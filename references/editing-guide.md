@@ -127,6 +127,7 @@ eb.set_template(lines, s); eb.save('my-deck.html', lines); eb.verify('my-deck.ht
 | 点按钮 / 链接报 React #231（onClick 是字符串） | 写了内联 `onclick="fn()"`——运行时会把它当 React 的 `onClick` 字符串。**别用内联 on\***，用事件委托：`document.addEventListener('click', e => { const t = e.target.closest('.你的class'); if (!t) return; /* 处理 */ }, true)`（capture + `stopPropagation`）。模板的复制链接、bilibili 播放器都是这么实现的，可直接复用。 |
 | 改完后整个文件打不开 / JSON 报错 | 没走 `set_template` 的编码铁律（第 2 节），`</script>` 提前闭合或转义损坏。从备份恢复，重做并只经 edit-bundle。 |
 | 加页后导航乱 / 某页掉出章节 | 三处同步没做全。用 `insert_page` / `delete_page` / `move_page`，并用 `verify` 检查 `nav` 连续、`chapters.start` 正确。手插 HTML 块时还要注意 `</div>` 配平。 |
+| 改了章数后，目录页选中某章左侧空白 / 动画内容跑题 | 目录页左侧动画按章节索引取自 `const builders = [...]` 数组，且各动画文案是模板课程主题。增删章后同步 builders 数组并替换动画内文字，见 `template-pages.md` 目录页一节。 |
 
 放映态动画的坑（`:has()`、SVG transform、外层框漏挂 build）见 `animation.md` 第 5 节。
 

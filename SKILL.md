@@ -15,7 +15,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 快速上手（5 步）
 
-1. **复制模板**（所有命令都在本 skill 根目录执行）：`cp assets/template-deck.html my-deck.html`
+1. **按场景复制模板**（所有命令都在本 skill 根目录执行）：授课 `cp assets/template-deck.html my-deck.html`；技术分享用 `assets/tech-share-deck.html`；汇报 / 述职用 `assets/work-report-deck.html`（三套差异见 `references/template-variants.md`）
 2. **挑页改占位**：浏览器滚一遍 deck，对照 `references/template-pages.md` 选中要用的页型，替换占位文案（改法见 `references/editing-guide.md` 第 3.2 节）；品牌图 / 口号 / 品牌色替换见 `references/branding.md`。
 3. **增删复制页**：用 `scripts/edit-bundle.py` 的 `insert_page` / `delete_page` / `move_page`——slide DOM、导航数组、章节起点**三处同步全自动**；从零拼页参考 `references/page-snippets.md`。
 4. **每改一批就验证**（verify 三件套，退出码 0 = 过）：
@@ -37,18 +37,24 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 5. **改 template 必须经 edit-bundle.py**（转义有铁律），绝不用编辑器直改文件 → `references/editing-guide.md`
 6. **每页内容必须塞进 1080 高**（超出被无声裁切），改完必跑 measure_overflow → `references/design-system.md` 第 7 节
 7. **从零起新 deck 先对齐再动手**：主题与大纲没经用户确认前不碰模板 → `references/workflow.md`
+8. **字不如表，表不如图**：方法论 / 原理 / 流程页用图表做主表达——初版放类型化占位块，终版抽原图 / 自绘 / 制表落地、`data-todo` 归零 → `references/artwork.md`
+9. **文字朴实专业、标题即观点且点名技术**：不写套话与广告词；正文页标题必须承载这页的核心技术观点并写出最关键的技术名词（「基于 X 实现 Y」句式），栏目式 / 悬念式 / 有判断无技术名词的标题都是反模式 → `references/workflow.md`
 
 ## 文件导航
 
 | 文件 | 用途 |
 |---|---|
-| `assets/template-deck.html` | 34 页模板 deck（起点，复制后再改） |
+| `assets/template-deck.html` | 34 页授课模板 deck（复制后再改） |
+| `assets/tech-share-deck.html` | 25 页技术分享模板（选型 / 原理 / 架构 / 性能 / 踩坑 / Takeaway） |
+| `assets/work-report-deck.html` | 22 页工作汇报模板（TL;DR / KPI / 里程碑 / 甘特 / 分工 / 风险） |
+| `references/template-variants.md` | 三套模板怎么选 + 两套变体的逐页索引 |
 | `references/workflow.md` | 从零做 PPT 的七阶段协作流程（何时问什么、每阶段产出与闸门） |
 | `references/template-pages.md` | 34 页逐页索引：长什么样 / 常用于 / 怎么改 / 动画拍数 |
 | `references/design-system.md` | 颜色、字体、字号刻度、排版结构、审美硬要求 |
 | `references/animation.md` | build / layer / SMIL 三机制写法、节拍设计与验证 |
 | `references/page-snippets.md` | 可直接粘贴的页面骨架与构件（每段注明模板活例） |
 | `references/editing-guide.md` | 独立版结构、edit-bundle 用法、踩坑表、验证与 PPTX 导出 |
+| `references/artwork.md` | 配图工作流：初版类型化占位 → 终版 PDF 抽原图（PyMuPDF）/ 自绘流程架构图 / 表格 |
 | `references/branding.md` | 品牌替换：背景画 / 黑板 / 人像 / logo / 口号 / 品牌色 |
 | `scripts/edit-bundle.py` | 安全编辑工具函数库（load / get·set_template / insert·delete·move_page / embed_image / verify） |
 | `scripts/apply_bg.py` | 品牌图一键替换（默认预览模式，`--yes` 落盘） |

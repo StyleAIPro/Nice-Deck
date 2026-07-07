@@ -6,9 +6,10 @@
 
 ## 能做什么
 
-- 从内置的 34 页模板起步，快速做**授课 / 汇报 / 学习材料**三类演示（`references/workflow.md` 有完整的七阶段协作流程与场景适配）
+- 三套模板按场景起步：**授课**（34 页全量画廊）、**技术分享**（25 页，含选型 / 原理 / 架构 / 性能 / 踩坑页型）、**工作汇报**（22 页，含 TL;DR / KPI / 甘特 / 风险页型）——`references/workflow.md` 有完整的七阶段协作流程与场景适配
 - 保留整套设计系统：三色体系（品牌红 `#b5333b`）、Noto Sans SC + JetBrains Mono、统一字号刻度、玻璃组件、放映 / 滚动双模式、三种手动推进的动画机制（build 逐步揭示 / layer 标签切换 / SMIL 连续运动）
 - 品牌可替换：换 logo / 金色背景画 / 口号 / 品牌色（`references/branding.md` + `scripts/apply_bg.py`）
+- 配图有工作流：初版类型化占位标注，终版从素材 PDF 抽原图（PyMuPDF）、自绘流程 / 架构图、制表落地（`references/artwork.md`）
 - 一键 `scripts/html2pptx/convert.sh` 导出 PPTX，页内多标签（layer）自动逐标签展开成多页
 
 ## 安装
@@ -41,7 +42,9 @@ cp -R "$(pwd)" ~/.claude/skills/huawei-deck
 huawei-deck/
 ├── SKILL.md                 # skill 入口：5 步快速上手 + 铁律 + 文件导航
 ├── assets/
-│   └── template-deck.html   # ★34 页模板 deck（离线单文件，~12MB）
+│   ├── template-deck.html   # ★34 页授课模板（离线单文件，~12MB）
+│   ├── tech-share-deck.html # 25 页技术分享模板（选型/原理/架构/性能/踩坑/Takeaway）
+│   └── work-report-deck.html# 22 页工作汇报模板（TL;DR/KPI/里程碑/甘特/分工/风险）
 ├── references/
 │   ├── workflow.md          # 从零做一份 deck 的七阶段协作流程（授课/汇报/自读通用）
 │   ├── template-pages.md    # 34 页逐页索引：每页什么版式 / 常用于 / 怎么改
@@ -49,6 +52,7 @@ huawei-deck/
 │   ├── animation.md         # build / layer / SMIL 三机制写法 + 放映键位
 │   ├── page-snippets.md     # 可直接粘贴的 <section> 片段
 │   ├── editing-guide.md     # 编辑独立版 / 增删页 / 踩坑 / 验证工作流
+│   ├── artwork.md           # 配图工作流：占位标注 → 抽原图 / 自绘图 / 制表
 │   └── branding.md          # 换 logo / 背景画 / 口号 / 品牌色
 ├── scripts/
 │   ├── edit-bundle.py       # 独立版编辑工具函数（增删移页自动同步 nav/chapters）
