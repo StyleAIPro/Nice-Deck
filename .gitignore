@@ -10,3 +10,5 @@ _pre_*.html
 _ckpt_*.html
 shots_*/
 steps_*/
+# 测试产物与本地素材
+test-recode/
