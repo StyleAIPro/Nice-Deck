@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目是什么
 
-本仓库是一个 **Claude Code skill**（华为红品牌单文件 HTML 演示模板），不是普通应用代码库。交付物 = `SKILL.md`（skill 入口）+ `references/`（9 份使用文档）+ `scripts/`（编辑/验证/导出工具）+ `assets/` 下三套模板 deck（授课 34 页 / 技术分享 25 页 / 工作汇报 22 页，均为 ~12MB 离线单文件）。改动本仓库时，多数工作是维护这套文档与脚本的一致性；`docs/design/` 是本 skill 自身的设计规格与实现计划，仅供参考。
+本仓库是一个 **Claude Code skill**（华为红品牌单文件 HTML 演示模板），不是普通应用代码库。交付物 = `SKILL.md`（skill 入口）+ `references/`（9 份使用文档）+ `scripts/`（编辑/验证/导出工具）+ `assets/` 下三套模板 deck（授课 34 页 / 技术分享 34 页 / 工作汇报 32 页，均为 ~12MB 离线单文件）。改动本仓库时，多数工作是维护这套文档与脚本的一致性；`docs/design/` 是本 skill 自身的设计规格与实现计划，仅供参考。
 
 所有文档、注释、报错信息均为中文，新增内容保持中文。
 

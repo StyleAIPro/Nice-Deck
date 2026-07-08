@@ -45,8 +45,8 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 | 文件 | 用途 |
 |---|---|
 | `assets/template-deck.html` | 34 页授课模板 deck（复制后再改） |
-| `assets/tech-share-deck.html` | 25 页技术分享模板（选型 / 原理 / 架构 / 性能 / 踩坑 / Takeaway） |
-| `assets/work-report-deck.html` | 22 页工作汇报模板（TL;DR / KPI / 里程碑 / 甘特 / 分工 / 风险） |
+| `assets/tech-share-deck.html` | 34 页技术分享模板（选型 / 原理 / 架构 / 性能 / 对比 / 演进 / 双圆 / 踩坑 / Takeaway） |
+| `assets/work-report-deck.html` | 32 页工作汇报模板（TL;DR / KPI / 数据墙 / 案例 / 双轮闭环 / 矩阵 / 甘特 / 风险） |
 | `references/template-variants.md` | 三套模板怎么选 + 两套变体的逐页索引 |
 | `references/workflow.md` | 从零做 PPT 的七阶段协作流程（何时问什么、每阶段产出与闸门） |
 | `references/template-pages.md` | 34 页逐页索引：长什么样 / 常用于 / 怎么改 / 动画拍数 |
@@ -56,6 +56,8 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 | `references/editing-guide.md` | 独立版结构、edit-bundle 用法、踩坑表、验证与 PPTX 导出 |
 | `references/artwork.md` | 配图工作流：初版类型化占位 → 终版 PDF 抽原图（PyMuPDF）/ 自绘流程架构图 / 表格 |
 | `references/branding.md` | 品牌替换：背景画 / 黑板 / 人像 / logo / 口号 / 品牌色 |
+| `references/huawei-style.md` | 华为官方胶片风格分析：两套配色公式、页型清单、标题句式、数字用法、高复用组件 |
+| `assets/huawei-refs/` | 官方 PPT 提取素材库：封面 KV / logo / 图标 / 装饰组件 + 官方空白模板 pptx（内附 README 索引） |
 | `scripts/edit-bundle.py` | 安全编辑工具函数库（load / get·set_template / insert·delete·move_page / embed_image / verify） |
 | `scripts/apply_bg.py` | 品牌图一键替换（默认预览模式，`--yes` 落盘） |
 | `scripts/verify/*.mjs` | verify 三件套（measure_overflow / shot / steps） |
