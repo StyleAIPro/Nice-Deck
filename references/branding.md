@@ -14,7 +14,7 @@ cp assets/template-deck.html my-deck.html
 
 | 元素 | 当前资源（manifest key 前 12 位 / 现规格） | 影响页面 | 替换方式 |
 |---|---|---|---|
-| 金色门面背景画 | `tplbg-057d9f…`（JPEG 1920×1080，约 670KB） | 封面、目录、章扉页、结语页 | `apply_bg.py --target bg` |
+| 金色门面背景画 | `tplbg-057d9f…`（JPEG 1920×1080，约 670KB） | 封面、目录、章扉页、结语页（**两套变体已白底化，仅授课模板全量生效**） | `apply_bg.py --target bg` |
 | 金框黑板底图 | `tplboard-cacd…`（PNG 1887×1062） | 黑板·题卡A、黑板·金框题卡 | `apply_bg.py --target board` |
 | 右下人像装饰 | `tplppl-3f0d59…`（PNG 271×266，透明底） | 问题页、研讨页 | `apply_bg.py --target people` |
 | HUAWEI logo 水印 | `18fc27a8-f87c…`（PNG 266×60，透明底） | 全部页面（`position:fixed` 右下角） | `apply_bg.py --target logo` |
@@ -53,7 +53,7 @@ python3 scripts/apply_bg.py my-deck.html 你的logo.png     --target logo --yes
 
 ## 3. 换口号
 
-口号是纯文本占位，共 **2 处**（封面页底部、结语页居中），占位内容完全相同。**注意：work-report-deck（汇报模板）已随官方化改版移除口号占位，本节仅适用于授课与技术分享模板**：
+口号是纯文本占位，占位内容完全相同。**各模板处数：授课模板 2 处（封面底部、结语页居中）；技术分享模板 1 处（仅结语页，封面已改深色 KV 版式）；汇报模板 0 处（官方化改版已移除）**——下方脚本的 `assert count == 2` 仅适用于授课模板，其他模板按实际处数改断言：
 
 ```
 在此替换口号　八字四段　全角空格分隔　详见branding

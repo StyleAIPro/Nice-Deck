@@ -26,6 +26,7 @@
 | 封底-金色稻田收割机KV.png | dme 封底 | 金色稻田+红色收割机，封底/结尾页画 |
 | 封面-灯塔星空.jpeg | gaokong | 灯塔星空夜景，深色封面可用 |
 | 封面-彩色星球飘带KV.jpeg | storage-en 封面 | IDF 彩色星球飘带，发布会风格右侧半幅 |
+| 封面-深蓝金光轨KV.jpeg | 研究报告封面 | 深蓝紫渐变 + 金色光轨光球，研究报告 / 技术分享深色封面（tech-share 模板封面在用） |
 | 背景-帆船海洋-目录页.jpeg | gaokong 目录页 | 蓝色帆船竖构图，目录页左侧图 |
 | 背景-雪山登山队.jpg | template-light | 雪山滑雪登山队，团队/征程隐喻 |
 | 背景-浅蓝天空.jpeg / 背景-浅粉光晕.png / 背景-白色波纹.jpeg / 背景-深灰纹理.jpeg | ict-academy | 内容页/章节页底纹四件套（浅色×3 + 深色×1） |
@@ -65,4 +66,5 @@
 
 - 本目录是**素材库**，不会被自动打包进 deck；选用后经 `eb.embed_image()` 内联进 bundle 才生效。
 - 部分 logo（tech/ 下 cangjie、opengauss）为白底 JPEG 转存 PNG，深色页使用前需抠底。
+- 本库的提取工具链：pptx 经 `soffice --headless --convert-to pdf` 转 PDF → PyMuPDF 渲染逐页图目检；内嵌媒体用 Python `zipfile` 解包 `ppt/media/`；PDF 内嵌图用 PyMuPDF `extract_image`。PDF 进阶处理见 `.agents/skills/pdf/`。
 - 原 pptx 中另有 36 个 `.wdp`（JPEG-XR）背景图未提取（macOS 无原生解码器），如需要可从 `test-recode/参考ppt/` 原件解包。
