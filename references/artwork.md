@@ -28,7 +28,7 @@
 
 ## 2. 终版落地 A：从素材 PDF 抽原图（PyMuPDF）
 
-依赖 `pymupdf`（`python3 -m pip install pymupdf`）。三步循环，每张图都要**目检**：
+依赖 `pymupdf`（`python3 -m pip install pymupdf`）。若素材是 pptx，先 `soffice --headless --convert-to pdf` 转成 PDF 再走本节流程（内嵌媒体也可直接用 `zipfile` 解包 `ppt/media/` 拿原图）；PDF 的合并 / 拆分 / 文本表格提取 / 表单等进阶操作，参考仓库内置 pdf skill `.agents/skills/pdf/` 的方法与脚本。三步循环，每张图都要**目检**：
 
 ```python
 import fitz

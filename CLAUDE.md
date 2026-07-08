@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目是什么
 
-本仓库是一个 **Claude Code skill**（华为红品牌单文件 HTML 演示模板），不是普通应用代码库。交付物 = `SKILL.md`（skill 入口）+ `references/`（9 份使用文档）+ `scripts/`（编辑/验证/导出工具）+ `assets/` 下三套模板 deck（授课 34 页 / 技术分享 34 页 / 工作汇报 32 页，均为 ~12MB 离线单文件）。改动本仓库时，多数工作是维护这套文档与脚本的一致性；`docs/design/` 是本 skill 自身的设计规格与实现计划，仅供参考。
+本仓库是一个 **Claude Code skill**（华为红品牌单文件 HTML 演示模板），不是普通应用代码库。交付物 = `SKILL.md`（skill 入口）+ `references/`（9 份使用文档）+ `scripts/`（编辑/验证/导出工具）+ `assets/` 下三套模板 deck（授课 34 页 / 技术分享 36 页 / 工作汇报 41 页，均为 ~12MB 离线单文件）。改动本仓库时，多数工作是维护这套文档与脚本的一致性；`docs/design/` 是本 skill 自身的设计规格与实现计划，仅供参考。
 
 所有文档、注释、报错信息均为中文，新增内容保持中文。
 
@@ -23,7 +23,7 @@ bash scripts/html2pptx/convert.sh <deck.html> [out.pptx]
 python3 scripts/apply_bg.py <deck.html> <new-image> --target bg --yes
 ```
 
-依赖：Node ≥ 18 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；PPTX 导出另需 `python3 -m pip install python-pptx`。edit-bundle.py 只用 Python 标准库。
+依赖：Node ≥ 18 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；PPTX 导出另需 `python3 -m pip install python-pptx`。edit-bundle.py 只用 Python 标准库。解析外部参考材料（pptx/pdf）另需本机 LibreOffice（`soffice`，pptx → PDF）与 `pymupdf`（渲染逐页图 / 抽图）；PDF 进阶处理（合并 / 拆分 / 表格 / 表单）用仓库内置 pdf skill（`.agents/skills/pdf/`）。
 
 没有测试框架、lint 或构建步骤——验证方式就是对 deck 跑 verify 三件套，以及 `eb.verify(path)` 的结构一致性检查。
 
@@ -58,7 +58,7 @@ edit-bundle 的不变量（改该脚本时必须保持）：
 
 ## 文档一致性
 
-`SKILL.md` 与 `references/*.md` 互相交叉引用（每条设计铁律指向对应 reference，README 复述了目录结构与快速上手）。改脚本行为、命令用法、页数（当前 34 页）或铁律时，检查并同步 `SKILL.md`、`README.md` 与相关 reference。各 reference 分工见 `SKILL.md` 的「文件导航」表。
+`SKILL.md` 与 `references/*.md` 互相交叉引用（每条设计铁律指向对应 reference，README 复述了目录结构与快速上手）。改脚本行为、命令用法、页数（授课 34 / 技术分享 36 / 汇报 41）或铁律时，检查并同步 `SKILL.md`、`README.md` 与相关 reference。各 reference 分工见 `SKILL.md` 的「文件导航」表。
 
 ## 本地试装
 

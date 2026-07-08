@@ -15,8 +15,8 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 快速上手（5 步）
 
-1. **按场景复制模板**（所有命令都在本 skill 根目录执行）：授课 `cp assets/template-deck.html my-deck.html`；技术分享用 `assets/tech-share-deck.html`；汇报 / 述职用 `assets/work-report-deck.html`（三套差异见 `references/template-variants.md`）
-2. **挑页改占位**：浏览器滚一遍 deck，对照 `references/template-pages.md` 选中要用的页型，替换占位文案（改法见 `references/editing-guide.md` 第 3.2 节）；品牌图 / 口号 / 品牌色替换见 `references/branding.md`。
+1. **按场景复制模板**（所有命令都在本 skill 根目录执行）：授课 `cp assets/template-deck.html my-deck.html`；技术分享用 `assets/tech-share-deck.html`；汇报 / 述职用 `assets/work-report-deck.html`（三套差异与逐页索引见 `references/template-pages.md`）
+2. **挑页改占位**：浏览器滚一遍 deck，对照 `references/template-pages.md`（三套模板逐页索引）选中要用的页型，替换占位文案（改法见 `references/editing-guide.md` 第 3.2 节）；品牌图 / 口号 / 品牌色替换见 `references/branding.md`。
 3. **增删复制页**：用 `scripts/edit-bundle.py` 的 `insert_page` / `delete_page` / `move_page`——slide DOM、导航数组、章节起点**三处同步全自动**；从零拼页参考 `references/page-snippets.md`。
 4. **每改一批就验证**（verify 三件套，退出码 0 = 过）：
 
@@ -45,11 +45,10 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 | 文件 | 用途 |
 |---|---|
 | `assets/template-deck.html` | 34 页授课模板 deck（复制后再改） |
-| `assets/tech-share-deck.html` | 34 页技术分享模板（选型 / 原理 / 架构 / 性能 / 对比 / 演进 / 双圆 / 踩坑 / Takeaway） |
-| `assets/work-report-deck.html` | 32 页工作汇报模板（TL;DR / KPI / 数据墙 / 案例 / 双轮闭环 / 矩阵 / 甘特 / 风险） |
-| `references/template-variants.md` | 三套模板怎么选 + 两套变体的逐页索引 |
+| `assets/tech-share-deck.html` | 36 页技术分享模板（深色 KV 封面 / 选型 / 原理 / 性能 / 对比 / 演进 / 精读 / 跟读 / 踩坑 / Takeaway） |
+| `assets/work-report-deck.html` | 41 页工作汇报模板（TL;DR / KPI / 数据墙 / 案例 / 批示纪要 / 彩色横区架构 / 勾叉盘点 / 状态热力表 / 甘特 / 风险） |
 | `references/workflow.md` | 从零做 PPT 的七阶段协作流程（何时问什么、每阶段产出与闸门） |
-| `references/template-pages.md` | 34 页逐页索引：长什么样 / 常用于 / 怎么改 / 动画拍数 |
+| `references/template-pages.md` | 三套模板逐页索引：怎么选模板 + 每页长什么样 / 常用于 / 怎么改 / 动画拍数 |
 | `references/design-system.md` | 颜色、字体、字号刻度、排版结构、审美硬要求 |
 | `references/animation.md` | build / layer / SMIL 三机制写法、节拍设计与验证 |
 | `references/page-snippets.md` | 可直接粘贴的页面骨架与构件（每段注明模板活例） |
@@ -85,3 +84,4 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 
 - 预期性能：模板 12MB，headless Chrome 首开约 2.6s；PPTX 导出 34 页 → 55 张、约 47s。
 - 依赖：本机 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）；PPTX 导出另需 `python3 -m pip install python-pptx`。
+- 解析外部参考材料（用户给的 pptx / pdf 素材 → 逐页图目检、提取封面与配图）：pptx 先 `soffice --headless --convert-to pdf` 再用 PyMuPDF（`pip install pymupdf`）渲染逐页图；pptx 内嵌媒体用 `zipfile` 解包 `ppt/media/`；PDF 的合并 / 拆分 / 表格与表单处理按 `.agents/skills/pdf/` 的方法执行（pypdf / pdfplumber）。

@@ -6,7 +6,7 @@
 
 ## 能做什么
 
-- 三套模板按场景起步：**授课**（34 页全量画廊）、**技术分享**（34 页，含选型 / 原理 / 架构 / 性能 / 大数字对比 / 演进曲线 / 踩坑页型）、**工作汇报**（32 页，含 TL;DR / KPI / 数据墙 / 案例 / 双轮闭环 / 甘特 / 风险页型）——`references/workflow.md` 有完整的七阶段协作流程与场景适配
+- 三套模板按场景起步：**授课**（34 页全量画廊）、**技术分享**（36 页，深色光轨 KV 封面，含选型 / 原理 / 性能对比 / 演进曲线 / 精读批注 / 截图跟读页型）、**工作汇报**（41 页，含 TL;DR / KPI / 数据墙 / 案例 / 批示纪要 / 场景裁剪流程 / 组织阵型 / 状态热力表 / 甘特 / 风险页型）——`references/workflow.md` 有完整的七阶段协作流程与场景适配
 - 保留整套设计系统：三色体系（品牌红 `#b5333b`）、Noto Sans SC + JetBrains Mono、统一字号刻度、玻璃组件、放映 / 滚动双模式、三种手动推进的动画机制（build 逐步揭示 / layer 标签切换 / SMIL 连续运动）
 - 品牌可替换：换 logo / 金色背景画 / 口号 / 品牌色（`references/branding.md` + `scripts/apply_bg.py`）
 - 配图有工作流：初版类型化占位标注，终版从素材 PDF 抽原图（PyMuPDF）、自绘流程 / 架构图、制表落地（`references/artwork.md`）
@@ -33,8 +33,12 @@ cp -R "$(pwd)" ~/.claude/skills/huawei-deck
 | 验证脚本 / html2pptx 截图 | 本机 Google Chrome + `playwright-core` | `npm i -g playwright-core`（或设环境变量 `PLAYWRIGHT_CORE` 指向已装路径） |
 | html2pptx 组装 | `python-pptx` | `python3 -m pip install python-pptx` |
 | 编辑模板 deck | Python 3（标准库即可） | 系统自带 |
+| 解析外部参考材料：pptx → 逐页图 | 本机 LibreOffice（`soffice`） | `brew install --cask libreoffice` |
+| 解析外部参考材料：pdf 渲染 / 抽图 | `pymupdf` | `python3 -m pip install pymupdf` |
 
 > playwright-core 加载顺序：`PLAYWRIGHT_CORE` 环境变量 → 裸 `import playwright-core` → 内置回退路径。缺依赖时脚本会打印可操作的中文提示。
+>
+> 解析外部参考材料指从 pptx/pdf 素材提取版式与图片（`assets/huawei-refs/` 即由此产出）：pptx 先经 `soffice --headless --convert-to pdf` 转 PDF，再用 PyMuPDF 渲染逐页图 / 抽内嵌图；pptx 内嵌媒体可直接用 Python `zipfile` 解包 `ppt/media/`。PDF 的进阶处理（合并 / 拆分 / 表格提取 / 表单）参考仓库内置的 pdf skill：`.agents/skills/pdf/`（`npx skills add https://github.com/anthropics/skills --skill pdf` 安装）。
 
 ## 目录
 
@@ -43,12 +47,12 @@ huawei-deck/
 ├── SKILL.md                 # skill 入口：5 步快速上手 + 铁律 + 文件导航
 ├── assets/
 │   ├── template-deck.html   # ★34 页授课模板（离线单文件，~12MB）
-│   ├── tech-share-deck.html # 34 页技术分享模板（选型/原理/架构/性能/对比/演进/踩坑/Takeaway）
-│   ├── work-report-deck.html# 32 页工作汇报模板（TL;DR/KPI/数据墙/案例/闭环/甘特/分工/风险）
+│   ├── tech-share-deck.html # 36 页技术分享模板（深色KV封面/选型/原理/对比/演进/精读/跟读/Takeaway）
+│   ├── work-report-deck.html# 41 页工作汇报模板（TL;DR/KPI/数据墙/案例/纪要/阵型/热力表/甘特/风险）
 │   └── huawei-refs/         # 华为官方 PPT 提取素材库：封面 KV / logo / 图标 / 组件 + 官方模板 pptx
 ├── references/
 │   ├── workflow.md          # 从零做一份 deck 的七阶段协作流程（授课/汇报/自读通用）
-│   ├── template-pages.md    # 34 页逐页索引：每页什么版式 / 常用于 / 怎么改
+│   ├── template-pages.md    # 三套模板逐页索引：怎么选 + 每页长什么样 / 常用于 / 怎么改
 │   ├── design-system.md     # 颜色 / 字体 / 字号刻度 / 版式硬规
 │   ├── animation.md         # build / layer / SMIL 三机制写法 + 放映键位
 │   ├── page-snippets.md     # 可直接粘贴的 <section> 片段
