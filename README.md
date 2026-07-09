@@ -4,6 +4,12 @@
 
 这是一个 [Claude Code](https://claude.com/claude-code) **skill**——把本目录放进 Claude 的 skills 目录即可，Claude 会在你要「做一份华为风 PPT / 网页演示」时自动用它。
 
+## 效果预览
+
+![deck 交互演示：液态玻璃工具条 · 侧边预览 · 记笔记 · 放映/滚动切换](docs/showcase/deck-demo.gif)
+
+> 本地 Chrome 实录一份用本 skill 做出的答辩 deck：顶部液态玻璃工具条随讲切章，左上侧边预览缩略图跳页，左下角记笔记留评审批注，右上放映 / 滚动一键切换——放映翻到「03 · 研究过程」后切滚动，缓慢通览到致谢页。完整图文案例见 [`docs/showcase/showcase-1.md`](docs/showcase/showcase-1.md)。
+
 ## 能做什么
 
 - 三套模板按场景起步：**授课**（34 页全量画廊）、**技术分享**（36 页，深色光轨 KV 封面，含选型 / 原理 / 性能对比 / 演进曲线 / 精读批注 / 截图跟读页型）、**工作汇报**（41 页，含 TL;DR / KPI / 数据墙 / 案例 / 批示纪要 / 场景裁剪流程 / 组织阵型 / 状态热力表 / 甘特 / 风险页型）——`references/workflow.md` 有完整的七阶段协作流程与场景适配
