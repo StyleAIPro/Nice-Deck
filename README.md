@@ -28,6 +28,8 @@ cp -R "$(pwd)" ~/.claude/skills/huawei-deck
 
 ## 依赖
 
+> **一键体检**：`python3 scripts/check_deps.py` 会检查下表全部依赖（含外部依赖 skill `pdf`），缺失项能自动装的（pip / npx / npm）先打印命令再装，装不了的（Node / Chrome / soffice）给安装提示；`--check-only` 只报告不改环境。退出码 0 就绪 / 1 仍缺 / 2 工具或参数错误。
+
 | 用途 | 依赖 | 安装 |
 |---|---|---|
 | 验证脚本 / html2pptx 截图 | 本机 Google Chrome + `playwright-core` | `npm i -g playwright-core`（或设环境变量 `PLAYWRIGHT_CORE` 指向已装路径） |

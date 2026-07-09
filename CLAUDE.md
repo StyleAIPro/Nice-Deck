@@ -11,6 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
+# 依赖体检 doctor（动手前先跑；退出码：0 就绪 / 1 仍缺 / 2 工具或参数错误）
+python3 scripts/check_deps.py                # 缺失项自动装（pip/npx/npm 先打印再装），Node/Chrome/soffice 给提示
+python3 scripts/check_deps.py --check-only   # 只报告不改环境
+
 # verify 三件套（退出码契约：0 通过 / 1 检测到问题 / 2 工具或参数错误）
 node scripts/verify/measure_overflow.mjs <deck.html> --all       # 全页溢出检测（也可只传若干 data-label）
 node scripts/verify/shot.mjs <deck.html> <页label> /tmp/p.jpg     # 单页 1920×1080 截图（build 全显）

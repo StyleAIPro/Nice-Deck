@@ -82,6 +82,7 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 
 ## 性能与依赖
 
+- **一键体检**：动手前先跑 `python3 scripts/check_deps.py`——检查以下全部依赖（含外部依赖 skill `pdf`），缺失项能自动装的（pip / npx / npm）会先打印命令再装，装不了的（Node / Chrome / soffice）给安装提示。加 `--check-only` 只报告不改环境。退出码：0 就绪 / 1 仍缺 / 2 工具或参数错误。
 - 预期性能：模板 12MB，headless Chrome 首开约 2.6s；PPTX 导出 34 页 → 55 张、约 47s。
 - 依赖：本机 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）；PPTX 导出另需 `python3 -m pip install python-pptx`。
 - 解析外部参考材料（用户给的 pptx / pdf 素材 → 逐页图目检、提取封面与配图）：pptx 先 `soffice --headless --convert-to pdf` 再用 PyMuPDF（`pip install pymupdf`）渲染逐页图；pptx 内嵌媒体用 `zipfile` 解包 `ppt/media/`；PDF 的合并 / 拆分 / 表格与表单处理按 `.agents/skills/pdf/` 的方法执行（pypdf / pdfplumber）。
