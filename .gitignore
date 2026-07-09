@@ -8,6 +8,8 @@ node_modules/
 !assets/**/*.pptx
 _pre_*.html
 _ckpt_*.html
+# 根目录 html 工作产物（deck 副本 / 个人文件，如毕业设计答辩回顾.html）；assets 下模板不受影响
+/*.html
 shots_*/
 steps_*/
 # 测试产物与本地素材

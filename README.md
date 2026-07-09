@@ -79,3 +79,9 @@ huawei-deck/
 ## 快速上手
 
 见 `SKILL.md`。一句话：`cp assets/template-deck.html 我的演示.html` → 照 `references/template-pages.md` 挑页改占位 → 增删页用 `scripts/edit-bundle.py`（自动记账）→ 跑 `scripts/verify/` 验证 → `scripts/html2pptx/convert.sh` 出 PPTX。
+
+## 许可证
+
+原创代码与文档（`scripts/` / `references/` / `SKILL.md` 等）以 **MIT** 许可，见 [`LICENSE`](LICENSE)。
+
+两块第三方内容**不在** MIT 范围内，按各自条款使用：`.agents/skills/pdf/`（Anthropic 官方 skill，© Anthropic, PBC）、`assets/huawei-refs/` 与模板中的华为官方版式 / 封面 / 插画 / Logo / 品牌色（版权归华为）。复用品牌素材前须自行获得授权；发布自己的 deck 前建议按 `references/branding.md` 替换为自有或已授权资产。详见 `LICENSE` 末尾的第三方声明。
