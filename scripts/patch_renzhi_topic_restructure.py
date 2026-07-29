@@ -119,18 +119,18 @@ def professional_knowledge() -> str:
       <div style="font-size:21px;font-weight:900;color:#b5333b;letter-spacing:.08em;">THEME 01 · P7–P12</div>
       <h3 style="margin:10px 0 18px;font-size:30px;line-height:1.16;">IT Operations Platform & New Delivery Model</h3>
       <div style="display:grid;grid-template-rows:repeat(3,1fr);gap:12px;flex:1;">
-        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;"><b>Build the platform:</b> agents, knowledge and tools.</div>
-        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;"><b>Prove it in delivery:</b> technical problem solving and field collaboration.</div>
-        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;"><b>Scale the model:</b> OCC coordination, project closure and reusable assets.</div>
+        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;display:flex;align-items:center;"><div><b>Build the platform:</b> agents, knowledge and tools.</div></div>
+        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;display:flex;align-items:center;"><div><b>Prove it in delivery:</b> technical problem solving and field collaboration.</div></div>
+        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;display:flex;align-items:center;"><div><b>Scale the model:</b> OCC coordination, project closure and reusable assets.</div></div>
       </div>
     </article>
     <article style="background:#fff;border:1px solid #bdc3cb;border-radius:10px;padding:22px 24px;display:flex;flex-direction:column;">
       <div style="font-size:21px;font-weight:900;color:#b5333b;letter-spacing:.08em;">THEME 02 · P13–P15</div>
       <h3 style="margin:10px 0 18px;font-size:30px;line-height:1.16;">Model Training Taskforce Incubation & Enablement</h3>
       <div style="display:grid;grid-template-rows:repeat(3,1fr);gap:12px;flex:1;">
-        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;"><b>Build expertise:</b> framework adaptation, performance tuning and quality optimization.</div>
-        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;"><b>Prove it in practice:</b> training projects, product validation and delivery support.</div>
-        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;"><b>Scale the capability:</b> courses, instructors, train-and-fight programs and knowledge assets.</div>
+        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;display:flex;align-items:center;"><div><b>Build expertise:</b> framework adaptation, performance tuning and quality optimization.</div></div>
+        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;display:flex;align-items:center;"><div><b>Prove it in practice:</b> training projects, product validation and delivery support.</div></div>
+        <div style="background:#f5f6f7;border-left:5px solid #566472;padding:15px 16px;font-size:22px;line-height:1.32;display:flex;align-items:center;"><div><b>Scale the capability:</b> courses, instructors, train-and-fight programs and knowledge assets.</div></div>
       </div>
     </article>
   </div>
@@ -175,11 +175,11 @@ def platform_outcomes() -> str:
     )
     body = f"""
 <div style="flex:1;min-height:0;padding:16px 58px 66px;display:grid;grid-template-rows:32fr 25fr 31fr 12fr;gap:13px;">
-  <div class="build" data-step="0" style="background:#f5f6f7;border:1px solid #bdc3cb;border-radius:9px;padding:14px 16px;">
+  <div class="build" data-step="0" style="background:#f5f6f7;border:1px solid #bdc3cb;border-radius:9px;padding:14px 16px;display:flex;flex-direction:column;">
     <div style="font-size:24px;font-weight:900;color:#b5333b;margin-bottom:10px;">1. Platform Construction</div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">{platform_cards}</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;flex:1;min-height:0;">{platform_cards}</div>
   </div>
-  <div class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:13px 16px;">
+  <div class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:13px 16px;display:flex;flex-direction:column;justify-content:center;">
     <div style="font-size:24px;font-weight:900;color:#b5333b;margin-bottom:9px;">2. Collaborative Operating Model</div>
     <div style="display:grid;grid-template-columns:1fr 34px 1fr 34px 1fr 34px 1fr;align-items:center;text-align:center;font-size:22px;font-weight:850;">
       <div style="background:#f5f6f7;padding:13px 8px;border:1px solid #bdc3cb;">On-site FAE</div><div style="color:#b5333b;font-size:30px;">→</div>
@@ -188,6 +188,7 @@ def platform_outcomes() -> str:
       <div style="background:#f5f6f7;padding:13px 8px;border:1px solid #bdc3cb;">Agent Platform</div>
     </div>
     <div style="margin-top:10px;text-align:center;font-size:21px;line-height:1.24;color:#566472;font-weight:750;">One operating loop: intake → diagnosis → execution → closure → knowledge feedback</div>
+    <div style="margin-top:7px;display:flex;align-items:center;justify-content:center;gap:10px;color:#b5333b;font-size:21px;line-height:1.2;font-weight:850;"><span style="font-size:30px;line-height:1;">↶</span><span>Closure evidence and knowledge feedback return to the next field task</span></div>
   </div>
   <div class="build" data-step="2" style="display:grid;grid-template-columns:repeat(5,1fr);gap:11px;">{metric_cards}</div>
   <div style="font-size:23px;line-height:1.25;font-weight:850;color:#566472;text-align:center;display:flex;align-items:center;justify-content:center;">The platform connects delivery evidence, expert collaboration and reusable knowledge in one closed loop.</div>
@@ -204,7 +205,7 @@ def platform_architecture() -> str:
     def route_card(title: str, items: list[str], accent: bool = False) -> str:
         border = "#b5333b" if accent else "#566472"
         rows = "".join(
-            f'<div style="background:#f5f6f7;border:1px solid #d7d9dd;padding:13px 12px;font-size:21px;line-height:1.24;font-weight:750;">{item}</div>'
+            f'<div style="background:#f5f6f7;border:1px solid #d7d9dd;padding:13px 12px;font-size:21px;line-height:1.24;font-weight:750;display:flex;align-items:center;">{item}</div>'
             for item in items
         )
         return f"""<article style="background:#fff;border:2px solid {border};border-radius:9px;padding:17px;display:flex;flex-direction:column;min-height:0;">
@@ -215,11 +216,14 @@ def platform_architecture() -> str:
     body = f"""
 <div style="flex:1;min-height:0;padding:15px 58px 66px;display:flex;flex-direction:column;gap:12px;">
   <div style="background:#fff;border:1px solid #bdc3cb;padding:12px 18px;text-align:center;font-size:21px;font-weight:850;color:#566472;">Project Demand · Customer Environment · Operations Data · Expert Knowledge</div>
-  <div style="flex:1;min-height:0;display:grid;grid-template-columns:26fr 48fr 26fr;gap:16px;">
+  <div style="flex:1;min-height:0;display:grid;grid-template-columns:24fr 36px 44fr 36px 24fr;gap:10px;align-items:stretch;">
     {route_card("Mid-Route Agent", ["Demand Intake & Feasibility Analysis", "Solution Planning & Resource Coordination", "Remote Collaboration & Delivery Guidance"])}
+    <div style="display:flex;align-items:center;justify-content:center;color:#b5333b;font-size:34px;font-weight:900;">→</div>
     {route_card("Platform Core", ["Agent Orchestration", "Knowledge & Tool Foundation", "Hybrid Retrieval, Evaluation & Feedback", "Skills for Reusable Delivery Workflows"], True)}
+    <div style="display:flex;align-items:center;justify-content:center;color:#b5333b;font-size:34px;font-weight:900;">→</div>
     {route_card("Down-Route Agent", ["On-site Diagnosis & Issue Localization", "Model Migration, Deployment & Performance Tuning", "Local Execution Bot & Environment Access"])}
   </div>
+  <div style="display:grid;grid-template-columns:24fr 44fr 24fr;gap:56px;color:#b5333b;font-size:30px;line-height:1;font-weight:900;text-align:center;"><div>↓</div><div>↓</div><div>↓</div></div>
   <div style="background:#fff;border:2px solid #b5333b;border-radius:9px;padding:15px 18px;display:grid;grid-template-columns:330px 1fr;align-items:center;gap:20px;">
     <div style="font-size:27px;font-weight:900;color:#b5333b;text-align:center;">OCC Operations Center</div>
     <div style="font-size:22px;line-height:1.28;font-weight:800;color:#566472;text-align:center;">Request Dispatch · Expert Collaboration · Progress Visibility · Closure Evidence</div>
@@ -270,7 +274,7 @@ def technical_governance() -> str:
 def training_taskforce() -> str:
     def track(title: str, items: list[str], supporting: str) -> str:
         rows = "".join(
-            f'<div style="background:#f5f6f7;border-left:5px solid #566472;padding:13px 15px;font-size:22px;font-weight:800;">{item}</div>'
+            f'<div style="background:#f5f6f7;border-left:5px solid #566472;padding:13px 15px;font-size:22px;font-weight:800;display:flex;align-items:center;">{item}</div>'
             for item in items
         )
         return f"""<article style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:19px 21px;display:flex;flex-direction:column;">
