@@ -1,15 +1,27 @@
 # -*- coding: utf-8 -*-
+import contextlib
 import importlib.util
+import io
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DECK = ROOT / "Deck-Projects/renzhi/renzhi-deck.html"
 EDIT_BUNDLE = ROOT / "scripts/edit-bundle.py"
+PATCH_SCRIPT = ROOT / "scripts/patch_renzhi_topic_restructure.py"
 
 spec = importlib.util.spec_from_file_location("eb", EDIT_BUNDLE)
 eb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(eb)
+
+patch_spec = importlib.util.spec_from_file_location(
+    "patch_renzhi_topic_restructure",
+    PATCH_SCRIPT,
+)
+patch = importlib.util.module_from_spec(patch_spec)
+patch_spec.loader.exec_module(patch)
 
 EXPECTED_LABELS = [
     "封面页", "目录页", "工作经历", "主要项目", "目录页", "专业知识",
@@ -26,6 +38,8 @@ REQUIRED_TEXT = {
     ],
     "kc-resp-proj": [
         "Middle-Lane + Lower-Lane Agents",
+        "X+ Field Practice",
+        "Cluster Integration Agent",
         "OCC",
         "57",
         "220+",
@@ -36,6 +50,7 @@ REQUIRED_TEXT = {
         "Workflow + Agentic Workflow",
         "Skills × Knowledge",
         "Technical Governance",
+        "All sprint items closed; core migration modules delivered; security inspection passed; HIS production online.",
     ],
     "kc-train-outcomes": [
         "A5 Architecture Evolution",
@@ -81,6 +96,58 @@ def section_html(template, label):
     return template[start:end + len("</section>")]
 
 
+def assert_idempotence_validation():
+    original_deck = patch.DECK
+    try:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = patch.main()
+        assert result == 0
+        assert output.getvalue() == "deck 已是双专题完成态，未重复修改\n"
+
+        cases = [
+            (
+                "数量",
+                "      { i:20, code:'致谢', label:'结语' },\n",
+                "",
+            ),
+            (
+                "序号",
+                "{ i:0, code:'Start', label:'封面页' }",
+                "{ i:9, code:'Start', label:'封面页' }",
+            ),
+            (
+                "label",
+                "{ i:0, code:'Start', label:'封面页' }",
+                "{ i:0, code:'Start', label:'损坏页' }",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for name, old, new in cases:
+                corrupted = Path(temp_dir) / f"corrupted-{name}.html"
+                shutil.copy2(DECK, corrupted)
+                lines = eb.load(corrupted)
+                template = eb.get_template(lines)
+                assert template.count(old) == 1, f"无法构造 nav {name}损坏场景"
+                template = template.replace(old, new, 1)
+                eb.set_template(lines, template)
+                eb.save(corrupted, lines)
+
+                patch.DECK = corrupted
+                output = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(output):
+                        patch.main()
+                except RuntimeError as error:
+                    expected_error = "导航 label" if name == "label" else f"导航{name}"
+                    assert expected_error in str(error), str(error)
+                else:
+                    raise AssertionError(f"完成态快路径未拒绝 nav {name}损坏")
+                assert output.getvalue() == "", f"nav {name}损坏时不应打印幂等成功提示"
+    finally:
+        patch.DECK = original_deck
+
+
 def main():
     lines = eb.load(DECK)
     template = eb.get_template(lines)
@@ -117,6 +184,7 @@ def main():
             marker = re.search(r">Page (\d+)<", block)
             assert marker and int(marker.group(1)) == page_number
 
+    assert_idempotence_validation()
     eb.verify(DECK)
     print("PASS: renzhi topic restructure")
 

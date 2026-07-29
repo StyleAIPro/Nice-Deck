@@ -144,7 +144,8 @@ def platform_outcomes() -> str:
         f"""<div style="background:#fff;border:1px solid #bdc3cb;border-top:5px solid #566472;border-radius:7px;padding:14px 16px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:22px;line-height:1.24;font-weight:800;">{text}</div>"""
         for text in (
             "Middle-Lane + Lower-Lane Agents",
-            "Model Migration & Tuning Agent",
+            "X+ Field Practice",
+            "Cluster Integration Agent",
             "Knowledge and Tool Foundation",
         )
     )
@@ -165,7 +166,7 @@ def platform_outcomes() -> str:
 <div style="flex:1;min-height:0;padding:16px 58px 66px;display:grid;grid-template-rows:32fr 25fr 31fr 12fr;gap:13px;">
   <div class="build" data-step="0" style="background:#f5f6f7;border:1px solid #bdc3cb;border-radius:9px;padding:14px 16px;">
     <div style="font-size:24px;font-weight:900;color:#b5333b;margin-bottom:10px;">1. Platform Construction</div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">{platform_cards}</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">{platform_cards}</div>
   </div>
   <div class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:13px 16px;">
     <div style="font-size:24px;font-weight:900;color:#b5333b;margin-bottom:9px;">2. Collaborative Operating Model</div>
@@ -247,7 +248,7 @@ def technical_governance() -> str:
       <div style="background:#f5f6f7;padding:14px;border-left:5px solid #566472;">Decompose goals into owners, acceptance evidence and release gates.</div>
       <div style="background:#f5f6f7;padding:14px;border-left:5px solid #566472;">Freeze non-critical features when critical-path resources conflict.</div>
       <div style="background:#f5f6f7;padding:14px;border-left:5px solid #566472;">Verify jointly across backend, MCP, front end, security and HIS.</div>
-      <div style="background:#fdf0f1;padding:14px;border-left:5px solid #b5333b;font-weight:800;">Protect productization and security paths while exposing deferred work.</div>
+      <div style="background:#fdf0f1;padding:14px;border-left:5px solid #b5333b;font-weight:800;">All sprint items closed; core migration modules delivered; security inspection passed; HIS production online.</div>
     </div>
     <div style="margin-top:14px;font-size:21px;line-height:1.28;font-weight:850;color:#566472;">Governance serves engineering delivery through visible evidence, dependencies and release decisions.</div>
   </aside>
@@ -538,6 +539,23 @@ def validate_complete(template: str) -> None:
     if template.count('class="slide-fit"') != 21:
         raise RuntimeError("完成态 slide-fit 数量不是 21")
 
+    nav_start = template.find("const nav = [")
+    nav_end = template.find("];", nav_start)
+    if nav_start < 0 or nav_end < 0:
+        raise RuntimeError("完成态导航数量错误：未找到 nav 数组")
+    nav_entries = re.findall(
+        r"\{ i:(\d+), code:'((?:[^'\\]|\\.)*)', label:'((?:[^'\\]|\\.)*)' \}",
+        template[nav_start:nav_end],
+    )
+    if len(nav_entries) != 21:
+        raise RuntimeError(f"完成态导航数量错误：{len(nav_entries)}")
+    nav_numbers = [int(number) for number, _, _ in nav_entries]
+    if nav_numbers != list(range(21)):
+        raise RuntimeError(f"完成态导航序号错误：{nav_numbers}")
+    nav_labels = [label for _, _, label in nav_entries]
+    if nav_labels != EXPECTED_LABELS:
+        raise RuntimeError(f"完成态导航 label 错误：{nav_labels}")
+
     starts = [
         int(value)
         for value in re.findall(
@@ -574,6 +592,7 @@ def main() -> int:
     new_labels = {"kc-train-outcomes", "ai-coding-reflection"}
     present = new_labels.intersection(labels)
     if present == new_labels and labels == EXPECTED_LABELS:
+        validate_complete(template)
         print("deck 已是双专题完成态，未重复修改")
         return 0
     if present or labels != BASELINE_LABELS:
