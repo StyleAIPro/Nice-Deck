@@ -140,13 +140,24 @@ def professional_knowledge() -> str:
 
 
 def platform_outcomes() -> str:
+    def platform_card(title: str, detail: str = "") -> str:
+        detail_html = (
+            f'<div style="margin-top:7px;font-size:21px;line-height:1.2;color:#566472;font-weight:750;">{detail}</div>'
+            if detail
+            else ""
+        )
+        return f"""<div style="background:#fff;border:1px solid #bdc3cb;border-top:5px solid #566472;border-radius:7px;padding:14px 16px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;">
+  <div style="font-size:22px;line-height:1.24;font-weight:800;">{title}</div>
+  {detail_html}
+</div>"""
+
     platform_cards = "".join(
-        f"""<div style="background:#fff;border:1px solid #bdc3cb;border-top:5px solid #566472;border-radius:7px;padding:14px 16px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:22px;line-height:1.24;font-weight:800;">{text}</div>"""
-        for text in (
-            "Middle-Lane + Lower-Lane Agents",
-            "X+ Field Practice",
-            "Cluster Integration Agent",
-            "Knowledge and Tool Foundation",
+        platform_card(title, detail)
+        for title, detail in (
+            ("Middle-Lane + Lower-Lane Agents", "Model Migration & Tuning Agent"),
+            ("X+ Field Practice", ""),
+            ("Cluster Integration Agent", ""),
+            ("Knowledge and Tool Foundation", ""),
         )
     )
     metric_cards = "".join(

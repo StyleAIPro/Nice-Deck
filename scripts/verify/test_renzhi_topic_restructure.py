@@ -38,6 +38,7 @@ REQUIRED_TEXT = {
     ],
     "kc-resp-proj": [
         "Middle-Lane + Lower-Lane Agents",
+        "Model Migration & Tuning Agent",
         "X+ Field Practice",
         "Cluster Integration Agent",
         "OCC",
