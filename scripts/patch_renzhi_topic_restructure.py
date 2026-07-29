@@ -118,6 +118,11 @@ COMPLETE_FORBIDDEN_A5_TEXT = [
     "TB/s",
 ]
 
+COMPLETE_FORBIDDEN_OVERVIEW_TEXT = [
+    "Architecture Design → Technical Breakthroughs → Scaled Validation → Capability Assets",
+    "Two connected themes turn engineering practice into repeatable delivery capability.",
+]
+
 COMPLETE_EXPECTED_STEPS = {
     "kc-train-outcomes": {0, 1, 2, 3},
     "kc-sol-a3": {0, 1, 2, 3, 4},
@@ -175,9 +180,6 @@ def shell(label: str, section: str) -> str:
 def professional_knowledge() -> str:
     body = """
 <div style="flex:1;min-height:0;padding:18px 58px 66px;display:flex;flex-direction:column;gap:16px;">
-  <div style="background:#fff;border:1px solid #bdc3cb;border-left:7px solid #b5333b;padding:13px 18px;font-size:24px;line-height:1.25;font-weight:800;color:#566472;">
-    Architecture Design → Technical Breakthroughs → Scaled Validation → Capability Assets
-  </div>
   <div style="flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;gap:22px;">
     <article style="background:#fff;border:1px solid #bdc3cb;border-radius:10px;padding:22px 24px;display:flex;flex-direction:column;">
       <div style="font-size:21px;font-weight:900;color:#b5333b;letter-spacing:.08em;">THEME 01 · P7–P12</div>
@@ -198,7 +200,6 @@ def professional_knowledge() -> str:
       </div>
     </article>
   </div>
-  <div style="font-size:24px;line-height:1.25;font-weight:850;text-align:center;color:#566472;">Two connected themes turn engineering practice into repeatable delivery capability.</div>
 </div>"""
     return page("专业知识", "Professional Knowledge: Two Focused Themes", body)
 
@@ -688,6 +689,14 @@ def validate_complete(template: str) -> None:
         for text in required_texts:
             if text not in section:
                 raise RuntimeError(f"完成态关键内容错误：{label} 缺少 {text}")
+
+    overview_marker = '<section data-label="专业知识"'
+    overview_start = template.find(overview_marker)
+    overview_end = template.find("</section>", overview_start)
+    overview_section = template[overview_start:overview_end + len("</section>")]
+    for text in COMPLETE_FORBIDDEN_OVERVIEW_TEXT:
+        if text in overview_section:
+            raise RuntimeError(f"完成态已删除文案仍存在：{text}")
 
     a5_marker = '<section data-label="kc-train-outcomes"'
     a5_start = template.find(a5_marker)

@@ -94,6 +94,10 @@ REQUIRED_TEXT = {
 }
 
 FORBIDDEN_TEXT = {
+    "专业知识": [
+        "Architecture Design → Technical Breakthroughs → Scaled Validation → Capability Assets",
+        "Two connected themes turn engineering practice into repeatable delivery capability.",
+    ],
     "kc-sol-a3": [
         "Blind Validation Passed",
         "Full-Scale Accuracy Verified",
@@ -218,6 +222,24 @@ def assert_idempotence_validation():
 
             corruption_cases.append(
                 ("A5 禁止性硬件事实", inject_a5_hardware_fact, "A5 禁止")
+            )
+
+            def inject_removed_overview_copy(template):
+                block = section_html(template, "专业知识")
+                removed_copy = (
+                    "Architecture Design → Technical Breakthroughs → "
+                    "Scaled Validation → Capability Assets"
+                )
+                assert removed_copy not in block
+                corrupted = block.replace(
+                    "</section>",
+                    f"<div>{removed_copy}</div></section>",
+                    1,
+                )
+                return replace_section(template, "专业知识", corrupted)
+
+            corruption_cases.append(
+                ("已删除总览文案", inject_removed_overview_copy, "已删除文案")
             )
 
             for name, corrupt, expected_error in corruption_cases:
