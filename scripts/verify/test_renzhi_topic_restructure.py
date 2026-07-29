@@ -86,7 +86,10 @@ def main():
     template = eb.get_template(lines)
     labels = re.findall(r'<section\b[^>]*data-label="([^"]+)"', template)
     assert labels == EXPECTED_LABELS, f"页面顺序错误:\n{labels}"
-    starts = [int(value) for value in re.findall(r"start:(\d+)", template)]
+    starts = [
+        int(value)
+        for value in re.findall(r"name:'[^']+', start:(\d+)", template)
+    ]
     assert starts == [2, 5, 17], f"章节起点错误: {starts}"
     assert template.count('class="slide-fit"') == 21
     assert template.count("<section data-label=") == 21
