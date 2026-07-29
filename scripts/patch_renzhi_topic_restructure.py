@@ -60,6 +60,70 @@ EXPECTED_LABELS = [
     "结语",
 ]
 
+COMPLETE_REQUIRED_TEXT = {
+    "kc-resp-proj": [
+        "57",
+        "Projects",
+        "250+",
+        "Requests Received",
+        "220+",
+        "Requests Completed",
+        "85%+",
+        "OCC Closure Rate",
+        "30,000+",
+        "Knowledge Fragments",
+        "Source: AICO platform and integrated-delivery operating records",
+    ],
+    "kc-train-outcomes": [
+        "A5 Architecture Evolution → Training Infra Impact",
+        "Qwen2.5-7B GRPO; 20% improvement on AIME / MATH; 8 acceleration features validated across MS-RL and VeRL.",
+        "Model Structure & Algorithms",
+        "MoE · SFT · DPO · GRPO",
+        "Training Frameworks",
+        "VeRL · Ray · Megatron · MindSpeed",
+        "Parallelism & Resources",
+        "TP · PP · EP · DP · HBM · Offload",
+        "Runtime & Kernels",
+        "CANN · HCCL · AICPU · Operators",
+    ],
+    "kc-sol-a3": [
+        "Architecture-Aware Proxy Model",
+        "Mresident ∝ Ptotal",
+        "Ftoken ∝ Pactive",
+        "Prune Layers",
+        "Reduce Total Experts",
+        "Single-Node Proxy",
+        "Attention time · MoE time · peak HBM · rollout / logprob / actor-update phases",
+        "Engineering Estimate",
+        "No Full-Scale Blind Validation",
+        "calibration on the target environment",
+    ],
+    "ai-coding-reflection": [
+        "Practice",
+        "Infra Development",
+        "Agent Development",
+        "Boundaries",
+        "Human Accountability",
+        "AI Coding does not replace Engineering Judgment.",
+        "Verification",
+        "Core View",
+        "Open Question",
+    ],
+}
+
+COMPLETE_FORBIDDEN_A5_TEXT = [
+    "interconnect bandwidth",
+    "HBM capacity",
+    "chip count",
+    "TB/s",
+]
+
+COMPLETE_EXPECTED_STEPS = {
+    "kc-train-outcomes": {0, 1, 2, 3},
+    "kc-sol-a3": {0, 1, 2, 3, 4},
+    "ai-coding-reflection": {0, 1, 2, 3},
+}
+
 
 def load_edit_bundle():
     spec = importlib.util.spec_from_file_location("eb", EDIT_BUNDLE)
@@ -190,7 +254,10 @@ def platform_outcomes() -> str:
     <div style="margin-top:10px;text-align:center;font-size:21px;line-height:1.24;color:#566472;font-weight:750;">One operating loop: intake → diagnosis → execution → closure → knowledge feedback</div>
     <div style="margin-top:7px;display:flex;align-items:center;justify-content:center;gap:10px;color:#b5333b;font-size:21px;line-height:1.2;font-weight:850;"><span style="font-size:30px;line-height:1;">↶</span><span>Closure evidence and knowledge feedback return to the next field task</span></div>
   </div>
-  <div class="build" data-step="2" style="display:grid;grid-template-columns:repeat(5,1fr);gap:11px;">{metric_cards}</div>
+  <div class="build" data-step="2" style="display:flex;flex-direction:column;gap:7px;">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:11px;flex:1;min-height:0;">{metric_cards}</div>
+    <div style="font-size:21px;line-height:1.2;text-align:right;color:#566472;font-weight:750;">Source: AICO platform and integrated-delivery operating records</div>
+  </div>
   <div style="font-size:23px;line-height:1.25;font-weight:850;color:#566472;text-align:center;display:flex;align-items:center;justify-content:center;">The platform connects delivery evidence, expert collaboration and reusable knowledge in one closed loop.</div>
 </div>"""
     return page(
@@ -324,25 +391,36 @@ def training_outcomes() -> str:
             ("Software Stack & Operators", "Re-validate Megatron, MindSpeed, VeRL, CANN operators and version compatibility."),
         )
     )
-    timeline = "".join(
+    timeline_primary = "".join(
         f"""<div style="display:grid;grid-template-columns:150px 1fr;gap:12px;background:#f5f6f7;border-left:5px solid #566472;padding:10px 13px;">
   <div style="font-size:21px;font-weight:900;color:#b5333b;">{tag}</div>
   <div><div style="font-size:24px;line-height:1.12;font-weight:900;">{title}</div><div style="font-size:21px;line-height:1.24;margin-top:4px;color:#566472;">{text}</div></div>
 </div>"""
         for tag, title, text in (
             ("X1+", "Train–Inference Integration", "Validated SFT / DPO and train–inference integration; closed field issues."),
-            ("Training Taskforce", "Qwen2.5-7B GRPO", "Advanced AIME / MATH results and verified eight acceleration features."),
+            ("Training Taskforce", "Qwen2.5-7B GRPO", "Qwen2.5-7B GRPO; 20% improvement on AIME / MATH; 8 acceleration features validated across MS-RL and VeRL."),
+        )
+    )
+    timeline_scale = "".join(
+        f"""<div style="display:grid;grid-template-columns:150px 1fr;gap:12px;background:#f5f6f7;border-left:5px solid #566472;padding:10px 13px;">
+  <div style="font-size:21px;font-weight:900;color:#b5333b;">{tag}</div>
+  <div><div style="font-size:24px;line-height:1.12;font-weight:900;">{title}</div><div style="font-size:21px;line-height:1.24;margin-top:4px;color:#566472;">{text}</div></div>
+</div>"""
+        for tag, title, text in (
             ("A3 / A5", "Resource Design", "Designed from model structure, parallelism, memory and communication constraints."),
             ("Enablement", "Capability at Scale", "Courses reached 2,000+ learners, developed 8+ instructors and achieved 98%+ satisfaction."),
         )
     )
     stack = "".join(
-        f'<div style="background:#f5f6f7;border:1px solid #bdc3cb;padding:12px 10px;text-align:center;font-size:21px;line-height:1.2;font-weight:850;">{text}</div>'
-        for text in (
-            "Model Structure & Algorithms",
-            "Training Frameworks",
-            "Parallelism & Resources",
-            "CANN / HCCL / Operators",
+        f"""<div style="background:#f5f6f7;border:1px solid #bdc3cb;padding:10px 9px;text-align:center;">
+  <div style="font-size:21px;line-height:1.15;font-weight:900;">{title}</div>
+  <div style="font-size:21px;line-height:1.2;margin-top:5px;color:#566472;">{detail}</div>
+</div>"""
+        for title, detail in (
+            ("Model Structure & Algorithms", "MoE · SFT · DPO · GRPO"),
+            ("Training Frameworks", "VeRL · Ray · Megatron · MindSpeed"),
+            ("Parallelism & Resources", "TP · PP · EP · DP · HBM · Offload"),
+            ("Runtime & Kernels", "CANN · HCCL · AICPU · Operators"),
         )
     )
     body = f"""
@@ -352,12 +430,18 @@ def training_outcomes() -> str:
       <div style="font-size:21px;font-weight:900;color:#b5333b;margin-bottom:9px;">A5 Architecture Evolution → Training Infra Impact</div>
       <div style="display:grid;grid-template-rows:repeat(4,1fr);gap:8px;flex:1;">{impact_cards}</div>
     </div>
-    <div class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:14px;display:flex;flex-direction:column;">
-      <div style="font-size:21px;font-weight:900;color:#b5333b;margin-bottom:9px;">TRAINING, DELIVERY & ENABLEMENT</div>
-      <div style="display:grid;grid-template-rows:repeat(4,1fr);gap:8px;flex:1;">{timeline}</div>
+    <div style="display:grid;grid-template-rows:1fr 1fr;gap:10px;min-height:0;">
+      <div class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:12px 14px;display:flex;flex-direction:column;">
+        <div style="font-size:21px;font-weight:900;color:#b5333b;margin-bottom:7px;">X1+ DELIVERY & TRAINING TASKFORCE</div>
+        <div style="display:grid;grid-template-rows:repeat(2,1fr);gap:7px;flex:1;">{timeline_primary}</div>
+      </div>
+      <div class="build" data-step="2" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:12px 14px;display:flex;flex-direction:column;">
+        <div style="font-size:21px;font-weight:900;color:#b5333b;margin-bottom:7px;">A3 / A5 DESIGN & ENABLEMENT</div>
+        <div style="display:grid;grid-template-rows:repeat(2,1fr);gap:7px;flex:1;">{timeline_scale}</div>
+      </div>
     </div>
   </div>
-  <div class="build" data-step="2" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:12px 14px;">
+  <div class="build" data-step="3" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:11px 14px;">
     <div style="font-size:21px;font-weight:900;color:#b5333b;margin-bottom:8px;">FOUR-LAYER PRODUCT KNOWLEDGE STACK</div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px;">{stack}</div>
   </div>
@@ -374,38 +458,40 @@ def a3_estimate() -> str:
 <div style="padding:11px 58px 0;">
   <div style="height:44px;background:#b5333b;color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;letter-spacing:.02em;">Engineering Estimate — No Full-Scale Blind Validation</div>
 </div>
-<div style="flex:1;min-height:0;padding:12px 58px 66px;display:grid;grid-template-rows:1.05fr .9fr 1fr;gap:11px;">
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;min-height:0;">
+<div style="flex:1;min-height:0;padding:12px 58px 66px;display:grid;grid-template-rows:1.1fr .85fr 1fr;gap:11px;">
+  <div style="display:grid;grid-template-columns:1.18fr 1fr 1fr;gap:12px;min-height:0;">
     <article class="build" data-step="0" style="background:#fff;border:1px solid #bdc3cb;border-left:6px solid #566472;border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;justify-content:center;">
       <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 01</div>
       <h3 style="margin:5px 0 7px;font-size:25px;">Read the Model Structure</h3>
-      <div style="font-size:21px;line-height:1.26;color:#566472;">Total parameters set resident memory. Active parameters set per-token compute. Layer count sets repeated depth. Top-K, expert distribution and EP expose routing and communication cost.</div>
+      <div style="font-size:21px;line-height:1.25;color:#566472;"><b>Mresident ∝ Ptotal</b><br><b>Ftoken ∝ Pactive</b><br>Layer count sets repeated depth; Top-K, expert distribution and EP expose routing and communication cost.</div>
     </article>
-    <div class="build" data-step="1" style="display:grid;grid-template-columns:38px 1fr;align-items:stretch;">
-      <div style="display:flex;align-items:center;justify-content:center;font-size:32px;color:#b5333b;font-weight:900;">→</div>
-      <article style="background:#fff;border:1px solid #bdc3cb;border-left:6px solid #566472;border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;justify-content:center;">
-        <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 02 · Architecture-Aware Proxy Model</div>
-        <h3 style="margin:5px 0 7px;font-size:25px;">Build a Single-Node Proxy</h3>
-        <div style="font-size:21px;line-height:1.26;color:#566472;">Keep hidden size, attention heads, MoE blocks, Top-K and data type. <b>Prune Layers</b> to reduce repeated depth. <b>Reduce Total Experts</b> so resident memory fits one node.</div>
-      </article>
-    </div>
+    <article class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-left:6px solid #566472;border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;justify-content:center;">
+      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 02 · Architecture-Aware Proxy Model</div>
+      <h3 style="margin:5px 0 7px;font-size:25px;">Prune Layers</h3>
+      <div style="font-size:21px;line-height:1.25;color:#566472;">Keep hidden size, attention heads, MoE blocks, Top-K and data type; reduce repeated depth while preserving each layer’s compute pattern.</div>
+    </article>
+    <article class="build" data-step="2" style="background:#fff;border:1px solid #bdc3cb;border-left:6px solid #566472;border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;justify-content:center;">
+      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 03 · Single-Node Proxy</div>
+      <h3 style="margin:5px 0 7px;font-size:25px;">Reduce Total Experts</h3>
+      <div style="font-size:21px;line-height:1.25;color:#566472;">Reduce total experts until resident memory fits one node; retain MoE routing, active experts and expert-compute shape.</div>
+    </article>
   </div>
-  <div class="build" data-step="2" style="display:grid;grid-template-columns:1fr 42px 1fr;gap:8px;min-height:0;">
+  <div class="build" data-step="3" style="display:grid;grid-template-columns:1fr 42px 1fr;gap:8px;min-height:0;">
     <article style="background:#fff;border:1px solid #bdc3cb;border-radius:8px;padding:13px 16px;display:flex;flex-direction:column;justify-content:center;">
-      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 03</div>
+      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 04</div>
       <h3 style="margin:4px 0 6px;font-size:25px;">Measure the Proxy</h3>
-      <div style="font-size:21px;line-height:1.25;color:#566472;">Measure Attention, MoE, peak memory and key training-stage time.</div>
+      <div style="font-size:21px;line-height:1.25;color:#566472;">Attention time · MoE time · peak HBM · rollout / logprob / actor-update phases</div>
     </article>
     <div style="display:flex;align-items:center;justify-content:center;font-size:32px;color:#b5333b;font-weight:900;">→</div>
     <article style="background:#fff;border:1px solid #bdc3cb;border-radius:8px;padding:13px 16px;display:flex;flex-direction:column;justify-content:center;">
-      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 04</div>
+      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 05</div>
       <h3 style="margin:4px 0 6px;font-size:25px;">Extrapolate with Constraints</h3>
       <div style="font-size:21px;line-height:1.25;color:#566472;">Scale analytically with full-model layers, total experts, parallel strategy and topology constraints.</div>
     </article>
   </div>
-  <article class="build" data-step="3" style="background:#fff;border:2px solid #b5333b;border-radius:8px;padding:12px 16px;display:grid;grid-template-columns:260px 1fr;gap:14px;min-height:0;align-items:center;">
+  <article class="build" data-step="4" style="background:#fff;border:2px solid #b5333b;border-radius:8px;padding:12px 16px;display:grid;grid-template-columns:260px 1fr;gap:14px;min-height:0;align-items:center;">
     <div>
-      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 05</div>
+      <div style="font-size:21px;font-weight:900;color:#b5333b;">STEP 06</div>
       <h3 style="margin:5px 0 8px;font-size:25px;">Report a Planning Range</h3>
       <div style="font-size:21px;line-height:1.24;font-weight:850;color:#566472;">The proxy captures compute and memory order of magnitude; it is not the full model.</div>
     </div>
@@ -426,11 +512,16 @@ def ai_coding_reflection() -> str:
     def bullet(text: str) -> str:
         return f'<div style="background:#f5f6f7;border-left:5px solid #566472;padding:12px 13px;font-size:21px;line-height:1.28;">{text}</div>'
 
-    practice = "".join(
+    infra_practice = "".join(
         bullet(text)
         for text in (
             "Trace VeRL, Ray, Megatron and MindSpeed call paths; generate debugging scripts and log probes.",
             "Handle version compatibility and source-level adaptation; automate distributed training deployment and tests.",
+        )
+    )
+    agent_practice = "".join(
+        bullet(text)
+        for text in (
             "Package delivery flows as Skills / MCP; build RAG, evaluation and BadCase feedback loops.",
             "Accelerate AICO-PPT, AICO-Bot, distributed-training utilities and document-extraction tools.",
         )
@@ -445,21 +536,27 @@ def ai_coding_reflection() -> str:
     body = f"""
 <div style="flex:1;min-height:0;padding:19px 58px 66px;display:grid;grid-template-columns:30fr 38fr 32fr;gap:18px;">
   <article class="build" data-step="0" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:19px;display:flex;flex-direction:column;">
-    <h3 style="margin:0 0 15px;font-size:28px;color:#b5333b;">Practice</h3>
-    <div style="display:grid;grid-template-rows:repeat(4,1fr);gap:11px;flex:1;">{practice}</div>
+    <h3 style="margin:0 0 11px;font-size:28px;color:#b5333b;">Practice</h3>
+    <h4 style="margin:0 0 7px;font-size:22px;">Infra Development</h4>
+    <div style="display:grid;grid-template-rows:repeat(2,1fr);gap:8px;">{infra_practice}</div>
+    <h4 style="margin:12px 0 7px;font-size:22px;">Agent Development</h4>
+    <div style="display:grid;grid-template-rows:repeat(2,1fr);gap:8px;">{agent_practice}</div>
   </article>
-  <article class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:19px;display:flex;flex-direction:column;">
-    <h3 style="margin:0 0 15px;font-size:28px;color:#b5333b;">Boundaries & Verification</h3>
-    <div style="flex:1;display:flex;flex-direction:column;justify-content:center;">
-      <div style="display:grid;grid-template-rows:1fr 1.15fr;gap:11px;">{boundaries}</div>
-      <div style="margin-top:15px;background:#fdf0f1;border-left:7px solid #b5333b;padding:16px;font-size:22px;line-height:1.32;font-weight:900;">
-        AI Coding does not replace Engineering Judgment.<br><br>
-        Every conclusion requires Verification through code, logs, tests or the target environment.
+  <div style="display:grid;grid-template-rows:1.15fr .85fr;gap:12px;min-height:0;">
+    <article class="build" data-step="1" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:17px;display:flex;flex-direction:column;">
+      <h3 style="margin:0 0 11px;font-size:27px;color:#b5333b;">Boundaries & Human Accountability</h3>
+      <div style="display:grid;grid-template-rows:1fr 1.15fr;gap:9px;">{boundaries}</div>
+      <div style="margin-top:11px;background:#fdf0f1;border-left:7px solid #b5333b;padding:12px 14px;font-size:22px;line-height:1.25;font-weight:900;">
+        AI Coding does not replace Engineering Judgment.
       </div>
-    </div>
-  </article>
-  <article class="build" data-step="2" style="background:#fff;border:1px solid #bdc3cb;border-left:8px solid #b5333b;border-radius:9px;padding:22px;display:flex;flex-direction:column;">
-    <h3 style="margin:0 0 22px;font-size:28px;color:#b5333b;">Open Question</h3>
+    </article>
+    <article class="build" data-step="2" style="background:#fff;border:1px solid #bdc3cb;border-radius:9px;padding:17px;display:flex;flex-direction:column;justify-content:center;">
+      <h3 style="margin:0 0 10px;font-size:27px;color:#b5333b;">Verification</h3>
+      <div style="font-size:22px;line-height:1.3;font-weight:850;color:#566472;">Every conclusion requires Verification through code, logs, tests or the target environment.</div>
+    </article>
+  </div>
+  <article class="build" data-step="3" style="background:#fff;border:1px solid #bdc3cb;border-left:8px solid #b5333b;border-radius:9px;padding:22px;display:flex;flex-direction:column;">
+    <h3 style="margin:0 0 22px;font-size:28px;color:#b5333b;">Core View & Open Question</h3>
     <div style="flex:1;display:flex;flex-direction:column;justify-content:center;">
       <div style="font-size:24px;line-height:1.34;font-weight:850;color:#566472;">AI Coding accelerates the loop from system understanding to code change, result verification and capability reuse.</div>
       <div style="height:2px;background:#bdc3cb;margin:24px 0;"></div>
@@ -580,6 +677,40 @@ def validate_complete(template: str) -> None:
     ]
     if starts != [2, 5, 17]:
         raise RuntimeError(f"完成态章节起点错误：{starts}")
+
+    for label, required_texts in COMPLETE_REQUIRED_TEXT.items():
+        marker = f'<section data-label="{label}"'
+        start = template.find(marker)
+        end = template.find("</section>", start)
+        if start < 0 or end < 0:
+            raise RuntimeError(f"完成态关键内容错误：页面不存在或未闭合 {label}")
+        section = template[start:end + len("</section>")]
+        for text in required_texts:
+            if text not in section:
+                raise RuntimeError(f"完成态关键内容错误：{label} 缺少 {text}")
+
+    a5_marker = '<section data-label="kc-train-outcomes"'
+    a5_start = template.find(a5_marker)
+    a5_end = template.find("</section>", a5_start)
+    a5_section = template[a5_start:a5_end + len("</section>")]
+    for text in COMPLETE_FORBIDDEN_A5_TEXT:
+        if text.lower() in a5_section.lower():
+            raise RuntimeError(f"完成态 A5 禁止性硬件事实：{text}")
+
+    for label, expected_steps in COMPLETE_EXPECTED_STEPS.items():
+        marker = f'<section data-label="{label}"'
+        start = template.find(marker)
+        end = template.find("</section>", start)
+        section = template[start:end + len("</section>")]
+        actual_steps = {
+            int(value)
+            for value in re.findall(r'data-step="(\d+)"', section)
+        }
+        if actual_steps != expected_steps:
+            raise RuntimeError(
+                f"完成态动画步骤错误：{label} "
+                f"{sorted(actual_steps)} != {sorted(expected_steps)}"
+            )
 
     blocks = re.findall(
         r'<div class="slide-fit"[^>]*>.*?</section>\s*</div></div>',

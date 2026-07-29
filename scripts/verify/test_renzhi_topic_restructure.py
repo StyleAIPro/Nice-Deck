@@ -45,6 +45,7 @@ REQUIRED_TEXT = {
         "57",
         "220+",
         "85%+",
+        "Source: AICO platform and integrated-delivery operating records",
     ],
     "kc-mgmt": [
         "Performance Baseline Retrieval",
@@ -57,8 +58,17 @@ REQUIRED_TEXT = {
         "A5 Architecture Evolution",
         "Training Infra Impact",
         "Qwen2.5-7B GRPO",
+        "Qwen2.5-7B GRPO; 20% improvement on AIME / MATH; 8 acceleration features validated across MS-RL and VeRL.",
         "2,000+",
         "98%+",
+        "Model Structure & Algorithms",
+        "MoE · SFT · DPO · GRPO",
+        "Training Frameworks",
+        "VeRL · Ray · Megatron · MindSpeed",
+        "Parallelism & Resources",
+        "TP · PP · EP · DP · HBM · Offload",
+        "Runtime & Kernels",
+        "CANN · HCCL · AICPU · Operators",
     ],
     "kc-sol-a3": [
         "Architecture-Aware Proxy Model",
@@ -66,6 +76,10 @@ REQUIRED_TEXT = {
         "Reduce Total Experts",
         "Engineering Estimate",
         "No Full-Scale Blind Validation",
+        "Mresident ∝ Ptotal",
+        "Ftoken ∝ Pactive",
+        "Attention time · MoE time · peak HBM · rollout / logprob / actor-update phases",
+        "calibration on the target environment",
     ],
     "ai-coding-reflection": [
         "AI Coding in Infra & Agent Development",
@@ -73,6 +87,9 @@ REQUIRED_TEXT = {
         "Boundaries",
         "Engineering Judgment",
         "Verification",
+        "Infra Development",
+        "Agent Development",
+        "Human Accountability",
     ],
 }
 
@@ -86,6 +103,18 @@ FORBIDDEN_TEXT = {
         "Dual-Track Integrated Delivery Flow",
         "People Assignment & Growth Map",
     ],
+    "kc-train-outcomes": [
+        "interconnect bandwidth",
+        "HBM capacity",
+        "chip count",
+        "TB/s",
+    ],
+}
+
+EXPECTED_STEPS = {
+    "kc-train-outcomes": {0, 1, 2, 3},
+    "kc-sol-a3": {0, 1, 2, 3, 4},
+    "ai-coding-reflection": {0, 1, 2, 3},
 }
 
 
@@ -95,6 +124,11 @@ def section_html(template, label):
     end = template.find("</section>", start)
     assert end >= 0, f"页面未闭合: {label}"
     return template[start:end + len("</section>")]
+
+
+def replace_section(template, label, replacement):
+    old = section_html(template, label)
+    return template.replace(old, replacement, 1)
 
 
 def assert_idempotence_validation():
@@ -145,6 +179,65 @@ def assert_idempotence_validation():
                 else:
                     raise AssertionError(f"完成态快路径未拒绝 nav {name}损坏")
                 assert output.getvalue() == "", f"nav {name}损坏时不应打印幂等成功提示"
+
+            corruption_cases = []
+
+            source = "Source: AICO platform and integrated-delivery operating records"
+            assert source in eb.get_template(eb.load(DECK))
+            corruption_cases.append(
+                (
+                    "关键内容",
+                    lambda template: template.replace(source, "", 1),
+                    "关键内容",
+                )
+            )
+
+            def corrupt_steps(template):
+                block = section_html(template, "kc-train-outcomes")
+                assert block.count('data-step="3"') >= 1
+                return replace_section(
+                    template,
+                    "kc-train-outcomes",
+                    block.replace('data-step="3"', 'data-step="2"'),
+                )
+
+            corruption_cases.append(("动画步骤", corrupt_steps, "动画步骤"))
+
+            def inject_a5_hardware_fact(template):
+                block = section_html(template, "kc-train-outcomes")
+                corrupted = block.replace(
+                    "</section>",
+                    "<div>A5 interconnect bandwidth: 1.6 TB/s.</div></section>",
+                    1,
+                )
+                return replace_section(
+                    template,
+                    "kc-train-outcomes",
+                    corrupted,
+                )
+
+            corruption_cases.append(
+                ("A5 禁止性硬件事实", inject_a5_hardware_fact, "A5 禁止")
+            )
+
+            for name, corrupt, expected_error in corruption_cases:
+                corrupted = Path(temp_dir) / f"corrupted-{name}.html"
+                shutil.copy2(DECK, corrupted)
+                lines = eb.load(corrupted)
+                template = corrupt(eb.get_template(lines))
+                eb.set_template(lines, template)
+                eb.save(corrupted, lines)
+
+                patch.DECK = corrupted
+                output = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(output):
+                        patch.main()
+                except RuntimeError as error:
+                    assert expected_error in str(error), str(error)
+                else:
+                    raise AssertionError(f"完成态快路径未拒绝{name}")
+                assert output.getvalue() == "", f"{name}时不应打印幂等成功提示"
     finally:
         patch.DECK = original_deck
 
@@ -171,6 +264,16 @@ def main():
         block = section_html(template, label)
         for token in tokens:
             assert token not in block, f"{label} 仍含禁用文案: {token}"
+
+    for label, expected_steps in EXPECTED_STEPS.items():
+        block = section_html(template, label)
+        actual_steps = {
+            int(value)
+            for value in re.findall(r'data-step="(\d+)"', block)
+        }
+        assert actual_steps == expected_steps, (
+            f"{label} 动画步骤错误: {sorted(actual_steps)}"
+        )
 
     blocks = re.findall(
         r'<div class="slide-fit"[^>]*>.*?</section>\s*</div></div>',

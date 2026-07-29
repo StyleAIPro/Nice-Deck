@@ -215,3 +215,81 @@ P6/P7/P8/P13 nested clips 均为 0
 四页均未发现新重叠、裁切或页脚遮挡；垂直居中、P7 闭环回流和 P8 架构连接均清晰可见。
 
 本轮提交主题：`fix: 优化双专题页面视觉连接与对齐`
+
+## 最终独立评审修复
+
+### 内容与完成态防回归
+
+- P7 补充来源脚注：
+  `Source: AICO platform and integrated-delivery operating records`。
+- P14 补齐 Qwen2.5-7B GRPO 的 20% 结果、MS-RL / VeRL 八项加速验证和四层产品知识栈明细；动画步骤固定为 `{0, 1, 2, 3}`。
+- P15 补齐 `Mresident ∝ Ptotal`、`Ftoken ∝ Pactive`，拆分 `Prune Layers` 与 `Reduce Total Experts`，补充单节点代理测量阶段和边界；动画步骤固定为 `{0, 1, 2, 3, 4}`。
+- P18 将 Practice 明确拆为 `Infra Development` 与 `Agent Development`，分离 Boundaries / Human Accountability、Verification、Core View / Open Question；动画步骤固定为 `{0, 1, 2, 3}`。
+- `validate_complete()` 新增四页关键文案、三页精确动画步骤和 P14 A5 禁止性硬件事实校验。
+- 验收测试新增关键文案破坏、动画步骤破坏、A5 硬件事实注入三个完成态负向场景；均要求在幂等成功提示前静默拒绝。
+
+### RED / GREEN
+
+扩充验收后、修改生产补丁前：
+
+```text
+$ python3 scripts/verify/test_renzhi_topic_restructure.py
+AssertionError: kc-resp-proj 缺少文案: Source: AICO platform and integrated-delivery operating records
+退出码：1
+```
+
+从原始 19 页基线重新生成后：
+
+```text
+$ python3 scripts/patch_renzhi_topic_restructure.py
+slide-fit=21  sections=21  nav=21  nav_seq_ok=True
+chapters: ["name:'Working Experience', start:2",
+           "name:'Self-Evaluation', start:5",
+           "name:'Reflections & Suggestions', start:17"]
+退出码：0
+
+$ python3 scripts/verify/test_renzhi_topic_restructure.py
+slide-fit=21  sections=21  nav=21  nav_seq_ok=True
+chapters: ["name:'Working Experience', start:2",
+           "name:'Self-Evaluation', start:5",
+           "name:'Reflections & Suggestions', start:17"]
+PASS: renzhi topic restructure
+退出码：0
+```
+
+验收测试中的 nav 数量、序号、label、关键文案、动画步骤和 A5 禁止事实六类破坏场景均被完成态快路径拒绝，且标准输出为空。
+
+### 结构、溢出与视觉复核
+
+```text
+$ eb.verify(Deck-Projects/renzhi/renzhi-deck.html)
+slide-fit=21  sections=21  nav=21  nav_seq_ok=True
+chapters: ["name:'Working Experience', start:2",
+           "name:'Self-Evaluation', start:5",
+           "name:'Reflections & Suggestions', start:17"]
+退出码：0
+
+$ node scripts/verify/measure_overflow.mjs Deck-Projects/renzhi/renzhi-deck.html --all
+21 页 section overflow 均为 Y=0、X=0
+P7/P14/P15/P18 nested clips 均为 0
+未改动 P10 保留基线已有的 4 条 nested clip 提示
+退出码：0
+```
+
+终态截图：
+
+- P7：`/tmp/renzhi-topic-final-review/p07-platform.jpg`
+- P14：`/tmp/renzhi-topic-final-review/p14-training-outcomes.jpg`
+- P15：`/tmp/renzhi-topic-final-review/p15-a3-estimate.jpg`
+- P18：`/tmp/renzhi-topic-final-review/p18-ai-coding.jpg`
+
+逐拍结果：
+
+- P11：5 帧，`/tmp/renzhi-topic-final-review/steps-p11/`
+- P14：5 帧，`/tmp/renzhi-topic-final-review/steps-p14/`
+- P15：6 帧，`/tmp/renzhi-topic-final-review/steps-p15/`
+- P18：5 帧，`/tmp/renzhi-topic-final-review/steps-p18/`
+
+已逐帧目检 21 张图片：每个点击步骤均新增对应可见内容，未发现新增重叠、裁切、页脚遮挡或中间步骤空容器。
+
+本轮提交主题：`fix: 落实认知答辩最终评审修复`
