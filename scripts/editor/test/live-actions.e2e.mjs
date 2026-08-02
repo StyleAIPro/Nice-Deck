@@ -42,6 +42,23 @@ function nextSocketMessage(socket) {
   });
 }
 
+async function reloadDeckFrame(page) {
+  await page.evaluate(() => {
+    const frame=document.querySelector('#deck-frame');
+    window.__previousDeckDocument=frame.contentDocument;
+    frame.contentWindow.location.reload();
+  });
+  await page.waitForFunction(() => {
+    const frame=document.querySelector('#deck-frame');
+    return frame.contentDocument !== window.__previousDeckDocument
+      && frame.contentDocument?.readyState === 'complete';
+  });
+}
+
+function sessionRequestCount(resourceRequests) {
+  return resourceRequests.filter(value => new URL(value).pathname === '/api/session').length;
+}
+
 test('人工改字与 Agent 位移共享 canonical 日志并实时撤销重做', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());
@@ -819,6 +836,25 @@ test('人工动作 commit ACK 丢失恢复后显示非错误成功提示', async
   assert.equal((await session(app)).groups.length,1);
 });
 
+test('普通人工动作成功后 iframe-only reload 仍按最新 sessionGroups 恢复', async t => {
+  const app=await startFixtureServer();
+  t.after(() => app.close());
+  const {browser,page,browserProblems,resourceProblems,resourceRequests}=await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  let heading=page.frameLocator('#deck-frame').locator('h2').first();
+  await page.click('[data-mode="text"]');
+  await heading.dblclick(); await heading.fill('普通成功后刷新 iframe'); await heading.press('Meta+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent==='1');
+  await reloadDeckFrame(page);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent==='普通成功后刷新 iframe');
+  heading=page.frameLocator('#deck-frame').locator('h2').first();
+  assert.equal(await heading.textContent(),'普通成功后刷新 iframe');
+  assert.equal(sessionRequestCount(resourceRequests),2,JSON.stringify(resourceRequests));
+  assert.deepEqual(browserProblems,[]);
+  assert.deepEqual(resourceProblems,[]);
+});
+
 test('sidecar 已提交但 sync ACK 也丢失时 apply/undo/redo 均成功且各广播一次', async t => {
   const app=await startFixtureServer({bridgeTimeoutMs:100});
   t.after(() => app.close());
@@ -873,10 +909,10 @@ test('sidecar 已提交但 sync ACK 也丢失时 apply/undo/redo 均成功且各
   assert.equal(await heading.evaluate(() => window.HuaweiDeckPatchRuntime.pendingTransactionCount()),0);
 });
 
-test('人工动作 syncPending 走成功结果并显示非错误提示且不重试', async t => {
+test('人工动作 syncPending 走成功结果且 iframe-only reload 后仍恢复', async t => {
   const app=await startFixtureServer({bridgeTimeoutMs:100});
   t.after(() => app.close());
-  const {browser,page}=await openEditor(app);
+  const {browser,page,browserProblems,resourceProblems,resourceRequests}=await openEditor(app);
   t.after(() => browser.close());
   page.setDefaultTimeout(4_000);
   const heading=page.frameLocator('#deck-frame').locator('h2').first();
@@ -900,4 +936,47 @@ test('人工动作 syncPending 走成功结果并显示非错误提示且不重�
   assert.equal(state.revision,1);
   assert.equal(state.groups.length,1);
   assert.equal(await heading.textContent(),'已保存但待确认同步');
+  await reloadDeckFrame(page);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent==='已保存但待确认同步');
+  assert.equal(sessionRequestCount(resourceRequests),2,JSON.stringify(resourceRequests));
+  assert.deepEqual(browserProblems,[]);
+  assert.deepEqual(resourceProblems,[]);
+});
+
+test('Agent apply/undo/redo 广播后 iframe-only reload 始终匹配权威编译集合', async t => {
+  const app=await startFixtureServer();
+  t.after(() => app.close());
+  const {browser,page,browserProblems,resourceProblems,resourceRequests}=await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  let heading=page.frameLocator('#deck-frame').locator('h2').first();
+  const target=await heading.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  const applied=await postJson(app,'/api/actions',{
+    expectedRevision:0,taskId:null,
+    actions:[{id:'agent-frame-reload',taskId:null,target,kind:'setText',payload:{text:'Agent 广播恢复'}}],
+  });
+  assert.equal(applied.response.status,200,JSON.stringify(applied.body));
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent==='1');
+  await reloadDeckFrame(page);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent==='Agent 广播恢复');
+
+  let changed=await postJson(app,`/api/groups/${applied.body.groupId}/undo`,{expectedRevision:1});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent==='2');
+  await reloadDeckFrame(page);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent==='第一页标题');
+
+  changed=await postJson(app,`/api/groups/${applied.body.groupId}/redo`,{expectedRevision:2});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent==='3');
+  await reloadDeckFrame(page);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent==='Agent 广播恢复');
+  heading=page.frameLocator('#deck-frame').locator('h2').first();
+  const state=await session(app);
+  assert.equal(state.revision,3);
+  assert.equal(new PatchJournal(state).compile()[0].after,'Agent 广播恢复');
+  assert.equal(await heading.textContent(),'Agent 广播恢复');
+  assert.equal(sessionRequestCount(resourceRequests),4,JSON.stringify(resourceRequests));
+  assert.deepEqual(browserProblems,[]);
+  assert.deepEqual(resourceProblems,[]);
 });

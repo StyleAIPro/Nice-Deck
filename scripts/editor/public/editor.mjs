@@ -29,6 +29,9 @@ let revision = 0;
 let editorMode = 'preview';
 let deckReady = false;
 let sessionGroups = [];
+let loadedSessionRevision = -1;
+let sessionRefreshTargetRevision = 0;
+let sessionRefreshPromise;
 let seenOnline = false;
 const createRequests = new Set();
 const manualRequests = new Set();
@@ -138,16 +141,43 @@ function upsertTask(task) {
   renderTasks();
 }
 
-async function loadSession() {
-  const [session, persistedTasks] = await Promise.all([
-    requestJson('/api/session'),
-    requestJson('/api/tasks'),
-  ]);
-  updateRevision(session.revision ?? 0);
-  sessionGroups = Array.isArray(session.groups) ? session.groups : [];
-  tasks = uniqueTasks([...(Array.isArray(persistedTasks) ? persistedTasks : []), ...tasks]);
-  renderTasks();
-  syncSessionActions();
+function loadSession(targetRevision = revision) {
+  if (Number.isSafeInteger(targetRevision)) {
+    sessionRefreshTargetRevision = Math.max(sessionRefreshTargetRevision, targetRevision);
+  }
+  if (sessionRefreshPromise) return sessionRefreshPromise;
+  const refresh = async () => {
+    let firstRequest = true;
+    while (firstRequest || loadedSessionRevision < sessionRefreshTargetRevision) {
+      firstRequest = false;
+      const requestedRevision = sessionRefreshTargetRevision;
+      const [session, persistedTasks] = await Promise.all([
+        requestJson('/api/session'),
+        requestJson('/api/tasks'),
+      ]);
+      const sessionRevision = Number.isSafeInteger(session.revision) ? session.revision : 0;
+      updateRevision(sessionRevision);
+      if (sessionRevision >= loadedSessionRevision) {
+        loadedSessionRevision = sessionRevision;
+        sessionGroups = Array.isArray(session.groups) ? session.groups : [];
+        tasks = uniqueTasks([...(Array.isArray(persistedTasks) ? persistedTasks : []), ...tasks]);
+        renderTasks();
+      }
+      if (loadedSessionRevision < requestedRevision) {
+        throw new Error(`权威会话 revision ${loadedSessionRevision} 落后于 ${requestedRevision}`);
+      }
+    }
+    syncSessionActions();
+  };
+  sessionRefreshPromise = refresh().finally(() => { sessionRefreshPromise = undefined; });
+  return sessionRefreshPromise;
+}
+
+function ensureSessionRevision(targetRevision) {
+  if (!Number.isSafeInteger(targetRevision) || loadedSessionRevision >= targetRevision) {
+    return Promise.resolve();
+  }
+  return loadSession(targetRevision);
 }
 
 function confirmPage(button) {
@@ -228,6 +258,7 @@ async function submitManualActions(message) {
       }
     }
     updateRevision(result.revision);
+    await ensureSessionRevision(result.revision);
     postManualResult(requestId, { ok: true, ...result });
   } catch (error) {
     if (error.committed === true) {
@@ -296,7 +327,8 @@ function onFrameMessage(event) {
     deckReady = true;
     renderPages(event.data.pages);
     deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode: editorMode }, location.origin);
-    syncSessionActions();
+    if (loadedSessionRevision >= revision) syncSessionActions();
+    else void ensureSessionRevision(revision).catch(() => {});
     return;
   }
   if (event.data?.type === 'create-region-task') {
@@ -379,6 +411,9 @@ eventsClient = connectEvents({
       return;
     }
     updateRevision(event?.revision);
+    if (['actions-recorded','group-undone','group-redone'].includes(event?.type)) {
+      void ensureSessionRevision(event.revision).catch(() => {});
+    }
     if (event?.type === 'task-created' && event.payload?.id) upsertTask(event.payload);
   },
   onState: state => {
