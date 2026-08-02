@@ -37,6 +37,10 @@ export class BridgeService {
     this.editorSocket = socket;
   }
 
+  hasEditorSocket() {
+    return this.editorSocket?.readyState === 1;
+  }
+
   clearEditorSocket(socket) {
     if (this.editorSocket === socket) this.editorSocket = null;
     for (const [commandId, pending] of this.pending) {
@@ -58,11 +62,21 @@ export class BridgeService {
     }
     const pending = this.pending.get(message.commandId);
     if (!pending || pending.socket !== socket) return false;
+    if (!Number.isSafeInteger(message.applied)
+      || message.applied < 0
+      || message.applied !== pending.expectedActionCount) {
+      this.#settle(
+        message.commandId,
+        'reject',
+        serviceError('INVALID_ACTION_ACK', 502, '编辑器动作回执计数无效'),
+      );
+      return true;
+    }
     this.#settle(message.commandId, 'resolve', message.applied);
     return true;
   }
 
-  waitFor(commandId, socket) {
+  waitFor(commandId, socket, expectedActionCount) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#settle(
@@ -72,7 +86,13 @@ export class BridgeService {
         );
       }, this.timeoutMs);
       timer.unref?.();
-      this.pending.set(commandId, { resolve, reject, timer, socket });
+      this.pending.set(commandId, {
+        resolve,
+        reject,
+        timer,
+        socket,
+        expectedActionCount,
+      });
     });
   }
 
@@ -84,7 +104,7 @@ export class BridgeService {
     }
     this.assertRevision(expectedRevision);
     const commandId = randomUUID();
-    const acknowledgement = this.waitFor(commandId, socket);
+    const acknowledgement = this.waitFor(commandId, socket, actions.length);
     try {
       socket.send(JSON.stringify({ type: 'apply-actions', commandId, actions }));
     } catch (error) {
@@ -96,7 +116,19 @@ export class BridgeService {
   createTask(input, expectedRevision) {
     return this.#enqueue(async () => {
       if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
-      return await this.sessionStore.createTask(input, expectedRevision);
+      const state = this.sessionStore.state;
+      const snapshot = {
+        revision: state.revision,
+        tasks: structuredClone(state.tasks ?? []),
+      };
+      try {
+        return await this.sessionStore.createTask(input, expectedRevision);
+      } catch (error) {
+        state.revision = snapshot.revision;
+        state.tasks = snapshot.tasks;
+        await unlink(`${this.sessionStore.sessionPath}.tmp`).catch(() => {});
+        throw error;
+      }
     });
   }
 

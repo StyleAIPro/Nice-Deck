@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
+import { BridgeService } from '../bridge-service.mjs';
 import { startServer } from '../server.mjs';
 
 const taskInput = {
@@ -35,6 +37,9 @@ async function makeApp(t, options = {}) {
     port: 0,
     openBrowser: false,
     token: 'secret',
+    editorToken: options.editorToken ?? 'editor-secret',
+    writerTimeoutMs: options.writerTimeoutMs,
+    spawnWriter: options.spawnWriter,
   });
   t.after(() => app.close());
   return app;
@@ -53,6 +58,40 @@ function nextMessage(socket) {
     socket.once('message', data => resolve(JSON.parse(data)));
     socket.once('error', reject);
   });
+}
+
+function rejectedWebSocketStatus(url) {
+  const socket = new WebSocket(url);
+  return new Promise(resolve => {
+    socket.once('unexpected-response', (_request, response) => resolve(response.statusCode));
+    socket.once('open', () => {
+      socket.terminate();
+      resolve(0);
+    });
+    socket.once('error', () => resolve(0));
+  });
+}
+
+function validBundle() {
+  const template = '<!doctype html><body><div class="stage"></div></body>';
+  return '<script type="__bundler/manifest">\n{}\n</script>\n'
+    + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
+}
+
+function hangingChild() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stderr.setEncoding = () => {};
+  child.stdin = { end() {} };
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+    return true;
+  };
+  return child;
 }
 
 test('拒绝无令牌请求并向 WebSocket 推送新任务', async t => {
@@ -108,6 +147,58 @@ test('所有受保护路由都拒绝无令牌请求且 Bearer 可授权', async 
   wrongToken.terminate();
 });
 
+test('editor capability 隔离 observer 且拒绝错误或重复 editor', async t => {
+  const app = await makeApp(t);
+  const editorUrl = app.editorWsUrl
+    ?? `${app.wsUrl}?token=secret&editorToken=editor-secret`;
+  const editor = await connect(editorUrl);
+  const observer = await connect(`${app.wsUrl}?token=secret`);
+  t.after(() => editor.close());
+  t.after(() => observer.close());
+
+  const editorMessage = nextMessage(editor).then(message => ({ source: 'editor', message }));
+  const observerMessage = nextMessage(observer).then(message => ({ source: 'observer', message }));
+  const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+  });
+  const received = await Promise.race([editorMessage, observerMessage]);
+  assert.equal(received.source, 'editor');
+  assert.equal(received.message.type, 'apply-actions');
+
+  observer.send(JSON.stringify({
+    type: 'actions-applied',
+    commandId: received.message.commandId,
+    applied: 1,
+  }));
+  const forgedSettled = await Promise.race([
+    responsePromise.then(() => true),
+    new Promise(resolve => setTimeout(() => resolve(false), 25)),
+  ]);
+  assert.equal(forgedSettled, false);
+  assert.equal(app.session.revision, 0);
+
+  editor.send(JSON.stringify({
+    type: 'actions-applied',
+    commandId: received.message.commandId,
+    applied: 1,
+  }));
+  const response = await responsePromise;
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).revision, 1);
+
+  assert.equal(app.editorToken, 'editor-secret');
+  assert.match(app.editorWsUrl, /editorToken=editor-secret/);
+  const sessionBody = await fetch(`${app.url}/api/session?token=secret`).then(value => value.text());
+  assert.doesNotMatch(sessionBody, /editor-secret/);
+  assert.equal(
+    await rejectedWebSocketStatus(`${app.wsUrl}?token=secret&editorToken=wrong`),
+    403,
+  );
+  assert.equal(await rejectedWebSocketStatus(app.editorWsUrl), 409);
+});
+
 test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', async t => {
   const app = await makeApp(t);
   const offline = await fetch(`${app.url}/api/actions?token=secret`, {
@@ -118,7 +209,7 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   assert.equal(offline.status, 409);
   assert.equal((await offline.json()).error, 'EDITOR_OFFLINE');
 
-  const ws = await connect(`${app.wsUrl}?token=secret`);
+  const ws = await connect(app.editorWsUrl);
   t.after(() => ws.close());
   const commandPromise = nextMessage(ws);
   const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
@@ -155,9 +246,46 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   assert.equal((await conflict.json()).error, 'REVISION_CONFLICT');
 });
 
+test('actions-applied 只接受与动作数一致的安全非负整数', async t => {
+  const app = await makeApp(t);
+  const ws = await connect(app.editorWsUrl);
+  t.after(() => ws.close());
+  const invalidAppliedValues = [undefined, -1, 0, 2, 1.5];
+
+  for (const applied of invalidAppliedValues) {
+    const commandPromise = nextMessage(ws);
+    const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    });
+    const command = await commandPromise;
+    const acknowledgement = { type: 'actions-applied', commandId: command.commandId };
+    if (applied !== undefined) acknowledgement.applied = applied;
+    ws.send(JSON.stringify(acknowledgement));
+
+    const response = await responsePromise;
+    assert.equal(response.status, 502, `applied=${applied}`);
+    assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
+    assert.equal(app.session.revision, 0);
+    assert.deepEqual(app.session.groups, []);
+  }
+
+  const commandPromise = nextMessage(ws);
+  const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+  });
+  const command = await commandPromise;
+  ws.send(JSON.stringify({ type: 'actions-applied', commandId: command.commandId, applied: 1 }));
+  assert.equal((await responsePromise).status, 200);
+  assert.equal(app.session.revision, 1);
+});
+
 test('等待 Action 回执期间串行化其他 revision mutation', async t => {
   const app = await makeApp(t);
-  const ws = await connect(`${app.wsUrl}?token=secret`);
+  const ws = await connect(app.editorWsUrl);
   t.after(() => ws.close());
   const commandPromise = nextMessage(ws);
   const actionResponsePromise = fetch(`${app.url}/api/actions?token=secret`, {
@@ -181,6 +309,29 @@ test('等待 Action 回执期间串行化其他 revision mutation', async t => {
   assert.equal((await actionResponse.json()).revision, 1);
   assert.equal(taskResponse.status, 409);
   assert.equal((await taskResponse.json()).error, 'REVISION_CONFLICT');
+});
+
+test('createTask 持久化失败时回滚共享状态并清理临时文件', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-task-rollback-'));
+  const sessionPath = join(root, 'session.json');
+  const temporaryPath = `${sessionPath}.tmp`;
+  const state = { revision: 0, tasks: [], groups: [], redo: [] };
+  const sessionStore = {
+    state,
+    sessionPath,
+    async createTask(input) {
+      state.tasks.push(input);
+      state.revision += 1;
+      await writeFile(temporaryPath, 'partial');
+      throw new Error('persist failed');
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+
+  await assert.rejects(() => bridge.createTask({ instruction: '修改' }, 0), /persist failed/);
+  assert.equal(state.revision, 0);
+  assert.deepEqual(state.tasks, []);
+  await assert.rejects(() => readFile(temporaryPath), { code: 'ENOENT' });
 });
 
 test('任务查询、输入错误和已列路由都有明确响应', async t => {
@@ -210,10 +361,7 @@ test('任务查询、输入错误和已列路由都有明确响应', async t => 
 });
 
 test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', async t => {
-  const template = '<!doctype html><body><div class="stage"></div></body>';
-  const bundle = '<script type="__bundler/manifest">\n{}\n</script>\n'
-    + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
-  const app = await makeApp(t, { deckContents: bundle });
+  const app = await makeApp(t, { deckContents: validBundle() });
   const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -226,12 +374,61 @@ test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', 
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
 });
 
+test('write-deck 超时终止子进程并映射稳定 504', async t => {
+  const child = hangingChild();
+  const app = await makeApp(t, {
+    deckContents: validBundle(),
+    writerTimeoutMs: 20,
+    spawnWriter: () => child,
+  });
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0 }),
+  });
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).error, 'WRITE_DECK_TIMEOUT');
+  assert.equal(child.killed, true);
+});
+
+test('write-deck 卡住时 close 取消 child 和请求并在有界时间收敛', async t => {
+  const child = hangingChild();
+  let signalStarted;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const app = await makeApp(t, {
+    deckContents: validBundle(),
+    writerTimeoutMs: 10_000,
+    spawnWriter: () => {
+      signalStarted();
+      return child;
+    },
+  });
+  const responsePromise = fetch(`${app.url}/api/write-deck?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0 }),
+  });
+  const didStart = await Promise.race([
+    started.then(() => true),
+    new Promise(resolve => setTimeout(() => resolve(false), 50)),
+  ]);
+  assert.equal(didStart, true);
+
+  const beforeClose = performance.now();
+  await app.close();
+  assert.ok(performance.now() - beforeClose < 500);
+  const response = await responsePromise;
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'SERVICE_CLOSED');
+  assert.equal(child.killed, true);
+});
+
 test('close 关闭 WebSocket、HTTP 端口并拒绝未完成命令', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-server-close-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck');
   const app = await startServer({ deckPath: deck, host: '127.0.0.1', port: 0, token: 'secret' });
-  const ws = await connect(`${app.wsUrl}?token=secret`);
+  const ws = await connect(app.editorWsUrl);
   const commandPromise = nextMessage(ws);
   const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
