@@ -214,7 +214,22 @@ function requestPage(button) {
   }, location.origin);
 }
 
-function renderPages(nextPages, preferredPageKey) {
+function capturePagePreference() {
+  const activePage = pageList.querySelector('[data-page-key][aria-current="page"]');
+  const preferredPageKey = pendingPageKey || activePage?.dataset.pageKey;
+  const preferredPage = preferredPageKey
+    ? [...pageList.querySelectorAll('[data-page-key]')]
+      .find(button => button.dataset.pageKey === preferredPageKey)
+    : activePage;
+  const preferredPageIndex = Number(preferredPage?.dataset.pageIndex);
+  return {
+    pageKey:preferredPageKey,
+    pageIndex:Number.isSafeInteger(preferredPageIndex) && preferredPageIndex > 0
+      ? preferredPageIndex : undefined,
+  };
+}
+
+function renderPages(nextPages, preferredPageKey, preferredPageIndex) {
   pages = nextPages;
   pageList.replaceChildren();
   for (const page of pages) {
@@ -238,7 +253,10 @@ function renderPages(nextPages, preferredPageKey) {
   const preferredPage = preferredPageKey
     ? pageList.querySelector(`[data-page-key="${CSS.escape(preferredPageKey)}"]`)
     : null;
-  const requestedPage = preferredPage ?? pageList.querySelector('[data-page-key]');
+  const fallbackPage = Number.isSafeInteger(preferredPageIndex) && preferredPageIndex > 0
+    ? pageList.querySelector(`[data-page-index="${preferredPageIndex}"]`)
+    : null;
+  const requestedPage = preferredPage ?? fallbackPage ?? pageList.querySelector('[data-page-key]');
   if (requestedPage) requestPage(requestedPage);
 }
 
@@ -359,10 +377,12 @@ function onFrameMessage(event) {
     const requestKey = `${event.data.frameInstanceId}:${event.data.requestSequence}`;
     if (handledAuthoritativeReloads.has(requestKey) || authoritativeReloadPending) return;
     handledAuthoritativeReloads.add(requestKey);
+    const pagePreference = capturePagePreference();
     authoritativeReloadPending = {
       frameInstanceId:event.data.frameInstanceId,
       requestSequence:event.data.requestSequence,
-      pageKey:pendingPageKey || currentKey.textContent,
+      pageKey:pagePreference.pageKey || currentKey.textContent,
+      pageIndex:pagePreference.pageIndex,
     };
     deckReady = false;
     deckReadyPayload = undefined;
@@ -389,6 +409,7 @@ function onFrameMessage(event) {
   if (event.data?.type === 'deck-ready' && Array.isArray(event.data.pages)) {
     if (authoritativeReloadPending
       && event.data.frameInstanceId === authoritativeReloadPending.frameInstanceId) return;
+    const pagePreference = capturePagePreference();
     const completedReload = authoritativeReloadPending;
     activeFrameInstanceId = typeof event.data.frameInstanceId === 'string'
       ? event.data.frameInstanceId : undefined;
@@ -399,7 +420,11 @@ function onFrameMessage(event) {
       diagnostics:Array.isArray(event.data.diagnostics) ? event.data.diagnostics : [],
     };
     announceDeckReady();
-    renderPages(event.data.pages, completedReload?.pageKey);
+    renderPages(
+      event.data.pages,
+      completedReload?.pageKey ?? pagePreference.pageKey,
+      completedReload?.pageIndex ?? pagePreference.pageIndex,
+    );
     deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode: editorMode }, location.origin);
     if (loadedSessionRevision >= revision) syncSessionActions();
     else void ensureSessionRevision(revision).catch(() => {});

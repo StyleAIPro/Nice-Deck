@@ -483,27 +483,31 @@ for (const scenario of [
     t.after(() => browser.close());
     page.setDefaultTimeout(4_000);
     const frame = page.frameLocator('#deck-frame');
-    await page.locator('[data-page-index="1"]').evaluate(button => {
+    await page.click('[data-page-index="2"]');
+    await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
+    await page.locator('[data-page-index="2"]').evaluate(button => {
       window.__navBeforeConnectedSelection = button;
     });
     await page.click(`[data-mode="${scenario.mode}"]`);
-    const target = frame.locator(scenario.target).first();
+    const target = frame.locator(scenario.target).nth(1);
     await target.click();
     assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
-    await page.locator('#deck-frame').evaluate(frameElement => {
-      const marker = frameElement.contentDocument.createElement('span');
+    await target.evaluate(element => {
+      const marker = document.createElement('span');
       marker.dataset.connectedStructureMarker = '';
-      frameElement.contentDocument.querySelector('section[data-label]').append(marker);
+      element.closest('section[data-label]').append(marker);
     });
     await page.waitForFunction(() => (
-      document.querySelector('[data-page-index="1"]') !== window.__navBeforeConnectedSelection
+      document.querySelector('[data-page-index="2"]') !== window.__navBeforeConnectedSelection
     ));
+    await page.locator('[data-page-key][aria-current="page"]').waitFor();
+    assert.equal(await page.locator('[data-current-page]').textContent(), '02 目录页');
     assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
     assert.equal(await frame.locator('[data-resize-handle]').count(), scenario.handle ? 1 : 0);
     const alignment = await page.locator('#deck-frame').evaluate((frameElement, withHandle) => {
       const document = frameElement.contentDocument;
       const selected = document.querySelector('[data-transform-selection]').getBoundingClientRect();
-      const element = document.querySelector(withHandle ? '.card' : 'h2').getBoundingClientRect();
+      const element = document.querySelectorAll(withHandle ? '.card' : 'h2')[1].getBoundingClientRect();
       const handle = document.querySelector('[data-resize-handle]')?.getBoundingClientRect();
       return {
         overlayAligned:Math.abs(selected.left - element.left) < 1
@@ -515,7 +519,7 @@ for (const scenario of [
       };
     }, scenario.handle);
     assert.deepEqual(alignment, { overlayAligned:true, handleAligned:true });
-    const pageKey = await page.locator('[data-page-index="1"]').getAttribute('data-page-key');
+    const pageKey = await page.locator('[data-page-index="2"]').getAttribute('data-page-key');
     await page.evaluate(key => {
       const frameElement = document.querySelector('#deck-frame');
       window.__connectedDiagnostics = null;
