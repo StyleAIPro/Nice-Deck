@@ -424,3 +424,45 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
     assert.equal(settled, true);
   });
 });
+
+test('Node helper wrapper 原样透传原子写的 commitScope 与 stage', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stderr.setEncoding = () => {};
+  child.stdin = new EventEmitter();
+  child.stdin.end = () => {};
+  child.stdin.write = data => {
+    const request = JSON.parse(String(data));
+    queueMicrotask(() => child.stdout.emit('data', `${JSON.stringify({
+      id:request.id,
+      ok:false,
+      code:'SNAPSHOT_WRITE_FAILED',
+      statusCode:500,
+      message:'snapshot directory fsync failed',
+      stage:'snapshot-directory-fsync',
+      committed:true,
+      commitScope:'snapshot',
+    })}\n`));
+    return true;
+  };
+  child.kill = () => queueMicrotask(() => child.emit('close', null));
+  const io = await createPersistentSidecarIO({
+    project:{ path:'/tmp/project', realPath:'/tmp/project', dev:'1', ino:'2' },
+    spawnHelper:() => child,
+    skipReadyHandshake:true,
+  });
+  try {
+    await assert.rejects(
+      () => io.writeSnapshot({ snapshotId:'123e4567-e89b-42d3-a456-426614174000', bytes:Buffer.from('x') }),
+      error => error.code === 'SNAPSHOT_WRITE_FAILED'
+        && error.commitScope === 'snapshot'
+        && error.stage === 'snapshot-directory-fsync'
+        && error.committed === true,
+    );
+  } finally {
+    await io.close();
+  }
+});

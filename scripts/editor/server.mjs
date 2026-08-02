@@ -410,6 +410,7 @@ function errorResponse(response, error) {
   if (typeof error?.failedActionId === 'string') details.failedActionId = error.failedActionId;
   if (Array.isArray(error?.candidates)) details.candidates = error.candidates.slice(0, 5);
   if (typeof error?.committed === 'boolean') details.committed = error.committed;
+  if (typeof error?.commitScope === 'string') details.commitScope = error.commitScope;
   if (typeof error?.commitConfirmed === 'boolean') details.commitConfirmed = error.commitConfirmed;
   if (typeof error?.recoveredBySync === 'boolean') details.recoveredBySync = error.recoveredBySync;
   if (Number.isSafeInteger(error?.revision)) details.revision = error.revision;

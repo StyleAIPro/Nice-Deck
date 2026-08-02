@@ -13,6 +13,37 @@ function snapshotError(code, statusCode, message) {
   return Object.assign(new Error(message), { code, statusCode });
 }
 
+const isCommittedSession = error => error?.committed === true
+  && error?.commitScope === 'session';
+const isCommittedSnapshot = error => error?.committed === true
+  && error?.commitScope === 'snapshot';
+
+function compensatedSnapshotError(error) {
+  return Object.assign(new Error(error?.message ?? 'snapshot 持久化失败'), {
+    code:typeof error?.code === 'string' && error.code.startsWith('SNAPSHOT_')
+      ? error.code : 'SNAPSHOT_WRITE_FAILED',
+    statusCode:Number.isInteger(error?.statusCode) ? error.statusCode : 500,
+    stage:error?.stage ?? 'snapshot-write',
+    committed:false,
+    commitScope:'snapshot',
+    compensated:true,
+    cause:error,
+  });
+}
+
+function snapshotRecoveryError(writeError, compensationError) {
+  return Object.assign(new Error('snapshot 已发布但补偿删除失败，需要重启服务恢复'), {
+    code:'SNAPSHOT_RECOVERY_REQUIRED',
+    statusCode:503,
+    stage:'snapshot-compensation',
+    committed:false,
+    commitScope:'snapshot',
+    sessionCandidateCommitted:false,
+    cause:compensationError,
+    writeError,
+  });
+}
+
 function decodeSnapshot(snapshot) {
   if (snapshot === undefined || snapshot === null) return null;
   if (typeof snapshot !== 'string') {
@@ -142,6 +173,7 @@ export class SessionStore {
       directory:dirname(this.sessionPath),
       name:basename(this.sessionPath),
       bytes:Buffer.from(JSON.stringify(state, null, 2)),
+      commitScope:'session',
     });
   }
 
@@ -159,7 +191,7 @@ export class SessionStore {
     try {
       await this.#persist(candidate);
     } catch (error) {
-      if (error?.committed === true) this.#publish(candidate);
+      if (isCommittedSession(error)) this.#publish(candidate);
       throw error;
     }
     return this.#publish(candidate);
@@ -186,32 +218,42 @@ export class SessionStore {
     const candidate = structuredClone(this.state);
     candidate.tasks.push(task);
     candidate.revision += 1;
-    let sessionPersistStarted = false;
-    try {
-      if (snapshotBytes) {
+    const cleanupSnapshot = () => {
+      if (!snapshotName) return Promise.resolve();
+      return typeof this.sidecarIO.deleteSnapshot === 'function'
+        ? this.sidecarIO.deleteSnapshot({ snapshotId:id })
+        : this.sidecarIO.unlink({
+          directory:snapshotsDirectory, name:snapshotName, missingOk:true,
+        });
+    };
+    if (snapshotBytes) {
+      try {
         await this.sidecarGuard();
         if (typeof this.sidecarIO.writeSnapshot === 'function') {
           await this.sidecarIO.writeSnapshot({ snapshotId:id, bytes:snapshotBytes });
         } else {
           await this.sidecarIO.atomicWrite({
-            directory:snapshotsDirectory, name:snapshotName, bytes:snapshotBytes,
+            directory:snapshotsDirectory,
+            name:snapshotName,
+            bytes:snapshotBytes,
+            commitScope:'snapshot',
           });
         }
+      } catch (error) {
+        if (isCommittedSnapshot(error)) {
+          try { await cleanupSnapshot(); }
+          catch (cleanupError) { throw snapshotRecoveryError(error, cleanupError); }
+          throw compensatedSnapshotError(error);
+        }
+        await cleanupSnapshot().catch(() => {});
+        throw error;
       }
-      sessionPersistStarted = true;
+    }
+    try {
       await this.persistState(candidate);
       return { task, revision: this.state.revision };
     } catch (error) {
-      if (!sessionPersistStarted || error?.committed !== true) {
-        if (snapshotName) {
-          const cleanup = typeof this.sidecarIO.deleteSnapshot === 'function'
-            ? this.sidecarIO.deleteSnapshot({ snapshotId:id })
-            : this.sidecarIO.unlink({
-              directory:snapshotsDirectory, name:snapshotName, missingOk:true,
-            });
-          await cleanup.catch(() => {});
-        }
-      }
+      if (!isCommittedSession(error)) await cleanupSnapshot().catch(() => {});
       throw error;
     }
   }

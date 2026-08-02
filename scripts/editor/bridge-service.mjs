@@ -9,6 +9,9 @@ function serviceError(code, statusCode, message = code, details = {}) {
   return Object.assign(new Error(message), { code, statusCode, ...details });
 }
 
+const isCommittedSession = error => error?.committed === true
+  && error?.commitScope === 'session';
+
 function copyJournalState(state) {
   return {
     groups: structuredClone(state.groups ?? []),
@@ -147,9 +150,17 @@ export class BridgeService {
     });
   }
 
+  #closedError() {
+    return serviceError('SERVICE_CLOSED', 503, '服务已关闭');
+  }
+
+  #throwIfClosed() {
+    if (this.closed) throw this.#closedError();
+  }
+
   #assertMutable() {
+    this.#throwIfClosed();
     if (this.recoveryRequired) throw this.#recoveryError();
-    if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
   }
 
   #enterRecoveryRequired(details = {}) {
@@ -171,16 +182,19 @@ export class BridgeService {
     try {
       await this.sessionStore.persistState(candidate);
     } catch (error) {
-      if (error?.committed === true) {
+      this.#throwIfClosed();
+      if (isCommittedSession(error)) {
         this.#publishSessionCandidate(candidate);
         throw this.#enterRecoveryRequired({
           ...recoveryDetails,
           committed:true,
+          commitScope:'session',
           cause:error,
         });
       }
       throw error;
     }
+    this.#throwIfClosed();
     this.#publishSessionCandidate(candidate);
     return this.sessionStore.state;
   }
@@ -249,6 +263,7 @@ export class BridgeService {
           try {
             await this.#persistCandidate(candidate, { operation:'diagnostics-baseline' });
           } catch (error) {
+            this.#throwIfClosed();
             if (error?.code === 'RECOVERY_REQUIRED') throw error;
             throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '启动诊断基线无法持久化');
           }
@@ -331,11 +346,16 @@ export class BridgeService {
       this.#assertMutable();
       const state = this.sessionStore.state;
       const snapshot = { revision: state.revision, tasks: structuredClone(state.tasks ?? []) };
-      try { return await this.sessionStore.createTask(input, expectedRevision); }
+      try {
+        const result = await this.sessionStore.createTask(input, expectedRevision);
+        this.#throwIfClosed();
+        return result;
+      }
       catch (error) {
-        if (error?.committed === true) {
+        this.#throwIfClosed();
+        if (isCommittedSession(error)) {
           throw this.#enterRecoveryRequired({
-            operation:'task', committed:true, cause:error,
+            operation:'task', committed:true, commitScope:'session', cause:error,
           });
         }
         state.revision = snapshot.revision;
@@ -357,6 +377,7 @@ export class BridgeService {
       try {
         group = await this.#commitJournal(journal => journal.appendGroup(taskId, prepared.results));
       } catch (error) {
+        this.#throwIfClosed();
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
@@ -366,6 +387,7 @@ export class BridgeService {
       const diagnosticsPending = await this.#refreshDiagnostics(
         this.#pageKeysForActions(prepared.results), result.revision,
       ).then(() => false, error => {
+        this.#throwIfClosed();
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         return true;
       });
@@ -387,11 +409,14 @@ export class BridgeService {
         throw diagnosticFailure('EDITOR_OFFLINE', '编辑器未连接或页面尚未就绪');
       }
       await this.readyPromise;
+      this.#throwIfClosed();
       const state = this.sessionStore.state;
       let diskFingerprint;
       try {
         diskFingerprint = await fingerprint();
+        this.#throwIfClosed();
       } catch (error) {
+        this.#throwIfClosed();
         const actualFingerprint = `unavailable:${error.code ?? 'READ_ERROR'}`;
         const conflictCreated = await this.#recordDeckConflict(actualFingerprint);
         throw serviceError('DECK_CHANGED', 409, '无法读取磁盘 Deck，拒绝写回', {
@@ -418,6 +443,7 @@ export class BridgeService {
       const pageKeys = this.#modifiedPageKeys();
       const authoritativeKeys = pageKeys.length ? pageKeys : Object.keys(state.diagnosticsBaseline);
       const current = await this.#diagnose(authoritativeKeys, state.revision);
+      this.#throwIfClosed();
       const blockers = compareDiagnostics(state.diagnosticsBaseline, current, authoritativeKeys);
       if (blockers.length) {
         throw serviceError('NEW_OVERFLOW', 409, '修改引入了新的页面或内层溢出', {
@@ -429,7 +455,9 @@ export class BridgeService {
       let result;
       try {
         result = await writer(runtimeWriteActions(this.compiledActions()), diskFingerprint);
+        this.#throwIfClosed();
       } catch (error) {
+        this.#throwIfClosed();
         if (['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(error?.code)
           && typeof error?.actualFingerprint === 'string') {
           error.conflictCreated = await this.#recordDeckConflict(error.actualFingerprint);
@@ -443,8 +471,12 @@ export class BridgeService {
         }
         throw error;
       }
-      try { await this.beforeSessionPersist(result); }
+      try {
+        await this.beforeSessionPersist(result);
+        this.#throwIfClosed();
+      }
       catch (error) {
+        this.#throwIfClosed();
         throw this.#enterRecoveryRequired({
           backup:result.backup,
           cause:error,
@@ -472,10 +504,12 @@ export class BridgeService {
           operation:'write-deck', backup:result.backup,
         });
       } catch (error) {
+        this.#throwIfClosed();
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         try {
           await restore(result, snapshot.deckFingerprint);
         } catch (restoreError) {
+          this.#throwIfClosed();
           throw this.#enterRecoveryRequired({
             backup:result.backup,
             committed:true,
@@ -484,6 +518,7 @@ export class BridgeService {
         }
         try { await finalize(result); }
         catch (finalizeError) {
+          this.#throwIfClosed();
           throw this.#enterRecoveryRequired({
             backup:result.backup,
             cause:finalizeError,
@@ -498,6 +533,7 @@ export class BridgeService {
       }
       try { await finalize(result); }
       catch (error) {
+        this.#throwIfClosed();
         throw this.#enterRecoveryRequired({
           backup:result.backup,
           committed:true,
@@ -514,7 +550,8 @@ export class BridgeService {
       const fingerprint = typeof fingerprintOrProvider === 'function'
         ? await fingerprintOrProvider()
         : fingerprintOrProvider;
-      if (this.closed || fingerprint === this.sessionStore.state.deckFingerprint) return false;
+      this.#throwIfClosed();
+      if (fingerprint === this.sessionStore.state.deckFingerprint) return false;
       return this.#recordDeckConflict(fingerprint);
     });
   }
@@ -536,7 +573,18 @@ export class BridgeService {
   }
 
   #enqueue(operation) {
-    const result = this.mutationQueue.then(operation, operation);
+    const guarded = async () => {
+      this.#throwIfClosed();
+      try {
+        const result = await operation();
+        this.#throwIfClosed();
+        return result;
+      } catch (error) {
+        this.#throwIfClosed();
+        throw error;
+      }
+    };
+    const result = this.mutationQueue.then(guarded, guarded);
     this.mutationQueue = result.catch(() => {});
     return result;
   }
@@ -558,6 +606,7 @@ export class BridgeService {
           return { id: groupId };
         });
       } catch (error) {
+        this.#throwIfClosed();
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
@@ -568,6 +617,7 @@ export class BridgeService {
       const diagnosticsPending = await this.#refreshDiagnostics(
         this.#pageKeysForActions(changedGroup?.actions ?? []), result.revision,
       ).then(() => false, error => {
+        this.#throwIfClosed();
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         return true;
       });
@@ -576,7 +626,7 @@ export class BridgeService {
   }
 
   async #prepare(actions, expectedRevision, { replace=false } = {}) {
-    if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
+    this.#throwIfClosed();
     this.assertRevision(expectedRevision);
     const commandId = randomUUID();
     try {
@@ -585,6 +635,7 @@ export class BridgeService {
         { expectedType:'actions-prepared', actions },
       );
     } catch (error) {
+      this.#throwIfClosed();
       if (['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND', 'TARGET_AMBIGUOUS',
         'INVALID_ACTION', 'ACTION_REJECTED', 'EDITOR_OFFLINE',
         'SERVICE_CLOSED', 'REVISION_CONFLICT'].includes(error.code)) throw error;
@@ -601,9 +652,11 @@ export class BridgeService {
       );
       if (result.committed !== true) throw serviceError('INVALID_ACTION_ACK', 502);
       return { commitConfirmed:true, recoveredBySync:false, syncPending:false };
-    } catch {
+    } catch (error) {
+      this.#throwIfClosed();
       try { await this.#forceSync(); }
-      catch {
+      catch (syncError) {
+        this.#throwIfClosed();
         return { commitConfirmed:false, recoveredBySync:false, syncPending:true };
       }
       return { commitConfirmed:false, recoveredBySync:true, syncPending:false };
@@ -611,6 +664,7 @@ export class BridgeService {
   }
 
   async #rollbackOrSync(commandId) {
+    this.#throwIfClosed();
     try {
       const result = await this.#send(
         commandId, { type:'rollback-actions', commandId },
@@ -618,15 +672,18 @@ export class BridgeService {
       );
       if (result.rolledBack !== true) throw serviceError('INVALID_ACTION_ACK', 502);
       return;
-    } catch {
+    } catch (error) {
+      this.#throwIfClosed();
       try { await this.#forceSync(); }
-      catch {
+      catch (syncError) {
+        this.#throwIfClosed();
         throw serviceError('EDITOR_SYNC_REQUIRED', 503, '无法确认浏览器回滚，请重连以恢复 sidecar 权威状态');
       }
     }
   }
 
   async #forceSync() {
+    this.#throwIfClosed();
     await this.#waitForEditorSocket();
     const commandId = randomUUID();
     await this.#send(
@@ -637,6 +694,7 @@ export class BridgeService {
   }
 
   async #refreshDiagnostics(pageKeys, revision) {
+    this.#throwIfClosed();
     if (!pageKeys.length || !this.editorReady) return;
     const pages = await this.#diagnose(pageKeys, revision);
     if (revision !== this.sessionStore.state.revision) return;
@@ -653,6 +711,7 @@ export class BridgeService {
   }
 
   async #diagnose(pageKeys, revision) {
+    this.#throwIfClosed();
     if (!this.hasEditorSocket() || !this.editorReady) {
       throw diagnosticFailure('EDITOR_OFFLINE', '编辑器未连接或页面尚未就绪');
     }
@@ -668,8 +727,10 @@ export class BridgeService {
         { type:'diagnose-pages', commandId, revision, pageKeys:uniquePageKeys },
         { expectedType:'diagnostics-result', revision, pageKeys:uniquePageKeys },
       );
+      this.#throwIfClosed();
       return result.pages;
     } catch (error) {
+      this.#throwIfClosed();
       if (error?.code === 'DIAGNOSTICS_UNAVAILABLE') throw error;
       if (error?.code === 'COMMAND_TIMEOUT' || error?.code === 'EDITOR_OFFLINE') {
         throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '编辑器未能返回权威页面诊断', {
@@ -706,6 +767,7 @@ export class BridgeService {
       await this.#persistCandidate(candidate, { operation:'deck-conflict' });
       return true;
     } catch (error) {
+      this.#throwIfClosed();
       if (error?.code === 'RECOVERY_REQUIRED') throw error;
       throw serviceError('WRITE_FAILED', 500, 'Deck 冲突状态无法持久化', {
         stage:'session',
@@ -716,7 +778,7 @@ export class BridgeService {
   }
 
   #waitForEditorSocket() {
-    if (this.closed) return Promise.reject(serviceError('SERVICE_CLOSED', 503, '服务已关闭'));
+    if (this.closed) return Promise.reject(this.#closedError());
     if (this.hasEditorSocket()) return Promise.resolve(this.editorSocket);
     return new Promise((resolve, reject) => {
       const waiter = { resolve, reject, timer:null };
@@ -732,6 +794,7 @@ export class BridgeService {
   #send(commandId, message, {
     expectedType, actions = [], revision = undefined, pageKeys = [],
   }) {
+    if (this.closed) return Promise.reject(this.#closedError());
     const socket = this.editorSocket;
     if (!socket || socket.readyState !== 1) {
       return Promise.reject(serviceError('EDITOR_OFFLINE', 409, '编辑器未连接'));

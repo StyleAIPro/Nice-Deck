@@ -869,6 +869,166 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   assert.equal((await conflict.json()).error, 'REVISION_CONFLICT');
 });
 
+test('close 已开始时 apply 的迟到持久化错误统一为 SERVICE_CLOSED，且不再回滚或 finalize', async () => {
+  const state = {
+    version:1, sessionId:'session-close-apply', deckPath:'/tmp/deck.html',
+    deckFingerprint:'deck', revision:0, tasks:[], groups:[], redo:[],
+    diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+  };
+  let rejectPersist;
+  let signalPersistStarted;
+  const persistStarted = new Promise(resolve => { signalPersistStarted = resolve; });
+  const sessionStore = {
+    state, sessionPath:'/tmp/session.json',
+    async persistState() {
+      signalPersistStarted();
+      return new Promise((resolve, reject) => { rejectPersist = reject; });
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const commands = [];
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      commands.push(message.type);
+      if (message.type === 'apply-actions') {
+        queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+          type:'actions-prepared', commandId:message.commandId,
+          applied:message.actions.length, results:message.actions,
+        })));
+      }
+    },
+  };
+  bridge.setEditorSocket(socket);
+
+  const applying = bridge.applyActions({
+    taskId:'task-1', actions:[action], expectedRevision:0,
+  });
+  await persistStarted;
+  bridge.close();
+  rejectPersist(Object.assign(new Error('late session failure'), {
+    committed:true, commitScope:'session', stage:'session-directory-fsync',
+  }));
+
+  await assert.rejects(
+    applying,
+    error => error.code === 'SERVICE_CLOSED' && error.statusCode === 503,
+  );
+  assert.deepEqual(commands, ['apply-actions']);
+});
+
+test('close 对 task、undo/redo 与 diagnostics 的迟到 helper 错误统一优先返回 SERVICE_CLOSED', async t => {
+  await t.test('task', async () => {
+    const state = { revision:0, tasks:[], groups:[], redo:[] };
+    let rejectTask;
+    let signalStarted;
+    const started = new Promise(resolve => { signalStarted = resolve; });
+    const bridge = new BridgeService({
+      sessionStore:{
+        state, sessionPath:'/tmp/session.json',
+        async createTask() {
+          signalStarted();
+          return new Promise((resolve, reject) => { rejectTask = reject; });
+        },
+      },
+    });
+    const pending = bridge.createTask({ instruction:'改' }, 0);
+    await started;
+    bridge.close();
+    rejectTask(new Error('late task helper failure'));
+    await assert.rejects(pending, error => error.code === 'SERVICE_CLOSED');
+    assert.equal(state.revision, 0);
+    assert.deepEqual(state.tasks, []);
+  });
+
+  for (const method of ['undoGroup', 'redoGroup']) {
+    await t.test(method, async () => {
+      const active = method === 'undoGroup';
+      const state = {
+        revision:1, tasks:[],
+        groups:[{ id:'group-1', taskId:'task-1', actions:[action], active }],
+        redo:active ? [] : ['group-1'],
+      };
+      let rejectPersist;
+      let signalStarted;
+      const started = new Promise(resolve => { signalStarted = resolve; });
+      const bridge = new BridgeService({
+        sessionStore:{
+          state, sessionPath:'/tmp/session.json',
+          async persistState() {
+            signalStarted();
+            return new Promise((resolve, reject) => { rejectPersist = reject; });
+          },
+        },
+      });
+      const commands = [];
+      const socket = {
+        readyState:1,
+        send(data) {
+          const message = JSON.parse(data);
+          commands.push(message.type);
+          if (message.type === 'apply-actions') {
+            queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+              type:'actions-prepared', commandId:message.commandId,
+              applied:message.actions.length, results:message.actions,
+            })));
+          }
+        },
+      };
+      bridge.setEditorSocket(socket);
+      const pending = bridge[method]('group-1', 1);
+      await started;
+      bridge.close();
+      rejectPersist(new Error('late journal helper failure'));
+      await assert.rejects(pending, error => error.code === 'SERVICE_CLOSED');
+      assert.deepEqual(commands, ['apply-actions']);
+      assert.equal(state.revision, 1);
+      assert.equal(state.groups[0].active, active);
+    });
+  }
+
+  await t.test('diagnostics', async () => {
+    const page = {
+      pageKey:'page-001-close-diagnostics', sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+    };
+    const state = {
+      revision:0, tasks:[], groups:[], redo:[], deckFingerprint:'deck',
+      diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+    };
+    let rejectPersist;
+    let signalStarted;
+    const started = new Promise(resolve => { signalStarted = resolve; });
+    const bridge = new BridgeService({
+      sessionStore:{
+        state, sessionPath:'/tmp/session.json',
+        async persistState() {
+          signalStarted();
+          return new Promise((resolve, reject) => { rejectPersist = reject; });
+        },
+      },
+    });
+    const socket = { readyState:1, send() {} };
+    bridge.setEditorSocket(socket);
+    bridge.handleMessage(socket, JSON.stringify({
+      type:'deck-ready', pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+      diagnostics:[page],
+    }));
+    await started;
+    let writerCalls = 0;
+    const pending = bridge.writeDeck(0, {
+      fingerprint:async () => 'deck',
+      writer:async () => { writerCalls += 1; },
+      restore:async () => {},
+    });
+    bridge.close();
+    rejectPersist(new Error('late diagnostics helper failure'));
+    await assert.rejects(pending, error => error.code === 'SERVICE_CLOSED');
+    assert.equal(writerCalls, 0);
+    assert.deepEqual(state.diagnosticsBaseline, {});
+  });
+});
+
 test('action 的 session 写已 committed 后发布候选并冻结，且不回滚或 finalize', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-action-committed-session-'));
   const sessionPath = join(root, 'session.json');
@@ -886,6 +1046,7 @@ test('action 的 session 写已 committed 后发布候选并冻结，且不回�
       await writeFile(sessionPath, JSON.stringify(candidate));
       throw Object.assign(new Error('session directory fsync failed after rename'), {
         committed:true,
+        commitScope:'session',
       });
     },
     async createTask() { createTaskCalls += 1; },
@@ -959,7 +1120,9 @@ test('undo/redo 的 session 写已 committed 后保留候选 journal 并冻结',
         async persistState(candidate = state) {
           observedRevisionDuringWrite = state.revision;
           await writeFile(sessionPath, JSON.stringify(candidate));
-          throw Object.assign(new Error('session committed'), { committed:true });
+          throw Object.assign(new Error('session committed'), {
+            committed:true, commitScope:'session',
+          });
         },
       };
       const bridge = new BridgeService({ sessionStore });
@@ -1024,6 +1187,7 @@ test('diagnostics 的 session 写已 committed 后发布候选并冻结后续 mu
       await writeFile(sessionPath, JSON.stringify(candidate));
       throw Object.assign(new Error('session directory fsync failed after rename'), {
         committed:true,
+        commitScope:'session',
       });
     },
     async createTask() { createTaskCalls += 1; },
@@ -1071,7 +1235,9 @@ test('conflict 的 session 写已 committed 后保留冲突并冻结', async () 
     state, sessionPath,
     async persistState(candidate = state) {
       await writeFile(sessionPath, JSON.stringify(candidate));
-      throw Object.assign(new Error('session committed'), { committed:true });
+      throw Object.assign(new Error('session committed'), {
+        committed:true, commitScope:'session',
+      });
     },
   };
   const bridge = new BridgeService({ sessionStore });
@@ -1108,7 +1274,9 @@ test('write-deck 的 session 写已 committed 后保留新基线、保留 record
     state, sessionPath,
     async persistState(candidate = state) {
       await writeFile(sessionPath, JSON.stringify(candidate));
-      throw Object.assign(new Error('session committed'), { committed:true });
+      throw Object.assign(new Error('session committed'), {
+        committed:true, commitScope:'session',
+      });
     },
   };
   const bridge = new BridgeService({ sessionStore });
@@ -2425,4 +2593,15 @@ test('close 关闭 WebSocket、HTTP 端口并拒绝未完成命令', async () =>
   const response = await responsePromise;
   assert.equal(response.status, 503);
   await assert.rejects(() => fetch(`${app.url}/api/session?token=secret`));
+
+  const restarted = await startServer({
+    deckPath:deck, host:'127.0.0.1', port:0, openBrowser:false, token:'secret',
+  });
+  try {
+    const session = await fetch(`${restarted.url}/api/session?token=secret`).then(value => value.json());
+    assert.equal(session.revision, 0);
+    assert.deepEqual(session.groups, []);
+  } finally {
+    await restarted.close();
+  }
 });

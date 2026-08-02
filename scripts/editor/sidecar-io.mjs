@@ -16,6 +16,7 @@ function helperError(payload) {
     statusCode:Number.isInteger(payload?.statusCode) ? payload.statusCode : 500,
     stage:payload?.stage ?? 'sidecar',
     committed:payload?.committed === true,
+    commitScope:typeof payload?.commitScope === 'string' ? payload.commitScope : undefined,
   });
 }
 
@@ -245,10 +246,11 @@ export async function createPersistentSidecarIO({
 
 // 仅供不经过 server 的 SessionStore 单元使用；生产服务始终注入 dirfd helper。
 export const localDurableIO = {
-  async atomicWrite({ directory, name, bytes }) {
+  async atomicWrite({ directory, name, bytes, commitScope }) {
     const path = join(directory, name);
     const temporary = `${path}.${randomUUID()}.tmp`;
     let handle;
+    let renamed = false;
     try {
       handle = await open(
         temporary,
@@ -261,8 +263,16 @@ export const localDurableIO = {
       await handle.close();
       handle = null;
       await rename(temporary, path);
+      renamed = true;
       const parent = await open(directory, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
       try { await parent.sync(); } finally { await parent.close(); }
+    } catch (error) {
+      throw Object.assign(error, {
+        code:`${String(commitScope ?? 'sidecar').toUpperCase()}_WRITE_FAILED`,
+        stage:renamed ? `${commitScope}-directory-fsync` : `${commitScope}-write`,
+        committed:renamed,
+        commitScope,
+      });
     } finally {
       await handle?.close();
       await unlink(temporary).catch(() => {});
@@ -272,5 +282,7 @@ export const localDurableIO = {
     await unlink(join(directory, name)).catch(error => {
       if (error.code !== 'ENOENT') throw error;
     });
+    const parent = await open(directory, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
+    try { await parent.sync(); } finally { await parent.close(); }
   },
 };

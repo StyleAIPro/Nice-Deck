@@ -111,6 +111,7 @@ test('task 的 session 写已 committed 后保留候选内存并由重启收敛'
         observedRevisionDuringWrite = store.state.revision;
         throw Object.assign(new Error('directory fsync failed after rename'), {
           committed:true,
+          commitScope:'session',
         });
       }
     },
@@ -176,4 +177,91 @@ test('SessionStore 的 session 与 snapshot 只通过可信 atomic I/O 层提交
     [join(store.sessionDir, 'snapshots'), `${result.task.id}.png`],
     [store.sessionDir, 'session.json'],
   ]);
+});
+
+test('snapshot rename 后目录 fsync 失败会补偿删除，且绝不提交 session 候选', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-snapshot-compensated-'));
+  const deck = join(root, 'deck.html');
+  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  await writeFile(deck, 'deck-v1');
+  let sessionWrites = 0;
+  let snapshotDeletes = 0;
+  const sidecarIO = {
+    async writeSession() { sessionWrites += 1; },
+    async writeSnapshot() {
+      throw Object.assign(new Error('snapshot directory fsync failed after rename'), {
+        code:'SNAPSHOT_WRITE_FAILED',
+        statusCode:500,
+        stage:'snapshot-directory-fsync',
+        committed:true,
+        commitScope:'snapshot',
+      });
+    },
+    async deleteSnapshot() { snapshotDeletes += 1; },
+  };
+  const store = await SessionStore.open({
+    deckPath:deck,
+    rootDir:join(root, '.huawei-deck-editor'),
+    sessionDir,
+    sidecarIO,
+  });
+
+  await assert.rejects(() => store.createTask({
+    pageKey:'page-001-a', pageIndex:1, pageLabel:'A',
+    rect:{ x:1, y:2, w:30, h:40 }, instruction:'改 A', snapshot:PNG_DATA_URL,
+  }, 0), error => error.code === 'SNAPSHOT_WRITE_FAILED'
+    && error.commitScope === 'snapshot'
+    && error.committed === false
+    && error.compensated === true);
+
+  assert.equal(sessionWrites, 1, '只能存在 open 时的初始 session 写，task 候选不得写入');
+  assert.equal(snapshotDeletes, 1);
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('snapshot rename 后补偿删除失败返回独立恢复错误，且不声称 session 已提交', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-snapshot-recovery-'));
+  const deck = join(root, 'deck.html');
+  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  await writeFile(deck, 'deck-v1');
+  let sessionWrites = 0;
+  const sidecarIO = {
+    async writeSession() { sessionWrites += 1; },
+    async writeSnapshot() {
+      throw Object.assign(new Error('snapshot directory fsync failed after rename'), {
+        code:'SNAPSHOT_WRITE_FAILED',
+        statusCode:500,
+        stage:'snapshot-directory-fsync',
+        committed:true,
+        commitScope:'snapshot',
+      });
+    },
+    async deleteSnapshot() {
+      throw Object.assign(new Error('snapshot compensation fsync failed'), {
+        code:'SNAPSHOT_DELETE_FAILED',
+        commitScope:'snapshot',
+        stage:'snapshot-delete-directory-fsync',
+      });
+    },
+  };
+  const store = await SessionStore.open({
+    deckPath:deck,
+    rootDir:join(root, '.huawei-deck-editor'),
+    sessionDir,
+    sidecarIO,
+  });
+
+  await assert.rejects(() => store.createTask({
+    pageKey:'page-001-a', pageIndex:1, pageLabel:'A',
+    rect:{ x:1, y:2, w:30, h:40 }, instruction:'改 A', snapshot:PNG_DATA_URL,
+  }, 0), error => error.code === 'SNAPSHOT_RECOVERY_REQUIRED'
+    && error.statusCode === 503
+    && error.commitScope === 'snapshot'
+    && error.committed === false
+    && error.sessionCandidateCommitted === false);
+
+  assert.equal(sessionWrites, 1, 'snapshot 恢复失败也不得开始 session 候选写入');
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
 });

@@ -35,11 +35,12 @@ TRANSACTION_ID_RE = re.compile(
 class SidecarIOError(RuntimeError):
     def __init__(
         self, message, *, stage="open", committed=False,
-        code="UNSAFE_SIDECAR_IO", status_code=500,
+        commit_scope=None, code="UNSAFE_SIDECAR_IO", status_code=500,
     ):
         super().__init__(message)
         self.stage = stage
         self.committed = committed
+        self.commit_scope = commit_scope
         self.code = code
         self.status_code = status_code
 
@@ -129,8 +130,10 @@ def _decode_json_file(directory_fd: int, name: str, *, max_bytes=None):
         raise SidecarIOError(f"{name} 不是有效 JSON") from error
 
 
-def _atomic_write_fd(directory_fd: int, name: str, contents: bytes):
+def _atomic_write_fd(directory_fd: int, name: str, contents: bytes, *, commit_scope: str):
     """仅在持久 helper 已持有的目录 fd 内原子发布文件。"""
+    if commit_scope not in {"session", "snapshot", "registry"}:
+        raise SidecarIOError("原子写 commitScope 无效")
     name = _require_name(name)
     temporary = f".{name}.{uuid.uuid4()}.tmp"
     renamed = False
@@ -148,11 +151,17 @@ def _atomic_write_fd(directory_fd: int, name: str, contents: bytes):
         os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         renamed = True
         os.fsync(directory_fd)
-        return {"committed": True}
+        return {"committed": True, "commitScope": commit_scope}
     except Exception as error:
         wrapped = SidecarIOError(
-            str(error), stage="directory-fsync" if renamed else "registry-write",
+            str(error),
+            stage=(
+                f"{commit_scope}-directory-fsync"
+                if renamed else f"{commit_scope}-write"
+            ),
             committed=renamed,
+            commit_scope=commit_scope,
+            code=f"{commit_scope.upper()}_WRITE_FAILED",
         )
         raise wrapped from error
     finally:
@@ -436,7 +445,9 @@ class PersistentHelper:
             raise SidecarIOError("write-session bytes 不是有效 JSON") from error
         if not isinstance(state, dict) or state.get("sessionId") != session_id:
             raise SidecarIOError("session.json 未绑定当前 sessionId")
-        return _atomic_write_fd(self.session_fd, "session.json", contents)
+        return _atomic_write_fd(
+            self.session_fd, "session.json", contents, commit_scope="session"
+        )
 
     @staticmethod
     def _unlink_bound(directory_fd, name):
@@ -459,7 +470,10 @@ class PersistentHelper:
         if not isinstance(snapshot_id, str) or not TRANSACTION_ID_RE.fullmatch(snapshot_id):
             raise SidecarIOError("snapshotId 不是规范 UUID v4")
         return _atomic_write_fd(
-            self.snapshots_fd, f"{snapshot_id}.png", _decode_bytes(payload["bytes"])
+            self.snapshots_fd,
+            f"{snapshot_id}.png",
+            _decode_bytes(payload["bytes"]),
+            commit_scope="snapshot",
         )
 
     def delete_snapshot(self, payload):
@@ -787,6 +801,7 @@ class PersistentHelper:
             self.root_fd,
             "sessions.json",
             json.dumps(registry, ensure_ascii=False, indent=2).encode("utf-8"),
+            commit_scope="registry",
         )
         return entry
 
@@ -823,6 +838,7 @@ class PersistentHelper:
             self.root_fd,
             "sessions.json",
             json.dumps(registry, ensure_ascii=False, indent=2).encode("utf-8"),
+            commit_scope="registry",
         )
         return active
 
@@ -909,6 +925,7 @@ def serve():
                     "statusCode": getattr(error, "status_code", 500),
                     "stage": getattr(error, "stage", "sidecar"),
                     "committed": bool(getattr(error, "committed", False)),
+                    "commitScope": getattr(error, "commit_scope", None),
                 }
             encoded = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
             response_limit = (
