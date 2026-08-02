@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -14,8 +15,9 @@ bundle_adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bundle_adapter)
 
 
-def minimal_bundle(path):
-    template = '<!doctype html><body><div class="stage"></div></body>'
+def minimal_bundle(path, template=None):
+    if template is None:
+        template = '<!doctype html><body><div class="stage"></div></body>'
     path.write_text(
         '<script type="__bundler/manifest">\n{}\n</script>\n'
         '<script type="__bundler/template">\n'
@@ -42,13 +44,15 @@ class BundleAdapterTest(unittest.TestCase):
 
             self.assertEqual(first, deck.read_text(encoding="utf-8"))
             self.assertEqual(
+                f"deck-{original}.html",
+                Path(result["backup"]).name,
+            )
+            self.assertEqual(
                 original,
                 hashlib.sha256(Path(result["backup"]).read_bytes()).hexdigest(),
             )
 
     def test_verification_failure_keeps_original(self):
-        from unittest import mock
-
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
             minimal_bundle(deck)
@@ -63,3 +67,80 @@ class BundleAdapterTest(unittest.TestCase):
                     bundle_adapter.write_patches(deck, [], Path(td) / "session")
 
             self.assertEqual(original, deck.read_bytes())
+            self.assertEqual([], list(deck.parent.glob(f".{deck.name}.*.tmp")))
+
+    def test_invalid_body_insert_points_are_rejected(self):
+        cases = {
+            "缺失 body 结束标签": "<!doctype html><body></bodyx>",
+            "多个 body 结束标签": "<body></body><body></body>",
+        }
+        for name, template in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                deck = Path(td) / "deck.html"
+                minimal_bundle(deck, template)
+                original = deck.read_bytes()
+
+                with self.assertRaisesRegex(ValueError, "必须恰好包含一个"):
+                    bundle_adapter.write_patches(deck, [], Path(td) / "session")
+
+                self.assertEqual(original, deck.read_bytes())
+
+    def test_invalid_marker_shapes_are_rejected(self):
+        begin = bundle_adapter.BEGIN
+        end = bundle_adapter.END
+        cases = {
+            "仅 begin": f"<body>{begin}</body>",
+            "仅 end": f"<body>{end}</body>",
+            "重复 begin": f"<body>{begin}{begin}{end}</body>",
+            "重复 end": f"<body>{begin}{end}{end}</body>",
+            "逆序": f"<body>{end}{begin}</body>",
+        }
+        for name, template in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                deck = Path(td) / "deck.html"
+                minimal_bundle(deck, template)
+                original = deck.read_bytes()
+
+                with self.assertRaisesRegex(ValueError, "补丁标记"):
+                    bundle_adapter.write_patches(deck, [], Path(td) / "session")
+
+                self.assertEqual(original, deck.read_bytes())
+
+    def test_corrupt_existing_backup_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            minimal_bundle(deck)
+            original = deck.read_bytes()
+            digest = hashlib.sha256(original).hexdigest()
+            backups = Path(td) / "session" / "backups"
+            backups.mkdir(parents=True)
+            backup = backups / f"deck-{digest}.html"
+            backup.write_bytes(b"corrupt")
+
+            with self.assertRaisesRegex(RuntimeError, "备份"):
+                bundle_adapter.write_patches(deck, [], Path(td) / "session")
+
+            self.assertEqual(original, deck.read_bytes())
+            self.assertEqual(b"corrupt", backup.read_bytes())
+
+    def test_external_change_before_replace_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            minimal_bundle(deck)
+            external = b"external change"
+            original_verify = bundle_adapter.eb.verify
+
+            def verify_then_change(path):
+                original_verify(path)
+                deck.write_bytes(external)
+
+            with mock.patch.object(
+                bundle_adapter.eb,
+                "verify",
+                side_effect=verify_then_change,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "写入期间"):
+                    bundle_adapter.write_patches(deck, [], Path(td) / "session")
+
+            self.assertEqual(external, deck.read_bytes())
+            self.assertEqual([], list(deck.parent.glob(f".{deck.name}.*.tmp")))
