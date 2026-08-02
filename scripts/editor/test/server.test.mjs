@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { request as httpRequest } from 'node:http';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
 import {
@@ -145,6 +146,26 @@ function rejectedWebSocketStatus(url, options) {
       resolve(0);
     });
     socket.once('error', () => resolve(0));
+  });
+}
+
+function postJsonChunks(url, chunks) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(url, {
+      method:'POST',
+      headers:{ 'content-type':'application/json', 'transfer-encoding':'chunked' },
+    }, response => {
+      const responseChunks = [];
+      response.on('data', chunk => responseChunks.push(chunk));
+      response.once('end', () => resolve({
+        status:response.statusCode,
+        body:JSON.parse(Buffer.concat(responseChunks).toString('utf8')),
+      }));
+      response.once('error', reject);
+    });
+    request.once('error', reject);
+    request.write(chunks[0]);
+    setTimeout(() => request.end(chunks[1]), 10);
   });
 }
 
@@ -1547,6 +1568,23 @@ test('任务查询、输入错误和已列路由都有明确响应', async t => 
   assert.equal((await fetch(`${app.url}/editor/index.html?token=secret`)).status, 404);
   assert.equal((await fetch(`${app.url}/events?token=secret`)).status, 426);
   assert.equal((await fetch(`${app.url}/preview?token=secret`)).status, 200);
+});
+
+test('JSON 请求体跨 chunk 拆分中文 UTF-8 时完整创建任务', async t => {
+  const app = await makeApp(t);
+  const instruction = '跨块中文修改';
+  const body = Buffer.from(JSON.stringify({ ...taskInput, instruction }));
+  const instructionStart = body.indexOf(Buffer.from(instruction));
+  assert.notEqual(instructionStart, -1);
+  const splitAt = instructionStart + 1;
+
+  const response = await postJsonChunks(
+    `${app.url}/api/tasks?token=secret`,
+    [body.subarray(0, splitAt), body.subarray(splitAt)],
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(response.body.task.instruction, instruction);
 });
 
 test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', async t => {

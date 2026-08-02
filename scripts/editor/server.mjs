@@ -309,16 +309,19 @@ function isProtected(pathname) {
 }
 
 async function readJson(request) {
-  let body = '';
+  const chunks = [];
+  let bodyBytes = 0;
   for await (const chunk of request) {
-    body += chunk;
-    if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bodyBytes += bytes.length;
+    if (bodyBytes > MAX_BODY_BYTES) {
       throw httpError('BODY_TOO_LARGE', 413, '请求体过大');
     }
+    chunks.push(bytes);
   }
-  if (!body) return {};
+  if (bodyBytes === 0) return {};
   try {
-    return JSON.parse(body);
+    return JSON.parse(Buffer.concat(chunks, bodyBytes).toString('utf8'));
   } catch {
     throw httpError('INVALID_JSON', 400, '请求体不是有效 JSON');
   }
