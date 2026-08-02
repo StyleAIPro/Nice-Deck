@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -48,8 +49,8 @@ async function makeApp(t, options = {}) {
   return app;
 }
 
-function connect(url) {
-  const socket = new WebSocket(url);
+function connect(url, options) {
+  const socket = new WebSocket(url, options);
   return new Promise((resolve, reject) => {
     socket.once('open', () => resolve(socket));
     socket.once('error', reject);
@@ -128,8 +129,8 @@ async function sendInvalidPrepared(socket, command, acknowledgement) {
   }));
 }
 
-function rejectedWebSocketStatus(url) {
-  const socket = new WebSocket(url);
+function rejectedWebSocketStatus(url, options) {
+  const socket = new WebSocket(url, options);
   return new Promise(resolve => {
     socket.once('unexpected-response', (_request, response) => resolve(response.statusCode));
     socket.once('open', () => {
@@ -146,6 +147,8 @@ function validBundle() {
     + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
 }
 
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
 function fakeWriterChild({ onEnd, onKill, closesOnKill = true } = {}) {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -153,7 +156,7 @@ function fakeWriterChild({ onEnd, onKill, closesOnKill = true } = {}) {
   child.stdout.setEncoding = () => {};
   child.stderr.setEncoding = () => {};
   child.stdin = new EventEmitter();
-  child.stdin.end = () => onEnd?.(child);
+  child.stdin.end = data => onEnd?.(child, data);
   child.killed = false;
   child.unrefCalled = false;
   child.unref = () => { child.unrefCalled = true; };
@@ -266,6 +269,58 @@ test('所有受保护路由都拒绝无令牌请求且 Bearer 可授权', async 
   });
   assert.equal(rejected, 403);
   wrongToken.terminate();
+});
+
+test('服务只允许 loopback 监听地址', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-loopback-'));
+  const deck = join(root, 'deck.html');
+  await writeFile(deck, 'deck');
+
+  for (const host of ['0.0.0.0', '::']) {
+    await t.test(`拒绝 ${host}`, async () => {
+      let app;
+      try {
+        app = await startServer({ deckPath:deck, host, port:0, openBrowser:false });
+        assert.fail(`不应监听非 loopback 地址 ${host}`);
+      } catch (error) {
+        if (error?.code === 'ERR_ASSERTION') throw error;
+        assert.equal(error.code, 'INVALID_HOST');
+      } finally {
+        await app?.close();
+      }
+    });
+  }
+
+  const localhost = await startServer({
+    deckPath:deck, host:'localhost', port:0, openBrowser:false,
+  });
+  assert.match(localhost.url, /^http:\/\/localhost:/);
+  await localhost.close();
+});
+
+test('携带 Origin 的 HTTP 与 WebSocket 只接受当前本地服务源', async t => {
+  const app = await makeApp(t);
+  const evilHttp = await fetch(`${app.url}/api/session?token=secret`, {
+    headers:{ Origin:'https://evil.example' },
+  });
+  assert.equal(evilHttp.status, 403);
+
+  const localHttp = await fetch(`${app.url}/api/session?token=secret`, {
+    headers:{ Origin:app.url },
+  });
+  assert.equal(localHttp.status, 200);
+  assert.equal((await fetch(`${app.url}/api/session?token=secret`)).status, 200);
+
+  assert.equal(await rejectedWebSocketStatus(
+    `${app.wsUrl}?token=secret`,
+    { headers:{ Origin:'https://evil.example' } },
+  ), 403);
+  const localSocket = await connect(
+    `${app.wsUrl}?token=secret`, { headers:{ Origin:app.url } },
+  );
+  localSocket.close();
+  const cliSocket = await connect(`${app.wsUrl}?token=secret`);
+  cliSocket.close();
 });
 
 test('editor capability 隔离 observer 且拒绝错误或重复 editor', async t => {
@@ -608,6 +663,235 @@ test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', 
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
 });
 
+test('writer 已替换 Deck 后无 ACK、坏 ACK、非零退出、EPIPE 或超时都必须恢复原子状态', async t => {
+  const cases = [
+    ['无 ACK', current => current.emit('close', 0)],
+    ['坏 ACK', current => {
+      current.stdout.emit('data', '{bad json\n');
+      current.emit('close', 0);
+    }],
+    ['非零退出', current => {
+      current.stderr.emit('data', 'writer failed');
+      current.emit('close', 7);
+    }],
+    ['EPIPE', current => current.stdin.emit('error', epipe())],
+    ['超时', () => {}],
+  ];
+
+  for (const [name, finish] of cases) {
+    await t.test(name, async subtest => {
+      let app;
+      const child = fakeWriterChild({
+        onEnd:current => queueMicrotask(async () => {
+          await writeFile(app.deckPath, `writer-mutated-${name}`);
+          finish(current);
+        }),
+      });
+      app = await makeApp(subtest, {
+        deckContents:validBundle(),
+        writerTimeoutMs:25,
+        spawnWriter:() => child,
+      });
+      await connectDiagnosticsEditor(subtest, app);
+      const deckBefore = await readFile(app.deckPath);
+      const sessionBefore = await readFile(join(app.sessionDir, 'session.json'));
+
+      const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+        method:'POST', headers:{ 'content-type':'application/json' },
+        body:JSON.stringify({ expectedRevision:0 }),
+      });
+
+      assert.notEqual(response.status, 200);
+      assert.deepEqual(await readFile(app.deckPath), deckBefore);
+      assert.deepEqual(await readFile(join(app.sessionDir, 'session.json')), sessionBefore);
+      assert.equal(app.session.deckFingerprint, sha256(deckBefore));
+      assert.equal(app.session.revision, 0);
+      assert.deepEqual(app.session.groups, []);
+    });
+  }
+});
+
+test('writer 成功回执必须完整、可信并与官方 Deck 指纹一致', async t => {
+  const replies = [
+    ['缺少字段', () => ({ ok:true })],
+    ['非法指纹', () => ({ ok:true, fingerprint:'bad', backup:'/tmp/outside.html' })],
+    ['会话外备份', (_app, deckBefore) => ({
+      ok:true, fingerprint:sha256(deckBefore), backup:'/tmp/outside.html',
+    })],
+    ['磁盘指纹不匹配', (app, deckBefore) => ({
+      ok:true,
+      fingerprint:'0'.repeat(64),
+      backup:join(app.sessionDir, 'backups', `deck-${sha256(deckBefore)}.html`),
+    })],
+  ];
+
+  for (const [name, makeReply] of replies) {
+    await t.test(name, async subtest => {
+      let reply;
+      const child = fakeWriterChild({
+        onEnd:current => queueMicrotask(() => {
+          current.stdout.emit('data', `${JSON.stringify(reply)}\n`);
+          current.emit('close', 0);
+        }),
+      });
+      const app = await makeApp(subtest, {
+        deckContents:validBundle(),
+        spawnWriter:() => child,
+      });
+      await connectDiagnosticsEditor(subtest, app);
+      const deckBefore = await readFile(app.deckPath);
+      reply = makeReply(app, deckBefore);
+      const sessionBefore = await readFile(join(app.sessionDir, 'session.json'));
+
+      const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+        method:'POST', headers:{ 'content-type':'application/json' },
+        body:JSON.stringify({ expectedRevision:0 }),
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 500, `${name}: ${JSON.stringify(body)}`);
+      assert.equal(body.code, 'WRITE_FAILED');
+      assert.equal(body.stage, 'adapter');
+      assert.match(body.recovery, /重试|恢复|检查/);
+      assert.deepEqual(await readFile(app.deckPath), deckBefore);
+      assert.deepEqual(await readFile(join(app.sessionDir, 'session.json')), sessionBefore);
+    });
+  }
+});
+
+test('Node 恢复边界拒绝当前 session backups 内的符号链接文件', async t => {
+  let reply;
+  const child = fakeWriterChild({
+    onEnd:current => queueMicrotask(() => {
+      current.stdout.emit('data', `${JSON.stringify(reply)}\n`);
+      current.emit('close', 0);
+    }),
+  });
+  const app = await makeApp(t, {
+    deckContents:validBundle(), spawnWriter:() => child,
+  });
+  await connectDiagnosticsEditor(t, app);
+  const deckBefore = await readFile(app.deckPath);
+  const fingerprint = sha256(deckBefore);
+  const outside = join(app.sessionDir, '..', 'outside-backup.html');
+  const backup = join(app.sessionDir, 'backups', `deck-${fingerprint}.html`);
+  await writeFile(outside, deckBefore);
+  await symlink(outside, backup);
+  reply = { ok:true, fingerprint, backup };
+
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 500, JSON.stringify(body));
+  assert.equal(body.code, 'WRITE_FAILED');
+  assert.equal(body.stage, 'adapter');
+  assert.deepEqual(await readFile(app.deckPath), deckBefore);
+  assert.deepEqual(await readFile(outside), deckBefore);
+});
+
+test('写入适配器只接收运行时所需的最小动作 DTO', async t => {
+  let receivedPatches;
+  const child = fakeWriterChild({
+    onEnd:(current, data) => queueMicrotask(() => {
+      receivedPatches = JSON.parse(data);
+      current.stdout.emit('data', `${JSON.stringify({
+        ok:false, code:'WRITE_FAILED', stage:'write', message:'stop after capture',
+      })}\n`);
+      current.emit('close', 0);
+    }),
+  });
+  const app = await makeApp(t, {
+    deckContents:validBundle(),
+    spawnWriter:() => child,
+  });
+  const editor = await connectDiagnosticsEditor(t, app);
+  const canonicalAction = {
+    ...action,
+    taskId:'ui-task',
+    target:{ ...action.target, pageKey:'page-001-save-gate' },
+    expectedRevision:0,
+    instruction:'仅供 UI 展示',
+    snapshot:'data:image/png;base64,ignored',
+    appliedAt:'2026-08-02T00:00:00.000Z',
+  };
+  const commandPromise = nextMessage(editor);
+  const applyPromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0, taskId:'ui-task', actions:[canonicalAction] }),
+  });
+  const command = await commandPromise;
+  await prepareAndCommit(editor, command, [canonicalAction]);
+  assert.equal((await applyPromise).status, 200);
+
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:1 }),
+  });
+  assert.equal(response.status, 500);
+  assert.deepEqual(Object.keys(receivedPatches[0]).sort(), ['id', 'kind', 'payload', 'target']);
+  assert.deepEqual(receivedPatches[0], {
+    id:canonicalAction.id,
+    target:canonicalAction.target,
+    kind:canonicalAction.kind,
+    payload:canonicalAction.payload,
+  });
+});
+
+test('保存回滚后 watcher 必须在串行边界重新读取权威指纹', async () => {
+  const page = {
+    pageKey:'page-001-watch-race', sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+  };
+  let diskFingerprint = 'old-fingerprint';
+  let persistCalls = 0;
+  const state = {
+    revision:0, tasks:[], groups:[], redo:[], deckFingerprint:'old-fingerprint', conflict:null,
+    diagnosticsBaseline:{ [page.pageKey]:page },
+    diagnosticsCurrent:{ [page.pageKey]:page }, diagnosticsRevision:0,
+  };
+  const sessionStore = {
+    state, sessionPath:'/tmp/session.json',
+    async persistState() {
+      persistCalls += 1;
+      if (persistCalls === 1) throw new Error('session persist failed');
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      if (message.type !== 'diagnose-pages') return;
+      queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+        type:'diagnostics-result', commandId:message.commandId,
+        revision:message.revision, pages:[page],
+      })));
+    },
+  };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready', pages:[{ index:1, label:'测试页', pageKey:page.pageKey }], diagnostics:[page],
+  }));
+
+  const write = bridge.writeDeck(0, {
+    fingerprint:async () => diskFingerprint,
+    writer:async () => {
+      diskFingerprint = 'new-fingerprint';
+      return { ok:true, fingerprint:'new-fingerprint', backup:'/tmp/backup.html' };
+    },
+    restore:async () => { diskFingerprint = 'old-fingerprint'; },
+  });
+  const watcher = bridge.noteDeckFingerprint(async () => diskFingerprint);
+
+  await assert.rejects(write, error => error.code === 'WRITE_FAILED' && error.stage === 'session');
+  assert.equal(await watcher, false);
+  assert.equal(diskFingerprint, 'old-fingerprint');
+  assert.equal(state.deckFingerprint, 'old-fingerprint');
+  assert.equal(state.conflict, null);
+});
+
 test('Deck 已替换但 session 基线持久化失败时恢复原文件与内存基线', async () => {
   const page = {
     pageKey:'page-001-save-rollback',
@@ -703,6 +987,81 @@ test('初始诊断基线持久化失败不得在内存伪装成可保存基线',
   assert.deepEqual(state.diagnosticsBaseline, {});
   assert.deepEqual(state.diagnosticsCurrent, {});
   assert.equal(state.diagnosticsRevision, null);
+});
+
+test('保存诊断超时、断线与显式拒绝统一返回 DIAGNOSTICS_UNAVAILABLE', async t => {
+  for (const mode of ['timeout', 'disconnect', 'reject']) {
+    await t.test(mode, async subtest => {
+      const app = await makeApp(subtest, {
+        deckContents:validBundle(), bridgeTimeoutMs:20,
+      });
+      const socket = await connect(app.editorWsUrl);
+      subtest.after(() => socket.close());
+      const page = {
+        pageKey:'page-001-diagnostics-failure',
+        sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+      };
+      socket.on('message', data => {
+        const message = JSON.parse(data);
+        if (message.type !== 'diagnose-pages') return;
+        if (mode === 'disconnect') socket.close();
+        if (mode === 'reject') socket.send(JSON.stringify({
+          type:'diagnostics-rejected', commandId:message.commandId, code:'NOT_READY',
+        }));
+      });
+      socket.send(JSON.stringify({
+        type:'deck-ready',
+        pages:[{ index:1, label:'测试页', pageKey:page.pageKey }], diagnostics:[page],
+      }));
+      const deadline = Date.now() + 500;
+      while (!Object.keys(app.session.diagnosticsBaseline ?? {}).length && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const deckBefore = await readFile(app.deckPath);
+      const sessionBefore = await readFile(join(app.sessionDir, 'session.json'));
+
+      const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+        method:'POST', headers:{ 'content-type':'application/json' },
+        body:JSON.stringify({ expectedRevision:0 }),
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 409, `${mode}: ${JSON.stringify(body)}`);
+      assert.equal(body.code, 'DIAGNOSTICS_UNAVAILABLE');
+      assert.equal(body.stage, 'diagnostics');
+      assert.match(body.recovery, /打开|重连|诊断/);
+      assert.deepEqual(await readFile(app.deckPath), deckBefore);
+      assert.deepEqual(await readFile(join(app.sessionDir, 'session.json')), sessionBefore);
+      assert.equal(app.session.revision, 0);
+      assert.deepEqual(app.session.groups, []);
+    });
+  }
+});
+
+test('动作命令超时仍保留 COMMAND_TIMEOUT 语义', async t => {
+  const app = await makeApp(t, { bridgeTimeoutMs:20 });
+  const socket = await connect(app.editorWsUrl);
+  t.after(() => socket.close());
+  socket.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type === 'rollback-actions') {
+      socket.send(JSON.stringify({
+        type:'actions-rolled-back', commandId:message.commandId, rolledBack:true,
+      }));
+    }
+  });
+
+  const response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0, taskId:null, actions:[action] }),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 504, JSON.stringify(body));
+  assert.equal(body.code, 'COMMAND_TIMEOUT');
+  assert.equal(body.stage, undefined);
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.groups, []);
 });
 
 test('write-deck 超时终止子进程并映射稳定 504', async t => {

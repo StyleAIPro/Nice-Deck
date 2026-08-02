@@ -224,6 +224,7 @@ test('adapter verify 失败保留原 deck 并返回具体阶段与恢复动作',
       message:'模拟 verify 失败',
       recovery:'检查 bundle 结构后重试',
       diagnostic:'backups/write-error.json',
+      candidate:'write-errors/candidate-deck.html',
     }),
   });
   t.after(() => app.close());
@@ -237,6 +238,7 @@ test('adapter verify 失败保留原 deck 并返回具体阶段与恢复动作',
   );
   assert.equal(failed.body.message, '模拟 verify 失败');
   assert.match(failed.body.recovery, /重试/);
+  assert.equal(failed.body.candidate, 'write-errors/candidate-deck.html');
   assert.equal(sha256(await readFile(app.deckPath)), sha256(before));
 });
 

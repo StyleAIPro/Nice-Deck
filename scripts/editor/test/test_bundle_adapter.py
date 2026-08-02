@@ -123,6 +123,42 @@ class BundleAdapterTest(unittest.TestCase):
             self.assertEqual(original, deck.read_bytes())
             self.assertEqual(b"corrupt", backup.read_bytes())
 
+    def test_existing_backup_symlink_is_rejected_even_when_target_matches(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            minimal_bundle(deck)
+            original = deck.read_bytes()
+            digest = hashlib.sha256(original).hexdigest()
+            backups = Path(td) / "session" / "backups"
+            backups.mkdir(parents=True)
+            outside = Path(td) / "outside-backup.html"
+            outside.write_bytes(original)
+            (backups / f"deck-{digest}.html").symlink_to(outside)
+
+            with self.assertRaisesRegex(RuntimeError, "符号链接|常规文件|备份"):
+                bundle_adapter.write_patches(deck, [], Path(td) / "session")
+
+            self.assertEqual(original, deck.read_bytes())
+            self.assertEqual(original, outside.read_bytes())
+
+    def test_backup_directory_symlink_cannot_write_outside_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            minimal_bundle(deck)
+            original = deck.read_bytes()
+            session = Path(td) / "session"
+            session.mkdir()
+            outside = Path(td) / "outside-backups"
+            outside.mkdir()
+            (session / "backups").symlink_to(outside, target_is_directory=True)
+
+            result = bundle_adapter.write_patches_safe(deck, [], session)
+
+            self.assertEqual(False, result["ok"])
+            self.assertEqual("WRITE_FAILED", result["code"])
+            self.assertEqual(original, deck.read_bytes())
+            self.assertEqual([], list(outside.iterdir()))
+
     def test_external_change_before_replace_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
@@ -164,7 +200,36 @@ class BundleAdapterTest(unittest.TestCase):
             self.assertEqual("verify", result["stage"])
             self.assertIn("重试", result["recovery"])
             self.assertTrue((session / result["diagnostic"]).is_file())
+            self.assertTrue((session / result["candidate"]).is_file())
+            self.assertEqual("write-errors", (session / result["candidate"]).parent.name)
+            diagnostic = json.loads(
+                (session / result["diagnostic"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(result["candidate"], diagnostic["candidate"])
             self.assertEqual(original, deck.read_bytes())
+
+    def test_write_errors_symlink_cannot_emit_diagnostics_outside_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            session = Path(td) / "session"
+            outside = Path(td) / "outside-errors"
+            minimal_bundle(deck)
+            session.mkdir()
+            outside.mkdir()
+            (session / "write-errors").symlink_to(outside, target_is_directory=True)
+
+            with mock.patch.object(
+                bundle_adapter.eb,
+                "verify",
+                side_effect=AssertionError("verify exploded"),
+            ):
+                result = bundle_adapter.write_patches_safe(deck, [], session)
+
+            self.assertEqual(False, result["ok"])
+            self.assertEqual("VERIFY_FAILED", result["code"])
+            self.assertNotIn("diagnostic", result)
+            self.assertNotIn("candidate", result)
+            self.assertEqual([], list(outside.iterdir()))
 
     def test_expected_fingerprint_mismatch_is_conflict_without_write(self):
         with tempfile.TemporaryDirectory() as td:
@@ -200,3 +265,5 @@ class BundleAdapterTest(unittest.TestCase):
             self.assertEqual("replace", result["stage"])
             self.assertEqual(original, deck.read_bytes())
             self.assertEqual([], list(deck.parent.glob(f".{deck.name}.*.tmp")))
+            self.assertTrue((session / result["candidate"]).is_file())
+            self.assertEqual("write-errors", (session / result["candidate"]).parent.name)

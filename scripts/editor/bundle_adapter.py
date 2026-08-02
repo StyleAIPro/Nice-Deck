@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import tempfile
 
 
@@ -32,24 +33,89 @@ def _block(patches):
     )
 
 
-def _ensure_backup(backup, original_bytes, digest):
+def _absolute_path(path):
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _ensure_plain_directory(path, parent=None):
+    path = _absolute_path(path)
     try:
-        with backup.open("xb") as stream:
-            stream.write(original_bytes)
+        path.mkdir(mode=0o700, parents=parent is None, exist_ok=False)
+    except FileExistsError:
+        pass
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"目录必须是非符号链接的真实目录：{path}")
+    real_path = Path(os.path.realpath(path))
+    if parent is not None:
+        real_parent = Path(os.path.realpath(parent))
+        if real_path.parent != real_parent:
+            raise RuntimeError(f"目录不在当前会话边界内：{path}")
+    return path
+
+
+def _open_directory_fd(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise RuntimeError(f"目录句柄不是常规目录：{path}")
+    return fd
+
+
+def _write_new_file(directory, name, contents):
+    directory_fd = _open_directory_fd(directory)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        try:
+            with os.fdopen(fd, "wb", closefd=False) as stream:
+                stream.write(contents)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _read_regular_file(directory, name):
+    directory_fd = _open_directory_fd(directory)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=directory_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RuntimeError(f"备份必须是非符号链接的常规文件：{directory / name}")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                return stream.read()
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _ensure_backup(backups, name, original_bytes, digest):
+    try:
+        _write_new_file(backups, name, original_bytes)
     except FileExistsError:
         pass
 
-    backup_bytes = backup.read_bytes()
+    try:
+        backup_bytes = _read_regular_file(backups, name)
+    except OSError as error:
+        raise RuntimeError(
+            f"备份必须是非符号链接的常规文件：{backups / name}"
+        ) from error
     backup_digest = hashlib.sha256(backup_bytes).hexdigest()
     if backup_digest != digest or backup_bytes != original_bytes:
-        raise RuntimeError(f"已有备份内容不一致或已损坏，拒绝继续：{backup}")
+        raise RuntimeError(f"已有备份内容不一致或已损坏，拒绝继续：{backups / name}")
 
 
 def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
-    deck_path = Path(deck_path).resolve()
-    session_dir = Path(session_dir).resolve()
-    backups = session_dir / "backups"
-    backups.mkdir(parents=True, exist_ok=True)
+    deck_path = _absolute_path(deck_path)
+    session_dir = _ensure_plain_directory(session_dir)
+    backups = _ensure_plain_directory(session_dir / "backups", parent=session_dir)
     phase = "read"
     tmp = None
     try:
@@ -61,8 +127,9 @@ def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
             raise error
 
         phase = "backup"
-        backup = backups / f"{deck_path.stem}-{digest}.html"
-        _ensure_backup(backup, original_bytes, digest)
+        backup_name = f"{deck_path.stem}-{digest}.html"
+        backup = backups / backup_name
+        _ensure_backup(backups, backup_name, original_bytes, digest)
 
         phase = "decode"
         lines = eb.load(deck_path)
@@ -112,6 +179,11 @@ def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
     except Exception as error:
         if not hasattr(error, "deck_stage"):
             error.deck_stage = phase
+        if tmp is not None and tmp.exists():
+            try:
+                error.deck_candidate_bytes = tmp.read_bytes()
+            except OSError:
+                pass
         raise
     finally:
         if tmp is not None and tmp.exists():
@@ -126,7 +198,7 @@ def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
 
 def write_patches_safe(deck_path, patches, session_dir, expected_fingerprint=None):
     """供 Node 服务调用的稳定结果封装；底层 write_patches 仍保留原异常类型便于测试。"""
-    session_dir = Path(session_dir).resolve()
+    session_dir = _absolute_path(session_dir)
     try:
         return write_patches(
             deck_path, patches, session_dir, expected_fingerprint=expected_fingerprint
@@ -141,29 +213,44 @@ def write_patches_safe(deck_path, patches, session_dir, expected_fingerprint=Non
             "VERIFY_FAILED": "检查 bundle 结构和补丁定位器后重试",
             "WRITE_FAILED": "检查备份、目录权限和磁盘空间后重试",
         }[code]
-        diagnostics = session_dir / "write-errors"
-        diagnostics.mkdir(parents=True, exist_ok=True)
-        diagnostic = diagnostics / (
-            "write-" + hashlib.sha256(os.urandom(32)).hexdigest()[:16] + ".json"
-        )
-        diagnostic.write_text(
-            json.dumps(
-                {
-                    "code": code,
-                    "stage": stage,
-                    "message": str(error),
-                    "errorType": type(error).__name__,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        return {
+        result = {
             "ok": False,
             "code": code,
             "stage": stage,
             "message": str(error) or "写回 Deck 失败",
             "recovery": recovery,
-            "diagnostic": str(diagnostic.relative_to(session_dir)),
         }
+        try:
+            safe_session = _ensure_plain_directory(session_dir)
+            diagnostics = _ensure_plain_directory(
+                safe_session / "write-errors", parent=safe_session
+            )
+            token = hashlib.sha256(os.urandom(32)).hexdigest()[:16]
+            candidate_bytes = getattr(error, "deck_candidate_bytes", None)
+            candidate_relative = None
+            if isinstance(candidate_bytes, bytes):
+                candidate_name = f"candidate-{token}.html"
+                _write_new_file(diagnostics, candidate_name, candidate_bytes)
+                candidate_relative = f"write-errors/{candidate_name}"
+                result["candidate"] = candidate_relative
+            diagnostic_name = f"write-{token}.json"
+            diagnostic_relative = f"write-errors/{diagnostic_name}"
+            diagnostic_payload = {
+                "code": code,
+                "stage": stage,
+                "message": str(error),
+                "errorType": type(error).__name__,
+            }
+            if candidate_relative is not None:
+                diagnostic_payload["candidate"] = candidate_relative
+            _write_new_file(
+                diagnostics,
+                diagnostic_name,
+                json.dumps(
+                    diagnostic_payload, ensure_ascii=False, indent=2
+                ).encode("utf-8"),
+            )
+            result["diagnostic"] = diagnostic_relative
+        except Exception as diagnostic_error:
+            result["diagnosticError"] = str(diagnostic_error)
+        return result

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { unwatchFile, watchFile } from 'node:fs';
+import { constants as fsConstants, unwatchFile, watchFile } from 'node:fs';
 import { createServer } from 'node:http';
-import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { BridgeService } from './bridge-service.mjs';
@@ -55,35 +55,135 @@ function bytesFingerprint(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-async function restoreDeckBackup(deckPath, sessionDir, result, expectedFingerprint) {
-  if (typeof result?.backup !== 'string' || typeof result?.fingerprint !== 'string') {
-    throw new Error('写回结果缺少可恢复备份信息');
+async function safeBackupsDirectory(sessionDir) {
+  const absoluteSession = resolve(sessionDir);
+  const sessionInfo = await lstat(absoluteSession);
+  if (sessionInfo.isSymbolicLink() || !sessionInfo.isDirectory()) {
+    throw new Error('当前会话目录不是可信真实目录');
   }
-  const backupRoot = resolve(sessionDir, 'backups');
-  const backupPath = resolve(result.backup);
-  const backupRelative = relative(backupRoot, backupPath);
-  if (!backupRelative || backupRelative.startsWith('..') || backupRelative.includes('/../')) {
-    throw new Error('备份路径不在当前会话目录内');
+  const sessionReal = await realpath(absoluteSession);
+  const backupRoot = join(absoluteSession, 'backups');
+  await mkdir(backupRoot, { mode:0o700 }).catch(error => {
+    if (error.code !== 'EEXIST') throw error;
+  });
+  const backupInfo = await lstat(backupRoot);
+  if (backupInfo.isSymbolicLink() || !backupInfo.isDirectory()) {
+    throw new Error('backups 必须是非符号链接的真实目录');
   }
-  const backupBytes = await readFile(backupPath);
+  const backupReal = await realpath(backupRoot);
+  if (dirname(backupReal) !== sessionReal) {
+    throw new Error('backups 不在当前会话目录内');
+  }
+  return { backupRoot, backupReal };
+}
+
+async function readTrustedBackup(sessionDir, backupPath, expectedFingerprint) {
+  const { backupRoot, backupReal } = await safeBackupsDirectory(sessionDir);
+  const absoluteBackup = resolve(backupPath);
+  if (dirname(absoluteBackup) !== backupRoot) {
+    throw new Error('备份路径不在当前会话 backups 目录内');
+  }
+  const backupInfo = await lstat(absoluteBackup);
+  if (backupInfo.isSymbolicLink() || !backupInfo.isFile()) {
+    throw new Error('备份必须是非符号链接的常规文件');
+  }
+  const backupRealPath = await realpath(absoluteBackup);
+  if (dirname(backupRealPath) !== backupReal) {
+    throw new Error('备份真实路径逃逸当前会话目录');
+  }
+  const handle = await open(
+    absoluteBackup,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  let backupBytes;
+  try {
+    const openedInfo = await handle.stat();
+    if (!openedInfo.isFile()) throw new Error('备份句柄不是常规文件');
+    backupBytes = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
   if (bytesFingerprint(backupBytes) !== expectedFingerprint) {
     throw new Error('备份指纹与写回前基线不一致');
   }
-  if (await fileFingerprint(deckPath) !== result.fingerprint) {
-    throw new Error('Deck 写回后又发生外部变化，拒绝自动恢复覆盖');
+  return { backupPath:absoluteBackup, backupBytes };
+}
+
+async function ensureTransactionBackup(deckPath, sessionDir, expectedFingerprint) {
+  const { backupRoot } = await safeBackupsDirectory(sessionDir);
+  const originalBytes = await readFile(deckPath);
+  const actualFingerprint = bytesFingerprint(originalBytes);
+  if (actualFingerprint !== expectedFingerprint) {
+    throw serviceError('DECK_CHANGED', 409, '诊断期间磁盘 Deck 已发生变化，拒绝覆盖', {
+      stage:'fingerprint',
+      recovery:'重新载入外部文件并在新基线上重放补丁，或另存为副本',
+      expectedFingerprint,
+      actualFingerprint,
+    });
   }
+  const backupPath = join(backupRoot, `${basename(deckPath, '.html')}-${expectedFingerprint}.html`);
+  let handle;
+  try {
+    handle = await open(
+      backupPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
+        | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    await handle.writeFile(originalBytes);
+    await handle.sync();
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  } finally {
+    await handle?.close();
+  }
+  const trusted = await readTrustedBackup(sessionDir, backupPath, expectedFingerprint);
+  return { ...trusted, expectedFingerprint };
+}
+
+async function restoreDeckBackup(deckPath, sessionDir, backupRecord, expectedFingerprint) {
+  const trusted = await readTrustedBackup(sessionDir, backupRecord.backupPath, expectedFingerprint);
+  if (await fileFingerprint(deckPath) === expectedFingerprint) return;
+  const backupBytes = trusted.backupBytes;
+  const observedFingerprint = await fileFingerprint(deckPath);
   const temporaryPath = join(
     dirname(deckPath), `.${basename(deckPath)}.${randomUUID()}.restore.tmp`,
   );
+  let handle;
   try {
-    await writeFile(temporaryPath, backupBytes, { flag:'wx' });
-    if (await fileFingerprint(deckPath) !== result.fingerprint) {
+    handle = await open(
+      temporaryPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
+        | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    await handle.writeFile(backupBytes);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    if (await fileFingerprint(deckPath) !== observedFingerprint) {
       throw new Error('Deck 在自动恢复期间发生外部变化');
     }
     await rename(temporaryPath, deckPath);
   } finally {
+    await handle?.close();
     await unlink(temporaryPath).catch(() => {});
   }
+}
+
+async function validateWriterResult(deckPath, sessionDir, result, backupRecord) {
+  if (result?.ok !== true) throw adapterError('WRITE_FAILED', 500, '写入 Deck 未返回成功状态');
+  if (typeof result.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(result.fingerprint)) {
+    throw adapterError('WRITE_FAILED', 500, '写入 Deck 返回无效 fingerprint');
+  }
+  if (typeof result.backup !== 'string' || resolve(result.backup) !== backupRecord.backupPath) {
+    throw adapterError('WRITE_FAILED', 500, '写入 Deck 返回不可信 backup');
+  }
+  await readTrustedBackup(sessionDir, result.backup, backupRecord.expectedFingerprint);
+  if (await fileFingerprint(deckPath) !== result.fingerprint) {
+    throw adapterError('WRITE_FAILED', 500, '写入 Deck 回执与官方文件指纹不一致');
+  }
+  return result;
 }
 
 function authCookieName(token) {
@@ -104,7 +204,15 @@ function cookieValue(request, name) {
   return undefined;
 }
 
-function authorize(request, url, token) {
+function authorize(request, url, token, serviceOrigin) {
+  if (request.headers.origin !== undefined) {
+    let suppliedOrigin;
+    try { suppliedOrigin = new URL(request.headers.origin).origin; }
+    catch { throw httpError('FORBIDDEN', 403, '请求 Origin 无效'); }
+    if (suppliedOrigin !== serviceOrigin) {
+      throw httpError('FORBIDDEN', 403, '请求 Origin 不属于当前本地编辑服务');
+    }
+  }
   const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '');
   const cookieToken = cookieValue(request, authCookieName(token));
   if (url.searchParams.get('token') !== token && bearer !== token && cookieToken !== token) {
@@ -170,8 +278,8 @@ function send(response, statusCode, body, contentType, headers = {}) {
   response.end(body);
 }
 
-async function sendEditorIndex(request, response, url, token, editorToken) {
-  authorize(request, url, token);
+async function sendEditorIndex(request, response, url, token, editorToken, serviceOrigin) {
+  authorize(request, url, token, serviceOrigin);
   if (url.searchParams.get('editorToken') !== editorToken) {
     throw httpError('FORBIDDEN', 403, '缺少编辑器能力令牌');
   }
@@ -228,6 +336,7 @@ function errorResponse(response, error) {
   if (typeof error?.stage === 'string') details.stage = error.stage;
   if (typeof error?.recovery === 'string') details.recovery = error.recovery;
   if (typeof error?.diagnostic === 'string') details.diagnostic = error.diagnostic;
+  if (typeof error?.candidate === 'string') details.candidate = error.candidate;
   if (typeof error?.backup === 'string') details.backup = error.backup;
   if (typeof error?.expectedFingerprint === 'string') details.expectedFingerprint = error.expectedFingerprint;
   if (typeof error?.actualFingerprint === 'string') details.actualFingerprint = error.actualFingerprint;
@@ -357,10 +466,13 @@ function runWritePatches(deckPath, sessionDir, patches, expectedFingerprint, {
                   stage:result.stage ?? 'write',
                   recovery:result.recovery ?? '检查诊断信息后重试',
                   diagnostic:result.diagnostic,
+                  candidate:result.candidate,
                 },
               ));
-            } else {
+            } else if (result?.ok === true) {
               settleRequest(null, result);
+            } else {
+              settleRequest(adapterError('WRITE_FAILED', 500, '写入 Deck 未返回明确成功状态'));
             }
           } catch {
             settleRequest(adapterError('WRITE_FAILED', 500, '写入 Deck 返回无效结果'));
@@ -390,6 +502,38 @@ function runWritePatches(deckPath, sessionDir, patches, expectedFingerprint, {
   });
 }
 
+async function runWriteTransaction({
+  deckPath,
+  sessionDir,
+  expectedFingerprint,
+  runWriter,
+}) {
+  let backupRecord;
+  try {
+    backupRecord = await ensureTransactionBackup(deckPath, sessionDir, expectedFingerprint);
+  } catch (error) {
+    if (error?.code === 'DECK_CHANGED') throw error;
+    throw adapterError('WRITE_FAILED', 500, `无法建立可信事务备份：${error.message}`);
+  }
+  try {
+    const result = await runWriter();
+    return await validateWriterResult(deckPath, sessionDir, result, backupRecord);
+  } catch (error) {
+    try {
+      await restoreDeckBackup(deckPath, sessionDir, backupRecord, expectedFingerprint);
+    } catch (restoreError) {
+      throw serviceError('WRITE_FAILED', 500, 'Deck 保存失败且无法从可信备份恢复', {
+        stage:'recovery',
+        recovery:'立即使用当前会话 backups 中的原始文件恢复 Deck，并停止继续编辑',
+        backup:backupRecord.backupPath,
+        committed:true,
+        cause:restoreError,
+      });
+    }
+    throw error;
+  }
+}
+
 export async function startServer({
   deckPath,
   host = '127.0.0.1',
@@ -405,6 +549,14 @@ export async function startServer({
 } = {}) {
   void openBrowser;
   if (!deckPath) throw new TypeError('缺少 deckPath');
+  const normalizedHost = String(host).toLowerCase();
+  const ipv4Loopback = /^127(?:\.\d{1,3}){3}$/.test(normalizedHost)
+    && normalizedHost.split('.').every(part => Number(part) <= 255);
+  if (!ipv4Loopback && normalizedHost !== '::1' && normalizedHost !== 'localhost') {
+    throw httpError('INVALID_HOST', 400, '编辑服务只允许监听 loopback 地址');
+  }
+  host = normalizedHost;
+  const urlHost = host.includes(':') ? `[${host}]` : host;
   const absoluteDeckPath = resolve(deckPath);
   const sessionStore = await SessionStore.open({ deckPath: absoluteDeckPath });
   const bridge = new BridgeService({ sessionStore, timeoutMs: bridgeTimeoutMs });
@@ -413,6 +565,7 @@ export async function startServer({
   let watcherClosed = false;
   let watcherGeneration = 0;
   let watcherQueue = Promise.resolve();
+  let serviceOrigin;
 
   const broadcast = (type, revision, payload) => {
     const message = JSON.stringify({ type, revision, payload });
@@ -424,11 +577,11 @@ export async function startServer({
   const watchListener = () => {
     const generation = watcherGeneration;
     watcherQueue = watcherQueue.then(async () => {
-      let fingerprint;
-      try { fingerprint = await fileFingerprint(absoluteDeckPath); }
-      catch (error) { fingerprint = `unavailable:${error.code ?? 'READ_ERROR'}`; }
       if (watcherClosed || generation !== watcherGeneration) return;
-      const changed = await bridge.noteDeckFingerprint(fingerprint);
+      const changed = await bridge.noteDeckFingerprint(async () => {
+        try { return await fileFingerprint(absoluteDeckPath); }
+        catch (error) { return `unavailable:${error.code ?? 'READ_ERROR'}`; }
+      });
       if (!watcherClosed && generation === watcherGeneration && changed) {
         broadcast('deck-conflict', sessionStore.state.revision, sessionStore.state.conflict);
       }
@@ -436,13 +589,16 @@ export async function startServer({
   };
 
   const server = createServer(async (request, response) => {
+    response.once('finish', () => {
+      if (watcherClosed) server.closeIdleConnections?.();
+    });
     try {
-      const url = new URL(request.url ?? '/', `http://${host}`);
+      const url = new URL(request.url ?? '/', `http://${urlHost}`);
       const { pathname } = url;
-      if (isProtected(pathname)) authorize(request, url, token);
+      if (isProtected(pathname)) authorize(request, url, token, serviceOrigin);
 
       if (request.method === 'GET' && pathname === '/') {
-        await sendEditorIndex(request, response, url, token, editorToken);
+        await sendEditorIndex(request, response, url, token, editorToken, serviceOrigin);
         return;
       }
 
@@ -509,17 +665,25 @@ export async function startServer({
             expectedRevision,
             {
               fingerprint:() => fileFingerprint(absoluteDeckPath),
-              writer:(patches, expectedFingerprint) => runWritePatches(
-                absoluteDeckPath, sessionStore.sessionDir, patches, expectedFingerprint, {
-                  spawnWriter,
-                  timeoutMs: writerTimeoutMs,
-                  killGraceMs: writerKillGraceMs,
-                  activeWriters,
-                  onActiveWritersChange,
-                },
-              ),
+              writer:(patches, expectedFingerprint) => runWriteTransaction({
+                deckPath:absoluteDeckPath,
+                sessionDir:sessionStore.sessionDir,
+                expectedFingerprint,
+                runWriter:() => runWritePatches(
+                  absoluteDeckPath, sessionStore.sessionDir, patches, expectedFingerprint, {
+                    spawnWriter,
+                    timeoutMs: writerTimeoutMs,
+                    killGraceMs: writerKillGraceMs,
+                    activeWriters,
+                    onActiveWritersChange,
+                  },
+                ),
+              }),
               restore:(writerResult, expectedFingerprint) => restoreDeckBackup(
-                absoluteDeckPath, sessionStore.sessionDir, writerResult, expectedFingerprint,
+                absoluteDeckPath,
+                sessionStore.sessionDir,
+                { backupPath:resolve(writerResult.backup) },
+                expectedFingerprint,
               ),
             },
           );
@@ -539,7 +703,7 @@ export async function startServer({
         return;
       }
       if (request.method === 'GET' && (pathname === '/editor' || pathname === '/editor/')) {
-        await sendEditorIndex(request, response, url, token, editorToken);
+        await sendEditorIndex(request, response, url, token, editorToken, serviceOrigin);
         return;
       }
       if (request.method === 'GET' && EDITOR_ASSETS.has(pathname)) {
@@ -564,7 +728,7 @@ export async function startServer({
   server.on('upgrade', (request, socket, head) => {
     let url;
     try {
-      url = new URL(request.url ?? '/', `http://${host}`);
+      url = new URL(request.url ?? '/', `http://${urlHost}`);
     } catch {
       socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
       return;
@@ -572,6 +736,15 @@ export async function startServer({
     if (url.pathname !== '/events' || url.searchParams.get('token') !== token) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
+    }
+    if (request.headers.origin !== undefined) {
+      let suppliedOrigin;
+      try { suppliedOrigin = new URL(request.headers.origin).origin; }
+      catch { suppliedOrigin = null; }
+      if (suppliedOrigin !== serviceOrigin) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return;
+      }
     }
     const suppliedEditorToken = url.searchParams.get('editorToken');
     const isEditor = suppliedEditorToken === editorToken;
@@ -606,8 +779,9 @@ export async function startServer({
   });
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : port;
-  const url = `http://${host}:${actualPort}`;
-  const wsUrl = `ws://${host}:${actualPort}/events`;
+  const url = `http://${urlHost}:${actualPort}`;
+  serviceOrigin = url;
+  const wsUrl = `ws://${urlHost}:${actualPort}/events`;
   const editorWsUrl = `${wsUrl}?token=${encodeURIComponent(token)}&editorToken=${encodeURIComponent(editorToken)}`;
   let closePromise;
   watchFile(absoluteDeckPath, { interval:500 }, watchListener);

@@ -16,6 +16,15 @@ function copyJournalState(state) {
   };
 }
 
+function runtimeWriteActions(actions) {
+  return actions.map(action => ({
+    id:action.id,
+    target:structuredClone(action.target),
+    kind:action.kind,
+    payload:structuredClone(action.payload),
+  }));
+}
+
 function diagnosticFailure(code, message, details = {}) {
   return serviceError(code, 409, message, {
     stage:'diagnostics',
@@ -158,7 +167,10 @@ export class BridgeService {
     }
     for (const [commandId, pending] of this.pending) {
       if (pending.socket === socket) {
-        this.#settle(commandId, 'reject', serviceError('EDITOR_OFFLINE', 409, '编辑器连接已断开'));
+        const error = pending.expectedType === 'diagnostics-result'
+          ? diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '页面诊断期间编辑器连接已断开')
+          : serviceError('EDITOR_OFFLINE', 409, '编辑器连接已断开');
+        this.#settle(commandId, 'reject', error);
       }
     }
   }
@@ -353,7 +365,7 @@ export class BridgeService {
           blockers,
         });
       }
-      const result = await writer(this.compiledActions(), diskFingerprint);
+      const result = await writer(runtimeWriteActions(this.compiledActions()), diskFingerprint);
       const snapshot = {
         deckFingerprint:state.deckFingerprint,
         conflict:structuredClone(state.conflict),
@@ -399,8 +411,11 @@ export class BridgeService {
     });
   }
 
-  noteDeckFingerprint(fingerprint) {
+  noteDeckFingerprint(fingerprintOrProvider) {
     return this.#enqueue(async () => {
+      const fingerprint = typeof fingerprintOrProvider === 'function'
+        ? await fingerprintOrProvider()
+        : fingerprintOrProvider;
       if (this.closed || fingerprint === this.sessionStore.state.deckFingerprint) return false;
       return this.#recordDeckConflict(fingerprint);
     });
@@ -540,12 +555,22 @@ export class BridgeService {
       throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '修改页不在当前编辑器页面集合中');
     }
     const commandId = randomUUID();
-    const result = await this.#send(
-      commandId,
-      { type:'diagnose-pages', commandId, revision, pageKeys:uniquePageKeys },
-      { expectedType:'diagnostics-result', revision, pageKeys:uniquePageKeys },
-    );
-    return result.pages;
+    try {
+      const result = await this.#send(
+        commandId,
+        { type:'diagnose-pages', commandId, revision, pageKeys:uniquePageKeys },
+        { expectedType:'diagnostics-result', revision, pageKeys:uniquePageKeys },
+      );
+      return result.pages;
+    } catch (error) {
+      if (error?.code === 'DIAGNOSTICS_UNAVAILABLE') throw error;
+      if (error?.code === 'COMMAND_TIMEOUT' || error?.code === 'EDITOR_OFFLINE') {
+        throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '编辑器未能返回权威页面诊断', {
+          diagnosticCode:error.code,
+        });
+      }
+      throw error;
+    }
   }
 
   #pageKeysForActions(actions) {
