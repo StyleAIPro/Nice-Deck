@@ -13,6 +13,7 @@
   const pathOf = (root, el) => { const path=[]; while (el && el !== root) { const parent=el.parentElement; path.unshift([...parent.children].indexOf(el)); el=parent; } return path.join('/'); };
   const fingerprint = el => fnv1a(`${el.tagName}\0${el.className}\0${(el.textContent ?? '').trim().slice(0,120)}\0${el.getAttribute('style') ?? ''}`);
   const locatorKey = locator => `${locator.pageKey}|${locator.path}|${locator.tag}|${locator.fingerprint}`;
+  const actionKey = action => `${locatorKey(action.target)}|${action.kind}|${action.kind === 'setStyle' ? action.payload.property : ''}`;
   function makeLocator(el) {
     if (locators.has(el)) return locators.get(el);
     const canvas = el.closest('.slide-canvas');
@@ -33,7 +34,7 @@
     resolved.set(locatorKey(locator), el);
     return el;
   }
-  function applyAction(action) {
+  function applyOne(action) {
     const el = resolve(action.target); let before, after;
     if (action.kind === 'setText') { before=el.textContent; after=action.payload.text; if (before !== after) el.textContent=after; }
     if (action.kind === 'translate') { const parts=(el.style.translate || '0px 0px').split(/\s+/); before={x:parseFloat(parts[0])||0,y:parseFloat(parts[1])||0}; after=action.payload; el.style.translate=`${after.x}px ${after.y}px`; }
@@ -42,9 +43,16 @@
     if (action.kind === 'hide' || action.kind === 'show') { before=el.style.display; after=action.kind === 'hide'?'none':(action.payload.display ?? ''); el.style.display=after; }
     return { ...action, before, after, appliedAt:new Date().toISOString() };
   }
+  function applyAction(action) {
+    const applied = applyOne(action);
+    const key = actionKey(action);
+    const index = activeActions.findIndex(active => actionKey(active) === key);
+    if (index < 0) activeActions.push(action); else activeActions[index] = action;
+    return applied;
+  }
   function applyAll(actions) {
-    activeActions = actions;
-    const applied=[]; for (const action of actions) { try { applied.push(applyAction(action)); } catch (error) { if (!['PAGE_NOT_FOUND','TARGET_NOT_FOUND'].includes(error.message)) throw error; } }
+    activeActions = [...actions];
+    const applied=[]; for (const action of activeActions) { try { applied.push(applyOne(action)); } catch (error) { if (!['PAGE_NOT_FOUND','TARGET_NOT_FOUND'].includes(error.message)) throw error; } }
     return applied;
   }
   new MutationObserver(() => {
