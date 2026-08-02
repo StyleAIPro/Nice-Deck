@@ -13,7 +13,10 @@
   const pathOf = (root, el) => { const path=[]; while (el && el !== root) { const parent=el.parentElement; path.unshift([...parent.children].indexOf(el)); el=parent; } return path.join('/'); };
   const fingerprint = el => fnv1a(`${el.tagName}\0${el.className}\0${(el.textContent ?? '').trim().slice(0,120)}\0${el.getAttribute('style') ?? ''}`);
   const locatorKey = locator => `${locator.pageKey}|${locator.path}|${locator.tag}|${locator.fingerprint}`;
-  const actionKey = action => `${locatorKey(action.target)}|${action.kind}|${action.kind === 'setStyle' ? action.payload.property : ''}`;
+  const actionKey = action => {
+    const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
+    return `${locatorKey(action.target)}|${kind}|${action.kind === 'setStyle' ? action.payload.property : ''}`;
+  };
   function makeLocator(el) {
     if (locators.has(el)) return locators.get(el);
     const canvas = el.closest('.slide-canvas');
@@ -51,8 +54,9 @@
     return applied;
   }
   function applyAll(actions) {
-    activeActions = [...actions];
-    const applied=[]; for (const action of activeActions) { try { applied.push(applyOne(action)); } catch (error) { if (!['PAGE_NOT_FOUND','TARGET_NOT_FOUND'].includes(error.message)) throw error; } }
+    const nextActions = [...actions];
+    const applied=[]; for (const action of nextActions) { try { applied.push(applyOne(action)); } catch (error) { if (!['PAGE_NOT_FOUND','TARGET_NOT_FOUND'].includes(error.message)) throw error; } }
+    activeActions = nextActions;
     return applied;
   }
   new MutationObserver(() => {
