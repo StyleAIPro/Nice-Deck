@@ -32,11 +32,11 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 | 移动 | 拖动可定位元素 | 创建 `translate` 动作组 |
 | 缩放 | 选择元素并拖动右下控制点 | 普通元素记录宽高，SVG / 交互组件等记录 scale |
 
-区域任务可以跨页连续添加；左侧文字页序列表用 badge 显示任务数。右下角 Agent 任务 drawer 只负责任务记录、定位和状态展示，可定位回原页和原区域；它不负责动作控制。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
+区域任务可以跨页连续添加；左侧文字页序列表用 badge 显示任务数。右下角 Agent 任务 drawer 负责任务记录、定位和状态展示，可定位回原页和原区域；任务已完成并关联动作组后，drawer 会显示撤销按钮。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
 
 ### 0.3 外部 Agent 协作与撤销 / 重做
 
-`undo` 通过 CLI 或 HTTP 执行，`redo` 通过 HTTP 执行；drawer 不执行二者。
+已完成任务可直接从 drawer 撤销；`undo` 也可通过 CLI 或 HTTP 执行，`redo` 通过 HTTP 执行。
 
 外部 Codex / Claude Code / Agent 不是内置聊天机器人，只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。drawer 的“交给 Agent 处理全部”只显示命令提示，不会假装已调用外部系统。
 
@@ -76,7 +76,7 @@ node scripts/verify/shot.mjs <deck.html> <页label> /tmp/page.jpg  # 改动页 1
 node scripts/verify/steps.mjs <deck.html> <页label> /tmp/steps    # 仅修改动画页时逐拍核对
 ```
 
-`shot.mjs` 会让 build 全显并输出 1920×1080 逻辑画布截图；`steps.mjs` 按放映规则逐拍输出同尺寸截图。没有 build / layer 的页面运行 `steps.mjs` 也会生成起始帧和结束帧，但通常只需在修改动画页时使用。
+`shot.mjs` 会让 build 全显并输出 1920×1080 逻辑画布截图；`steps.mjs` 按放映规则逐拍输出同尺寸截图。无动画页运行 `steps.mjs` 只打印“此页无动画”并退出 0，不生成逐拍截图；通常只需在修改动画页时使用。
 
 ### 0.6 错误恢复与第一版边界
 

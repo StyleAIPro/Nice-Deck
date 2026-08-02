@@ -169,6 +169,16 @@ function postJsonChunks(url, chunks) {
   });
 }
 
+async function createTask(app, overrides = {}) {
+  const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST',
+    headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ ...taskInput, ...overrides }),
+  });
+  assert.equal(response.status, 201);
+  return response.json();
+}
+
 function validBundle() {
   const template = '<!doctype html><body><div class="stage"></div></body>';
   return '<script type="__bundler/manifest">\n{}\n</script>\n'
@@ -808,7 +818,7 @@ test('editor capability 隔离 observer 且拒绝错误或重复 editor', async 
   const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
   });
   const received = await Promise.race([editorMessage, observerMessage]);
   assert.equal(received.source, 'editor');
@@ -848,7 +858,7 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   const offline = await fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
   });
   assert.equal(offline.status, 409);
   assert.equal((await offline.json()).error, 'EDITOR_OFFLINE');
@@ -859,7 +869,7 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
   });
   const command = await commandPromise;
   assert.equal(command.type, 'apply-actions');
@@ -884,7 +894,7 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   const conflict = await fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
   });
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json()).error, 'REVISION_CONFLICT');
@@ -924,7 +934,7 @@ test('close 已开始时 apply 的迟到持久化错误统一为 SERVICE_CLOSED�
   bridge.setEditorSocket(socket);
 
   const applying = bridge.applyActions({
-    taskId:'task-1', actions:[action], expectedRevision:0,
+    taskId:null, actions:[action], expectedRevision:0,
   });
   await persistStarted;
   bridge.close();
@@ -1053,9 +1063,14 @@ test('close 对 task、undo/redo 与 diagnostics 的迟到 helper 错误统一�
 test('action 的 session 写已 committed 后发布候选并冻结，且不回滚或 finalize', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-action-committed-session-'));
   const sessionPath = join(root, 'session.json');
+  const createdAt = new Date(0).toISOString();
   const state = {
     version:1, sessionId:'session-action', deckPath:join(root, 'deck.html'),
-    deckFingerprint:'deck', revision:0, tasks:[], groups:[], redo:[],
+    deckFingerprint:'deck', revision:0,
+    tasks:[{
+      id:'task-1', status:'pending', candidates:[], createdAt, updatedAt:createdAt,
+    }],
+    groups:[], redo:[],
     diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
   };
   let observedRevisionDuringWrite = null;
@@ -1106,8 +1121,12 @@ test('action 的 session 写已 committed 后发布候选并冻结，且不回�
   assert.equal(observedRevisionDuringWrite, 0, 'journal 写成功前不得发布候选 revision');
   assert.equal(state.revision, 1);
   assert.equal(state.groups.length, 1);
+  assert.equal(state.groups[0].taskId, 'task-1');
+  assert.equal(state.tasks[0].status, 'completed');
+  assert.equal(state.tasks[0].groupId, state.groups[0].id);
   assert.equal(disk.revision, 1);
   assert.deepEqual(disk.groups, state.groups);
+  assert.deepEqual(disk.tasks, state.tasks);
   assert.equal(rollbackCommands, 0);
   assert.equal(finalizeCommands, 0);
   await assert.rejects(
@@ -1128,9 +1147,14 @@ test('undo/redo 的 session 写已 committed 后保留候选 journal 并冻结',
       const sessionPath = join(root, 'session.json');
       const groupId = `group-${method}`;
       const initiallyActive = method === 'undo';
+      const createdAt = new Date(0).toISOString();
       const state = {
         version:1, sessionId:`session-${method}`, deckPath:join(root, 'deck.html'),
-        deckFingerprint:'deck', revision:1, tasks:[],
+        deckFingerprint:'deck', revision:1,
+        tasks:[{
+          id:'task-1', status:initiallyActive ? 'completed' : 'pending',
+          ...(initiallyActive ? { groupId } : {}), candidates:[], createdAt, updatedAt:createdAt,
+        }],
         groups:[{ id:groupId, taskId:'task-1', actions:[action], active:initiallyActive }],
         redo:initiallyActive ? [] : [groupId], diagnosticsBaseline:{},
         diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
@@ -1179,8 +1203,11 @@ test('undo/redo 的 session 写已 committed 后保留候选 journal 并冻结',
       assert.equal(state.revision, 2);
       assert.equal(state.groups[0].active, method === 'redo');
       assert.deepEqual(state.redo, method === 'undo' ? [groupId] : []);
+      assert.equal(state.tasks[0].status, method === 'undo' ? 'pending' : 'completed');
+      assert.equal(state.tasks[0].groupId, method === 'undo' ? undefined : groupId);
       assert.equal(disk.revision, state.revision);
       assert.deepEqual(disk.groups, state.groups);
+      assert.deepEqual(disk.tasks, state.tasks);
       assert.equal(rollbackCommands, 0);
       assert.equal(finalizeCommands, 0);
     });
@@ -1352,7 +1379,7 @@ test('actions-prepared 只接受与动作数一致的安全非负整数', async 
     const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+      body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
     });
     const command = await commandPromise;
     const acknowledgement = {};
@@ -1370,7 +1397,7 @@ test('actions-prepared 只接受与动作数一致的安全非负整数', async 
   const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
   });
   const command = await commandPromise;
   await prepareAndCommit(ws, command);
@@ -1428,6 +1455,175 @@ test('缺 canonical、错配 canonical 与浏览器拒绝均不得写 Journal', 
   assert.equal(rejected.error, 'TARGET_AMBIGUOUS');
   assert.equal(rejected.failedActionId, incomplete.id);
   assert.equal(rejected.candidates.length, 5);
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.groups, []);
+});
+
+test('TARGET_AMBIGUOUS 持久化关联任务为待确认并广播新 revision', async t => {
+  const app = await makeApp(t);
+  const created = await createTask(app);
+  const taskId = created.task.id;
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  const requested = { ...action, taskId };
+
+  const commandPromise = nextMessage(editor);
+  const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:1, taskId, actions:[requested] }),
+  });
+  const command = await commandPromise;
+  const eventPromise = nextMessage(editor);
+  editor.send(JSON.stringify({
+    type:'actions-rejected', commandId:command.commandId,
+    code:'TARGET_AMBIGUOUS', failedActionId:requested.id,
+    candidates:Array.from({ length:8 }, (_, index) => ({ path:String(index) })),
+  }));
+
+  const response = await responsePromise;
+  const body = await response.json();
+  assert.equal(response.status, 409);
+  assert.equal(body.error, 'TARGET_AMBIGUOUS');
+  assert.equal(body.revision, 2);
+  assert.equal(body.candidates.length, 5);
+  const event = await eventPromise;
+  assert.equal(event.type, 'task-updated');
+  assert.equal(event.revision, 2);
+  assert.equal(event.payload.id, taskId);
+  assert.equal(event.payload.status, 'needs-confirmation');
+
+  const persisted = JSON.parse(await readFile(join(app.sessionDir, 'session.json'), 'utf8'));
+  const task = persisted.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(persisted.revision, 2);
+  assert.equal(task.status, 'needs-confirmation');
+  assert.equal(task.candidates.length, 5);
+  assert.ok(task.updatedAt > created.task.updatedAt);
+  assert.deepEqual(persisted.groups, []);
+
+  const retryCommandPromise = nextMessage(editor);
+  const retryResponsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:2, taskId, actions:[requested] }),
+  });
+  const retryCommand = await retryCommandPromise;
+  await prepareAndCommit(editor, retryCommand);
+  const retryResponse = await retryResponsePromise;
+  const retryBody = await retryResponse.json();
+  assert.equal(retryResponse.status, 200);
+  assert.equal(retryBody.revision, 3);
+  const completed = app.session.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.groupId, retryBody.groupId);
+  assert.deepEqual(completed.candidates, []);
+  assert.equal(app.session.groups.length, 1);
+  assert.equal(app.session.groups[0].taskId, taskId);
+});
+
+test('成功 action 原子完成任务且 undo/redo 同步任务生命周期', async t => {
+  const app = await makeApp(t);
+  const created = await createTask(app);
+  const taskId = created.task.id;
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  const requested = { ...action, taskId };
+
+  let commandPromise = nextMessage(editor);
+  let responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:1, taskId, actions:[requested] }),
+  });
+  let command = await commandPromise;
+  await prepareAndCommit(editor, command);
+  let response = await responsePromise;
+  let body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.revision, 2);
+  const groupId = body.groupId;
+  assert.equal(body.task.id, taskId);
+  assert.equal(body.task.status, 'completed');
+  assert.equal(body.task.groupId, groupId);
+
+  let persisted = JSON.parse(await readFile(join(app.sessionDir, 'session.json'), 'utf8'));
+  let task = persisted.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(persisted.revision, 2);
+  assert.equal(persisted.groups[0].id, groupId);
+  assert.equal(persisted.groups[0].taskId, taskId);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.groupId, groupId);
+  assert.ok(task.updatedAt > created.task.updatedAt);
+
+  commandPromise = nextMessage(editor);
+  responsePromise = fetch(`${app.url}/api/groups/${groupId}/undo?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:2 }),
+  });
+  command = await commandPromise;
+  await prepareAndCommit(editor, command);
+  response = await responsePromise;
+  body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.revision, 3);
+  task = app.session.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(task.status, 'pending');
+  assert.equal(task.groupId, undefined);
+  assert.equal(app.session.groups[0].active, false);
+
+  commandPromise = nextMessage(editor);
+  responsePromise = fetch(`${app.url}/api/groups/${groupId}/redo?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:3 }),
+  });
+  command = await commandPromise;
+  await prepareAndCommit(editor, command);
+  response = await responsePromise;
+  body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.revision, 4);
+  task = app.session.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.groupId, groupId);
+  assert.equal(app.session.groups[0].active, true);
+
+  await new Promise(resolve => {
+    editor.once('close', resolve);
+    editor.close();
+  });
+  const replacementEditor = await connect(app.editorWsUrl);
+  t.after(() => replacementEditor.close());
+  let extraCommands = 0;
+  replacementEditor.on('message', () => { extraCommands += 1; });
+  response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:4, taskId, actions:[requested] }),
+  });
+  body = await response.json();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(response.status, 409);
+  assert.equal(body.error, 'TASK_ALREADY_COMPLETED');
+  assert.equal(extraCommands, 0);
+  assert.equal(app.session.revision, 4);
+  assert.equal(app.session.groups.length, 1);
+});
+
+test('不存在的 taskId 在发送浏览器 tentative action 前拒绝', async t => {
+  const app = await makeApp(t);
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  let commands = 0;
+  editor.on('message', () => { commands += 1; });
+
+  const response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0, taskId:'missing-task', actions:[action] }),
+  });
+  const body = await response.json();
+  await new Promise(resolve => setTimeout(resolve, 25));
+
+  assert.equal(response.status, 404);
+  assert.equal(body.error, 'TASK_NOT_FOUND');
+  assert.equal(commands, 0);
   assert.equal(app.session.revision, 0);
   assert.deepEqual(app.session.groups, []);
 });
@@ -1501,7 +1697,7 @@ test('等待 Action 回执期间串行化其他 revision mutation', async t => {
   const actionResponsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
   });
   const command = await commandPromise;
 
@@ -2163,7 +2359,7 @@ test('写入适配器只接收运行时所需的最小动作 DTO', async t => {
   const commandPromise = nextMessage(editor);
   const applyPromise = fetch(`${app.url}/api/actions?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ expectedRevision:0, taskId:'ui-task', actions:[canonicalAction] }),
+    body:JSON.stringify({ expectedRevision:0, taskId:null, actions:[canonicalAction] }),
   });
   const command = await commandPromise;
   await prepareAndCommit(editor, command, [canonicalAction]);
@@ -2621,7 +2817,7 @@ test('close 关闭 WebSocket、HTTP 端口并拒绝未完成命令', async () =>
   const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action] }),
   });
   await commandPromise;
 

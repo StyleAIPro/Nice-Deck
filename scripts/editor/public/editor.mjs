@@ -144,12 +144,57 @@ function locateTask(task) {
   }, location.origin);
 }
 
+function showTaskNotice(message) {
+  taskDrawer.dataset.open = 'true';
+  const note = taskDrawer.querySelector('[data-process-note]');
+  if (note) note.textContent = message;
+}
+
+async function undoTask(task) {
+  if (!task?.groupId) return;
+  let retried = false;
+  try {
+    let result;
+    while (!result) {
+      try {
+        result = await requestJson(`/api/groups/${encodeURIComponent(task.groupId)}/undo`, {
+          method:'POST',
+          headers:{ 'content-type':'application/json' },
+          body:JSON.stringify({ expectedRevision:revision }),
+        });
+      } catch (error) {
+        if (error.status === 409 && error.code === 'REVISION_CONFLICT' && !retried) {
+          retried = true;
+          await loadSession();
+          const refreshed = tasks.find(candidate => candidate.id === task.id);
+          if (!refreshed?.groupId) return;
+          task = refreshed;
+          continue;
+        }
+        if (error.committed === true) {
+          updateRevision(error.revision);
+          await loadSession(error.revision).catch(() => {});
+          showTaskNotice('撤销已保存、会话同步待确认');
+          return;
+        }
+        throw error;
+      }
+    }
+    updateRevision(result.revision);
+    await ensureSessionRevision(result.revision);
+    if (result.syncPending) showTaskNotice('撤销已保存、浏览器同步待重试');
+  } catch (error) {
+    await loadSession(error.revision).catch(() => {});
+    showTaskNotice(`撤销失败：${error.message || error.code || '未知错误'}`);
+  }
+}
+
 function renderTasks() {
   renderTaskDrawer(taskDrawer, {
     tasks,
     onLocate: locateTask,
     onProcessAll: processAllHint,
-    onUndo: () => {},
+    onUndo: task => { void undoTask(task); },
   });
   updatePageBadges();
 }
@@ -178,7 +223,7 @@ function loadSession(targetRevision = revision) {
       if (sessionRevision >= loadedSessionRevision) {
         loadedSessionRevision = sessionRevision;
         sessionGroups = Array.isArray(session.groups) ? session.groups : [];
-        tasks = uniqueTasks([...(Array.isArray(persistedTasks) ? persistedTasks : []), ...tasks]);
+        tasks = uniqueTasks([...tasks, ...(Array.isArray(persistedTasks) ? persistedTasks : [])]);
         renderTasks();
       }
       if (loadedSessionRevision < requestedRevision) {
@@ -524,7 +569,9 @@ eventsClient = connectEvents({
     if (['actions-recorded','group-undone','group-redone'].includes(event?.type)) {
       void ensureSessionRevision(event.revision).catch(() => {});
     }
-    if (event?.type === 'task-created' && event.payload?.id) upsertTask(event.payload);
+    if (['task-created','task-updated'].includes(event?.type) && event.payload?.id) {
+      upsertTask(event.payload);
+    }
   },
   onState: state => {
     wsState.dataset.wsState = state;

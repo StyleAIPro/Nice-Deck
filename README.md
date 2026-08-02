@@ -135,7 +135,7 @@ node scripts/verify/shot.mjs <deck.html> <页label> /tmp/page.jpg  # 1920×1080 
 node scripts/verify/steps.mjs <deck.html> <页label> /tmp/steps    # 仅修改动画页时逐拍核对
 ```
 
-`shot.mjs` 和 `steps.mjs` 使用 1920×1080 逻辑画布；无动画页运行 `steps.mjs` 仍会生成起始与结束两帧。操作细节与错误恢复见 [`references/editing-guide.md`](references/editing-guide.md)，开发者架构与信任边界见 [`docs/architecture.md`](docs/architecture.md)。
+`shot.mjs` 和动画页的 `steps.mjs` 使用 1920×1080 逻辑画布；无动画页运行 `steps.mjs` 只打印“此页无动画”并退出 0，不生成逐拍截图。操作细节与错误恢复见 [`references/editing-guide.md`](references/editing-guide.md)，开发者架构与信任边界见 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 许可证
 

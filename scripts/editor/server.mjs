@@ -1071,7 +1071,15 @@ export async function startServer({
         if (new Set(actions.map(action => action.id)).size !== actions.length) {
           throw httpError('DUPLICATE_ACTION_ID', 400, '同一批次 action id 不得重复');
         }
-        const result = await bridge.applyActions({ taskId, actions, expectedRevision });
+        let result;
+        try {
+          result = await bridge.applyActions({ taskId, actions, expectedRevision });
+        } catch (error) {
+          if (error?.task?.id && Number.isSafeInteger(error?.revision)) {
+            broadcast('task-updated', error.revision, error.task);
+          }
+          throw error;
+        }
         broadcast('actions-recorded', result.revision, result);
         json(response, 200, result);
         return;

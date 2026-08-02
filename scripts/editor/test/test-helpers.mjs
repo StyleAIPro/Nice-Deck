@@ -367,62 +367,74 @@ async function choosePilotActionTargets(page) {
   });
 }
 
-export async function applyPilotActions(app, page) {
+export async function applyPilotActions(app, page, task) {
   const navigation = page.locator('[data-page-index="9"]');
   const pageKey = await navigation.getAttribute('data-page-key');
   if (!pageKey) throw new Error('第 9 页缺少 pageKey');
+  if (!task?.id || task.pageKey !== pageKey) {
+    throw new Error('试点动作必须关联第 9 页真实任务');
+  }
   await navigation.click();
   await waitForPilotPage(page, pageKey);
   const specs = await choosePilotActionTargets(page);
-  const groups = [];
-  for (const kind of ['setText', 'translate', 'resize']) {
-    const state = await pilotSession(app);
-    const result = await pilotPost(app, '/api/actions', {
-      expectedRevision:state.revision,
-      taskId:null,
-      actions:[{
+  const kinds = ['setText', 'translate', 'resize'];
+  const state = await pilotSession(app);
+  const result = await pilotPost(app, '/api/actions', {
+    expectedRevision:state.revision,
+    taskId:task.id,
+    actions:kinds.map(kind => ({
         id:`renzhi-pilot-${kind}`,
-        taskId:null,
+        taskId:task.id,
         target:specs[kind].target,
         kind,
         payload:specs[kind].payload,
         expectedRevision:state.revision,
-      }],
-    });
-    const persisted = await waitForPilotSession(
-      app,
-      next => next.revision === state.revision + 1 && next.groups.length === state.groups.length + 1,
-      `等待 ${kind} 动作持久化超时`,
-    );
-    const group = persisted.groups.at(-1);
-    const action = group.actions[0];
-    if (group.id !== result.groupId || action.kind !== kind) {
-      throw new Error(`${kind} 动作 canonical 不一致：${JSON.stringify({ result, group })}`);
-    }
-    groups.push({ kind, groupId:group.id, action });
+      })),
+  });
+  const persisted = await waitForPilotSession(
+    app,
+    next => next.revision === state.revision + 1
+      && next.groups.length === state.groups.length + 1
+      && next.tasks.find(candidate => candidate.id === task.id)?.status === 'completed',
+    '等待三类试点动作与任务生命周期持久化超时',
+  );
+  const group = persisted.groups.at(-1);
+  if (group.id !== result.groupId
+    || group.taskId !== task.id
+    || group.actions.length !== kinds.length
+    || group.actions.some((action, index) => action.kind !== kinds[index])) {
+    throw new Error(`三类动作 canonical 不一致：${JSON.stringify({ result, group })}`);
   }
+  const completedTask = persisted.tasks.find(candidate => candidate.id === task.id);
+  if (completedTask.groupId !== group.id) throw new Error('试点任务未原子关联动作组');
+  const groups = group.actions.map((action, index) => ({
+    kind:kinds[index], groupId:group.id, action,
+  }));
 
   const afterActions = await pilotSession(app);
-  const undoGroup = groups[1];
-  const undone = await pilotPost(app, `/api/groups/${encodeURIComponent(undoGroup.groupId)}/undo`, {
+  const undone = await pilotPost(app, `/api/groups/${encodeURIComponent(group.id)}/undo`, {
     expectedRevision:afterActions.revision,
   });
   const afterUndo = await waitForPilotSession(
     app,
     state => state.revision === afterActions.revision + 1
-      && state.groups.find(group => group.id === undoGroup.groupId)?.active === false,
+      && state.groups.find(candidate => candidate.id === group.id)?.active === false
+      && state.tasks.find(candidate => candidate.id === task.id)?.status === 'pending'
+      && state.tasks.find(candidate => candidate.id === task.id)?.groupId === undefined,
     '等待试点 undo 持久化超时',
   );
-  const redone = await pilotPost(app, `/api/groups/${encodeURIComponent(undoGroup.groupId)}/redo`, {
+  const redone = await pilotPost(app, `/api/groups/${encodeURIComponent(group.id)}/redo`, {
     expectedRevision:afterUndo.revision,
   });
   await waitForPilotSession(
     app,
     state => state.revision === afterUndo.revision + 1
-      && state.groups.find(group => group.id === undoGroup.groupId)?.active === true,
+      && state.groups.find(candidate => candidate.id === group.id)?.active === true
+      && state.tasks.find(candidate => candidate.id === task.id)?.status === 'completed'
+      && state.tasks.find(candidate => candidate.id === task.id)?.groupId === group.id,
     '等待试点 redo 持久化超时',
   );
-  if (undone.groupId !== undoGroup.groupId || redone.groupId !== undoGroup.groupId) {
+  if (undone.groupId !== group.id || redone.groupId !== group.id) {
     throw new Error(`undo/redo groupId 不一致：${JSON.stringify({ undone, redone })}`);
   }
 

@@ -19,6 +19,31 @@ function copyJournalState(state) {
   };
 }
 
+function taskById(state, taskId) {
+  return state.tasks?.find(task => task.id === taskId);
+}
+
+function completeTask(state, taskId, groupId) {
+  if (taskId === null) return undefined;
+  const task = taskById(state, taskId);
+  if (!task) return undefined;
+  task.status = 'completed';
+  task.groupId = groupId;
+  task.candidates = [];
+  task.updatedAt = new Date().toISOString();
+  return task;
+}
+
+function reopenTask(state, taskId) {
+  if (taskId === null) return undefined;
+  const task = taskById(state, taskId);
+  if (!task) return undefined;
+  task.status = 'pending';
+  delete task.groupId;
+  task.updatedAt = new Date().toISOString();
+  return task;
+}
+
 function runtimeWriteActions(actions) {
   return actions.map(action => ({
     id:action.id,
@@ -372,17 +397,46 @@ export class BridgeService {
   applyActions({ taskId, actions, expectedRevision }) {
     return this.#enqueue(async () => {
       this.#assertMutable();
-      const prepared = await this.#prepare(actions, expectedRevision);
+      this.assertRevision(expectedRevision);
+      const linkedTask = taskId === null ? undefined : taskById(this.sessionStore.state, taskId);
+      if (taskId !== null && !linkedTask) {
+        throw serviceError('TASK_NOT_FOUND', 404, '找不到任务');
+      }
+      if (linkedTask?.groupId || linkedTask?.status === 'completed') {
+        throw serviceError('TASK_ALREADY_COMPLETED', 409, '任务已关联动作组，请先撤销后再处理');
+      }
+      let prepared;
+      try {
+        prepared = await this.#prepare(actions, expectedRevision);
+      } catch (error) {
+        if (taskId === null || error?.code !== 'TARGET_AMBIGUOUS') throw error;
+        const task = await this.#recordTaskNeedsConfirmation(taskId, error.candidates);
+        error.revision = this.sessionStore.state.revision;
+        error.task = structuredClone(task);
+        throw error;
+      }
       let group;
       try {
-        group = await this.#commitJournal(journal => journal.appendGroup(taskId, prepared.results));
+        group = await this.#commitJournal(journal => {
+          const appended = journal.appendGroup(taskId, prepared.results);
+          completeTask(journal.state, taskId, appended.id);
+          return appended;
+        });
       } catch (error) {
         this.#throwIfClosed();
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
-      const result = { groupId: group.id, revision: this.sessionStore.state.revision, applied: prepared.applied };
+      const completedTask = taskId === null
+        ? undefined
+        : taskById(this.sessionStore.state, taskId);
+      const result = {
+        groupId:group.id,
+        revision:this.sessionStore.state.revision,
+        applied:prepared.applied,
+        ...(completedTask ? { task:structuredClone(completedTask) } : {}),
+      };
       const confirmation = await this.#finalizeCommitted(prepared.commandId);
       const diagnosticsPending = await this.#refreshDiagnostics(
         this.#pageKeysForActions(prepared.results), result.revision,
@@ -599,10 +653,15 @@ export class BridgeService {
       catch { throw serviceError('GROUP_NOT_FOUND', 404, '找不到动作组'); }
       const actions = draft.compile();
       const prepared = await this.#prepare(actions, expectedRevision, { replace:true });
+      let linkedTask;
       try {
         await this.#commitJournal(journal => {
           journal.state.groups = structuredClone(draftState.groups);
           journal.state.redo = structuredClone(draftState.redo);
+          const changedGroup = journal.state.groups.find(group => group.id === groupId);
+          linkedTask = method === 'undo'
+            ? reopenTask(journal.state, changedGroup?.taskId ?? null)
+            : completeTask(journal.state, changedGroup?.taskId ?? null, groupId);
           return { id: groupId };
         });
       } catch (error) {
@@ -611,7 +670,10 @@ export class BridgeService {
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
-      const result = { groupId, revision: this.sessionStore.state.revision, applied: prepared.applied };
+      const result = {
+        groupId, revision: this.sessionStore.state.revision, applied: prepared.applied,
+        ...(linkedTask ? { task:structuredClone(taskById(this.sessionStore.state, linkedTask.id)) } : {}),
+      };
       const confirmation = await this.#finalizeCommitted(prepared.commandId);
       const changedGroup = draftState.groups.find(group => group.id === groupId);
       const diagnosticsPending = await this.#refreshDiagnostics(
@@ -819,8 +881,27 @@ export class BridgeService {
     const journal = new PatchJournal(candidate);
     const result = change(journal);
     candidate.revision += 1;
-    await this.#persistCandidate(candidate, { operation:'journal' });
+    await this.#persistCandidate(candidate, {
+      operation:'journal', revision:candidate.revision,
+      ...(typeof result?.id === 'string' ? { groupId:result.id } : {}),
+    });
     return result;
+  }
+
+  async #recordTaskNeedsConfirmation(taskId, candidates) {
+    const state = this.sessionStore.state;
+    const candidate = structuredClone(state);
+    const task = taskById(candidate, taskId);
+    if (!task) throw serviceError('TASK_NOT_FOUND', 404, '找不到任务');
+    task.status = 'needs-confirmation';
+    delete task.groupId;
+    task.candidates = structuredClone(Array.isArray(candidates) ? candidates.slice(0, 5) : []);
+    task.updatedAt = new Date().toISOString();
+    candidate.revision += 1;
+    await this.#persistCandidate(candidate, {
+      operation:'task-needs-confirmation', revision:candidate.revision,
+    });
+    return taskById(this.sessionStore.state, taskId);
   }
 
   #settle(commandId, method, value) {

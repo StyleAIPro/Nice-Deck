@@ -168,6 +168,67 @@ test('人工改字与 Agent 位移共享 canonical 日志并实时撤销重做',
   assert.deepEqual(resourceProblems, []);
 });
 
+test('任务 drawer 撤销已完成任务并同步权威任务与页面效果', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+  const target = await heading.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  const originalText = await heading.textContent();
+
+  const created = await postJson(app, '/api/tasks', {
+    expectedRevision:0,
+    pageKey:target.pageKey,
+    pageIndex:1,
+    pageLabel:'目录页',
+    rect:{ x:100, y:100, w:300, h:120 },
+    instruction:'通过 drawer 撤销标题修改',
+  });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  const taskId = created.body.task.id;
+  await page.waitForSelector(`[data-task-row="${taskId}"]`);
+
+  const applied = await postJson(app, '/api/actions', {
+    expectedRevision:1,
+    taskId,
+    actions:[{
+      id:'drawer-task-text', taskId, target, kind:'setText',
+      payload:{ text:'任务已完成标题' }, expectedRevision:1,
+    }],
+  });
+  assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  await heading.evaluate(element => new Promise(resolvePromise => {
+    const done = () => element.textContent === '任务已完成标题' && resolvePromise();
+    const observer = new MutationObserver(done);
+    observer.observe(element, { childList:true, characterData:true, subtree:true });
+    done();
+  }));
+  await page.waitForFunction(id => {
+    const row = document.querySelector(`[data-task-row="${CSS.escape(id)}"]`);
+    return row?.querySelector('.task-status-completed')
+      && row.querySelector(`[data-task-undo="${CSS.escape(id)}"]`);
+  }, taskId);
+
+  await page.locator(`[data-task-undo="${taskId}"]`).click();
+  await page.waitForFunction(expected => (
+    document.querySelector('#deck-frame').contentDocument.querySelector('h2').textContent === expected
+  ), originalText);
+  await page.waitForFunction(id => {
+    const row = document.querySelector(`[data-task-row="${CSS.escape(id)}"]`);
+    return row?.querySelector('.task-status-pending') && !row.querySelector('[data-task-undo]');
+  }, taskId);
+  const state = await session(app);
+  const task = state.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(state.revision, 3);
+  assert.equal(task.status, 'pending');
+  assert.equal(task.groupId, undefined);
+  assert.equal(state.groups[0].active, false);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('文字取消、空白、无变化和复杂富文本均不创建动作组', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());

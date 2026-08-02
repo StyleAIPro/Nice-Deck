@@ -119,19 +119,28 @@ test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与�
   }
 });
 
-test('editing guide 不承诺未实现的 drawer 撤销或缩略图', async () => {
+test('editing guide 准确说明 drawer 撤销且不承诺缩略图', async () => {
   const documents = await loadDocuments();
   const guide = documents['references/editing-guide.md'];
   requireClaims('references/editing-guide.md', guide, {
     '左栏是文字页序列表和 badge': /左侧文字页序列表[\s\S]{0,100}badge/,
-    'drawer 只做任务记录定位状态': /drawer[\s\S]{0,120}(?:只|仅)[\s\S]{0,80}任务记录[\s\S]{0,80}定位[\s\S]{0,80}状态/,
+    'drawer 可撤销已完成任务': /drawer[\s\S]{0,180}已完成[\s\S]{0,100}撤销/,
     'undo 由 CLI 或 HTTP 完成': /undo[\s\S]{0,100}(?:CLI|HTTP)/i,
     'redo 由 HTTP 完成': /redo[\s\S]{0,100}HTTP/i,
   });
-  assert.doesNotMatch(
-    guide,
-    /drawer[^。\n]{0,160}(?:提供|执行|完成|按钮)[^。\n]{0,80}撤销/,
-    'references/editing-guide.md 不得承诺 drawer 撤销',
-  );
   assert.doesNotMatch(guide, /页缩略图/, 'references/editing-guide.md 左栏不是页缩略图');
+});
+
+test('四份入口文档与 steps 无动画页行为一致', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    assert.doesNotMatch(
+      contents,
+      /无动画页[^。\n]{0,100}(?:生成|得到|输出)[^。\n]{0,80}(?:起始|开始)[^。\n]{0,40}(?:结束|末尾)[^。\n]{0,20}(?:两帧|2\s*帧)/,
+      `${file} 不得声称 steps.mjs 为无动画页生成两帧`,
+    );
+    requireClaims(file, contents, {
+      '无动画页明确不生成逐拍截图': /无动画页[^。\n]{0,120}(?:不生成|不会生成|不输出)[^。\n]{0,80}(?:逐拍)?截图/,
+    });
+  }
 });

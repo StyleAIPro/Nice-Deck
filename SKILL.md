@@ -45,7 +45,7 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 
 第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。所有 Agent 动作都要经过 token、revision、locator 与事务校验。session 可在关闭后重开；若出现 `RECOVERY_REQUIRED`，未决恢复状态会阻断继续写回，外部文件变化则应重载，或另存副本后再继续。
 
-写回后仍按完整工具链验证：`python3 scripts/edit-bundle.py <deck.html>`（等价调用 `eb.verify`）、`node scripts/verify/measure_overflow.mjs <deck.html> --all`、改动页 `shot.mjs`；只有修改了动画页才需要运行 `steps.mjs`。`shot.mjs` 与 `steps.mjs` 均按 1920×1080 逻辑画布截图；无动画页运行 `steps.mjs` 仍会得到起始与结束两帧。详细操作、错误恢复和外部 Agent 命令见 `references/editing-guide.md`，组件与信任边界见 `docs/architecture.md`。
+写回后仍按完整工具链验证：`python3 scripts/edit-bundle.py <deck.html>`（等价调用 `eb.verify`）、`node scripts/verify/measure_overflow.mjs <deck.html> --all`、改动页 `shot.mjs`；只有修改了动画页才需要运行 `steps.mjs`。`shot.mjs` 与动画页的 `steps.mjs` 均按 1920×1080 逻辑画布截图；无动画页运行 `steps.mjs` 只打印“此页无动画”并退出 0，不生成逐拍截图。详细操作、错误恢复和外部 Agent 命令见 `references/editing-guide.md`，组件与信任边界见 `docs/architecture.md`。
 
 ## 设计铁律（细则见对应 reference）
 

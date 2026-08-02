@@ -167,7 +167,7 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 
 第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。Agent 动作受 token、revision、locator 与事务校验。session 可重开；`RECOVERY_REQUIRED` 会让未决恢复状态阻断继续写回，外部文件变化必须重载，或另存副本。
 
-写回后运行 `python3 scripts/edit-bundle.py <deck.html>`（`eb.verify`）、`measure_overflow.mjs` 和改动页 `shot.mjs`；只有修改动画页才运行 `steps.mjs`。`shot.mjs` / `steps.mjs` 固定按 1920×1080 逻辑画布截图，无动画页执行 `steps.mjs` 仍输出起始与结束两帧。
+写回后运行 `python3 scripts/edit-bundle.py <deck.html>`（`eb.verify`）、`measure_overflow.mjs` 和改动页 `shot.mjs`；只有修改动画页才运行 `steps.mjs`。`shot.mjs` / 动画页的 `steps.mjs` 固定按 1920×1080 逻辑画布截图；无动画页执行 `steps.mjs` 只打印“此页无动画”并退出 0，不生成逐拍截图。
 
 ---
 

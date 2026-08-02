@@ -61,6 +61,7 @@ export function renderTaskDrawer(root, { tasks, onLocate, onProcessAll, onUndo }
     if (task.groupId && onUndo) {
       const undo = element('button', 'task-undo', '撤销');
       undo.type = 'button';
+      undo.dataset.taskUndo = task.id;
       undo.addEventListener('click', () => onUndo(task));
       row.append(undo);
     }

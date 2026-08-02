@@ -244,20 +244,28 @@ test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重
   created.forEach((task, index) => assertTask(task, expectedPilotPages[index]));
   for (const task of created) await assertPng(join(resources.app.sessionDir, task.snapshotPath));
 
-  const actionEvidence = await applyPilotActions(resources.app, opened.page);
+  const pilotTask = created.find(task => task.pageIndex === 9);
+  assert.ok(pilotTask, '第 9 页必须存在可关联的真实试点任务');
+  const actionEvidence = await applyPilotActions(resources.app, opened.page, pilotTask);
   assert.deepEqual(
     actionEvidence.groups.map(group => group.kind),
     ['setText', 'translate', 'resize'],
   );
+  assert.equal(new Set(actionEvidence.groups.map(group => group.groupId)).size, 1);
+  assert.ok(actionEvidence.groups.every(group => group.action.taskId === pilotTask.id));
   await assertPilotEffects(opened.page, actionEvidence);
   const beforeWrite = await waitForSession(
     resources.app,
-    state => state.revision === 10 && state.groups.length === 3 && state.tasks.length === 5,
+    state => state.revision === 8 && state.groups.length === 1 && state.tasks.length === 5,
     '等待跨页任务与 undo/redo 权威状态超时',
   );
   assert.equal(beforeWrite.redo.length, 0);
   assert.ok(beforeWrite.groups.every(group => group.active));
   assert.equal(new Set(beforeWrite.tasks.map(task => task.pageKey)).size, 5);
+  const completedTask = beforeWrite.tasks.find(task => task.id === pilotTask.id);
+  assert.equal(beforeWrite.groups[0].taskId, pilotTask.id);
+  assert.equal(completedTask.status, 'completed');
+  assert.equal(completedTask.groupId, beforeWrite.groups[0].id);
 
   const write = await requestJson(resources.app, '/api/write-deck', {
     method:'POST',
@@ -309,8 +317,11 @@ test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重
   assert.equal(restored.revision, beforeWrite.revision);
   assert.equal(restored.deckFingerprint, write.fingerprint);
   assert.equal(restored.tasks.length, 5);
-  assert.equal(restored.groups.length, 3);
+  assert.equal(restored.groups.length, 1);
   assert.ok(restored.groups.every(group => group.active));
+  const restoredTask = restored.tasks.find(task => task.id === pilotTask.id);
+  assert.equal(restoredTask.status, 'completed');
+  assert.equal(restoredTask.groupId, restored.groups[0].id);
   await assertPilotEffects(reopened.page, actionEvidence);
   assert.deepEqual(reopened.browserProblems, []);
   assert.deepEqual(reopened.resourceProblems, []);
