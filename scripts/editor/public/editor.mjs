@@ -343,6 +343,22 @@ async function createRegionTask(message) {
 
 function onFrameMessage(event) {
   if (event.origin !== location.origin || event.source !== deckFrame.contentWindow) return;
+  if (event.data?.type === 'deck-error' && typeof event.data.code === 'string') {
+    deckReady = false;
+    deckReadyPayload = undefined;
+    pages = [];
+    pendingFrameCommands.clear();
+    pageList.replaceChildren();
+    const error = document.createElement('div');
+    error.dataset.deckError = '';
+    error.setAttribute('role', 'alert');
+    error.textContent = `${event.data.code}：${event.data.message || 'Deck 运行时不可用'}`;
+    pageList.append(error);
+    pageCount.textContent = '0 页';
+    currentPage.textContent = '运行时错误';
+    currentKey.textContent = event.data.code;
+    return;
+  }
   if (event.data?.type === 'deck-ready' && Array.isArray(event.data.pages)) {
     deckReady = true;
     deckReadyPayload = {

@@ -4,6 +4,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import WebSocket from 'ws';
 import { startFixtureServer, openEditor } from './test-helpers.mjs';
+import { loadChromium } from '../../verify/load-playwright.mjs';
+
+const RUNTIME_CONTRACT = {
+  brand:'com.huawei.deck.visual-editor.patch-runtime',
+  schema:1,
+  version:'1.0.0',
+  api:'pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,pendingTransactionCount,activeActionCount,suspendedTargetCount',
+};
 
 function count(text, fragment) {
   return text.split(fragment).length - 1;
@@ -96,6 +104,92 @@ setTimeout(() => {
   await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
   assert.ok(await page.locator('#deck-frame').evaluate(frame => frame.contentWindow.scrollY > 900));
   assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('Deck 外部无关 attribute 持续变化时仍在有界时间发布 ready', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace('</body>', `
+<script>
+const unrelatedNoise = setInterval(() => {
+  document.body.dataset.unrelatedNoise = String(performance.now());
+}, 100);
+addEventListener('pagehide', () => clearInterval(unrelatedNoise), { once:true });
+</script>
+</body>`),
+  });
+  t.after(() => app.close());
+  const startedAt = Date.now();
+  const { browser, page } = await openEditor(app, { readyTimeoutMs:2_500 });
+  t.after(() => browser.close());
+  assert.equal(await page.locator('[data-page-key]').count(), 2);
+  assert.ok(Date.now() - startedAt < 2_500);
+});
+
+test('ready 后晚到 canvas 替换会重新 hydrate 导航并让切页诊断动作使用新节点', async t => {
+  const app = await startFixtureServer({
+    bundle:true,
+    fixtureTransform:fixture => fixture.replace('</body>', `
+<script>
+setTimeout(() => {
+  const stage = document.querySelector('.stage');
+  const replacements = [...stage.children].map(canvas => canvas.cloneNode(true));
+  const section = replacements[1].querySelector('section[data-label]');
+  Object.defineProperties(section, {
+    scrollWidth:{ value:1930, configurable:true },
+    clientWidth:{ value:1920, configurable:true },
+    scrollHeight:{ value:1080, configurable:true },
+    clientHeight:{ value:1080, configurable:true },
+  });
+  stage.replaceChildren(...replacements);
+  window.__lateCanvasReplacementDone = true;
+}, 900);
+</script>
+</body>`),
+  });
+  t.after(() => app.close());
+  const { browser, page, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  await page.locator('[data-page-index="2"]').evaluate(button => {
+    window.__navBeforeLateHydration = button;
+  });
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentWindow?.__lateCanvasReplacementDone === true
+  ));
+  await page.waitForFunction(() => (
+    document.querySelector('[data-page-index="2"]') !== window.__navBeforeLateHydration
+  ), undefined, { timeout:3_000 });
+
+  await page.locator('[data-page-index="2"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
+  assert.ok(await page.locator('#deck-frame').evaluate(frame => frame.contentWindow.scrollY > 900));
+
+  const target = await page.frameLocator('#deck-frame').locator('h2').nth(1)
+    .evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  const applied = await fetch(`${app.url}/api/actions?token=${app.token}`, {
+    method:'POST',
+    headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({
+      expectedRevision:0,
+      taskId:null,
+      actions:[{ id:'late-hydration-action', taskId:null, target, kind:'setText', payload:{ text:'新 canvas 动作' } }],
+    }),
+  });
+  assert.equal(applied.status, 200, await applied.text());
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument?.querySelectorAll('h2')[1]?.textContent
+      === '新 canvas 动作'
+  ));
+
+  const write = await fetch(`${app.url}/api/write-deck?token=${app.token}`, {
+    method:'POST',
+    headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:1 }),
+  });
+  const body = await write.json();
+  assert.equal(write.status, 409, JSON.stringify(body));
+  assert.equal(body.code, 'NEW_OVERFLOW', JSON.stringify(body));
+  assert.ok(body.blockers.some(item => item.kind === 'section' && item.x === 10), JSON.stringify(body));
   assert.deepEqual(resourceProblems, []);
 });
 
@@ -288,3 +382,34 @@ test('frame bridge 复用真实 inline runtime 且不请求外部 runtime', asyn
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
+
+for (const runtimeCase of [
+  {
+    name:'foreign truthy global',
+    code:'RUNTIME_GLOBAL_CONFLICT',
+    script:'window.HuaweiDeckPatchRuntime={foreign:true};',
+  },
+  {
+    name:'old branded incompatible runtime',
+    code:'RUNTIME_INCOMPATIBLE',
+    script:`window.HuaweiDeckPatchRuntime={contract:${JSON.stringify({ ...RUNTIME_CONTRACT, schema:0, version:'0.9.0' })}};`,
+  },
+]) {
+  test(`frame bridge 对 ${runtimeCase.name} 明确显示 ${runtimeCase.code}`, async t => {
+    const app = await startFixtureServer({
+      fixtureTransform:fixture => fixture.replace(
+        '<script src="../../runtime/patch-runtime.js"></script>',
+        `<script>${runtimeCase.script}</script>`,
+      ),
+    });
+    t.after(() => app.close());
+    const chromium = await loadChromium();
+    const browser = await chromium.launch({ channel:'chrome', headless:true });
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport:{ width:1440, height:900 } });
+    await page.goto(`${app.url}/?token=${app.token}&editorToken=${app.editorToken}`);
+    const error = page.locator('[data-deck-error]');
+    await error.waitFor({ state:'visible', timeout:3_000 });
+    assert.match(await error.innerText(), new RegExp(runtimeCase.code));
+  });
+}

@@ -1,7 +1,35 @@
 import { normalizeRect } from '/editor/protocol.mjs';
 
-async function ensurePatchRuntime() {
-  if (window.HuaweiDeckPatchRuntime) return window.HuaweiDeckPatchRuntime;
+const RUNTIME_CONTRACT = Object.freeze({
+  brand:'com.huawei.deck.visual-editor.patch-runtime',
+  schema:1,
+  version:'1.0.0',
+  api:'pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,pendingTransactionCount,activeActionCount,suspendedTargetCount',
+});
+
+function runtimeError(code, message = code) {
+  return Object.assign(new Error(message), { code });
+}
+
+function validatePatchRuntime(runtime) {
+  const seen = runtime?.contract;
+  const compatible = seen?.brand === RUNTIME_CONTRACT.brand
+    && seen.schema === RUNTIME_CONTRACT.schema
+    && seen.version === RUNTIME_CONTRACT.version
+    && seen.api === RUNTIME_CONTRACT.api
+    && RUNTIME_CONTRACT.api.split(',').every(name => typeof runtime[name] === 'function');
+  if (compatible) return runtime;
+  throw runtimeError(seen?.brand === RUNTIME_CONTRACT.brand
+    ? 'RUNTIME_INCOMPATIBLE' : 'RUNTIME_GLOBAL_CONFLICT');
+}
+
+function abortError() {
+  return new DOMException('页面已卸载', 'AbortError');
+}
+
+async function ensurePatchRuntime(signal) {
+  if (signal.aborted) throw abortError();
+  if (window.HuaweiDeckPatchRuntime) return validatePatchRuntime(window.HuaweiDeckPatchRuntime);
   window.__HuaweiDeckPatchRuntimeLoading ??= new Promise((resolvePromise, reject) => {
     const existing = [...document.scripts].find(script => {
       if (!script.src) return false;
@@ -11,8 +39,12 @@ async function ensurePatchRuntime() {
       src: '/editor/patch-runtime.js',
     });
     const finish = () => {
-      if (window.HuaweiDeckPatchRuntime) resolvePromise(window.HuaweiDeckPatchRuntime);
-      else reject(new Error('补丁运行时加载失败'));
+      try {
+        if (window.HuaweiDeckPatchRuntime) resolvePromise(validatePatchRuntime(window.HuaweiDeckPatchRuntime));
+        else reject(runtimeError('RUNTIME_LOAD_FAILED', '补丁运行时加载失败'));
+      } catch (error) {
+        reject(error);
+      }
     };
     if (existing) {
       if (window.HuaweiDeckPatchRuntime) finish();
@@ -26,57 +58,32 @@ async function ensurePatchRuntime() {
     script.addEventListener('error', reject, { once: true });
     document.head.append(script);
   });
-  return window.__HuaweiDeckPatchRuntimeLoading;
+  return Promise.race([
+    window.__HuaweiDeckPatchRuntimeLoading,
+    new Promise((_, reject) => signal.addEventListener('abort', () => reject(abortError()), { once:true })),
+  ]);
 }
 
-function waitForCanvases() {
-  const find = () => [...document.querySelectorAll('.stage .slide-canvas')];
-  const capture = () => {
-    const canvases = find();
-    return {
-      canvases,
-      structures:canvases.map(canvas => (
-        canvas.querySelector('section[data-label]')?.outerHTML ?? canvas.outerHTML
-      )),
-    };
-  };
-  const same = (left, right) => left.canvases.length === right.canvases.length
-    && left.canvases.every((canvas, index) => (
-      canvas === right.canvases[index]
-      && canvas.isConnected
-      && left.structures[index] === right.structures[index]
-    ));
-  return new Promise(resolvePromise => {
-    let candidate = capture();
-    let settleTimer;
-    const settle = () => {
-      const current = capture();
-      if (!current.canvases.length) return;
-      if (!same(candidate, current)) candidate = current;
-      clearTimeout(settleTimer);
-      settleTimer = setTimeout(() => {
-        const latest = capture();
-        if (!same(candidate, latest)) {
-          candidate = latest;
-          settle();
-          return;
-        }
-        observer.disconnect();
-        resolvePromise(latest.canvases);
-      }, 500);
-    };
-    const observer = new MutationObserver(() => {
-      candidate = capture();
-      settle();
-    });
-    observer.observe(document.documentElement, {
-      attributes:true, childList:true, characterData:true, subtree:true,
-    });
-    settle();
-  });
+const startupController = new AbortController();
+const abortStartup = () => startupController.abort();
+window.addEventListener('pagehide', abortStartup, { once:true });
+
+let runtime;
+try {
+  runtime = await ensurePatchRuntime(startupController.signal);
+} catch (error) {
+  if (error.name !== 'AbortError') {
+    parent.postMessage({
+      type:'deck-error',
+      code:error.code || 'RUNTIME_LOAD_FAILED',
+      message:error.message || '补丁运行时加载失败',
+    }, location.origin);
+  }
+  window.removeEventListener('pagehide', abortStartup);
 }
 
-const [runtime, canvases] = await Promise.all([ensurePatchRuntime(), waitForCanvases()]);
+if (runtime) {
+let canvases = [];
 let mode = 'preview';
 let dragging = null;
 let activePopover = null;
@@ -88,7 +95,111 @@ let transformSelection = null;
 const pendingManual = new Map();
 const tentativeCommands = new Map();
 let statusTimer;
+let canvasMonitor;
 const INTERACTIVE_TRANSFORM_SELECTOR = 'svg,a,button,input,select,textarea,iframe,[role="button"],.layer-panel';
+
+function structuralSignature(canvas) {
+  const source = canvas.querySelector('section[data-label]') ?? canvas;
+  const structure = [source, ...source.querySelectorAll('*')].map(node => (
+    `${node.tagName}:${node.childElementCount}:${node.dataset.label ?? ''}:${node.dataset.idx ?? ''}`
+  )).join('|');
+  return `${runtime.pageKey(canvas)}\0${structure}`;
+}
+
+function createCanvasMonitor(onPublish, signal) {
+  const QUIET_MS = 100;
+  const MAX_WAIT_MS = 1_200;
+  const capture = () => {
+    const nextCanvases = [...document.querySelectorAll('.stage .slide-canvas')];
+    return {
+      stage:nextCanvases[0]?.closest('.stage') ?? document.querySelector('.stage'),
+      canvases:nextCanvases,
+      signatures:nextCanvases.map(structuralSignature),
+    };
+  };
+  const same = (left, right) => Boolean(left && right)
+    && left.canvases.length === right.canvases.length
+    && left.canvases.every((canvas, index) => (
+      canvas === right.canvases[index]
+      && canvas.isConnected
+      && left.signatures[index] === right.signatures[index]
+    ));
+  const mutationTouchesStage = record => record.target?.closest?.('.stage')
+    || [...record.addedNodes, ...record.removedNodes].some(node => (
+      node.nodeType === Node.ELEMENT_NODE
+      && (node.matches?.('.stage,.slide-canvas') || node.querySelector?.('.stage,.slide-canvas'))
+    ));
+  let candidate;
+  let published;
+  let observedStage;
+  let quietTimer;
+  let maxTimer;
+  let stopped = false;
+  const stageObserver = new MutationObserver(records => {
+    const relevant = records.some(record => {
+      if (record.type !== 'attributes') return true;
+      return !['style', 'class', 'hidden', 'contenteditable', 'spellcheck', 'data-active',
+        'data-shown', 'data-direct-editing'].includes(record.attributeName)
+        && !record.attributeName.startsWith('aria-');
+    });
+    if (relevant) consider();
+  });
+  const bindStage = stage => {
+    if (stage === observedStage) return;
+    stageObserver.disconnect();
+    observedStage = stage;
+    if (stage) stageObserver.observe(stage, {
+      attributes:true, childList:true, characterData:true, subtree:true,
+    });
+  };
+  const publish = () => {
+    clearTimeout(quietTimer);
+    clearTimeout(maxTimer);
+    quietTimer = undefined;
+    maxTimer = undefined;
+    const latest = capture();
+    bindStage(latest.stage);
+    candidate = latest;
+    if (!latest.canvases.length || same(published, latest)) return;
+    if (onPublish(latest.canvases) === false) {
+      quietTimer = setTimeout(publish, QUIET_MS);
+      maxTimer ??= setTimeout(publish, MAX_WAIT_MS);
+      return;
+    }
+    published = latest;
+  };
+  function consider() {
+    if (stopped) return;
+    const latest = capture();
+    bindStage(latest.stage);
+    if (!latest.canvases.length) {
+      candidate = latest;
+      clearTimeout(quietTimer);
+      quietTimer = undefined;
+      return;
+    }
+    if (same(candidate, latest)) return;
+    candidate = latest;
+    clearTimeout(quietTimer);
+    quietTimer = setTimeout(publish, QUIET_MS);
+    maxTimer ??= setTimeout(publish, MAX_WAIT_MS);
+  }
+  const documentObserver = new MutationObserver(records => {
+    if (records.some(mutationTouchesStage)) consider();
+  });
+  documentObserver.observe(document.documentElement, { childList:true, subtree:true });
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    clearTimeout(quietTimer);
+    clearTimeout(maxTimer);
+    documentObserver.disconnect();
+    stageObserver.disconnect();
+  };
+  signal.addEventListener('abort', stop, { once:true });
+  consider();
+  return { stop };
+}
 
 const style = document.createElement('style');
 style.dataset.deckEditorUi = '';
@@ -1025,6 +1136,8 @@ function onParentMessage(event) {
 function teardown() {
   if (tornDown) return;
   tornDown = true;
+  startupController.abort();
+  canvasMonitor?.stop();
   clearTimeout(highlightTimer);
   clearTimeout(statusTimer);
   finishDirectEdit();
@@ -1050,6 +1163,7 @@ function teardown() {
   window.removeEventListener('pointerup', finishPointer, true);
   window.removeEventListener('pointercancel', cancelPointer, true);
   window.removeEventListener('pagehide', teardown);
+  window.removeEventListener('pagehide', abortStartup);
 }
 
 if (parent !== window) {
@@ -1061,13 +1175,24 @@ if (parent !== window) {
   window.addEventListener('pointerup', finishPointer, true);
   window.addEventListener('pointercancel', cancelPointer, true);
   window.addEventListener('pagehide', teardown);
-  parent.postMessage({
-    type: 'deck-ready',
-    pages: canvases.map((canvas, index) => ({
-      index: index + 1,
-      label: canvas.querySelector('section[data-label]')?.dataset.label ?? `第 ${index + 1} 页`,
-      pageKey: runtime.pageKey(canvas),
-    })),
-    diagnostics: diagnosePages(),
-  }, location.origin);
+  canvasMonitor = createCanvasMonitor(nextCanvases => {
+    if (dragging || directEdit || transformDrag || transformSelection
+      || activePopover || pendingManual.size > 0 || tentativeCommands.size > 0) return false;
+    finishDirectEdit();
+    cancelTransformDrag();
+    removeTransformSelection();
+    removePopover();
+    canvases = nextCanvases;
+    parent.postMessage({
+      type: 'deck-ready',
+      pages: canvases.map((canvas, index) => ({
+        index: index + 1,
+        label: canvas.querySelector('section[data-label]')?.dataset.label ?? `第 ${index + 1} 页`,
+        pageKey: runtime.pageKey(canvas),
+      })),
+      diagnostics: diagnosePages(),
+    }, location.origin);
+    return true;
+  }, startupController.signal);
+}
 }

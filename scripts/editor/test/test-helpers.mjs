@@ -9,8 +9,9 @@ export async function startFixtureServer(options = {}) {
   const deckPath = join(root, 'minimal-deck.html');
   if (options.bundle) {
     const wrapper = await readFile(resolve('assets/template-deck.html'), 'utf8');
-    const template = (await readFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), 'utf8'))
+    let template = (await readFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), 'utf8'))
       .replace('../../runtime/patch-runtime.js', '/editor/patch-runtime.js');
+    if (typeof options.fixtureTransform === 'function') template = options.fixtureTransform(template);
     const lines = wrapper.split('\n');
     const manifest = lines.findIndex(line => line.trim() === '<script type="__bundler/manifest">');
     const bundledTemplate = lines.findIndex(line => line.trim() === '<script type="__bundler/template">');
@@ -56,7 +57,16 @@ export async function startFixtureServer(options = {}) {
   }
 }
 
-export async function openEditor(app) {
+export function classifyResourceFailure(failure, options = {}) {
+  const exactPilotCancellation = options.allowPilotDocumentBlobAbort === true
+    && options.cancellationCount === 0
+    && failure.resourceType === 'document'
+    && failure.url.startsWith(`blob:${options.appUrl}/`)
+    && failure.errorText === 'net::ERR_ABORTED';
+  return exactPilotCancellation ? 'pilot-cancellation' : 'problem';
+}
+
+export async function openEditor(app, options = {}) {
   const chromium = await loadChromium();
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
   try {
@@ -71,9 +81,17 @@ export async function openEditor(app) {
     page.on('pageerror', error => browserProblems.push(error.message));
     page.on('request', request => resourceRequests.push(request.url()));
     page.on('requestfailed', request => {
-      const detail = `${request.resourceType()} ${request.url()} ${request.failure()?.errorText ?? ''}`;
-      if (request.resourceType() === 'document' && request.url().startsWith('blob:')
-        && request.failure()?.errorText === 'net::ERR_ABORTED') {
+      const failure = {
+        resourceType:request.resourceType(),
+        url:request.url(),
+        errorText:request.failure()?.errorText ?? '',
+      };
+      const detail = `${failure.resourceType} ${failure.url} ${failure.errorText}`;
+      if (classifyResourceFailure(failure, {
+        appUrl:app.url,
+        allowPilotDocumentBlobAbort:options.allowPilotDocumentBlobAbort,
+        cancellationCount:resourceCancellations.length,
+      }) === 'pilot-cancellation') {
         resourceCancellations.push(detail);
       } else {
         resourceProblems.push(detail);
@@ -90,7 +108,7 @@ export async function openEditor(app) {
     await page.waitForSelector('#deck-frame', { timeout: 3_000 });
     // iframe 元素出现早于 frame bridge 完成稳定 canvas 发现；测试交互必须等 deck-ready
     // 已渲染页序，否则首个模式切换/拖拽可能在 bridge 注册监听器前丢失。
-    await page.waitForSelector('[data-page-key]', { timeout: 12_000 });
+    await page.waitForSelector('[data-page-key]', { timeout:options.readyTimeoutMs ?? 12_000 });
     return {
       browser, page, browserProblems, resourceProblems, resourceCancellations, resourceRequests,
     };

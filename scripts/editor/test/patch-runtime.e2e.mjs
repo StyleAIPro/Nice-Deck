@@ -1,9 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { loadChromium } from '../../verify/load-playwright.mjs';
 import { PatchJournal } from '../patch-journal.mjs';
+
+const RUNTIME_CONTRACT = {
+  brand:'com.huawei.deck.visual-editor.patch-runtime',
+  schema:1,
+  version:'1.0.0',
+  api:'pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,pendingTransactionCount,activeActionCount,suspendedTargetCount',
+};
 
 test('公开动作登记后定位第二个同名页并在 DOM 重建后幂等重放', async t => {
   const chromium = await loadChromium();
@@ -250,6 +258,71 @@ test('同一页面二次加载 patch runtime 复用对象身份与已有动作�
     same:window.HuaweiDeckPatchRuntime === window.__runtimeBeforeSecondLoad,
     active:window.HuaweiDeckPatchRuntime.activeActionCount(),
     text:document.querySelector('h2').textContent,
+    contract:window.HuaweiDeckPatchRuntime.contract,
   }));
-  assert.deepEqual(result, { same:true, active:1, text:'保留状态' });
+  assert.deepEqual(result, { same:true, active:1, text:'保留状态', contract:RUNTIME_CONTRACT });
+});
+
+test('旧 branded runtime 不兼容时稳定拒绝且不覆盖全局对象', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto('about:blank');
+  const source = await readFile(resolve('scripts/editor/runtime/patch-runtime.js'), 'utf8');
+  const result = await page.evaluate(({ runtimeSource, contract }) => {
+    const oldRuntime = { contract:{ ...contract, schema:0, version:'0.9.0' } };
+    window.HuaweiDeckPatchRuntime = oldRuntime;
+    try {
+      (0, eval)(runtimeSource);
+      return { code:null, preserved:window.HuaweiDeckPatchRuntime === oldRuntime };
+    } catch (error) {
+      return { code:error.code, preserved:window.HuaweiDeckPatchRuntime === oldRuntime };
+    }
+  }, { runtimeSource:source, contract:RUNTIME_CONTRACT });
+  assert.deepEqual(result, { code:'RUNTIME_INCOMPATIBLE', preserved:true });
+});
+
+test('foreign truthy runtime 全局冲突时稳定拒绝且不盲目覆盖', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto('about:blank');
+  const source = await readFile(resolve('scripts/editor/runtime/patch-runtime.js'), 'utf8');
+  const result = await page.evaluate(runtimeSource => {
+    const foreignRuntime = { pageKey:'foreign' };
+    window.HuaweiDeckPatchRuntime = foreignRuntime;
+    try {
+      (0, eval)(runtimeSource);
+      return { code:null, preserved:window.HuaweiDeckPatchRuntime === foreignRuntime };
+    } catch (error) {
+      return { code:error.code, preserved:window.HuaweiDeckPatchRuntime === foreignRuntime };
+    }
+  }, source);
+  assert.deepEqual(result, { code:'RUNTIME_GLOBAL_CONFLICT', preserved:true });
+});
+
+test('pageKey 保留 script raw-text 内 blob 字符串差异', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const stage = document.querySelector('.stage');
+    const original = stage.querySelector('.slide-canvas');
+    const script = document.createElement('script');
+    script.type = 'application/json';
+    script.textContent = String.raw`{"template":"<img src=\"blob:a\">"}`;
+    original.querySelector('section').append(script);
+    const first = runtime.pageKey(original);
+    const replacement = original.cloneNode(true);
+    replacement.querySelector('script').textContent = String.raw`{"template":"<img src=\"blob:b\">"}`;
+    original.replaceWith(replacement);
+    const second = runtime.pageKey(replacement);
+    return { first, second };
+  });
+  assert.notEqual(result.first, result.second);
 });

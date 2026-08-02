@@ -67,6 +67,16 @@ test('pageKey 忽略每次加载变化的 blob URL 但保留真实结构差异',
   );
 });
 
+test('pageKey 仅归一化 start-tag 属性并保留 script raw-text 中 blob 字符串', () => {
+  const rawFirst = '<section><script>const tpl = `<img src="blob:a">`;</script></section>';
+  const rawSecond = '<section><script>const tpl = `<img src="blob:b">`;</script></section>';
+  assert.notEqual(makePageKey(9, '真实页', rawFirst), makePageKey(9, '真实页', rawSecond));
+  assert.equal(
+    makePageKey(9, '真实页', '<section><script src="blob:a">same()</script></section>'),
+    makePageKey(9, '真实页', '<section><script src="blob:b">same()</script></section>'),
+  );
+});
+
 test('拒绝越界任务和任意动作类型', () => {
   assert.throws(() => validateTask({ pageKey: 'p', rect: { x: -1, y: 0, w: 10, h: 10 }, instruction: '改' }));
   assert.throws(() => validateAction({ kind: 'replaceOuterHTML', payload: {} }));

@@ -223,7 +223,7 @@ test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重
     deckPath, host:'127.0.0.1', port:0, openBrowser:false,
     token:'renzhi-pilot', editorToken:'renzhi-pilot-editor',
   });
-  const opened = await openEditor(resources.app);
+  const opened = await openEditor(resources.app, { allowPilotDocumentBlobAbort:true });
   resources.browser = opened.browser;
   opened.page.setDefaultTimeout(12_000);
   await waitForPages(opened.page);
@@ -295,7 +295,7 @@ test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重
     deckPath, host:'127.0.0.1', port:0, openBrowser:false,
     token:'renzhi-reopen', editorToken:'renzhi-reopen-editor',
   });
-  const reopened = await openEditor(resources.reopened);
+  const reopened = await openEditor(resources.reopened, { allowPilotDocumentBlobAbort:true });
   resources.reopenedBrowser = reopened.browser;
   reopened.page.setDefaultTimeout(12_000);
   await waitForPages(reopened.page);

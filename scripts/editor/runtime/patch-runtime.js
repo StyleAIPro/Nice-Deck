@@ -1,10 +1,84 @@
 (() => {
+  const contract=Object.freeze({
+    brand:'com.huawei.deck.visual-editor.patch-runtime',schema:1,version:'1.0.0',
+    api:'pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,pendingTransactionCount,activeActionCount,suspendedTargetCount',
+  });
+  const contractError=code => Object.assign(new Error(code),{code});
+  const compatible=runtime => {
+    const seen=runtime?.contract;
+    return seen?.brand===contract.brand && seen.schema===contract.schema
+      && seen.version===contract.version && seen.api===contract.api
+      && contract.api.split(',').every(name => typeof runtime[name]==='function');
+  };
   // 编辑预览可能先加载受保护 runtime，保存后的 bundle 随后再解包同一份 inline runtime。
   // 二次加载必须复用已登记的 pageKey、locator 与动作状态，不能覆盖全局实例。
-  if (window.HuaweiDeckPatchRuntime) return;
+  if (window.HuaweiDeckPatchRuntime) {
+    if (compatible(window.HuaweiDeckPatchRuntime)) return;
+    throw contractError(window.HuaweiDeckPatchRuntime.contract?.brand===contract.brand
+      ? 'RUNTIME_INCOMPATIBLE' : 'RUNTIME_GLOBAL_CONFLICT');
+  }
   const slides = () => [...document.querySelectorAll('.stage .slide-canvas')];
   const fnv1a = text => { let h=2166136261; for (const c of text) { h ^= c.charCodeAt(0); h = Math.imul(h,16777619); } return (h>>>0).toString(16).padStart(8,'0'); };
-  const pageStructure = html => String(html).replace(/\b(src|href)=("blob:[^"]*"|'blob:[^']*')/gi,'$1="blob:"');
+  const normalizeTag=tag => {
+    let cursor=0,index=1,normalized='';
+    while (index<tag.length && !/[\s/>]/.test(tag[index])) index+=1;
+    while (index<tag.length) {
+      while (/\s/.test(tag[index]??'')) index+=1;
+      if (!tag[index] || tag[index]==='>' || tag[index]==='/') break;
+      const start=index;
+      while (index<tag.length && !/[\s=/>]/.test(tag[index])) index+=1;
+      const name=tag.slice(start,index).toLowerCase();
+      while (/\s/.test(tag[index]??'')) index+=1;
+      if (tag[index]!=='=') continue;
+      index+=1; while (/\s/.test(tag[index]??'')) index+=1;
+      const quote=tag[index];
+      if (quote!=='"' && quote!=="'") {
+        const valueStart=index;
+        while (index<tag.length && !/[\s>]/.test(tag[index])) index+=1;
+        if ((name==='src' || name==='href') && tag.slice(valueStart,index).startsWith('blob:')) {
+          normalized+=`${tag.slice(cursor,valueStart)}blob:`; cursor=index;
+        }
+        continue;
+      }
+      const valueStart=index+1,valueEnd=tag.indexOf(quote,valueStart);
+      if (valueEnd<0) break;
+      if ((name==='src' || name==='href') && tag.slice(valueStart,valueEnd).startsWith('blob:')) {
+        normalized+=`${tag.slice(cursor,valueStart)}blob:`; cursor=valueEnd;
+      }
+      index=valueEnd+1;
+    }
+    return normalized ? normalized+tag.slice(cursor) : tag;
+  };
+  const pageStructure = html => {
+    const source=String(html); let output='',cursor=0,rawTextTag=null;
+    while (cursor<source.length) {
+      const start=source.indexOf('<',cursor);
+      if (start<0) return output+source.slice(cursor);
+      output+=source.slice(cursor,start);
+      if (rawTextTag) {
+        const close=source.toLowerCase().indexOf(`</${rawTextTag}`,start);
+        if (close<0) return output+source.slice(start);
+        output+=source.slice(start,close); cursor=close; rawTextTag=null; continue;
+      }
+      if (source.startsWith('<!--',start)) {
+        const close=source.indexOf('-->',start+4),next=close<0?source.length:close+3;
+        output+=source.slice(start,next); cursor=next; continue;
+      }
+      let end=start+1,quote='';
+      for (;end<source.length;end+=1) {
+        const char=source[end];
+        if (quote) { if (char===quote) quote=''; }
+        else if (char==='"' || char==="'") quote=char;
+        else if (char==='>') break;
+      }
+      if (end>=source.length) return output+source.slice(start);
+      const tag=source.slice(start,end+1),match=tag.match(/^<\s*([A-Za-z][\w:-]*)/);
+      output+=match?normalizeTag(tag):tag;
+      if (match && ['script','style'].includes(match[1].toLowerCase()) && !/\/\s*>$/.test(tag)) rawTextTag=match[1].toLowerCase();
+      cursor=end+1;
+    }
+    return output;
+  };
   const pageKeys = new WeakMap(), locators = new WeakMap(), resolved = new Map();
   const suspendedTargets = new Set();
   let activeActions = [], activeBaselines = new Map(), replayTimer = 0, tentativeCount = 0;
@@ -387,6 +461,7 @@
     replayTimer=setTimeout(replayActive,30);
   }).observe(document.documentElement,{childList:true,subtree:true});
   window.HuaweiDeckPatchRuntime={
+    contract,
     pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,
     pendingTransactionCount:() => tentativeCount,
     activeActionCount:() => activeActions.length,

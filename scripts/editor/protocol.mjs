@@ -10,11 +10,90 @@ export function stableHash(text) {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
+function normalizeBlobAttributesInTag(tag) {
+  let cursor = 0;
+  let index = 1;
+  let normalized = '';
+  while (index < tag.length && !/[\s/>]/.test(tag[index])) index += 1;
+  while (index < tag.length) {
+    while (/\s/.test(tag[index] ?? '')) index += 1;
+    if (!tag[index] || tag[index] === '>' || tag[index] === '/') break;
+    const nameStart = index;
+    while (index < tag.length && !/[\s=/>]/.test(tag[index])) index += 1;
+    const name = tag.slice(nameStart, index).toLowerCase();
+    while (/\s/.test(tag[index] ?? '')) index += 1;
+    if (tag[index] !== '=') continue;
+    index += 1;
+    while (/\s/.test(tag[index] ?? '')) index += 1;
+    const quote = tag[index];
+    if (quote !== '"' && quote !== "'") {
+      const valueStart = index;
+      while (index < tag.length && !/[\s>]/.test(tag[index])) index += 1;
+      if ((name === 'src' || name === 'href') && tag.slice(valueStart, index).startsWith('blob:')) {
+        normalized += `${tag.slice(cursor, valueStart)}blob:`;
+        cursor = index;
+      }
+      continue;
+    }
+    const valueStart = index + 1;
+    const valueEnd = tag.indexOf(quote, valueStart);
+    if (valueEnd < 0) break;
+    if ((name === 'src' || name === 'href') && tag.slice(valueStart, valueEnd).startsWith('blob:')) {
+      normalized += `${tag.slice(cursor, valueStart)}blob:`;
+      cursor = valueEnd;
+    }
+    index = valueEnd + 1;
+  }
+  return normalized ? normalized + tag.slice(cursor) : tag;
+}
+
+function normalizeBlobResourceAttributes(html) {
+  const source = String(html);
+  let output = '';
+  let cursor = 0;
+  let rawTextTag = null;
+  while (cursor < source.length) {
+    const start = source.indexOf('<', cursor);
+    if (start < 0) return output + source.slice(cursor);
+    output += source.slice(cursor, start);
+    if (rawTextTag) {
+      const close = source.toLowerCase().indexOf(`</${rawTextTag}`, start);
+      if (close < 0) return output + source.slice(start);
+      output += source.slice(start, close);
+      cursor = close;
+      rawTextTag = null;
+      continue;
+    }
+    if (source.startsWith('<!--', start)) {
+      const end = source.indexOf('-->', start + 4);
+      const next = end < 0 ? source.length : end + 3;
+      output += source.slice(start, next);
+      cursor = next;
+      continue;
+    }
+    let end = start + 1;
+    let quote = '';
+    for (; end < source.length; end += 1) {
+      const char = source[end];
+      if (quote) {
+        if (char === quote) quote = '';
+      } else if (char === '"' || char === "'") quote = char;
+      else if (char === '>') break;
+    }
+    if (end >= source.length) return output + source.slice(start);
+    const tag = source.slice(start, end + 1);
+    const match = tag.match(/^<\s*([A-Za-z][\w:-]*)/);
+    output += match ? normalizeBlobAttributesInTag(tag) : tag;
+    if (match && ['script', 'style'].includes(match[1].toLowerCase()) && !/\/\s*>$/.test(tag)) {
+      rawTextTag = match[1].toLowerCase();
+    }
+    cursor = end + 1;
+  }
+  return output;
+}
+
 export function makePageKey(index, label, html) {
-  const structure = String(html).replace(
-    /\b(src|href)=("blob:[^"]*"|'blob:[^']*')/gi,
-    '$1="blob:"',
-  );
+  const structure = normalizeBlobResourceAttributes(html);
   const digest = stableHash(`${index}\0${label}\0${structure}`);
   return `page-${String(index).padStart(3, '0')}-${digest}`;
 }
