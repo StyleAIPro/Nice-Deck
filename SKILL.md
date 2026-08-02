@@ -39,9 +39,9 @@ python3 scripts/deck-editor.py <deck.html>
 python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 ```
 
-在工作台里可用预览、区域标记、文字、移动、缩放五种模式：区域拉框后在旁侧输入修改说明，任务会跨页累积到 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 通过本地 CLI、HTTP、WebSocket 读取任务并提交动作；这不是内置聊天机器人，drawer 只记录任务并给出外部 CLI 提示。
+在工作台里可用预览、区域标记、文字、移动、缩放五种模式：区域拉框后在旁侧输入修改说明，任务会跨页累积到 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 不是内置聊天机器人，只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。drawer 只记录任务并给出外部 CLI 提示。
 
-预览、区域标记和自动会话保存不触碰原始 source deck。会话自动保存在 deck 同目录的 `.huawei-deck-editor/`，包含会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，且已由 `.gitignore` 忽略提交。正式写回必须由用户明确触发：三重闸门依次确认 editor online、文件指纹未变、无新增溢出，并在候选文件上通过 bundle verify；随后由 `scripts/edit-bundle.py` 处理临时文件、备份与原子替换。冲突或验证失败一律拒绝覆盖，不会静默改写源文件。
+预览、区域标记和自动会话保存不触碰原始 source deck。会话自动保存在 deck 同目录的 `.huawei-deck-editor/`，包含会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，且已由 `.gitignore` 忽略提交。正式写回必须由用户明确触发：三重闸门依次确认 editor online、文件指纹未变、无新增溢出，并在候选文件上通过 bundle verify。`scripts/edit-bundle.py` 仅在系统临时工作副本执行 `load`、`get_template`、`set_template`、`save`、`eb.verify`；bundle adapter / writer 负责 sidecar 备份、同目录候选、transaction、fingerprint 复核、`os.replace` 与失败恢复。冲突或验证失败一律拒绝覆盖，不会静默改写源文件。
 
 第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。所有 Agent 动作都要经过 token、revision、locator 与事务校验。session 可在关闭后重开；若出现 `RECOVERY_REQUIRED`，未决恢复状态会阻断继续写回，外部文件变化则应重载，或另存副本后再继续。
 

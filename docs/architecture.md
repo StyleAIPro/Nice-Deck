@@ -161,9 +161,9 @@ python3 scripts/deck-editor.py <deck.html>
 python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 ```
 
-浏览器提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 经本地 CLI、HTTP、WebSocket 读取任务并提交动作；这不是内置聊天机器人，drawer 不承担真实对话或模型调用。
+浏览器提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 不是内置聊天机器人，只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。drawer 不承担真实对话或模型调用。
 
-预览、区域标记和自动会话保存不触碰原始 source deck。`.huawei-deck-editor/` 自动保存会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。正式写回由用户明确触发，三重闸门依次检查 editor online、文件指纹、无新增溢出并执行 bundle verify，随后由 `scripts/edit-bundle.py` 处理临时文件、备份和原子替换；冲突或验证失败拒绝覆盖。
+预览、区域标记和自动会话保存不触碰原始 source deck。`.huawei-deck-editor/` 自动保存会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。正式写回由用户明确触发，三重闸门依次检查 editor online、文件指纹、无新增溢出并执行 bundle verify。`scripts/edit-bundle.py` 仅在系统临时工作副本执行 `load`、`get_template`、`set_template`、`save`、`eb.verify`；bundle adapter / writer 负责 sidecar 备份、同目录候选、transaction、fingerprint 复核、`os.replace` 与失败恢复。冲突或验证失败拒绝覆盖。
 
 第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。Agent 动作受 token、revision、locator 与事务校验。session 可重开；`RECOVERY_REQUIRED` 会让未决恢复状态阻断继续写回，外部文件变化必须重载，或另存副本。
 
@@ -288,7 +288,8 @@ flowchart TD
 
 | 组件 | 职责 |
 |---|---|
-| capability WS | `/events` WebSocket；普通客户端可订阅事件，带独立 `editorToken` 的唯一 editor socket 才能执行页面命令 |
+| observer WebSocket | 普通 token 客户端连接 `/events`，只订阅 revision、task、action、undo / redo 与冲突广播，不能发送动作命令 |
+| editor capability WebSocket | 同一 `/events` 端点上额外携带 `editorToken`；只允许一个 editor client，服务用它下发 frame 事务 / 诊断命令并接收 ACK |
 | `BridgeService` | mutation queue 串行化任务、动作、undo / redo、诊断和写回；执行页面事务与 durable session 的两阶段收敛 |
 | `SessionStore` + `PatchJournal` | session revision、跨页任务、PNG 快照路径、动作组、redo 集与 diagnostics；编译当前权威动作集合 |
 | persistent dirfd helper | Python JSONL 长驻进程；绑定 project / root / session / snapshots / backups / transactions / write-errors 的目录 fd，执行原子持久化 |
@@ -299,8 +300,8 @@ flowchart TD
 
 #### 动作事务
 
-1. 外部 Agent 或 parent 带 `expectedRevision` 与 locator 提交 action；`BridgeService` 经 capability WS 发给唯一 editor client，再由 parent 转交 preview frame。
-2. frame 定位目标并做 tentative 应用，返回逐字段完整的 canonical action；服务端校验 id / kind / target / payload / after 与重复 id。
+1. 外部 Agent 经 `POST /api/actions`，或 parent 经同一 HTTP 路由，带 `expectedRevision` 与 locator 提交 action。
+2. `BridgeService` 通过唯一 editor capability WebSocket 把事务命令发给 parent，再转交 preview frame；frame 定位目标并做 tentative 应用，返回逐字段完整的 canonical action 与 ACK。该 capability 不对外暴露动作提交能力。
 3. `PatchJournal` 把动作组写入候选 session，`SessionStore` durable 落盘并增加 revision；成功后才向 frame 发 commit。持久化失败则发 rollback，DOM 与 runtime 基线恢复。
 4. commit ACK 丢失时以 durable session 为准同步；重连或 iframe-only reload 都用 authoritative compiled 集合重放。undo / redo 也走同一队列和完整集合，而不是只发送单条反向动作。
 
@@ -317,7 +318,7 @@ flowchart TD
 1. mutation queue 检查 revision、editor online 和诊断 ready；
 2. 读取磁盘 fingerprint，与 session 基线及 watch conflict 比较；
 3. frame 针对修改页返回 diagnostics，与启动基线比较，新增 section overflow 或 nested clip 以 `NEW_OVERFLOW` 阻断；
-4. bundle adapter 读取 deck → 创建内容寻址备份 → 在系统临时目录经 `scripts/edit-bundle.py` 注入权威动作 → `eb.verify`；
+4. bundle adapter / writer 经可信 dirfd 读取 deck 并创建 sidecar 内容寻址备份；`scripts/edit-bundle.py` 仅在系统临时工作副本执行 `load` → `get_template` → `set_template` → `save` → `eb.verify`；
 5. 把候选写成 deck 同目录的独占临时文件，再次核对源文件，durable 写入 transaction record；
 6. `os.replace` 原子替换，持久化新的 session fingerprint / diagnostics，最后删除 transaction。
 
@@ -325,7 +326,7 @@ flowchart TD
 
 #### 信任边界
 
-网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由 fingerprint、revision、locator 与 transaction 校验。服务没有任意路径读写 API，外部 Agent 只能使用枚举的 task / action / undo / write-deck 接口。
+网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由 fingerprint、revision、locator 与 transaction 校验。服务没有任意路径读写 API。外部接口严格枚举为 session / status（`GET /api/session`）、tasks（`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`）、actions（`POST /api/actions`）、undo / redo（`POST /api/groups/<GROUP_ID>/undo|redo`）、write-deck（`POST /api/write-deck`）和 observer events（`GET /events` 升级 WebSocket）；唯一 editor capability 只为 frame 事务命令与 ACK 服务。
 
 目标 locator 找不到返回 `TARGET_NOT_FOUND`，不能唯一匹配返回 `TARGET_AMBIGUOUS`；frame 未就绪返回 `EDITOR_OFFLINE`。所有错误都保留稳定 code 与恢复提示，浏览器 tentative 状态和 durable session 不会分叉。
 

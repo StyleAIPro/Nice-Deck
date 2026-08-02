@@ -54,7 +54,6 @@ test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 side
     'sidecar 内容': /\.huawei-deck-editor\/[\s\S]{0,260}会话[\s\S]{0,100}任务[\s\S]{0,100}快照[\s\S]{0,100}动作[\s\S]{0,100}诊断[\s\S]{0,100}备份/,
     'sidecar 不进交付与版本控制': /\.huawei-deck-editor\/[\s\S]{0,300}(?:不进入|不会进入)[^\n]{0,60}(?:交付 deck|最终交付)[\s\S]{0,180}(?:忽略提交|Git 忽略|gitignore)/i,
     '三重写回闸门': /editor online[\s\S]{0,180}文件指纹[\s\S]{0,180}无新增溢出[\s\S]{0,180}(?:bundle verify|eb\.verify)/i,
-    '临时文件备份原子替换': /临时文件[\s\S]{0,120}备份[\s\S]{0,120}原子替换/,
     '预览和自动保存不碰 source deck': /(?:预览|自动会话保存)[\s\S]{0,160}(?:不触碰|不修改)[^\n]{0,50}(?:source deck|原始 deck)/i,
     'Agent 动作安全字段': /token[\s\S]{0,100}revision[\s\S]{0,100}locator[\s\S]{0,100}事务/i,
     '冲突不静默覆盖': /(?:冲突|验证失败)[\s\S]{0,120}(?:不静默覆盖|拒绝覆盖)/,
@@ -90,4 +89,48 @@ test('Skill、README 与架构文档各自承担入口、仓库和开发者职�
     '状态与动作模型': /session registry[\s\S]{0,120}transaction record[\s\S]{0,120}revision[\s\S]{0,120}mutation queue[\s\S]{0,120}canonical action[\s\S]{0,120}authoritative reload/i,
     '信任边界': /loopback[\s\S]{0,100}token[\s\S]{0,100}Origin[\s\S]{0,100}dirfd[\s\S]{0,100}fingerprint/i,
   });
+});
+
+test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与写回职责', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      'Agent 读取 session/status': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,260}\/api\/session/,
+      'Agent 读取 tasks': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,360}\/api\/tasks/,
+      'Agent 提交 actions': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,460}\/api\/actions/,
+      'Agent undo/redo': /\/api\/groups\/<GROUP_ID>\/(?:undo|redo)[\s\S]{0,160}(?:undo|redo)/i,
+      'Agent 正式写回': /\/api\/write-deck/,
+      'observer WS 只订阅 events': /observer WebSocket[\s\S]{0,100}\/events[\s\S]{0,100}(?:只|仅)[^。\n]{0,40}(?:订阅|接收)/i,
+      '唯一 editor capability 只传 frame 事务 ACK': /唯一 editor capability WebSocket[\s\S]{0,160}frame[\s\S]{0,100}(?:事务|命令)[\s\S]{0,80}ACK[\s\S]{0,100}(?:不对外|不能用于|不用于)[^。\n]{0,40}(?:提交|动作)/i,
+      'edit-bundle 只操作系统临时工作副本': /scripts\/edit-bundle\.py[\s\S]{0,120}(?:仅|只)[\s\S]{0,80}系统临时工作副本[\s\S]{0,160}load[\s\S]{0,80}get_template[\s\S]{0,80}set_template[\s\S]{0,80}save[\s\S]{0,80}(?:eb\.verify|verify)/,
+      'adapter writer 负责持久写回': /bundle adapter \/ writer[\s\S]{0,180}sidecar 备份[\s\S]{0,120}同目录候选[\s\S]{0,120}transaction[\s\S]{0,120}fingerprint[\s\S]{0,120}os\.replace[\s\S]{0,120}恢复/i,
+    });
+    assert.doesNotMatch(
+      contents,
+      /外部 (?:Codex|Claude Code|Agent)[^。\n]{0,180}(?:WebSocket|capability WS)[^。\n]{0,120}(?:提交动作|提交 actions)/i,
+      `${file} 错误宣称外部 Agent 可经 WebSocket 提交动作`,
+    );
+    assert.doesNotMatch(
+      contents,
+      /scripts\/edit-bundle\.py[^；。\n]{0,160}(?:处理|生成|创建|负责)[^；。\n]{0,100}(?:备份|transaction|原子替换|os\.replace)/,
+      `${file} 错误把持久备份或原子替换归给 edit-bundle.py`,
+    );
+  }
+});
+
+test('editing guide 不承诺未实现的 drawer 撤销或缩略图', async () => {
+  const documents = await loadDocuments();
+  const guide = documents['references/editing-guide.md'];
+  requireClaims('references/editing-guide.md', guide, {
+    '左栏是文字页序列表和 badge': /左侧文字页序列表[\s\S]{0,100}badge/,
+    'drawer 只做任务记录定位状态': /drawer[\s\S]{0,120}(?:只|仅)[\s\S]{0,80}任务记录[\s\S]{0,80}定位[\s\S]{0,80}状态/,
+    'undo 由 CLI 或 HTTP 完成': /undo[\s\S]{0,100}(?:CLI|HTTP)/i,
+    'redo 由 HTTP 完成': /redo[\s\S]{0,100}HTTP/i,
+  });
+  assert.doesNotMatch(
+    guide,
+    /drawer[^。\n]{0,160}(?:提供|执行|完成|按钮)[^。\n]{0,80}撤销/,
+    'references/editing-guide.md 不得承诺 drawer 撤销',
+  );
+  assert.doesNotMatch(guide, /页缩略图/, 'references/editing-guide.md 左栏不是页缩略图');
 });

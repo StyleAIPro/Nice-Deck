@@ -32,11 +32,13 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 | 移动 | 拖动可定位元素 | 创建 `translate` 动作组 |
 | 缩放 | 选择元素并拖动右下控制点 | 普通元素记录宽高，SVG / 交互组件等记录 scale |
 
-区域任务可以跨页连续添加；左侧页缩略图显示任务数，右下角 Agent 任务 drawer 汇总全部任务，可定位回原页和原区域。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
+区域任务可以跨页连续添加；左侧文字页序列表用 badge 显示任务数。右下角 Agent 任务 drawer 只负责任务记录、定位和状态展示，可定位回原页和原区域；它不负责动作控制。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
 
 ### 0.3 外部 Agent 协作与撤销 / 重做
 
-外部 Codex / Claude Code / Agent 通过本地 CLI、HTTP 或 capability WebSocket 读取任务并提交动作；这不是内置聊天机器人。drawer 的“交给 Agent 处理全部”只显示命令提示，不会假装已调用外部系统。
+`undo` 通过 CLI 或 HTTP 执行，`redo` 通过 HTTP 执行；drawer 不执行二者。
+
+外部 Codex / Claude Code / Agent 不是内置聊天机器人，只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。drawer 的“交给 Agent 处理全部”只显示命令提示，不会假装已调用外部系统。
 
 ```bash
 # 用启动器输出的真实值替换下面两项
@@ -49,7 +51,7 @@ node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" apply ac
 node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" undo GROUP_ID
 ```
 
-`apply` 的动作类型限于 `setText`、`setStyle`、`translate`、`resize`、`hide`、`show`，并必须带当前 `expectedRevision`（传数组时 CLI 会先读取 revision）。drawer 在任务已有动作组时提供“撤销”；CLI 第一版也只暴露 `undo`。完整重做由本地接口 `POST /api/groups/<GROUP_ID>/redo` 执行，仍要携带当前 `expectedRevision`。撤销 / 重做都会让浏览器按权威动作集合重放，不是单纯反改 DOM。
+`apply` 的动作类型限于 `setText`、`setStyle`、`translate`、`resize`、`hide`、`show`，并必须带当前 `expectedRevision`（传数组时 CLI 会先读取 revision）。CLI 第一版只暴露 `undo`；完整重做由 HTTP 接口 `POST /api/groups/<GROUP_ID>/redo` 执行，仍要携带当前 `expectedRevision`。撤销 / 重做都会让浏览器按权威动作集合重放，不是单纯反改 DOM。
 
 ### 0.4 保存会话不等于正式写回
 
@@ -63,7 +65,7 @@ node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" undo GRO
 2. **文件指纹**：磁盘 deck 仍与 session 基线一致，否则 `DECK_CHANGED`；
 3. **验证闸门**：修改页相对基线无新增溢出，随后候选 bundle 通过 `eb.verify`。
 
-通过闸门后，writer 才调用 `scripts/edit-bundle.py` 在系统临时目录生成候选内容：先保留原文件备份，再写同目录临时文件，复查文件指纹，落盘 transaction record，最后用 `os.replace` 原子替换。会话基线更新失败时会尝试从备份恢复；冲突或验证失败不静默覆盖。
+通过闸门后，职责分为两层：`scripts/edit-bundle.py` 仅在系统临时工作副本执行 `load`、`get_template`、`set_template`、`save`、`eb.verify`；bundle adapter / writer 负责 sidecar 备份、同目录候选、transaction、fingerprint 复核、`os.replace` 与失败恢复。会话基线更新失败时会尝试从备份恢复；冲突或验证失败不静默覆盖。
 
 ### 0.5 写回后的验证
 

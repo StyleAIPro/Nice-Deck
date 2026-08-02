@@ -105,7 +105,7 @@ python3 scripts/deck-editor.py <deck.html>
 python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 ```
 
-工作台提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务会跨页累积到右下角 Agent 任务 drawer；简单修改可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 使用启动终端输出的 URL 和 token，经本地 CLI、HTTP 或 WebSocket 读取任务并提交动作；这不是内置聊天机器人，点击 drawer 的“交给 Agent”只显示可复制的 CLI 提示，不会伪装已经调用 Agent。
+工作台提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务会跨页累积到右下角 Agent 任务 drawer；简单修改可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 不是内置聊天机器人；它使用启动终端输出的 URL 和 token，只经 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。点击 drawer 的“交给 Agent”只显示可复制的 CLI 提示，不会伪装已经调用 Agent。
 
 常用的外部 Agent CLI 是：
 
@@ -122,7 +122,7 @@ node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" undo GRO
 
 预览、区域标记和自动会话保存不触碰原始 source deck。任务和直接编辑会自动写入 deck 同目录的 `.huawei-deck-editor/`：其中保存会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck。本仓库 `.gitignore` 已忽略提交该目录，把 deck 放到其他仓库时也应加入相同规则。
 
-自动保存 session 不等于修改正式文件。正式写回必须由用户明确触发；当前第一版没有内置聊天，也没有 CLI `write` 子命令，由外部 Agent 在确认后调用本地 `POST /api/write-deck`。三重闸门依次检查 editor online、文件指纹未变、无新增溢出，并在候选文件上执行 bundle verify；通过后才由 `scripts/edit-bundle.py` 生成临时文件、创建备份并原子替换。冲突或验证失败会拒绝覆盖，不会静默修改 deck。
+自动保存 session 不等于修改正式文件。正式写回必须由用户明确触发；当前第一版没有内置聊天，也没有 CLI `write` 子命令，由外部 Agent 在确认后调用本地 `POST /api/write-deck`。三重闸门依次检查 editor online、文件指纹未变、无新增溢出，并在候选文件上执行 bundle verify。`scripts/edit-bundle.py` 仅在系统临时工作副本执行 `load`、`get_template`、`set_template`、`save`、`eb.verify`；bundle adapter / writer 负责 sidecar 备份、同目录候选、transaction、fingerprint 复核、`os.replace` 与失败恢复。冲突或验证失败会拒绝覆盖，不会静默修改 deck。
 
 第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。Agent 动作受 token、revision、locator 与事务校验。关闭服务后可重开同一 session；若出现 `RECOVERY_REQUIRED`，未决恢复状态会阻断继续写回；若 source deck 被外部修改，应重载，或另存副本后再继续。
 
