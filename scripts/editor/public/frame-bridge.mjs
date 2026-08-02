@@ -31,16 +31,48 @@ async function ensurePatchRuntime() {
 
 function waitForCanvases() {
   const find = () => [...document.querySelectorAll('.stage .slide-canvas')];
-  const current = find();
-  if (current.length) return Promise.resolve(current);
+  const capture = () => {
+    const canvases = find();
+    return {
+      canvases,
+      structures:canvases.map(canvas => (
+        canvas.querySelector('section[data-label]')?.outerHTML ?? canvas.outerHTML
+      )),
+    };
+  };
+  const same = (left, right) => left.canvases.length === right.canvases.length
+    && left.canvases.every((canvas, index) => (
+      canvas === right.canvases[index]
+      && canvas.isConnected
+      && left.structures[index] === right.structures[index]
+    ));
   return new Promise(resolvePromise => {
+    let candidate = capture();
+    let settleTimer;
+    const settle = () => {
+      const current = capture();
+      if (!current.canvases.length) return;
+      if (!same(candidate, current)) candidate = current;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        const latest = capture();
+        if (!same(candidate, latest)) {
+          candidate = latest;
+          settle();
+          return;
+        }
+        observer.disconnect();
+        resolvePromise(latest.canvases);
+      }, 500);
+    };
     const observer = new MutationObserver(() => {
-      const canvases = find();
-      if (!canvases.length) return;
-      observer.disconnect();
-      resolvePromise(canvases);
+      candidate = capture();
+      settle();
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.documentElement, {
+      attributes:true, childList:true, characterData:true, subtree:true,
+    });
+    settle();
   });
 }
 
@@ -145,8 +177,23 @@ function showPage(pageKey) {
     parent.postMessage({ type: 'page-shown', pageKey, shown: false, reason: 'PAGE_NOT_FOUND' }, location.origin);
     return null;
   }
-  const top = canvas.getBoundingClientRect().top + window.scrollY;
-  window.scrollTo({ top, left: 0, behavior: 'auto' });
+  const stage = canvas.closest('.stage');
+  const stageStyle = stage ? getComputedStyle(stage) : null;
+  const stageScrolls = stage && ['auto', 'scroll', 'overlay'].includes(stageStyle.overflowY)
+    && stage.scrollHeight > stage.clientHeight;
+  if (stageScrolls) {
+    const scrollTarget = canvas.closest('.slide-fit') ?? canvas;
+    const stageRect = stage.getBoundingClientRect();
+    const targetRect = scrollTarget.getBoundingClientRect();
+    stage.scrollTo({
+      top:stage.scrollTop + targetRect.top - stageRect.top,
+      left:stage.scrollLeft,
+      behavior:'auto',
+    });
+  } else {
+    const top = canvas.getBoundingClientRect().top + window.scrollY;
+    window.scrollTo({ top, left: 0, behavior: 'auto' });
+  }
   requestAnimationFrame(() => {
     parent.postMessage({ type: 'page-shown', pageKey, shown: true }, location.origin);
   });

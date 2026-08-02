@@ -62,7 +62,10 @@ test('拉框弹输入框并跨页持久化两条任务', async t => {
   }
 
   await page.reload();
-  await page.waitForFunction(() => document.querySelectorAll('[data-task-row]').length === 2);
+  await page.waitForFunction(() => (
+    document.querySelectorAll('[data-task-row]').length === 2
+    && document.querySelectorAll('[data-page-badge]').length === 2
+  ));
   assert.equal(await page.locator('[data-task-row]').count(), 2);
   assert.deepEqual(await page.locator('[data-page-badge]').allTextContents(), ['1', '1']);
 

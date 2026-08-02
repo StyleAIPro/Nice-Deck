@@ -37,8 +37,16 @@ let seenOnline = false;
 const createRequests = new Set();
 const manualRequests = new Set();
 const commandReplies = new Map();
+const pendingFrameCommands = new Map();
 const MAX_SNAPSHOT_BYTES = 512 * 1024;
 
+function onDeckFrameLoad() {
+  // document load 早于 frame bridge 的稳定 canvas 发现；此窗口内的 Agent 命令必须排队。
+  deckReady = false;
+  deckReadyPayload = undefined;
+}
+
+deckFrame.addEventListener('load', onDeckFrameLoad);
 deckFrame.src = `/preview?token=${encodeURIComponent(token)}`;
 
 function endpoint(pathname) {
@@ -211,6 +219,7 @@ function renderPages(nextPages) {
     button.className = 'page-item';
     button.dataset.pageKey = page.pageKey;
     button.dataset.pageIndex = String(page.index);
+    button.dataset.pageLabel = page.label;
     button.dataset.pageTitle = `${String(page.index).padStart(2, '0')} ${page.label}`;
     button.setAttribute('aria-current', 'false');
     const label = document.createElement('span');
@@ -346,6 +355,10 @@ function onFrameMessage(event) {
     deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode: editorMode }, location.origin);
     if (loadedSessionRevision >= revision) syncSessionActions();
     else void ensureSessionRevision(revision).catch(() => {});
+    for (const command of pendingFrameCommands.values()) {
+      deckFrame.contentWindow?.postMessage(command, location.origin);
+    }
+    pendingFrameCommands.clear();
     return;
   }
   if (event.data?.type === 'create-region-task') {
@@ -426,7 +439,8 @@ eventsClient = connectEvents({
     if (replyTypes[event?.type] && typeof event.commandId === 'string') {
       const reply = commandReplies.get(`${replyTypes[event.type]}:${event.commandId}`);
       if (reply) eventsClient?.send(reply);
-      else deckFrame.contentWindow?.postMessage(event, location.origin);
+      else if (deckReady) deckFrame.contentWindow?.postMessage(event, location.origin);
+      else pendingFrameCommands.set(event.commandId, event);
       return;
     }
     updateRevision(event?.revision);
@@ -460,6 +474,8 @@ function teardown() {
   eventsClient?.close();
   resizeObserver.disconnect();
   cancelAnimationFrame(fitFrameRequest);
+  pendingFrameCommands.clear();
+  deckFrame.removeEventListener('load', onDeckFrameLoad);
   for (const button of modeButtons) button.removeEventListener('click', onModeClick);
   window.removeEventListener('message', onFrameMessage);
   window.removeEventListener('pagehide', teardown);

@@ -45,6 +45,18 @@ def directory_identity(path):
 
 
 class BundleAdapterTest(unittest.TestCase):
+    def test_saved_patches_wait_for_stable_canvas_structure_before_apply(self):
+        block = bundle_adapter._block([{"kind": "setText"}])
+
+        self.assertIn("deckEditorApplyWhenStable", block)
+        self.assertIn("section?.outerHTML", block)
+        self.assertIn("setTimeout(check,100)", block)
+        self.assertNotIn(
+            ";window.HuaweiDeckPatchRuntime.applyAll?.(JSON.parse(document."
+            'getElementById("huawei-deck-editor-patches").textContent));',
+            block,
+        )
+
     def test_write_is_idempotent_and_backup_is_exact(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"

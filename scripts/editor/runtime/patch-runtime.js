@@ -1,6 +1,10 @@
 (() => {
+  // 编辑预览可能先加载受保护 runtime，保存后的 bundle 随后再解包同一份 inline runtime。
+  // 二次加载必须复用已登记的 pageKey、locator 与动作状态，不能覆盖全局实例。
+  if (window.HuaweiDeckPatchRuntime) return;
   const slides = () => [...document.querySelectorAll('.stage .slide-canvas')];
   const fnv1a = text => { let h=2166136261; for (const c of text) { h ^= c.charCodeAt(0); h = Math.imul(h,16777619); } return (h>>>0).toString(16).padStart(8,'0'); };
+  const pageStructure = html => String(html).replace(/\b(src|href)=("blob:[^"]*"|'blob:[^']*')/gi,'$1="blob:"');
   const pageKeys = new WeakMap(), locators = new WeakMap(), resolved = new Map();
   const suspendedTargets = new Set();
   let activeActions = [], activeBaselines = new Map(), replayTimer = 0, tentativeCount = 0;
@@ -9,7 +13,7 @@
     if (pageKeys.has(canvas)) return pageKeys.get(canvas);
     const index = slides().indexOf(canvas) + 1;
     const section = canvas.querySelector('section[data-label]');
-    const key = `page-${String(index).padStart(3,'0')}-${fnv1a(`${index}\0${section?.dataset.label ?? ''}\0${section?.outerHTML ?? ''}`)}`;
+    const key = `page-${String(index).padStart(3,'0')}-${fnv1a(`${index}\0${section?.dataset.label ?? ''}\0${pageStructure(section?.outerHTML ?? '')}`)}`;
     pageKeys.set(canvas, key); return key;
   };
   const pathOf = (root, el) => {

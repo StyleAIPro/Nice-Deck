@@ -28,8 +28,31 @@ def _block(patches):
         f'{BEGIN}\n<script type="application/json" '
         f'id="huawei-deck-editor-patches">{data}</script>\n'
         f"<script>{runtime}\n"
-        ";window.HuaweiDeckPatchRuntime.applyAll?.(JSON.parse(document."
-        'getElementById("huawei-deck-editor-patches").textContent));</script>\n'
+        ";(() => {\n"
+        "  const deckEditorApplyWhenStable=()=>{\n"
+        "    const patches=JSON.parse(document.getElementById("
+        "\"huawei-deck-editor-patches\").textContent);\n"
+        "    let previous=null;\n"
+        "    const check=()=>{\n"
+        "      const canvases=[...document.querySelectorAll("
+        "\".stage .slide-canvas\")];\n"
+        "      const signature=JSON.stringify(canvases.map((canvas,index)=>{\n"
+        "        const section=canvas.querySelector(\"section[data-label]\");\n"
+        "        return [index,section?.dataset.label??\"\",section?.outerHTML??\"\"];\n"
+        "      }));\n"
+        "      if(canvases.length&&signature===previous){\n"
+        "        window.HuaweiDeckPatchRuntime.applyAll?.(patches);\n"
+        "        return;\n"
+        "      }\n"
+        "      previous=signature;\n"
+        "      setTimeout(check,100);\n"
+        "    };\n"
+        "    check();\n"
+        "  };\n"
+        "  if(document.readyState===\"loading\")document.addEventListener("
+        "\"DOMContentLoaded\",deckEditorApplyWhenStable,{once:true});\n"
+        "  else deckEditorApplyWhenStable();\n"
+        "})();</script>\n"
         f"{END}"
     )
 

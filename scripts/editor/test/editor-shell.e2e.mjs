@@ -66,6 +66,63 @@ test('iframe 挂载后发现两个同名页并显示独立页序', async t => {
   assert.deepEqual(resourceProblems, []);
 });
 
+test('Deck 首帧异步替换 canvas 后导航仍绑定稳定的当前页面', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace('</body>', `
+<script>
+setTimeout(() => {
+  const stage = document.querySelector('.stage');
+  stage.replaceChildren(...[...stage.children].map(canvas => canvas.cloneNode(true)));
+}, 250);
+</script>
+</body>`),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  await page.waitForFunction(() => document.querySelectorAll('[data-page-key]').length === 2);
+
+  const navigationKeys = await page.locator('[data-page-key]').evaluateAll(elements => (
+    elements.map(element => element.dataset.pageKey)
+  ));
+  const currentKeys = await page.locator('#deck-frame').evaluate(frame => {
+    const runtime = frame.contentWindow.HuaweiDeckPatchRuntime;
+    return [...frame.contentDocument.querySelectorAll('.stage .slide-canvas')]
+      .map(canvas => runtime.pageKey(canvas));
+  });
+  assert.deepEqual(navigationKeys, currentKeys);
+
+  await page.getByRole('button', { name:'02 目录页' }).click();
+  await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
+  assert.ok(await page.locator('#deck-frame').evaluate(frame => frame.contentWindow.scrollY > 900));
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('Deck 使用 stage 内滚动时左侧页序仍切换到目标画布', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace('</style>', `
+html,body{height:100%;overflow:hidden}.stage{position:absolute;inset:0;overflow-y:auto}
+</style>`),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  await page.waitForFunction(() => document.querySelectorAll('[data-page-key]').length === 2);
+
+  await page.getByRole('button', { name:'02 目录页' }).click();
+  await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
+  const position = await page.locator('#deck-frame').evaluate(frame => {
+    const stage = frame.contentDocument.querySelector('.stage');
+    const second = frame.contentDocument.querySelectorAll('.slide-canvas')[1];
+    return { stageScrollTop:stage.scrollTop, secondTop:second.getBoundingClientRect().top };
+  });
+  assert.ok(position.stageScrollTop > 900, JSON.stringify(position));
+  assert.ok(position.secondTop >= -1 && position.secondTop < 1080, JSON.stringify(position));
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('点击页序经 frame 确认后真实切换画布并同步当前页', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());

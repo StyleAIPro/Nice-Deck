@@ -230,3 +230,26 @@ test('定位失败候选最多五个且排除隐藏祖先下的同标签元素',
   assert.ok(result.candidates.every(candidate => candidate.tag === 'H2'));
   assert.ok(!result.candidates.some(candidate => candidate.path === result.hiddenPath));
 });
+
+test('同一页面二次加载 patch runtime 复用对象身份与已有动作状态', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    const target = runtime.makeLocator(heading);
+    runtime.applyAll([{ id:'before-second-load', target, kind:'setText', payload:{ text:'保留状态' } }]);
+    window.__runtimeBeforeSecondLoad = runtime;
+  });
+
+  await page.addScriptTag({ path:resolve('scripts/editor/runtime/patch-runtime.js') });
+  const result = await page.evaluate(() => ({
+    same:window.HuaweiDeckPatchRuntime === window.__runtimeBeforeSecondLoad,
+    active:window.HuaweiDeckPatchRuntime.activeActionCount(),
+    text:document.querySelector('h2').textContent,
+  }));
+  assert.deepEqual(result, { same:true, active:1, text:'保留状态' });
+});

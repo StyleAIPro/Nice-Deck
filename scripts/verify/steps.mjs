@@ -40,7 +40,9 @@ try {
   await page.waitForTimeout(5000); // React mount + 字体/图片 settle
   await page.addStyleTag({ content: `
     .glassbar.railtoggle,.glassbar.navbar,.glassbar.modebar,.railpanel,.railfoot,.hint,.noteschip,#__deck_loading_overlay{display:none!important;}
-    .stage .slide-canvas{content-visibility:visible!important;}
+    /* 与 shot.mjs 一致：逐拍图按逻辑画布 1:1 输出，不能继承 stage 的自适应缩放。 */
+    .stage .slide-fit{width:1920px!important;height:1080px!important;}
+    .stage .slide-canvas{content-visibility:visible!important;transform:none!important;width:1920px!important;height:1080px!important;}
     img[alt="HUAWEI"], img[data-brand-logo] { right: 30px !important; } /* fixed logo 超出 canvas 元素框右缘会被 element.screenshot 裁掉 → 左移 8px */
     [data-steps-target] .build{opacity:0!important; transition:none!important;}
     [data-steps-target] .build[data-shown]{opacity:1!important; transform:none!important; filter:none!important;}` });

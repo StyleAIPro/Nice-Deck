@@ -57,6 +57,16 @@ test('同名页仍生成不同 pageKey', () => {
     makePageKey(5, '目录页', '<section>A</section>'));
 });
 
+test('pageKey 忽略每次加载变化的 blob URL 但保留真实结构差异', () => {
+  const first = '<section><img src="blob:http://127.0.0.1:5000/first"><p>A</p></section>';
+  const second = '<section><img src="blob:http://127.0.0.1:6000/second"><p>A</p></section>';
+  assert.equal(makePageKey(9, '真实页', first), makePageKey(9, '真实页', second));
+  assert.notEqual(
+    makePageKey(9, '真实页', first),
+    makePageKey(9, '真实页', '<section><img src="asset.png"><p>B</p></section>'),
+  );
+});
+
 test('拒绝越界任务和任意动作类型', () => {
   assert.throws(() => validateTask({ pageKey: 'p', rect: { x: -1, y: 0, w: 10, h: 10 }, instruction: '改' }));
   assert.throws(() => validateAction({ kind: 'replaceOuterHTML', payload: {} }));

@@ -32,7 +32,10 @@ try {
   await page.waitForTimeout(5000); // React mount + 字体/图片 settle
   await page.addStyleTag({ content: `
     .glassbar.railtoggle,.glassbar.navbar,.glassbar.modebar,.railpanel,.railfoot,.hint,.noteschip,#__deck_loading_overlay{display:none!important;}
-    .stage .slide-canvas{content-visibility:visible!important;}
+    /* Deck 会按 stage 可用宽度给 1920×1080 画布加缩放 transform；
+       element.screenshot 会把该视觉缩放写进像素尺寸，因此验证截图必须临时恢复 1:1。 */
+    .stage .slide-fit{width:1920px!important;height:1080px!important;}
+    .stage .slide-canvas{content-visibility:visible!important;transform:none!important;width:1920px!important;height:1080px!important;}
     img[alt="HUAWEI"], img[data-brand-logo] { right: 30px !important; }` }); // 不强制 content-visibility 会截到白页；
   // logo 水印是 position:fixed right:22px，比 canvas 元素框更靠右，element.screenshot 会裁掉右缘 → 左移 8px 收进框内
   // build 元素全显

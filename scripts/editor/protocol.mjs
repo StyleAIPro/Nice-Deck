@@ -11,7 +11,11 @@ export function stableHash(text) {
 }
 
 export function makePageKey(index, label, html) {
-  const digest = stableHash(`${index}\0${label}\0${html}`);
+  const structure = String(html).replace(
+    /\b(src|href)=("blob:[^"]*"|'blob:[^']*')/gi,
+    '$1="blob:"',
+  );
+  const digest = stableHash(`${index}\0${label}\0${structure}`);
   return `page-${String(index).padStart(3, '0')}-${digest}`;
 }
 
