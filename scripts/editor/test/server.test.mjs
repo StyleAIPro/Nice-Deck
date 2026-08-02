@@ -125,6 +125,47 @@ test('拒绝无令牌请求并向 WebSocket 推送新任务', async t => {
   assert.equal((await event).type, 'task-created');
 });
 
+test('任务快照仅接受限额内 PNG，落盘后响应与 session 均无 data URL', async t => {
+  const app = await makeApp(t);
+  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
+  const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ...taskInput,
+      snapshot: `data:image/png;base64,${png.toString('base64')}`,
+    }),
+  });
+  assert.equal(response.status, 201);
+  const result = await response.json();
+  assert.equal(result.task.snapshot, undefined);
+  assert.equal(result.task.snapshotPath, `snapshots/${result.task.id}.png`);
+  assert.deepEqual(await readFile(join(app.sessionDir, result.task.snapshotPath)), png);
+  assert.doesNotMatch(await readFile(join(app.sessionDir, 'session.json'), 'utf8'), /data:image\/png/);
+
+  const bad = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...taskInput, expectedRevision: 1, snapshot: 'data:image/png;base64,bm90LXBuZw==' }),
+  });
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error, 'INVALID_SNAPSHOT');
+
+  const oversized = Buffer.concat([png.subarray(0, 8), Buffer.alloc(512 * 1024, 1)]).toString('base64');
+  const tooLarge = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ...taskInput,
+      expectedRevision: 1,
+      snapshot: `data:image/png;base64,${oversized}`,
+    }),
+  });
+  assert.equal(tooLarge.status, 413);
+  assert.equal((await tooLarge.json()).error, 'SNAPSHOT_TOO_LARGE');
+  assert.equal(app.session.revision, 1);
+});
+
 test('所有受保护路由都拒绝无令牌请求且 Bearer 可授权', async t => {
   const app = await makeApp(t);
   const routes = [

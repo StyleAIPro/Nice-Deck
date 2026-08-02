@@ -48,6 +48,10 @@
             <span data-current-key>等待 Deck 响应</span>
           </div>
           <div class="canvas-tools" aria-label="画布状态">
+            <button class="region-mode-button" type="button" data-mode="region" aria-pressed="false">
+              <span class="region-mode-icon" aria-hidden="true"></span>
+              区域标记
+            </button>
             <span>1920 × 1080</span>
             <span class="zoom-value" data-zoom>—</span>
           </div>
@@ -81,6 +85,7 @@
         </section>
       </aside>
     </section>
+    <aside class="task-drawer" data-task-drawer aria-label="Agent 修改任务"></aside>
   </main>
   <script type="module" src="/editor/editor.mjs"></script>
 </body>

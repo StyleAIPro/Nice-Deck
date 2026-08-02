@@ -146,6 +146,8 @@ test('preview 仅在内存注入一次且静态资源保持受保护', async t =
   for (const path of [
     '/preview',
     '/editor/editor.mjs',
+    '/editor/task-drawer.mjs',
+    '/editor/protocol.mjs',
     '/editor/editor.css',
     '/editor/huawei-logo.png',
     '/editor/html2canvas.min.js',
@@ -155,6 +157,8 @@ test('preview 仅在内存注入一次且静态资源保持受保护', async t =
   }
   for (const path of [
     `/editor/editor.mjs?token=${app.token}`,
+    `/editor/task-drawer.mjs?token=${app.token}`,
+    `/editor/protocol.mjs?token=${app.token}`,
     `/editor/huawei-logo.png?token=${app.token}`,
     `/editor/html2canvas.min.js?token=${app.token}`,
     `/editor/patch-runtime.js?token=${app.token}`,

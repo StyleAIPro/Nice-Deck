@@ -17,7 +17,9 @@ const EDITOR_ASSETS = new Map([
   ['/editor/editor.css', { path: join(PUBLIC_DIR, 'editor.css'), type: 'text/css; charset=utf-8' }],
   ['/editor/editor.mjs', { path: join(PUBLIC_DIR, 'editor.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/frame-bridge.mjs', { path: join(PUBLIC_DIR, 'frame-bridge.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/task-drawer.mjs', { path: join(PUBLIC_DIR, 'task-drawer.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/ws-client.mjs', { path: join(PUBLIC_DIR, 'ws-client.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/protocol.mjs', { path: join(EDITOR_DIR, 'protocol.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/html2canvas.min.js', {
     path: join(PROJECT_DIR, 'node_modules/html2canvas/dist/html2canvas.min.js'),
     type: 'text/javascript; charset=utf-8',
@@ -74,7 +76,7 @@ async function readJson(request) {
   for await (const chunk of request) {
     body += chunk;
     if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
-      throw httpError('BODY_TOO_LARGE', 400, '请求体过大');
+      throw httpError('BODY_TOO_LARGE', 413, '请求体过大');
     }
   }
   if (!body) return {};
