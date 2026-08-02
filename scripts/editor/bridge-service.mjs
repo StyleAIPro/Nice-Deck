@@ -136,6 +136,25 @@ export class BridgeService {
     this.editorReady = false;
     this.editorPageKeys = [];
     this.readyPromise = null;
+    this.recoveryRequired = null;
+  }
+
+  #recoveryError() {
+    return serviceError('RECOVERY_REQUIRED', 503, '存在未完成的 durable transaction，当前服务已冻结为只读', {
+      stage:'recovery-required',
+      recovery:'停止继续修改并重启编辑服务，让 transaction 按磁盘与 session 状态收敛',
+      ...(this.recoveryRequired ?? {}),
+    });
+  }
+
+  #assertMutable() {
+    if (this.recoveryRequired) throw this.#recoveryError();
+    if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
+  }
+
+  #enterRecoveryRequired(details = {}) {
+    if (!this.recoveryRequired) this.recoveryRequired = details;
+    return this.#recoveryError();
   }
 
   assertRevision(expectedRevision) {
@@ -282,7 +301,7 @@ export class BridgeService {
 
   createTask(input, expectedRevision) {
     return this.#enqueue(async () => {
-      if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
+      this.#assertMutable();
       const state = this.sessionStore.state;
       const snapshot = { revision: state.revision, tasks: structuredClone(state.tasks ?? []) };
       try { return await this.sessionStore.createTask(input, expectedRevision); }
@@ -300,6 +319,7 @@ export class BridgeService {
 
   applyActions({ taskId, actions, expectedRevision }) {
     return this.#enqueue(async () => {
+      this.#assertMutable();
       const prepared = await this.#prepare(actions, expectedRevision);
       let group;
       try {
@@ -325,7 +345,7 @@ export class BridgeService {
     fingerprint, writer, restore, finalize = async () => {},
   }) {
     return this.#enqueue(async () => {
-      if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
+      this.#assertMutable();
       this.assertRevision(expectedRevision);
       if (!this.hasEditorSocket() || !this.editorReady) {
         throw diagnosticFailure('EDITOR_OFFLINE', '编辑器未连接或页面尚未就绪');
@@ -377,11 +397,23 @@ export class BridgeService {
         if (['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(error?.code)
           && typeof error?.actualFingerprint === 'string') {
           error.conflictCreated = await this.#recordDeckConflict(error.actualFingerprint);
-          await finalize(error);
+          try { await finalize(error); }
+          catch (finalizeError) {
+            throw this.#enterRecoveryRequired({
+              backup:error.backup,
+              cause:finalizeError,
+            });
+          }
         }
         throw error;
       }
-      await this.beforeSessionPersist(result);
+      try { await this.beforeSessionPersist(result); }
+      catch (error) {
+        throw this.#enterRecoveryRequired({
+          backup:result.backup,
+          cause:error,
+        });
+      }
       const snapshot = {
         deckFingerprint:state.deckFingerprint,
         conflict:structuredClone(state.conflict),
@@ -404,9 +436,7 @@ export class BridgeService {
         await this.sessionStore.persistState();
       } catch (error) {
         if (error?.committed === true) {
-          throw serviceError('WRITE_FAILED', 500, '会话基线目录同步失败，保留事务记录等待重启收敛', {
-            stage:'session-durability',
-            recovery:'停止继续修改并重启编辑服务，让 durable transaction 自动收敛',
+          throw this.#enterRecoveryRequired({
             backup:result.backup,
             committed:true,
             cause:error,
@@ -416,43 +446,35 @@ export class BridgeService {
           await restore(result, snapshot.deckFingerprint);
         } catch (restoreError) {
           Object.assign(state, snapshot);
-          if (['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(restoreError?.code)
-            && typeof restoreError?.actualFingerprint === 'string') {
-            const conflictCreated = await this.#recordDeckConflict(
-              restoreError.actualFingerprint,
-            );
-            throw serviceError(
-              restoreError.code,
-              restoreError.statusCode ?? 409,
-              restoreError.message,
-              {
-                stage:restoreError.stage ?? 'session-rollback',
-                recovery:restoreError.recovery
-                  ?? '保留磁盘外部版本，重新载入后在新基线上重放补丁',
-                backup:result.backup,
-                expectedFingerprint:restoreError.expectedFingerprint,
-                actualFingerprint:restoreError.actualFingerprint,
-                conflictCreated,
-              },
-            );
-          }
-          throw serviceError('WRITE_FAILED', 500, '会话基线更新与 Deck 自动恢复均失败', {
-            stage:'session-rollback',
-            recovery:'立即使用备份恢复原文件，并检查 sidecar 目录权限',
+          throw this.#enterRecoveryRequired({
             backup:result.backup,
             committed:true,
             cause:restoreError,
           });
         }
         Object.assign(state, snapshot);
-        throw serviceError('WRITE_FAILED', 500, '会话基线更新失败，Deck 已从备份恢复并保留事务记录', {
+        try { await finalize(result); }
+        catch (finalizeError) {
+          throw this.#enterRecoveryRequired({
+            backup:result.backup,
+            cause:finalizeError,
+          });
+        }
+        throw serviceError('WRITE_FAILED', 500, '会话基线更新失败，Deck 已恢复且事务已安全清理', {
           stage:'session',
           recovery:'检查 sidecar 目录权限后重试',
           backup:result.backup,
           cause:error,
         });
       }
-      await finalize(result);
+      try { await finalize(result); }
+      catch (error) {
+        throw this.#enterRecoveryRequired({
+          backup:result.backup,
+          committed:true,
+          cause:error,
+        });
+      }
       return result;
     });
   }
@@ -491,6 +513,7 @@ export class BridgeService {
 
   async #changeGroup(method, groupId, expectedRevision) {
     return this.#enqueue(async () => {
+      this.#assertMutable();
       this.assertRevision(expectedRevision);
       const draftState = copyJournalState(this.sessionStore.state);
       const draft = new PatchJournal(draftState);

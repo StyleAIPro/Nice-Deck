@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { open, rename, unlink } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'sidecar_io.py');
@@ -18,71 +18,197 @@ function helperError(payload) {
   });
 }
 
-export function callSidecarHelper(request, { spawnHelper=spawn } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawnHelper('python3', [HELPER], { stdio:['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
+function lifecycleError(code, message) {
+  return Object.assign(new Error(message), { code, stage:'sidecar-helper' });
+}
+
+class PersistentSidecarIO {
+  constructor(child, { timeoutMs, maxInputBytes, maxOutputBytes }) {
+    this.child = child;
+    this.timeoutMs = timeoutMs;
+    this.maxInputBytes = maxInputBytes;
+    this.maxOutputBytes = maxOutputBytes;
+    this.pending = new Map();
+    this.stdout = '';
+    this.stderr = '';
+    this.closed = false;
+    this.finished = false;
+    this.closePromise = new Promise(resolve => { this.resolveClosed = resolve; });
+
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.once('error', reject);
-    child.once('close', code => {
-      let payload;
-      try { payload = JSON.parse(stdout); }
+    child.stdout.on('data', chunk => this.#onStdout(String(chunk)));
+    child.stderr.on('data', chunk => {
+      this.stderr = `${this.stderr}${String(chunk)}`.slice(-this.maxOutputBytes);
+    });
+    child.stdin.on('error', error => this.#failAll(error));
+    child.once('error', error => this.#finish(error));
+    child.once('close', () => this.#finish());
+  }
+
+  #finish(error = lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭')) {
+    if (this.finished) return;
+    this.finished = true;
+    this.#failAll(error);
+    this.resolveClosed();
+  }
+
+  #failAll(error) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  #abort(error) {
+    if (this.finished) return;
+    this.#failAll(error);
+    this.child.kill?.('SIGKILL');
+  }
+
+  #onStdout(chunk) {
+    if (this.finished) return;
+    this.stdout += chunk;
+    if (Buffer.byteLength(this.stdout) > this.maxOutputBytes) {
+      this.#abort(lifecycleError(
+        'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 输出超过上限',
+      ));
+      return;
+    }
+    let newline;
+    while ((newline = this.stdout.indexOf('\n')) >= 0) {
+      const line = this.stdout.slice(0, newline);
+      this.stdout = this.stdout.slice(newline + 1);
+      let response;
+      try { response = JSON.parse(line); }
       catch {
-        reject(helperError({ message:`sidecar helper 输出无效（${code}）：${stderr.trim()}` }));
+        this.#abort(lifecycleError('SIDECAR_HELPER_PROTOCOL', 'sidecar helper 返回无效 JSONL'));
         return;
       }
-      if (payload.ok !== true) reject(helperError(payload));
-      else resolve(payload.result);
+      const pending = this.pending.get(response?.id);
+      if (!pending) continue;
+      this.pending.delete(response.id);
+      clearTimeout(pending.timer);
+      if (response.ok === true) pending.resolve(response.result);
+      else pending.reject(helperError(response));
+    }
+  }
+
+  #request(command, payload) {
+    if (this.closed || this.finished) {
+      return Promise.reject(lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭'));
+    }
+    const id = randomUUID();
+    const line = `${JSON.stringify({ id, command, payload })}\n`;
+    if (Buffer.byteLength(line) > this.maxInputBytes) {
+      const error = lifecycleError(
+        'SIDECAR_HELPER_INPUT_LIMIT', 'sidecar helper 输入超过上限',
+      );
+      this.#abort(error);
+      return Promise.reject(error);
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        const error = lifecycleError('SIDECAR_HELPER_TIMEOUT', 'sidecar helper 请求超时');
+        reject(error);
+        this.#abort(error);
+      }, this.timeoutMs);
+      timer.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
+      try {
+        this.child.stdin.write(line);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
-    child.stdin.on('error', reject);
-    child.stdin.end(JSON.stringify(request));
+  }
+
+  initialize(payload) { return this.#request('initialize', payload); }
+  ensureRoot() { return this.#request('ensure-root', {}); }
+  discover({ deckName }) { return this.#request('discover', { deckName }); }
+  inspectLegacy({ deckName, currentFingerprint }) {
+    return this.#request('inspect-legacy', { deckName, currentFingerprint });
+  }
+  prepareSession({ deckName, sessionId, initialFingerprint, sessionName, mode }) {
+    return this.#request('prepare-session', {
+      deckName, sessionId, initialFingerprint, sessionName, mode,
+    });
+  }
+  activateSession({ sessionId }) {
+    return this.#request('activate-session', { sessionId });
+  }
+  bindSession({ deckName, sessionName, create=false }) {
+    return this.#request('bind-session', { deckName, sessionName, create });
+  }
+  readSession({ missingOk=false } = {}) {
+    return this.#request('read-session', { missingOk });
+  }
+  assertBound() { return this.#request('assert-bound', {}); }
+  readTransaction({ transactionId }) {
+    return this.#request('read-transaction', { transactionId });
+  }
+  listTransactions() { return this.#request('list-transactions', {}); }
+  verifyBackup({ backupName, expectedFingerprint }) {
+    return this.#request('verify-backup', { backupName, expectedFingerprint });
+  }
+  hashDeck() { return this.#request('hash-deck', {}); }
+  writeSession({ sessionId, bytes }) {
+    return this.#request('write-session', {
+      sessionId, bytes:Buffer.from(bytes).toString('base64'),
+    });
+  }
+  writeSnapshot({ snapshotId, bytes }) {
+    return this.#request('write-snapshot', {
+      snapshotId, bytes:Buffer.from(bytes).toString('base64'),
+    });
+  }
+  deleteSnapshot({ snapshotId }) {
+    return this.#request('delete-snapshot', { snapshotId });
+  }
+  deleteTransaction({ transactionId }) {
+    return this.#request('delete-transaction', { transactionId });
+  }
+  pruneTransactions({ maximum=32 } = {}) {
+    return this.#request('prune-transactions', { maximum });
+  }
+  restoreDeck({ backupName, oldFingerprint, candidateFingerprint }) {
+    return this.#request('restore-deck', {
+      backupName, oldFingerprint, candidateFingerprint,
+    });
+  }
+
+  async close() {
+    if (this.closed) return this.closePromise;
+    this.closed = true;
+    if (!this.finished) this.child.kill?.('SIGKILL');
+    await this.closePromise;
+  }
+}
+
+export async function createPersistentSidecarIO({
+  project,
+  root,
+  spawnHelper=spawn,
+  timeoutMs=1_000,
+  maxInputBytes=1024 * 1024,
+  maxOutputBytes=1024 * 1024,
+  skipReadyHandshake=false,
+} = {}) {
+  const child = spawnHelper('python3', ['-u', HELPER, '--serve'], {
+    stdio:['pipe', 'pipe', 'pipe'],
   });
-}
-
-export function createTrustedSidecarIO(identity, options = {}) {
-  const call = request => callSidecarHelper(request, options);
-  const directoryIdentity = directory => {
-    const match = Object.values(identity).find(item => item?.path === directory);
-    if (!match) throw helperError({ message:`目录不在可信 sidecar identity 内：${directory}` });
-    return match;
-  };
-  return {
-    atomicWrite({ directory, name, bytes }) {
-      return call({
-        operation:'atomic-write', directory:directoryIdentity(directory), name,
-        bytes:Buffer.from(bytes).toString('base64'),
-      });
-    },
-    unlink({ directory, name, missingOk=true }) {
-      return call({ operation:'unlink', directory:directoryIdentity(directory), name, missingOk });
-    },
-    read({ directory, name }) {
-      return call({ operation:'read', directory:directoryIdentity(directory), name })
-        .then(result => Buffer.from(result.bytes, 'base64'));
-    },
-    ensureBackup({ deckName, backupName, expectedFingerprint }) {
-      return call({
-        operation:'ensure-backup', project:identity.project, deckName,
-        backups:identity.backups, backupName, expectedFingerprint,
-      });
-    },
-    restoreDeck({ deckName, backupName, oldFingerprint, candidateFingerprint }) {
-      return call({
-        operation:'restore-deck', project:identity.project, deckName,
-        backups:identity.backups, backupName, oldFingerprint, candidateFingerprint,
-      });
-    },
-  };
-}
-
-export async function ensureTrustedDirectory(parent, path, options = {}) {
-  return callSidecarHelper({
-    operation:'ensure-directory', parent:plainIdentity(parent), name:basename(path), path,
-  }, options);
+  const io = new PersistentSidecarIO(child, { timeoutMs, maxInputBytes, maxOutputBytes });
+  if (!skipReadyHandshake) {
+    try { await io.initialize(root ? { project:plainIdentity(project), root:plainIdentity(root) } : {
+      project:plainIdentity(project),
+    }); }
+    catch (error) { await io.close(); throw error; }
+  }
+  return io;
 }
 
 // 仅供不经过 server 的 SessionStore 单元使用；生产服务始终注入 dirfd helper。

@@ -187,6 +187,11 @@ def _ensure_backup(backups, name, original_bytes, digest, expected_identity=None
     backup_digest = hashlib.sha256(backup_bytes).hexdigest()
     if backup_digest != digest or backup_bytes != original_bytes:
         raise RuntimeError(f"已有备份内容不一致或已损坏，拒绝继续：{backups / name}")
+    directory_fd = _open_directory_fd(backups, expected_identity)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def write_patches(
@@ -196,12 +201,14 @@ def write_patches(
     expected_fingerprint=None,
     transaction_id=None,
     sidecar_identity=None,
+    session_id=None,
 ):
     deck_path = _absolute_path(deck_path)
     session_dir = _ensure_sidecar_session(
         deck_path, _absolute_path(session_dir), sidecar_identity
     )
     transaction_id = _normalize_transaction_id(transaction_id)
+    session_id = _normalize_transaction_id(session_id) if session_id is not None else None
     if sidecar_identity is None:
         backups = _ensure_plain_directory(session_dir / "backups", parent=session_dir)
         backup_identity = _identity_for(backups, "backups")
@@ -290,6 +297,8 @@ def write_patches(
             "candidateFingerprint": written_fingerprint,
             "backup": str(backup),
         }
+        if session_id is not None:
+            transaction_payload["sessionId"] = session_id
         _write_new_file(
             transactions,
             transaction_name,
@@ -341,6 +350,7 @@ def write_patches_safe(
     expected_fingerprint=None,
     transaction_id=None,
     sidecar_identity=None,
+    session_id=None,
 ):
     """供 Node 服务调用的稳定结果封装；底层 write_patches 仍保留原异常类型便于测试。"""
     deck_path = _absolute_path(deck_path)
@@ -353,6 +363,7 @@ def write_patches_safe(
             expected_fingerprint=expected_fingerprint,
             transaction_id=transaction_id,
             sidecar_identity=sidecar_identity,
+            session_id=session_id,
         )
     except Exception as error:
         stage = getattr(error, "deck_stage", "write")

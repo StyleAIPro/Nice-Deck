@@ -42,10 +42,12 @@ export class SessionStore {
     sidecarGuard = async () => {},
     sidecarIO = localDurableIO,
     directoriesPrepared = false,
+    deckFingerprint: selectedDeckFingerprint,
+    sessionId: selectedSessionId,
+    persistedState,
   }) {
     await sidecarGuard();
-    const bytes = await readFile(deckPath);
-    const deckFingerprint = sha256(bytes);
+    const deckFingerprint = selectedDeckFingerprint ?? sha256(await readFile(deckPath));
     const sessionDir = selectedSessionDir
       ?? join(rootDir, `${parse(deckPath).name}-${deckFingerprint.slice(0, 8)}`);
     if (!directoriesPrepared) {
@@ -54,19 +56,30 @@ export class SessionStore {
       await mkdir(join(sessionDir, 'backups'), { recursive: true });
     }
 
+    let persisted = persistedState;
+    if (persisted === undefined) {
+      try {
+        persisted = JSON.parse((await readFile(join(sessionDir, 'session.json'))).toString('utf8'));
+      } catch {
+        persisted = null;
+      }
+    }
+    const sessionId = selectedSessionId ?? persisted?.sessionId ?? randomUUID();
     const store = new SessionStore(
-      deckPath, deckFingerprint, sessionDir, sidecarGuard, sidecarIO,
+      deckPath, deckFingerprint, sessionDir, sidecarGuard, sidecarIO, sessionId,
     );
-    await sidecarGuard();
-    try {
-      const persistedBytes = directoriesPrepared && typeof sidecarIO.read === 'function'
-        ? await sidecarIO.read({ directory:sessionDir, name:'session.json' })
-        : await readFile(store.sessionPath);
-      const persisted = JSON.parse(persistedBytes.toString('utf8'));
+    const applyPersisted = persisted => {
+      if (persisted.sessionId !== undefined && persisted.sessionId !== sessionId) {
+        throw new Error('session.json 的 sessionId 与 registry 不一致');
+      }
+      if (persisted.deckPath !== undefined && persisted.deckPath !== deckPath) {
+        throw new Error('session.json 的 deckPath 与当前 Deck 不一致');
+      }
       store.state = {
         ...store.state,
         ...persisted,
         deckPath,
+        sessionId,
         tasks:Array.isArray(persisted.tasks) ? persisted.tasks : [],
         groups:Array.isArray(persisted.groups) ? persisted.groups : [],
         redo:Array.isArray(persisted.redo) ? persisted.redo : [],
@@ -74,9 +87,10 @@ export class SessionStore {
         diagnosticsCurrent:persisted.diagnosticsCurrent ?? {},
         conflict:persisted.conflict ?? null,
       };
-    } catch {
-      await store.#persist();
-    }
+    };
+    await sidecarGuard();
+    if (persisted === null) await store.#persist();
+    else applyPersisted(persisted);
     return store;
   }
 
@@ -86,6 +100,7 @@ export class SessionStore {
     sessionDir,
     sidecarGuard = async () => {},
     sidecarIO = localDurableIO,
+    sessionId = randomUUID(),
   ) {
     this.deckPath = deckPath;
     this.sessionDir = sessionDir;
@@ -94,6 +109,7 @@ export class SessionStore {
     this.sidecarIO = sidecarIO;
     this.state = {
       version: 1,
+      sessionId,
       deckPath,
       deckFingerprint,
       revision: 0,
@@ -115,6 +131,13 @@ export class SessionStore {
 
   async #persist(state = this.state) {
     await this.sidecarGuard();
+    if (typeof this.sidecarIO.writeSession === 'function') {
+      await this.sidecarIO.writeSession({
+        sessionId:this.state.sessionId,
+        bytes:Buffer.from(JSON.stringify(state, null, 2)),
+      });
+      return;
+    }
     await this.sidecarIO.atomicWrite({
       directory:dirname(this.sessionPath),
       name:basename(this.sessionPath),
@@ -147,9 +170,13 @@ export class SessionStore {
     try {
       if (snapshotBytes) {
         await this.sidecarGuard();
-        await this.sidecarIO.atomicWrite({
-          directory:snapshotsDirectory, name:snapshotName, bytes:snapshotBytes,
-        });
+        if (typeof this.sidecarIO.writeSnapshot === 'function') {
+          await this.sidecarIO.writeSnapshot({ snapshotId:id, bytes:snapshotBytes });
+        } else {
+          await this.sidecarIO.atomicWrite({
+            directory:snapshotsDirectory, name:snapshotName, bytes:snapshotBytes,
+          });
+        }
       }
       this.state.tasks.push(task);
       this.state.revision += 1;
@@ -160,9 +187,12 @@ export class SessionStore {
         this.state.revision = previousRevision;
         this.state.tasks = previousTasks;
         if (snapshotName) {
-          await this.sidecarIO.unlink({
-            directory:snapshotsDirectory, name:snapshotName, missingOk:true,
-          }).catch(() => {});
+          const cleanup = typeof this.sidecarIO.deleteSnapshot === 'function'
+            ? this.sidecarIO.deleteSnapshot({ snapshotId:id })
+            : this.sidecarIO.unlink({
+              directory:snapshotsDirectory, name:snapshotName, missingOk:true,
+            });
+          await cleanup.catch(() => {});
         }
       }
       throw error;

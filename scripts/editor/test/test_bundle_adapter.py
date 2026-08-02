@@ -2,6 +2,8 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,6 +140,32 @@ class BundleAdapterTest(unittest.TestCase):
             self.assertEqual(original, deck.read_bytes())
             self.assertEqual(b"corrupt", backup.read_bytes())
 
+    def test_existing_backup_directory_fsync_failure_blocks_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            backups = Path(td) / "backups"
+            backups.mkdir()
+            original = b"stable-deck"
+            digest = hashlib.sha256(original).hexdigest()
+            name = f"deck-{digest}.html"
+            (backups / name).write_bytes(original)
+            backup_identity = directory_identity(backups)
+            real_fsync = bundle_adapter.os.fsync
+
+            def fail_directory_fsync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("injected existing backup directory fsync failure")
+                return real_fsync(fd)
+
+            with mock.patch.object(
+                bundle_adapter.os, "fsync", side_effect=fail_directory_fsync
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "existing backup directory fsync failure"
+                ):
+                    bundle_adapter._ensure_backup(
+                        backups, name, original, digest, backup_identity
+                    )
+
     def test_existing_backup_symlink_is_rejected_even_when_target_matches(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
@@ -252,6 +280,7 @@ class BundleAdapterTest(unittest.TestCase):
             original_fingerprint = hashlib.sha256(deck.read_bytes()).hexdigest()
             session = project / ".huawei-deck-editor" / "deck-session"
             transaction_id = "123e4567-e89b-42d3-a456-426614174000"
+            session_id = "223e4567-e89b-42d3-a456-426614174000"
 
             result = bundle_adapter.write_patches(
                 deck,
@@ -259,11 +288,13 @@ class BundleAdapterTest(unittest.TestCase):
                 session,
                 expected_fingerprint=original_fingerprint,
                 transaction_id=transaction_id,
+                session_id=session_id,
             )
 
             transaction = session / "transactions" / f"{transaction_id}.json"
             record = json.loads(transaction.read_text(encoding="utf-8"))
             self.assertEqual(transaction_id, record["transactionId"])
+            self.assertEqual(session_id, record["sessionId"])
             self.assertEqual(str(deck), record["deckPath"])
             self.assertEqual(str(session), record["sessionDir"])
             self.assertEqual(original_fingerprint, record["oldFingerprint"])

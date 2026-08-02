@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
-  mkdir, mkdtemp, readFile, readdir, rename, symlink, unlink, writeFile,
+  mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, unlink, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -165,6 +165,7 @@ async function writeTransactionRecord(app, transactionId, oldBytes, candidateByt
   );
   await writeFile(transactionPath, JSON.stringify({
     version:1,
+    sessionId:app.session.sessionId,
     transactionId,
     deckPath:app.deckPath,
     sessionDir:app.sessionDir,
@@ -176,7 +177,7 @@ async function writeTransactionRecord(app, transactionId, oldBytes, candidateByt
 }
 
 async function createPendingTransactionFixture({
-  root, diskBytes, oldBytes, candidateBytes, sessionFingerprint,
+  root, diskBytes, oldBytes, candidateBytes, sessionFingerprint, registered=true,
 }) {
   const deckPath = join(root, 'deck.html');
   await writeFile(deckPath, diskBytes);
@@ -186,13 +187,16 @@ async function createPendingTransactionFixture({
   const sessionDir = join(sidecarRoot, `deck-${oldFingerprint.slice(0, 8)}`);
   const backup = join(sessionDir, 'backups', `deck-${oldFingerprint}.html`);
   const transactionId = '123e4567-e89b-42d3-a456-426614174000';
+  const sessionId = '223e4567-e89b-42d3-a456-426614174000';
   const transaction = join(sessionDir, 'transactions', `${transactionId}.json`);
   await mkdir(join(sessionDir, 'snapshots'), { recursive:true });
   await mkdir(join(sessionDir, 'backups'), { recursive:true });
   await mkdir(join(sessionDir, 'transactions'), { recursive:true });
+  await mkdir(join(sessionDir, 'write-errors'), { recursive:true });
   await writeFile(backup, oldBytes);
   await writeFile(join(sessionDir, 'session.json'), JSON.stringify({
     version:1,
+    ...(registered ? { sessionId } : {}),
     deckPath,
     deckFingerprint:sessionFingerprint,
     revision:0,
@@ -206,6 +210,7 @@ async function createPendingTransactionFixture({
   }, null, 2));
   await writeFile(transaction, JSON.stringify({
     version:1,
+    ...(registered ? { sessionId } : {}),
     transactionId,
     deckPath,
     sessionDir,
@@ -213,9 +218,24 @@ async function createPendingTransactionFixture({
     candidateFingerprint,
     backup,
   }));
+  if (registered) {
+    await writeFile(join(sidecarRoot, 'sessions.json'), JSON.stringify({
+      version:1,
+      sessions:{
+        [sessionId]:{
+          sessionId,
+          deckRealPath:await realpath(deckPath),
+          initialFingerprint:oldFingerprint,
+          sessionName:`deck-${oldFingerprint.slice(0, 8)}`,
+          mode:'fresh',
+          status:'active',
+        },
+      },
+    }, null, 2));
+  }
   return {
     deckPath, sidecarRoot, sessionDir, backup, transaction,
-    oldFingerprint, candidateFingerprint,
+    oldFingerprint, candidateFingerprint, sessionId,
   };
 }
 
@@ -234,6 +254,32 @@ async function replaceSidecarIdentity(app, level) {
 
 async function sidecarTree(root) {
   return (await readdir(root, { recursive:true })).sort();
+}
+
+function emptySessionState(deckPath, deckFingerprint, extra = {}) {
+  return {
+    version:1,
+    deckPath,
+    deckFingerprint,
+    revision:0,
+    tasks:[],
+    groups:[],
+    redo:[],
+    diagnosticsBaseline:{},
+    diagnosticsCurrent:{},
+    diagnosticsRevision:null,
+    conflict:null,
+    ...extra,
+  };
+}
+
+async function makeCompleteSessionDirectory(sidecarRoot, sessionName) {
+  const sessionDir = join(sidecarRoot, sessionName);
+  await mkdir(join(sessionDir, 'snapshots'), { recursive:true });
+  await mkdir(join(sessionDir, 'backups'));
+  await mkdir(join(sessionDir, 'transactions'));
+  await mkdir(join(sessionDir, 'write-errors'));
+  return sessionDir;
 }
 
 function fakeWriterChild({ onEnd, onKill, closesOnKill = true } = {}) {
@@ -263,6 +309,102 @@ function hangingChild() {
 function epipe() {
   return Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
 }
+
+test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，未注册新会话只读拒绝', async t => {
+  await t.test('新会话发布 registry，重启复用同一随机 sessionId', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-registry-fresh-'));
+    const deckPath = join(root, 'deck.html');
+    await writeFile(deckPath, 'deck');
+    let app = await startServer({ deckPath, host:'127.0.0.1', port:0, openBrowser:false });
+    const firstSessionId = app.session.sessionId;
+    const firstSessionDir = app.sessionDir;
+    try {
+      assert.match(firstSessionId, /^[0-9a-f-]{36}$/);
+      const registry = JSON.parse(await readFile(join(root, '.huawei-deck-editor', 'sessions.json')));
+      assert.equal(registry.sessions[firstSessionId].sessionId, firstSessionId);
+      assert.equal(registry.sessions[firstSessionId].sessionName, firstSessionDir.split('/').at(-1));
+      assert.equal(
+        JSON.parse(await readFile(join(firstSessionDir, 'session.json'))).sessionId,
+        firstSessionId,
+      );
+    } finally {
+      await app.close();
+    }
+    app = await startServer({ deckPath, host:'127.0.0.1', port:0, openBrowser:false });
+    try {
+      assert.equal(app.sessionDir, firstSessionDir);
+      assert.equal(app.session.sessionId, firstSessionId);
+    } finally {
+      await app.close();
+    }
+  });
+
+  await t.test('无 registry 的严格 legacy 且无 pending 时一次迁移', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-registry-legacy-'));
+    const deckPath = join(root, 'deck.html');
+    await writeFile(deckPath, 'legacy-deck');
+    const fingerprint = sha256('legacy-deck');
+    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+    const sessionDir = await makeCompleteSessionDirectory(sidecarRoot, sessionName);
+    await writeFile(
+      join(sessionDir, 'session.json'),
+      JSON.stringify(emptySessionState(deckPath, fingerprint), null, 2),
+    );
+    const app = await startServer({ deckPath, host:'127.0.0.1', port:0, openBrowser:false });
+    try {
+      assert.equal(app.sessionDir, sessionDir);
+      assert.match(app.session.sessionId, /^[0-9a-f-]{36}$/);
+      const registry = JSON.parse(await readFile(join(sidecarRoot, 'sessions.json')));
+      assert.equal(registry.sessions[app.session.sessionId].sessionName, sessionName);
+      assert.equal(
+        JSON.parse(await readFile(join(sessionDir, 'session.json'))).sessionId,
+        app.session.sessionId,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  await t.test('无 registry 的 pending 即使完全自洽也只读拒绝', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-registry-pending-'));
+    const oldBytes = Buffer.from('old');
+    const candidateBytes = Buffer.from('candidate');
+    const fixture = await createPendingTransactionFixture({
+      root, diskBytes:candidateBytes, oldBytes, candidateBytes,
+      sessionFingerprint:sha256(oldBytes), registered:false,
+    });
+    const treeBefore = await sidecarTree(fixture.sidecarRoot);
+    const deckBefore = await readFile(fixture.deckPath);
+    await assert.rejects(
+      () => startServer({
+        deckPath:fixture.deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+      }),
+      error => error.code === 'UNSAFE_SIDECAR',
+    );
+    assert.deepEqual(await sidecarTree(fixture.sidecarRoot), treeBefore);
+    assert.deepEqual(await readFile(fixture.deckPath), deckBefore);
+  });
+
+  await t.test('带 sessionId 但未注册的自洽目录不得按 legacy 收编', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-registry-unregistered-'));
+    const deckPath = join(root, 'deck.html');
+    await writeFile(deckPath, 'unregistered');
+    const fingerprint = sha256('unregistered');
+    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+    const sessionDir = await makeCompleteSessionDirectory(sidecarRoot, sessionName);
+    await writeFile(join(sessionDir, 'session.json'), JSON.stringify(emptySessionState(
+      deckPath, fingerprint, { sessionId:'123e4567-e89b-42d3-a456-426614174000' },
+    )));
+    const treeBefore = await sidecarTree(sidecarRoot);
+    await assert.rejects(
+      () => startServer({ deckPath, host:'127.0.0.1', port:0, openBrowser:false }),
+      error => error.code === 'UNSAFE_SIDECAR',
+    );
+    assert.deepEqual(await sidecarTree(sidecarRoot), treeBefore);
+  });
+});
 
 test('拒绝无令牌请求并向 WebSocket 推送新任务', async t => {
   const app = await makeApp(t);
@@ -858,10 +1000,11 @@ test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', 
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
 });
 
-test('writer 成功但 session persist 前中断时 durable record 仍存在', async t => {
+test('writer 成功但 session persist 前中断后进入 RECOVERY_REQUIRED，拒绝第二候选并由重启收敛', async t => {
   let app;
   let transactionId;
   let transactionPath;
+  let writerStarts = 0;
   const candidateBytes = Buffer.from('candidate before session persist interruption');
   const child = fakeWriterChild({
     onEnd:current => queueMicrotask(async () => {
@@ -882,6 +1025,7 @@ test('writer 成功但 session persist 前中断时 durable record 仍存在', a
   app = await makeApp(t, {
     deckContents:validBundle(),
     spawnWriter:(_command, args) => {
+      writerStarts += 1;
       transactionId = args.at(-1);
       return child;
     },
@@ -900,10 +1044,50 @@ test('writer 成功但 session persist 前中断时 durable record 仍存在', a
     body:JSON.stringify({ expectedRevision:0 }),
   });
 
-  assert.equal(response.status, 500);
+  assert.equal(response.status, 503);
+  assert.equal((await response.clone().json()).code, 'RECOVERY_REQUIRED');
   assert.deepEqual(await readFile(app.deckPath), candidateBytes);
   assert.deepEqual(await readFile(join(app.sessionDir, 'session.json')), sessionBefore);
   assert.ok((await readFile(transactionPath)).length > 0);
+
+  const taskResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify(taskInput),
+  });
+  assert.equal(taskResponse.status, 503);
+  assert.equal((await taskResponse.json()).code, 'RECOVERY_REQUIRED');
+  for (const [path, body] of [
+    ['/api/actions', {
+      expectedRevision:0, taskId:null, actions:[{ ...action, taskId:null }],
+    }],
+    ['/api/groups/missing/undo', { expectedRevision:0 }],
+    ['/api/groups/missing/redo', { expectedRevision:0 }],
+  ]) {
+    const mutation = await fetch(`${app.url}${path}?token=secret`, {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify(body),
+    });
+    assert.equal(mutation.status, 503, path);
+    assert.equal((await mutation.json()).code, 'RECOVERY_REQUIRED', path);
+  }
+  const secondSave = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+  assert.equal(secondSave.status, 503);
+  assert.equal((await secondSave.json()).code, 'RECOVERY_REQUIRED');
+  assert.equal(writerStarts, 1, 'fatal 状态不得启动第二个 writer candidate');
+
+  await app.close();
+  const restarted = await startServer({
+    deckPath:app.deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+  });
+  try {
+    assert.deepEqual(await readFile(app.deckPath), Buffer.from(validBundle()));
+    await assert.rejects(() => readFile(transactionPath), { code:'ENOENT' });
+  } finally {
+    await restarted.close();
+  }
 });
 
 test('backup 父目录 fsync 失败时不得启动 writer 或发布 transaction record', async t => {
@@ -1509,7 +1693,7 @@ test('Deck 已替换但 session 基线持久化失败时恢复原文件与内存
   assert.deepEqual(state.diagnosticsBaseline, { [page.pageKey]:page });
 });
 
-test('writer success 后 session persist 失败且 Deck 再次外改时保留第三值并进入冲突', async () => {
+test('writer success 后 session persist 失败且 Deck 再次外改时保留第三值并冻结恢复', async () => {
   const page = {
     pageKey:'page-001-session-third-party',
     sectionOverflow:{ x:0, y:0 }, nestedClips:[],
@@ -1565,13 +1749,20 @@ test('writer success 后 session persist 失败且 Deck 再次外改时保留第
         });
       },
     }),
-    error => ['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(error.code),
+    error => error.code === 'RECOVERY_REQUIRED',
   );
   assert.equal(diskFingerprint, 'third-party-fingerprint');
   assert.equal(state.deckFingerprint, 'old-fingerprint');
-  assert.equal(state.conflict?.code, 'DECK_CHANGED');
-  assert.equal(state.conflict?.actualFingerprint, 'third-party-fingerprint');
-  assert.equal(persistCalls, 2);
+  assert.equal(state.conflict, null);
+  assert.equal(persistCalls, 1);
+  await assert.rejects(
+    bridge.writeDeck(0, {
+      fingerprint:async () => diskFingerprint,
+      writer:async () => assert.fail('RECOVERY_REQUIRED 不得产生第二 candidate'),
+      restore:async () => assert.fail('RECOVERY_REQUIRED 不得再次恢复'),
+    }),
+    error => error.code === 'RECOVERY_REQUIRED',
+  );
 });
 
 test('初始诊断基线持久化失败不得在内存伪装成可保存基线', async () => {

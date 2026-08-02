@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, unwatchFile, watchFile } from 'node:fs';
 import { createServer } from 'node:http';
 import { isIP } from 'node:net';
-import { lstat, open, readFile, readdir, realpath } from 'node:fs/promises';
+import { lstat, open, readFile, realpath } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { BridgeService } from './bridge-service.mjs';
 import { validateAction, validateTask } from './protocol.mjs';
 import { RevisionConflict, SessionStore } from './session-store.mjs';
-import { createTrustedSidecarIO, ensureTrustedDirectory } from './sidecar-io.mjs';
+import { createPersistentSidecarIO } from './sidecar-io.mjs';
 
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
@@ -53,14 +53,6 @@ function detailedHttpError(code, statusCode, message, details = {}) {
   return Object.assign(httpError(code, statusCode, message), details);
 }
 
-async function fileFingerprint(path) {
-  return createHash('sha256').update(await readFile(path)).digest('hex');
-}
-
-function bytesFingerprint(bytes) {
-  return createHash('sha256').update(bytes).digest('hex');
-}
-
 function restoreConflictError(expectedFingerprint, actualFingerprint, message, cause) {
   return detailedHttpError('RESTORE_CONFLICT', 409, message, {
     stage:'recovery',
@@ -96,107 +88,6 @@ async function captureDirectoryIdentity(path, label, parentIdentity = null) {
     ino:String(info.ino),
     label,
   };
-}
-
-async function assertDirectoryIdentity(identity, parentIdentity = null) {
-  const current = await captureDirectoryIdentity(
-    identity.path, identity.label, parentIdentity,
-  );
-  if (current.realPath !== identity.realPath
-    || current.dev !== identity.dev
-    || current.ino !== identity.ino) {
-    throw new Error(`${identity.label} 身份已在服务运行期间变化`);
-  }
-  return current;
-}
-
-async function ensureTrustedChildDirectory(parentIdentity, childPath, label) {
-  const identity = await ensureTrustedDirectory(parentIdentity, resolve(childPath));
-  return { ...identity, label };
-}
-
-async function prepareSidecarRoot(deckPath) {
-  const projectDir = dirname(deckPath);
-  const project = await captureDirectoryIdentity(projectDir, 'Deck 项目目录');
-  const sidecarRoot = join(projectDir, '.huawei-deck-editor');
-  const root = await ensureTrustedChildDirectory(project, sidecarRoot, 'sidecar root');
-  return makeRootBoundary(project, root);
-}
-
-function makeRootBoundary(project, root) {
-  const boundary = { project, root, sidecarRoot:root.path };
-  boundary.guard = async () => {
-    try {
-      await assertDirectoryIdentity(project);
-      await assertDirectoryIdentity(root, project);
-    } catch (error) {
-      throw unsafeSidecarError('sidecar root 身份已变化，拒绝继续写入', error);
-    }
-  };
-  return boundary;
-}
-
-async function captureExistingSidecarRoot(deckPath) {
-  const project = await captureDirectoryIdentity(dirname(deckPath), 'Deck 项目目录');
-  const sidecarRoot = join(dirname(deckPath), '.huawei-deck-editor');
-  let root;
-  try { root = await captureDirectoryIdentity(sidecarRoot, 'sidecar root', project); }
-  catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
-  return makeRootBoundary(project, root);
-}
-
-async function prepareSidecarSession(rootBoundary, sessionDir) {
-  await rootBoundary.guard();
-  const session = await ensureTrustedChildDirectory(
-    rootBoundary.root, sessionDir, 'sidecar session',
-  );
-  const snapshots = await ensureTrustedChildDirectory(
-    session, join(session.path, 'snapshots'), 'snapshots',
-  );
-  const backups = await ensureTrustedChildDirectory(
-    session, join(session.path, 'backups'), 'backups',
-  );
-  const transactions = await ensureTrustedChildDirectory(
-    session, join(session.path, 'transactions'), 'transactions',
-  );
-  const writeErrors = await ensureTrustedChildDirectory(
-    session, join(session.path, 'write-errors'), 'write-errors',
-  );
-  const boundary = {
-    ...rootBoundary,
-    session,
-    snapshots,
-    backups,
-    transactions,
-    writeErrors,
-    sessionDir:session.path,
-  };
-  boundary.guard = async () => {
-    try {
-      await assertDirectoryIdentity(boundary.project);
-      await assertDirectoryIdentity(boundary.root, boundary.project);
-      await assertDirectoryIdentity(boundary.session, boundary.root);
-      await assertDirectoryIdentity(boundary.snapshots, boundary.session);
-      await assertDirectoryIdentity(boundary.backups, boundary.session);
-      await assertDirectoryIdentity(boundary.transactions, boundary.session);
-      await assertDirectoryIdentity(boundary.writeErrors, boundary.session);
-    } catch (error) {
-      throw unsafeSidecarError('sidecar 身份已在服务运行期间变化，拒绝继续写入', error);
-    }
-  };
-  boundary.pythonIdentity = Object.fromEntries(
-    ['project', 'root', 'session', 'snapshots', 'backups', 'transactions', 'writeErrors'].map(name => [name, {
-      path:boundary[name].path,
-      realPath:boundary[name].realPath,
-      dev:boundary[name].dev,
-      ino:boundary[name].ino,
-    }]),
-  );
-  boundary.io = createTrustedSidecarIO(boundary.pythonIdentity);
-  return boundary;
 }
 
 async function safeBackupsDirectory(sessionDir, sidecarBoundary) {
@@ -241,35 +132,17 @@ async function readTransactionRecord(
     sessionDir, sidecarBoundary,
   );
   const transactionPath = join(transactionRoot, `${transactionId}.json`);
-  const info = await lstat(transactionPath);
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error('事务记录必须是非符号链接的常规文件');
-  }
-  if (dirname(await realpath(transactionPath)) !== transactionReal) {
-    throw new Error('事务记录真实路径逃逸当前会话目录');
-  }
-  const handle = await open(
-    transactionPath,
-    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
-  );
-  let bytes;
-  try {
-    if (!(await handle.stat()).isFile()) throw new Error('事务记录句柄不是常规文件');
-    bytes = await handle.readFile();
-  } finally {
-    await handle.close();
-  }
-  let record;
-  try { record = JSON.parse(bytes); }
-  catch { throw new Error('事务记录不是有效 JSON'); }
+  void transactionReal;
+  const record = await sidecarBoundary.io.readTransaction({ transactionId });
   const expectedKeys = [
     'backup', 'candidateFingerprint', 'deckPath', 'oldFingerprint',
-    'sessionDir', 'transactionId', 'version',
+    'sessionDir', 'sessionId', 'transactionId', 'version',
   ];
   if (!record || typeof record !== 'object' || Array.isArray(record)
     || JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(expectedKeys)
     || record.version !== 1
     || record.transactionId !== transactionId
+    || record.sessionId !== sidecarBoundary.sessionId
     || resolve(record.deckPath ?? '') !== resolve(deckPath)
     || resolve(record.sessionDir ?? '') !== resolve(sessionDir)
     || record.oldFingerprint !== expectedFingerprint
@@ -287,28 +160,15 @@ async function removeTransactionRecord(sessionDir, transactionId, sidecarBoundar
   const { transactionRoot } = await safeTransactionsDirectory(
     sessionDir, sidecarBoundary,
   );
-  await sidecarBoundary.io.unlink({
-    directory:transactionRoot,
-    name:`${requireTransactionId(transactionId)}.json`,
-    missingOk:true,
+  void transactionRoot;
+  await sidecarBoundary.io.deleteTransaction({
+    transactionId:requireTransactionId(transactionId),
   });
 }
 
 async function pruneTransactionRecords(sessionDir, maximum = 32, sidecarBoundary) {
-  const { transactionRoot } = await safeTransactionsDirectory(sessionDir, sidecarBoundary);
-  const candidates = [];
-  for (const entry of await readdir(transactionRoot, { withFileTypes:true })) {
-    if (!entry.isFile() || !/^[0-9a-f-]{36}\.json$/.test(entry.name)) continue;
-    const path = join(transactionRoot, entry.name);
-    const info = await lstat(path);
-    if (!info.isSymbolicLink() && info.isFile()) candidates.push({ path, mtimeMs:info.mtimeMs });
-  }
-  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
-  for (const candidate of candidates.slice(maximum)) {
-    await sidecarBoundary.io.unlink({
-      directory:transactionRoot, name:basename(candidate.path), missingOk:true,
-    });
-  }
+  await safeTransactionsDirectory(sessionDir, sidecarBoundary);
+  await sidecarBoundary.io.pruneTransactions({ maximum });
 }
 
 async function readTrustedBackup(
@@ -321,30 +181,11 @@ async function readTrustedBackup(
   if (dirname(absoluteBackup) !== backupRoot) {
     throw new Error('备份路径不在当前会话 backups 目录内');
   }
-  const backupInfo = await lstat(absoluteBackup);
-  if (backupInfo.isSymbolicLink() || !backupInfo.isFile()) {
-    throw new Error('备份必须是非符号链接的常规文件');
-  }
-  const backupRealPath = await realpath(absoluteBackup);
-  if (dirname(backupRealPath) !== backupReal) {
-    throw new Error('备份真实路径逃逸当前会话目录');
-  }
-  const handle = await open(
-    absoluteBackup,
-    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
-  );
-  let backupBytes;
-  try {
-    const openedInfo = await handle.stat();
-    if (!openedInfo.isFile()) throw new Error('备份句柄不是常规文件');
-    backupBytes = await handle.readFile();
-  } finally {
-    await handle.close();
-  }
-  if (bytesFingerprint(backupBytes) !== expectedFingerprint) {
-    throw new Error('备份指纹与写回前基线不一致');
-  }
-  return { backupPath:absoluteBackup, backupBytes };
+  void backupReal;
+  await sidecarBoundary.io.verifyBackup({
+    backupName:basename(absoluteBackup), expectedFingerprint,
+  });
+  return { backupPath:absoluteBackup };
 }
 
 async function syncDirectoryPath(path) {
@@ -373,7 +214,8 @@ async function restoreDeckBackup(
     });
   } catch (error) {
     if (error?.stage !== 'restore-conflict') throw error;
-    const currentFingerprint = await fileFingerprint(deckPath).catch(() => 'unavailable');
+    const currentFingerprint = await sidecarBoundary.io.hashDeck()
+      .then(result => result.fingerprint).catch(() => 'unavailable');
     throw restoreConflictError(
       candidateFingerprint,
       currentFingerprint,
@@ -419,7 +261,7 @@ async function validateWriterResult(
   if (record.candidateFingerprint !== result.fingerprint) {
     throw adapterError('WRITE_FAILED', 500, '事务记录 candidate 与 writer 回执不一致');
   }
-  if (await fileFingerprint(deckPath) !== result.fingerprint) {
+  if ((await sidecarBoundary.io.hashDeck()).fingerprint !== result.fingerprint) {
     throw adapterError('WRITE_FAILED', 500, '写入 Deck 回执与官方文件指纹不一致');
   }
   return result;
@@ -589,6 +431,7 @@ function runWritePatches(
   patches,
   expectedFingerprint,
   transactionId,
+  sessionId,
   sidecarIdentity,
   {
   spawnWriter,
@@ -605,12 +448,12 @@ function runWritePatches(
     'spec.loader.exec_module(module)',
     'patches=json.load(sys.stdin)',
     'identity=json.loads(sys.argv[5])',
-    'print(json.dumps(module.write_patches_safe(sys.argv[2],patches,sys.argv[3],sys.argv[4],sys.argv[6],identity),ensure_ascii=False))',
+    'print(json.dumps(module.write_patches_safe(sys.argv[2],patches,sys.argv[3],sys.argv[4],sys.argv[7],identity,sys.argv[6]),ensure_ascii=False))',
   ].join(';');
   return new Promise((resolvePromise, reject) => {
     const child = spawnWriter('python3', [
       '-c', program, adapterPath, deckPath, sessionDir, expectedFingerprint,
-      JSON.stringify(sidecarIdentity), transactionId,
+      JSON.stringify(sidecarIdentity), sessionId, transactionId,
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -785,9 +628,10 @@ async function runWriteTransaction({
     await pruneTransactionRecords(sessionDir, 32, sidecarBoundary);
     return result;
   } catch (error) {
-    const actualFingerprint = await fileFingerprint(deckPath).catch(readError => (
+    const actualFingerprint = await sidecarBoundary.io.hashDeck()
+      .then(result => result.fingerprint).catch(readError => (
       `unavailable:${readError.code ?? 'READ_ERROR'}`
-    ));
+      ));
     let transaction;
     try {
       transaction = await readTransactionRecord(
@@ -852,191 +696,224 @@ async function finalizeWriteTransaction(value, sessionDir, sidecarBoundary) {
   await removeTransactionRecord(sessionDir, match[1], sidecarBoundary);
 }
 
-async function readGuardedJsonFile(path, sidecarBoundary, label) {
-  await sidecarBoundary.guard();
-  const info = await lstat(path);
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error(`${label} 必须是非符号链接的常规文件`);
-  }
-  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-  try {
-    if (!(await handle.stat()).isFile()) throw new Error(`${label} 句柄不是常规文件`);
-    return JSON.parse(await handle.readFile('utf8'));
-  } finally {
-    await handle.close();
-  }
+const LEGACY_SESSION_KEYS = [
+  'conflict', 'deckFingerprint', 'deckPath', 'diagnosticsBaseline',
+  'diagnosticsCurrent', 'diagnosticsRevision', 'groups', 'redo', 'revision',
+  'tasks', 'version',
+];
+
+function strictLegacySessionState(state, deckPath, fingerprint) {
+  return Boolean(state && typeof state === 'object' && !Array.isArray(state)
+    && JSON.stringify(Object.keys(state).sort()) === JSON.stringify(LEGACY_SESSION_KEYS)
+    && state.version === 1
+    && resolve(state.deckPath ?? '') === resolve(deckPath)
+    && state.deckFingerprint === fingerprint
+    && Number.isInteger(state.revision) && state.revision >= 0
+    && Array.isArray(state.tasks) && Array.isArray(state.groups) && Array.isArray(state.redo)
+    && state.diagnosticsBaseline && typeof state.diagnosticsBaseline === 'object'
+    && state.diagnosticsCurrent && typeof state.diagnosticsCurrent === 'object');
 }
 
-async function readGuardedBytesFile(path, sidecarBoundary, label) {
-  await sidecarBoundary.guard();
-  const info = await lstat(path);
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error(`${label} 必须是非符号链接的常规文件`);
+function validateRegisteredSessionState(state, entry, deckPath, { preparing=false } = {}) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)
+    || state.sessionId !== entry.sessionId
+    || resolve(state.deckPath ?? '') !== resolve(deckPath)
+    || !/^[a-f0-9]{64}$/.test(state.deckFingerprint ?? '')
+    || (preparing && state.deckFingerprint !== entry.initialFingerprint)
+    || !Array.isArray(state.tasks) || !Array.isArray(state.groups) || !Array.isArray(state.redo)) {
+    throw new Error('session.json 未严格绑定 registry sessionId/Deck/fingerprint');
   }
-  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-  try {
-    if (!(await handle.stat()).isFile()) throw new Error(`${label} 句柄不是常规文件`);
-    return await handle.readFile();
-  } finally {
-    await handle.close();
-  }
+  return state;
 }
 
-async function findPendingDeckTransaction(deckPath, rootBoundary) {
-  await rootBoundary.guard();
-  const deckPrefix = `${basename(deckPath, '.html')}-`;
-  const candidates = [];
-  for (const entry of await readdir(rootBoundary.sidecarRoot, { withFileTypes:true })) {
-    if (!entry.name.startsWith(deckPrefix)) continue;
-    if (!entry.isDirectory()) {
-      throw new Error('Deck session 候选必须是非符号链接的真实目录');
-    }
-    const sessionDir = join(rootBoundary.sidecarRoot, entry.name);
-    const transactionDir = join(sessionDir, 'transactions');
-    let transactionEntries;
-    try { transactionEntries = await readdir(transactionDir, { withFileTypes:true }); }
-    catch (error) {
-      if (error.code === 'ENOENT') continue;
-      throw error;
-    }
-    for (const transactionEntry of transactionEntries) {
-      const match = transactionEntry.name.match(
-          /^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/,
-        );
-      if (match) candidates.push({
-        sessionDir, transactionId:match[1], recordEntryIsFile:transactionEntry.isFile(),
-      });
-    }
-  }
-  if (!candidates.length) return null;
-  if (candidates.length !== 1) {
-    throw new Error('当前 Deck 存在多个未完成 transaction，拒绝猜测恢复顺序');
-  }
-  const candidate = candidates[0];
-  if (!candidate.recordEntryIsFile) {
-    throw new Error('transaction record 必须是非符号链接的常规文件');
-  }
-  const session = await captureDirectoryIdentity(
-    candidate.sessionDir, 'sidecar session', rootBoundary.root,
-  );
-  const transactions = await captureDirectoryIdentity(
-    join(candidate.sessionDir, 'transactions'), 'transactions', session,
-  );
-  const discoveryBoundary = {
-    guard:async () => {
-      await rootBoundary.guard();
-      await assertDirectoryIdentity(session, rootBoundary.root);
-      await assertDirectoryIdentity(transactions, session);
-    },
+function persistentBoundary(project, root, binding, io) {
+  const boundary = {
+    project:{ ...project, label:'Deck 项目目录' },
+    root:{ ...root, label:'sidecar root' },
+    ...Object.fromEntries(Object.entries(binding.identities).map(([key, value]) => (
+      [key, { ...value, label:key }]
+    ))),
+    sidecarRoot:root.path,
+    sessionDir:binding.identities.session.path,
+    io,
   };
-  const transactionPath = join(
-    transactions.path, `${candidate.transactionId}.json`,
+  boundary.guard = async () => {
+    try { await io.assertBound(); }
+    catch (error) { throw unsafeSidecarError('sidecar 身份已在服务运行期间变化，拒绝继续写入', error); }
+  };
+  boundary.pythonIdentity = Object.fromEntries(
+    ['project', 'root', 'session', 'snapshots', 'backups', 'transactions', 'writeErrors']
+      .map(name => [name, Object.fromEntries(
+        ['path', 'realPath', 'dev', 'ino'].map(key => [key, boundary[name][key]]),
+      )]),
   );
-  const rawRecord = await readGuardedJsonFile(
-    transactionPath, discoveryBoundary, 'transaction record',
-  );
+  return boundary;
+}
+
+async function recoverRegisteredTransaction(deckPath, state, sidecarBoundary) {
+  const transactionIds = await sidecarBoundary.io.listTransactions();
+  if (!transactionIds.length) return state;
+  if (transactionIds.length !== 1) {
+    throw new Error('当前注册 session 存在多个未完成 transaction，拒绝猜测恢复顺序');
+  }
+  const [transactionId] = transactionIds;
+  const record = await sidecarBoundary.io.readTransaction({ transactionId });
   const expectedKeys = [
     'backup', 'candidateFingerprint', 'deckPath', 'oldFingerprint',
-    'sessionDir', 'transactionId', 'version',
+    'sessionDir', 'sessionId', 'transactionId', 'version',
   ];
-  const expectedSessionDir = join(
-    rootBoundary.sidecarRoot,
-    `${basename(deckPath, '.html')}-${String(rawRecord?.oldFingerprint ?? '').slice(0, 8)}`,
-  );
   const expectedBackup = join(
-    candidate.sessionDir, 'backups',
-    `${basename(deckPath, '.html')}-${rawRecord?.oldFingerprint}.html`,
+    sidecarBoundary.backups.path,
+    `${basename(deckPath, '.html')}-${record?.oldFingerprint}.html`,
   );
-  if (!rawRecord || typeof rawRecord !== 'object' || Array.isArray(rawRecord)
-    || JSON.stringify(Object.keys(rawRecord).sort()) !== JSON.stringify(expectedKeys)
-    || rawRecord.version !== 1
-    || rawRecord.transactionId !== candidate.transactionId
-    || resolve(rawRecord?.deckPath ?? '') !== resolve(deckPath)
-    || resolve(rawRecord?.sessionDir ?? '') !== resolve(candidate.sessionDir)
-    || resolve(candidate.sessionDir) !== resolve(expectedSessionDir)
-    || !/^[a-f0-9]{64}$/.test(rawRecord?.oldFingerprint ?? '')
-    || !/^[a-f0-9]{64}$/.test(rawRecord?.candidateFingerprint ?? '')
-    || resolve(rawRecord?.backup ?? '') !== resolve(expectedBackup)) {
-    throw new Error('未完成 transaction 未绑定当前 Deck/session');
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(expectedKeys)
+    || record.version !== 1
+    || record.transactionId !== transactionId
+    || record.sessionId !== sidecarBoundary.sessionId
+    || resolve(record.deckPath ?? '') !== resolve(deckPath)
+    || resolve(record.sessionDir ?? '') !== resolve(sidecarBoundary.sessionDir)
+    || !/^[a-f0-9]{64}$/.test(record.oldFingerprint ?? '')
+    || !/^[a-f0-9]{64}$/.test(record.candidateFingerprint ?? '')
+    || resolve(record.backup ?? '') !== resolve(expectedBackup)) {
+    throw new Error('未完成 transaction 未严格绑定 registry/Deck/session');
   }
-  const sessionState = await readGuardedJsonFile(
-    join(candidate.sessionDir, 'session.json'), discoveryBoundary, 'session.json',
-  );
-  if (resolve(sessionState?.deckPath ?? '') !== resolve(deckPath)
-    || ![rawRecord.oldFingerprint, rawRecord.candidateFingerprint]
-      .includes(sessionState?.deckFingerprint)) {
-    throw new Error('未完成 transaction 对应 session 未严格绑定 Deck/fingerprint');
-  }
-  const backups = await captureDirectoryIdentity(
-    join(candidate.sessionDir, 'backups'), 'backups', session,
-  );
-  const backupBoundary = {
-    guard:async () => {
-      await discoveryBoundary.guard();
-      await assertDirectoryIdentity(backups, session);
-    },
-  };
-  const backupBytes = await readGuardedBytesFile(
-    expectedBackup, backupBoundary, 'transaction backup',
-  );
-  if (bytesFingerprint(backupBytes) !== rawRecord.oldFingerprint) {
-    throw new Error('未完成 transaction backup 与 oldFingerprint 不一致');
-  }
-  // 到这里之前全部是只读检查；严格绑定成立后才补齐运行期目录并选择 session。
-  const sidecarBoundary = await prepareSidecarSession(rootBoundary, candidate.sessionDir);
-  const backupRecord = { backupPath:resolve(rawRecord.backup) };
-  const { record } = await readTransactionRecord(
-    deckPath, candidate.sessionDir, candidate.transactionId,
-    rawRecord.oldFingerprint, backupRecord, sidecarBoundary,
-  );
-  return {
-    ...candidate,
-    transactionPath,
-    record,
-    backupRecord,
-    sessionState,
-    sidecarBoundary,
-  };
-}
-
-async function recoverPendingDeckTransaction(deckPath, rootBoundary) {
-  const pending = await findPendingDeckTransaction(deckPath, rootBoundary);
-  if (!pending) return null;
-  const diskFingerprint = await fileFingerprint(deckPath);
-  const sessionFingerprint = pending.sessionState.deckFingerprint;
-  const { oldFingerprint, candidateFingerprint } = pending.record;
-  if (diskFingerprint === candidateFingerprint && sessionFingerprint === oldFingerprint) {
-    await restoreDeckBackup(
-      deckPath,
-      pending.sessionDir,
-      pending.backupRecord,
-      oldFingerprint,
-      candidateFingerprint,
-      pending.sidecarBoundary,
-    );
-    await removeTransactionRecord(
-      pending.sessionDir, pending.transactionId, pending.sidecarBoundary,
-    );
-    return { sessionDir:pending.sessionDir, sidecarBoundary:pending.sidecarBoundary };
-  }
-  if ((diskFingerprint === candidateFingerprint && sessionFingerprint === candidateFingerprint)
-    || (diskFingerprint === oldFingerprint && sessionFingerprint === oldFingerprint)) {
-    await removeTransactionRecord(
-      pending.sessionDir, pending.transactionId, pending.sidecarBoundary,
-    );
-    return { sessionDir:pending.sessionDir, sidecarBoundary:pending.sidecarBoundary };
-  }
-  if (![oldFingerprint, candidateFingerprint].includes(sessionFingerprint)) {
+  await sidecarBoundary.io.verifyBackup({
+    backupName:basename(expectedBackup), expectedFingerprint:record.oldFingerprint,
+  });
+  if (![record.oldFingerprint, record.candidateFingerprint].includes(state.deckFingerprint)) {
     throw new Error('session fingerprint 与未完成 transaction 不一致');
   }
-  return {
-    sessionDir:pending.sessionDir,
-    sidecarBoundary:pending.sidecarBoundary,
-    pendingConflict:{
+  const diskFingerprint = (await sidecarBoundary.io.hashDeck()).fingerprint;
+  if (diskFingerprint === record.candidateFingerprint
+    && state.deckFingerprint === record.oldFingerprint) {
+    await sidecarBoundary.io.restoreDeck({
+      backupName:basename(expectedBackup),
+      oldFingerprint:record.oldFingerprint,
+      candidateFingerprint:record.candidateFingerprint,
+    });
+    await sidecarBoundary.io.deleteTransaction({ transactionId });
+    return state;
+  }
+  if ((diskFingerprint === record.candidateFingerprint
+      && state.deckFingerprint === record.candidateFingerprint)
+    || (diskFingerprint === record.oldFingerprint
+      && state.deckFingerprint === record.oldFingerprint)) {
+    await sidecarBoundary.io.deleteTransaction({ transactionId });
+    return state;
+  }
+  const conflicted = {
+    ...state,
+    conflict:{
+      code:'DECK_CHANGED',
+      expectedFingerprint:state.deckFingerprint,
       actualFingerprint:diskFingerprint,
-      transactionId:pending.transactionId,
+      detectedAt:new Date().toISOString(),
     },
   };
+  await sidecarBoundary.io.writeSession({
+    sessionId:sidecarBoundary.sessionId,
+    bytes:Buffer.from(JSON.stringify(conflicted, null, 2)),
+  });
+  await sidecarBoundary.io.deleteTransaction({ transactionId });
+  return conflicted;
+}
+
+async function initializePersistentSidecar(deckPath) {
+  const project = await captureDirectoryIdentity(dirname(deckPath), 'Deck 项目目录');
+  const io = await createPersistentSidecarIO({ project });
+  try {
+    const { identity:root } = await io.ensureRoot();
+    const deckName = basename(deckPath);
+    const discovery = await io.discover({ deckName });
+    let { fingerprint:currentFingerprint } = await io.hashDeck();
+    let entry;
+    let persistedState;
+    let binding;
+
+    if (discovery.registry !== null && discovery.sessions.length > 1) {
+      throw new Error('当前 Deck registry 存在多个 session，拒绝猜测');
+    }
+    if (discovery.sessions.length === 1) {
+      [entry] = discovery.sessions;
+      if (entry.kind === 'unsafe'
+        || (entry.kind === 'missing' && !(entry.status === 'preparing' && entry.mode === 'fresh'))) {
+        throw new Error('registry session 目录缺失或不安全');
+      }
+      binding = await io.bindSession({
+        deckName, sessionName:entry.sessionName, create:entry.kind === 'missing',
+      });
+      persistedState = await io.readSession({ missingOk:entry.status === 'preparing' });
+      if (entry.status === 'active') {
+        validateRegisteredSessionState(persistedState, entry, deckPath);
+      } else if (entry.mode === 'legacy') {
+        if ((await io.listTransactions()).length) {
+          throw new Error('preparing legacy session 出现 pending transaction');
+        }
+        if (persistedState?.sessionId === undefined) {
+          if (!strictLegacySessionState(
+            persistedState, deckPath, entry.initialFingerprint,
+          )) throw new Error('preparing legacy session 不再满足迁移约束');
+          persistedState = { ...persistedState, sessionId:entry.sessionId };
+          await io.writeSession({
+            sessionId:entry.sessionId,
+            bytes:Buffer.from(JSON.stringify(persistedState, null, 2)),
+          });
+        } else {
+          validateRegisteredSessionState(persistedState, entry, deckPath, { preparing:true });
+        }
+      } else if (persistedState !== null) {
+        validateRegisteredSessionState(persistedState, entry, deckPath, { preparing:true });
+      }
+    } else {
+      const legacy = await io.inspectLegacy({ deckName, currentFingerprint });
+      if (legacy.candidates.some(candidate => candidate.transactionIds.length)) {
+        throw new Error('无 registry 的 legacy session 含 pending transaction，拒绝迁移');
+      }
+      if (legacy.candidates.length > 1) {
+        throw new Error('无 registry 时存在多个 legacy session，拒绝猜测');
+      }
+      const candidate = legacy.candidates[0] ?? null;
+      if (candidate && (!candidate.expectedCurrentName
+        || !strictLegacySessionState(candidate.sessionState, deckPath, currentFingerprint))) {
+        throw new Error('未注册 session 不是可迁移的严格 legacy');
+      }
+      const mode = candidate ? 'legacy' : 'fresh';
+      const sessionId = randomUUID();
+      const sessionName = candidate?.sessionName
+        ?? `${basename(deckPath, '.html')}-${currentFingerprint.slice(0, 8)}`;
+      entry = await io.prepareSession({
+        deckName, sessionId, initialFingerprint:currentFingerprint, sessionName, mode,
+      });
+      binding = await io.bindSession({ deckName, sessionName, create:mode === 'fresh' });
+      if (candidate) {
+        persistedState = { ...candidate.sessionState, sessionId };
+        await io.writeSession({
+          sessionId, bytes:Buffer.from(JSON.stringify(persistedState, null, 2)),
+        });
+      } else {
+        persistedState = null;
+      }
+    }
+    const sidecarBoundary = persistentBoundary(project, root, binding, io);
+    sidecarBoundary.sessionId = entry.sessionId;
+    if (entry.status === 'active') {
+      persistedState = await recoverRegisteredTransaction(
+        deckPath, persistedState, sidecarBoundary,
+      );
+      currentFingerprint = (await io.hashDeck()).fingerprint;
+    }
+    return {
+      sidecarBoundary,
+      entry,
+      persistedState,
+      currentFingerprint,
+      needsActivation:entry.status === 'preparing',
+    };
+  } catch (error) {
+    await io.close();
+    throw error;
+  }
 }
 
 export async function startServer({
@@ -1065,59 +942,38 @@ export async function startServer({
   const urlHost = host.includes(':') ? `[${host}]` : host;
   const absoluteDeckPath = resolve(deckPath);
   let sidecarBoundary;
-  let pendingRecovery;
+  let initialization;
   try {
-    const existingRootBoundary = await captureExistingSidecarRoot(absoluteDeckPath);
-    pendingRecovery = existingRootBoundary
-      ? await recoverPendingDeckTransaction(absoluteDeckPath, existingRootBoundary)
-      : null;
-    if (pendingRecovery) {
-      sidecarBoundary = pendingRecovery.sidecarBoundary;
-    } else {
-      const rootBoundary = existingRootBoundary ?? await prepareSidecarRoot(absoluteDeckPath);
-      const deckFingerprint = await fileFingerprint(absoluteDeckPath);
-      sidecarBoundary = await prepareSidecarSession(
-        rootBoundary,
-        join(
-          rootBoundary.sidecarRoot,
-          `${basename(absoluteDeckPath, '.html')}-${deckFingerprint.slice(0, 8)}`,
-        ),
-      );
-    }
+    initialization = await initializePersistentSidecar(absoluteDeckPath);
+    sidecarBoundary = initialization.sidecarBoundary;
   } catch (error) {
     if (error?.code === 'UNSAFE_SIDECAR') throw error;
     throw unsafeSidecarError('sidecar 路径不可信，拒绝启动编辑服务', error);
   }
-  const sessionStore = await SessionStore.open({
-    deckPath:absoluteDeckPath,
-    rootDir:sidecarBoundary.sidecarRoot,
-    sessionDir:sidecarBoundary.sessionDir,
-    sidecarGuard:sidecarBoundary.guard,
-    sidecarIO:sidecarBoundary.io,
-    directoriesPrepared:true,
-  });
+  let sessionStore;
+  try {
+    sessionStore = await SessionStore.open({
+      deckPath:absoluteDeckPath,
+      rootDir:sidecarBoundary.sidecarRoot,
+      sessionDir:sidecarBoundary.sessionDir,
+      sidecarGuard:sidecarBoundary.guard,
+      sidecarIO:sidecarBoundary.io,
+      directoriesPrepared:true,
+      deckFingerprint:initialization.currentFingerprint,
+      sessionId:initialization.entry.sessionId,
+      persistedState:initialization.persistedState,
+    });
+    if (initialization.needsActivation) {
+      await sidecarBoundary.io.activateSession({
+        sessionId:initialization.entry.sessionId,
+      });
+    }
+  } catch (error) {
+    await sidecarBoundary.io.close();
+    throw unsafeSidecarError('session/registry 无法安全完成初始化', error);
+  }
   if (resolve(sessionStore.sessionDir) !== resolve(sidecarBoundary.sessionDir)) {
     throw unsafeSidecarError('Deck 在 sidecar 初始化期间发生变化，请重试');
-  }
-  if (pendingRecovery?.pendingConflict) {
-    const previousConflict = sessionStore.state.conflict;
-    sessionStore.state.conflict = {
-      code:'DECK_CHANGED',
-      expectedFingerprint:sessionStore.state.deckFingerprint,
-      actualFingerprint:pendingRecovery.pendingConflict.actualFingerprint,
-      detectedAt:new Date().toISOString(),
-    };
-    try {
-      await sessionStore.persistState();
-      await removeTransactionRecord(
-        sessionStore.sessionDir,
-        pendingRecovery.pendingConflict.transactionId,
-        sidecarBoundary,
-      );
-    } catch (error) {
-      sessionStore.state.conflict = previousConflict;
-      throw unsafeSidecarError('未完成 transaction 冲突状态无法安全持久化', error);
-    }
   }
   const bridge = new BridgeService({
     sessionStore,
@@ -1143,7 +999,7 @@ export async function startServer({
     watcherQueue = watcherQueue.then(async () => {
       if (watcherClosed || generation !== watcherGeneration) return;
       const changed = await bridge.noteDeckFingerprint(async () => {
-        try { return await fileFingerprint(absoluteDeckPath); }
+        try { return (await sidecarBoundary.io.hashDeck()).fingerprint; }
         catch (error) { return `unavailable:${error.code ?? 'READ_ERROR'}`; }
       });
       if (!watcherClosed && generation === watcherGeneration && changed) {
@@ -1228,7 +1084,7 @@ export async function startServer({
           result = await bridge.writeDeck(
             expectedRevision,
             {
-              fingerprint:() => fileFingerprint(absoluteDeckPath),
+              fingerprint:() => sidecarBoundary.io.hashDeck().then(result => result.fingerprint),
               writer:(patches, expectedFingerprint) => runWriteTransaction({
                 deckPath:absoluteDeckPath,
                 sessionDir:sessionStore.sessionDir,
@@ -1241,6 +1097,7 @@ export async function startServer({
                   patches,
                   expectedFingerprint,
                   transactionId,
+                  sessionStore.state.sessionId,
                   sidecarBoundary.pythonIdentity,
                   {
                     spawnWriter,
@@ -1387,6 +1244,7 @@ export async function startServer({
         httpClosed,
         writersSettled,
       ]);
+      await sidecarBoundary.io.close();
       server.closeAllConnections?.();
     })();
     return closePromise;

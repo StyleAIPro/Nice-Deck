@@ -15,6 +15,13 @@ from pathlib import Path
 import stat
 import sys
 import uuid
+import re
+
+
+MAX_REQUEST_BYTES = 1024 * 1024
+TRANSACTION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
 class SidecarIOError(RuntimeError):
@@ -81,18 +88,32 @@ def _read_fd_file(directory_fd: int, name: str) -> bytes:
         os.close(fd)
 
 
-def read_regular(identity: dict, name: str) -> bytes:
-    directory_fd = _open_directory(identity)
-    try:
-        return _read_fd_file(directory_fd, name)
-    finally:
-        os.close(directory_fd)
-
-
-def atomic_write(identity: dict, name: str, contents: bytes, stage_hook=None):
-    """完成 temp fsync → rename → parent fsync，成功后才返回。"""
+def _open_child_directory(parent_fd: int, name: str, *, create: bool) -> int:
     name = _require_name(name)
-    directory_fd = _open_directory(identity)
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileExistsError:
+            pass
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, dir_fd=parent_fd)
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise SidecarIOError("sidecar 子路径不是常规目录")
+    return fd
+
+
+def _decode_json_file(directory_fd: int, name: str):
+    try:
+        return json.loads(_read_fd_file(directory_fd, name))
+    except json.JSONDecodeError as error:
+        raise SidecarIOError(f"{name} 不是有效 JSON") from error
+
+
+def _atomic_write_fd(directory_fd: int, name: str, contents: bytes):
+    """仅在持久 helper 已持有的目录 fd 内原子发布文件。"""
+    name = _require_name(name)
     temporary = f".{name}.{uuid.uuid4()}.tmp"
     renamed = False
     fd = None
@@ -104,23 +125,17 @@ def atomic_write(identity: dict, name: str, contents: bytes, stage_hook=None):
             written = os.write(fd, view)
             view = view[written:]
         os.fsync(fd)
-        if stage_hook:
-            stage_hook("temp-fsync")
         os.close(fd)
         fd = None
         os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         renamed = True
-        if stage_hook:
-            stage_hook("rename")
         os.fsync(directory_fd)
-        if stage_hook:
-            stage_hook("directory-fsync")
         return {"committed": True}
     except Exception as error:
-        stage = getattr(error, "stage", None)
-        if stage is None:
-            stage = "directory-fsync" if renamed else ("temp-fsync" if fd is not None else "rename")
-        wrapped = SidecarIOError(str(error), stage=stage, committed=renamed)
+        wrapped = SidecarIOError(
+            str(error), stage="directory-fsync" if renamed else "registry-write",
+            committed=renamed,
+        )
         raise wrapped from error
     finally:
         if fd is not None:
@@ -130,149 +145,6 @@ def atomic_write(identity: dict, name: str, contents: bytes, stage_hook=None):
                 os.unlink(temporary, dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
-        os.close(directory_fd)
-
-
-def unlink_regular(identity: dict, name: str, *, missing_ok=False):
-    name = _require_name(name)
-    directory_fd = _open_directory(identity)
-    try:
-        try:
-            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            if missing_ok:
-                return {"removed": False}
-            raise
-        if not stat.S_ISREG(info.st_mode):
-            raise SidecarIOError("拒绝删除非常规文件", stage="unlink")
-        os.unlink(name, dir_fd=directory_fd)
-        os.fsync(directory_fd)
-        return {"removed": True}
-    finally:
-        os.close(directory_fd)
-
-
-def ensure_child_directory(parent_identity: dict, name: str, path: str) -> dict:
-    name = _require_name(name)
-    parent_fd = _open_directory(parent_identity)
-    child_fd = None
-    try:
-        try:
-            os.mkdir(name, 0o700, dir_fd=parent_fd)
-            os.fsync(parent_fd)
-        except FileExistsError:
-            pass
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        child_fd = os.open(name, flags, dir_fd=parent_fd)
-        info = os.fstat(child_fd)
-        if not stat.S_ISDIR(info.st_mode):
-            raise SidecarIOError("sidecar 子路径不是常规目录")
-        absolute = str(Path(path).absolute())
-        expected_path = str(Path(parent_identity["path"]) / name)
-        if absolute != expected_path:
-            raise SidecarIOError("sidecar 子目录路径与父 identity 不一致")
-        return {
-            "path": absolute,
-            "realPath": str(Path(parent_identity["realPath"]) / name),
-            "dev": str(info.st_dev),
-            "ino": str(info.st_ino),
-        }
-    finally:
-        if child_fd is not None:
-            os.close(child_fd)
-        os.close(parent_fd)
-
-
-def ensure_backup(
-    project_identity: dict,
-    deck_name: str,
-    backups_identity: dict,
-    backup_name: str,
-    expected_fingerprint: str,
-):
-    project_fd = _open_directory(project_identity)
-    backups_fd = _open_directory(backups_identity)
-    try:
-        original = _read_fd_file(project_fd, deck_name)
-        actual = hashlib.sha256(original).hexdigest()
-        if actual != expected_fingerprint:
-            raise SidecarIOError("Deck 指纹与保存请求基线不一致", stage="fingerprint")
-        try:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(_require_name(backup_name), flags, 0o600, dir_fd=backups_fd)
-            try:
-                view = memoryview(original)
-                while view:
-                    written = os.write(fd, view)
-                    view = view[written:]
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.fsync(backups_fd)
-        except FileExistsError:
-            pass
-        backup = _read_fd_file(backups_fd, backup_name)
-        if backup != original or hashlib.sha256(backup).hexdigest() != expected_fingerprint:
-            raise SidecarIOError("已有备份内容不一致或已损坏", stage="backup")
-        return {"fingerprint": actual}
-    finally:
-        os.close(backups_fd)
-        os.close(project_fd)
-
-
-def restore_deck(
-    project_identity: dict,
-    deck_name: str,
-    backups_identity: dict,
-    backup_name: str,
-    old_fingerprint: str,
-    candidate_fingerprint: str,
-):
-    project_fd = _open_directory(project_identity)
-    backups_fd = _open_directory(backups_identity)
-    temporary = f".{_require_name(deck_name)}.{uuid.uuid4()}.restore.tmp"
-    renamed = False
-    try:
-        backup = _read_fd_file(backups_fd, backup_name)
-        if hashlib.sha256(backup).hexdigest() != old_fingerprint:
-            raise SidecarIOError("备份指纹与写回前基线不一致", stage="restore")
-        current = _read_fd_file(project_fd, deck_name)
-        current_fingerprint = hashlib.sha256(current).hexdigest()
-        if current_fingerprint == old_fingerprint:
-            return {"restored": False, "fingerprint": old_fingerprint}
-        if current_fingerprint != candidate_fingerprint:
-            raise SidecarIOError(
-                "Deck 已不再是本次 writer candidate，拒绝自动恢复覆盖",
-                stage="restore-conflict",
-            )
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(temporary, flags, 0o600, dir_fd=project_fd)
-        try:
-            view = memoryview(backup)
-            while view:
-                written = os.write(fd, view)
-                view = view[written:]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        latest = hashlib.sha256(_read_fd_file(project_fd, deck_name)).hexdigest()
-        if latest != candidate_fingerprint:
-            raise SidecarIOError(
-                "Deck 在自动恢复期间发生外部变化，拒绝覆盖",
-                stage="restore-conflict",
-            )
-        os.replace(temporary, deck_name, src_dir_fd=project_fd, dst_dir_fd=project_fd)
-        renamed = True
-        os.fsync(project_fd)
-        return {"restored": True, "fingerprint": old_fingerprint}
-    finally:
-        if not renamed:
-            try:
-                os.unlink(temporary, dir_fd=project_fd)
-            except FileNotFoundError:
-                pass
-        os.close(backups_fd)
-        os.close(project_fd)
 
 
 def _decode_bytes(value):
@@ -281,45 +153,671 @@ def _decode_bytes(value):
     return base64.b64decode(value, validate=True)
 
 
-def dispatch(request: dict):
-    operation = request.get("operation")
-    if operation == "atomic-write":
-        return atomic_write(
-            request["directory"], request["name"], _decode_bytes(request["bytes"])
+class PersistentHelper:
+    """长期持有可信目录 fd 的生产 helper；只接受专用 JSONL 命令。"""
+
+    def __init__(self):
+        self.project_fd = None
+        self.root_fd = None
+        self.project_identity = None
+        self.root_identity = None
+        self.deck_name = None
+        self.session_name = None
+        self.session_fd = None
+        self.snapshots_fd = None
+        self.backups_fd = None
+        self.transactions_fd = None
+        self.write_errors_fd = None
+
+    def close(self):
+        for name in (
+            "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd",
+            "session_fd", "root_fd", "project_fd",
+        ):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+
+    def _require_bound_session(self):
+        if self.session_fd is None:
+            raise SidecarIOError("尚未绑定可信 session")
+
+    def bind_session(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {
+            "deckName", "sessionName", "create"
+        }:
+            raise SidecarIOError("bind-session payload 格式无效")
+        if self.root_fd is None:
+            raise SidecarIOError("尚未绑定可信 sidecar root")
+        deck_name = _require_name(payload["deckName"])
+        if not deck_name.endswith(".html") or not isinstance(payload["create"], bool):
+            raise SidecarIOError("bind-session 参数无效")
+        session_name = _require_name(payload["sessionName"])
+        expected_prefix = f"{Path(deck_name).stem}-"
+        suffix = session_name.removeprefix(expected_prefix)
+        if not session_name.startswith(expected_prefix) or not re.fullmatch(r"[a-f0-9]{8}", suffix):
+            raise SidecarIOError("session 名称未严格绑定 Deck 和 old8")
+
+        for name in (
+            "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd", "session_fd"
+        ):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+        self.session_fd = _open_child_directory(
+            self.root_fd, session_name, create=payload["create"]
         )
-    if operation == "unlink":
-        return unlink_regular(
-            request["directory"], request["name"], missing_ok=request.get("missingOk", False)
+        try:
+            self.snapshots_fd = _open_child_directory(
+                self.session_fd, "snapshots", create=payload["create"]
+            )
+            self.backups_fd = _open_child_directory(
+                self.session_fd, "backups", create=payload["create"]
+            )
+            self.transactions_fd = _open_child_directory(
+                self.session_fd, "transactions", create=payload["create"]
+            )
+            self.write_errors_fd = _open_child_directory(
+                self.session_fd, "write-errors", create=payload["create"]
+            )
+        except Exception:
+            for name in (
+                "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd", "session_fd"
+            ):
+                fd = getattr(self, name)
+                if fd is not None:
+                    os.close(fd)
+                    setattr(self, name, None)
+            raise
+        self.deck_name = deck_name
+        self.session_name = session_name
+        identities = {}
+        for key, fd, child in (
+            ("session", self.session_fd, session_name),
+            ("snapshots", self.snapshots_fd, f"{session_name}/snapshots"),
+            ("backups", self.backups_fd, f"{session_name}/backups"),
+            ("transactions", self.transactions_fd, f"{session_name}/transactions"),
+            ("writeErrors", self.write_errors_fd, f"{session_name}/write-errors"),
+        ):
+            identities[key] = self._identity_for_fd(
+                fd,
+                str(Path(self.root_identity["path"]) / child),
+                str(Path(self.root_identity["realPath"]) / child),
+            )
+        return {"sessionName": session_name, "identities": identities}
+
+    def read_session(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"missingOk"}:
+            raise SidecarIOError("read-session payload 格式无效")
+        self._require_bound_session()
+        try:
+            return _decode_json_file(self.session_fd, "session.json")
+        except FileNotFoundError:
+            if payload["missingOk"] is True:
+                return None
+            raise
+
+    @staticmethod
+    def _same_directory_entry(parent_fd, name, expected_fd):
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        held = os.fstat(expected_fd)
+        return (
+            stat.S_ISDIR(current.st_mode)
+            and current.st_dev == held.st_dev
+            and current.st_ino == held.st_ino
         )
-    if operation == "read":
-        return {"bytes": base64.b64encode(read_regular(request["directory"], request["name"])).decode("ascii")}
-    if operation == "ensure-directory":
-        return ensure_child_directory(request["parent"], request["name"], request["path"])
-    if operation == "ensure-backup":
-        return ensure_backup(
-            request["project"], request["deckName"], request["backups"],
-            request["backupName"], request["expectedFingerprint"],
+
+    def assert_bound(self, payload):
+        if payload != {}:
+            raise SidecarIOError("assert-bound payload 格式无效")
+        self._require_bound_session()
+        checks = (
+            (self.project_fd, ".huawei-deck-editor", self.root_fd),
+            (self.root_fd, self.session_name, self.session_fd),
+            (self.session_fd, "snapshots", self.snapshots_fd),
+            (self.session_fd, "backups", self.backups_fd),
+            (self.session_fd, "transactions", self.transactions_fd),
+            (self.session_fd, "write-errors", self.write_errors_fd),
         )
-    if operation == "restore-deck":
-        return restore_deck(
-            request["project"], request["deckName"], request["backups"],
-            request["backupName"], request["oldFingerprint"], request["candidateFingerprint"],
+        try:
+            if not all(self._same_directory_entry(*check) for check in checks):
+                raise SidecarIOError("sidecar 目录身份已变化")
+        except OSError as error:
+            raise SidecarIOError("sidecar 目录身份已变化") from error
+        return {"safe": True}
+
+    def read_transaction(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"transactionId"}:
+            raise SidecarIOError("read-transaction payload 格式无效")
+        self._require_bound_session()
+        transaction_id = payload["transactionId"]
+        if not isinstance(transaction_id, str) or not TRANSACTION_ID_RE.fullmatch(transaction_id):
+            raise SidecarIOError("transactionId 不是规范 UUID v4")
+        return _decode_json_file(self.transactions_fd, f"{transaction_id}.json")
+
+    def list_transactions(self, payload):
+        if payload != {}:
+            raise SidecarIOError("list-transactions payload 格式无效")
+        self._require_bound_session()
+        transaction_ids = []
+        for name in sorted(os.listdir(self.transactions_fd)):
+            if not name.endswith(".json"):
+                continue
+            transaction_id = name[:-5]
+            if not TRANSACTION_ID_RE.fullmatch(transaction_id):
+                continue
+            info = os.stat(name, dir_fd=self.transactions_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                raise SidecarIOError("transaction record 必须是非符号链接的常规文件")
+            transaction_ids.append(transaction_id)
+        return transaction_ids
+
+    def verify_backup(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {
+            "backupName", "expectedFingerprint"
+        }:
+            raise SidecarIOError("verify-backup payload 格式无效")
+        self._require_bound_session()
+        fingerprint = payload["expectedFingerprint"]
+        if not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+            raise SidecarIOError("backup fingerprint 无效")
+        expected_name = f"{Path(self.deck_name).stem}-{fingerprint}.html"
+        if payload["backupName"] != expected_name:
+            raise SidecarIOError("backup 名称未严格绑定 Deck 指纹")
+        actual = hashlib.sha256(_read_fd_file(self.backups_fd, expected_name)).hexdigest()
+        if actual != fingerprint:
+            raise SidecarIOError("备份指纹与写回前基线不一致")
+        return {"fingerprint": actual}
+
+    def hash_deck(self, payload):
+        if payload != {}:
+            raise SidecarIOError("hash-deck payload 格式无效")
+        if self.deck_name is None:
+            raise SidecarIOError("尚未选择 Deck")
+        return {
+            "fingerprint": hashlib.sha256(
+                _read_fd_file(self.project_fd, self.deck_name)
+            ).hexdigest()
+        }
+
+    def write_session(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"sessionId", "bytes"}:
+            raise SidecarIOError("write-session payload 格式无效")
+        self._require_bound_session()
+        session_id = payload["sessionId"]
+        if not isinstance(session_id, str) or not TRANSACTION_ID_RE.fullmatch(session_id):
+            raise SidecarIOError("write-session sessionId 无效")
+        contents = _decode_bytes(payload["bytes"])
+        try:
+            state = json.loads(contents)
+        except json.JSONDecodeError as error:
+            raise SidecarIOError("write-session bytes 不是有效 JSON") from error
+        if not isinstance(state, dict) or state.get("sessionId") != session_id:
+            raise SidecarIOError("session.json 未绑定当前 sessionId")
+        return _atomic_write_fd(self.session_fd, "session.json", contents)
+
+    @staticmethod
+    def _unlink_bound(directory_fd, name):
+        name = _require_name(name)
+        try:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return {"removed": False}
+        if not stat.S_ISREG(info.st_mode):
+            raise SidecarIOError("拒绝删除非常规文件", stage="unlink")
+        os.unlink(name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        return {"removed": True}
+
+    def write_snapshot(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"snapshotId", "bytes"}:
+            raise SidecarIOError("write-snapshot payload 格式无效")
+        self._require_bound_session()
+        snapshot_id = payload["snapshotId"]
+        if not isinstance(snapshot_id, str) or not TRANSACTION_ID_RE.fullmatch(snapshot_id):
+            raise SidecarIOError("snapshotId 不是规范 UUID v4")
+        return _atomic_write_fd(
+            self.snapshots_fd, f"{snapshot_id}.png", _decode_bytes(payload["bytes"])
         )
-    raise SidecarIOError("未知 sidecar I/O operation")
+
+    def delete_snapshot(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"snapshotId"}:
+            raise SidecarIOError("delete-snapshot payload 格式无效")
+        self._require_bound_session()
+        snapshot_id = payload["snapshotId"]
+        if not isinstance(snapshot_id, str) or not TRANSACTION_ID_RE.fullmatch(snapshot_id):
+            raise SidecarIOError("snapshotId 不是规范 UUID v4")
+        return self._unlink_bound(self.snapshots_fd, f"{snapshot_id}.png")
+
+    def delete_transaction(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"transactionId"}:
+            raise SidecarIOError("delete-transaction payload 格式无效")
+        self._require_bound_session()
+        transaction_id = payload["transactionId"]
+        if not isinstance(transaction_id, str) or not TRANSACTION_ID_RE.fullmatch(transaction_id):
+            raise SidecarIOError("transactionId 不是规范 UUID v4")
+        return self._unlink_bound(self.transactions_fd, f"{transaction_id}.json")
+
+    def prune_transactions(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"maximum"}:
+            raise SidecarIOError("prune-transactions payload 格式无效")
+        maximum = payload["maximum"]
+        if not isinstance(maximum, int) or isinstance(maximum, bool) or not 0 <= maximum <= 256:
+            raise SidecarIOError("prune-transactions maximum 无效")
+        self._require_bound_session()
+        candidates = []
+        for name in os.listdir(self.transactions_fd):
+            if not name.endswith(".json") or not TRANSACTION_ID_RE.fullmatch(name[:-5]):
+                continue
+            info = os.stat(name, dir_fd=self.transactions_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                raise SidecarIOError("transaction record 必须是常规文件")
+            candidates.append((info.st_mtime_ns, name))
+        candidates.sort(reverse=True)
+        removed = 0
+        for _, name in candidates[maximum:]:
+            self._unlink_bound(self.transactions_fd, name)
+            removed += 1
+        return {"removed": removed}
+
+    def restore_bound_deck(self, payload):
+        required = {"backupName", "oldFingerprint", "candidateFingerprint"}
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise SidecarIOError("restore-deck payload 格式无效")
+        self._require_bound_session()
+        old_fingerprint = payload["oldFingerprint"]
+        candidate_fingerprint = payload["candidateFingerprint"]
+        if (
+            not isinstance(old_fingerprint, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", old_fingerprint)
+            or not isinstance(candidate_fingerprint, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", candidate_fingerprint)
+            or payload["backupName"]
+            != f"{Path(self.deck_name).stem}-{old_fingerprint}.html"
+        ):
+            raise SidecarIOError("restore-deck 参数未绑定 Deck/fingerprint")
+        backup = _read_fd_file(self.backups_fd, payload["backupName"])
+        if hashlib.sha256(backup).hexdigest() != old_fingerprint:
+            raise SidecarIOError("备份指纹与写回前基线不一致", stage="restore")
+        current = _read_fd_file(self.project_fd, self.deck_name)
+        current_fingerprint = hashlib.sha256(current).hexdigest()
+        if current_fingerprint == old_fingerprint:
+            return {"restored": False, "fingerprint": old_fingerprint}
+        if current_fingerprint != candidate_fingerprint:
+            raise SidecarIOError(
+                "Deck 已不再是本次 writer candidate，拒绝自动恢复覆盖",
+                stage="restore-conflict",
+            )
+        temporary = f".{self.deck_name}.{uuid.uuid4()}.restore.tmp"
+        renamed = False
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(temporary, flags, 0o600, dir_fd=self.project_fd)
+            try:
+                view = memoryview(backup)
+                while view:
+                    written = os.write(fd, view)
+                    view = view[written:]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            latest = hashlib.sha256(
+                _read_fd_file(self.project_fd, self.deck_name)
+            ).hexdigest()
+            if latest != candidate_fingerprint:
+                raise SidecarIOError(
+                    "Deck 在自动恢复期间发生外部变化，拒绝覆盖",
+                    stage="restore-conflict",
+                )
+            os.replace(
+                temporary, self.deck_name,
+                src_dir_fd=self.project_fd, dst_dir_fd=self.project_fd,
+            )
+            renamed = True
+            os.fsync(self.project_fd)
+            return {"restored": True, "fingerprint": old_fingerprint}
+        finally:
+            if not renamed:
+                try:
+                    os.unlink(temporary, dir_fd=self.project_fd)
+                except FileNotFoundError:
+                    pass
+
+    def initialize(self, payload):
+        if not isinstance(payload, dict) or set(payload) not in (
+            {"project"}, {"project", "root"}
+        ):
+            raise SidecarIOError("initialize payload 格式无效")
+        self.project_identity = _require_identity(payload["project"])
+        self.project_fd = _open_directory(self.project_identity)
+        if "root" in payload:
+            self.root_identity = _require_identity(payload["root"])
+            self.root_fd = _open_directory(self.root_identity)
+        return {"ready": True}
+
+    @staticmethod
+    def _identity_for_fd(fd, path, real_path):
+        info = os.fstat(fd)
+        return {
+            "path": path,
+            "realPath": real_path,
+            "dev": str(info.st_dev),
+            "ino": str(info.st_ino),
+        }
+
+    def ensure_root(self, payload):
+        if payload != {} or self.project_fd is None or self.root_fd is not None:
+            raise SidecarIOError("ensure-root 状态或 payload 无效")
+        root_name = ".huawei-deck-editor"
+        created = False
+        try:
+            os.mkdir(root_name, 0o700, dir_fd=self.project_fd)
+            os.fsync(self.project_fd)
+            created = True
+        except FileExistsError:
+            pass
+        self.root_fd = _open_child_directory(self.project_fd, root_name, create=False)
+        root_path = str(Path(self.project_identity["path"]) / root_name)
+        root_real = str(Path(self.project_identity["realPath"]) / root_name)
+        self.root_identity = self._identity_for_fd(self.root_fd, root_path, root_real)
+        return {"created": created, "identity": self.root_identity}
+
+    def discover(self, payload):
+        if (
+            self.root_fd is None
+            or not isinstance(payload, dict)
+            or set(payload) != {"deckName"}
+        ):
+            raise SidecarIOError("discover payload 格式无效")
+        deck_name = _require_name(payload["deckName"])
+        if not deck_name.endswith(".html"):
+            raise SidecarIOError("discover deckName 无效")
+        self.deck_name = deck_name
+        registry = None
+        try:
+            registry = self._validate_registry(
+                json.loads(_read_fd_file(self.root_fd, "sessions.json"))
+            )
+        except FileNotFoundError:
+            pass
+        if registry is None:
+            return {"registry": None, "sessions": []}
+        deck_real_path = str(Path(self.project_identity["realPath"]) / deck_name)
+        sessions = []
+        for session_id, entry in sorted(registry["sessions"].items()):
+            if entry["deckRealPath"] != deck_real_path:
+                continue
+            try:
+                info = os.stat(
+                    entry["sessionName"], dir_fd=self.root_fd, follow_symlinks=False
+                )
+                kind = "directory" if stat.S_ISDIR(info.st_mode) else "unsafe"
+            except FileNotFoundError:
+                kind = "missing"
+            sessions.append({**entry, "kind": kind})
+        return {"registry": registry, "sessions": sessions}
+
+    def inspect_legacy(self, payload):
+        if (
+            self.root_fd is None
+            or not isinstance(payload, dict)
+            or set(payload) != {"deckName", "currentFingerprint"}
+        ):
+            raise SidecarIOError("inspect-legacy payload 格式无效")
+        deck_name = _require_name(payload["deckName"])
+        fingerprint = payload["currentFingerprint"]
+        if (
+            not deck_name.endswith(".html")
+            or not isinstance(fingerprint, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)
+        ):
+            raise SidecarIOError("inspect-legacy 参数无效")
+        prefix = f"{Path(deck_name).stem}-"
+        candidates = []
+        for session_name in sorted(os.listdir(self.root_fd)):
+            if not session_name.startswith(prefix):
+                continue
+            info = os.stat(session_name, dir_fd=self.root_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                raise SidecarIOError("legacy session 候选必须是真实目录")
+            session_fd = _open_child_directory(self.root_fd, session_name, create=False)
+            transactions_fd = None
+            try:
+                transactions_fd = _open_child_directory(
+                    session_fd, "transactions", create=False
+                )
+                transaction_ids = []
+                for name in sorted(os.listdir(transactions_fd)):
+                    if not name.endswith(".json"):
+                        continue
+                    transaction_id = name[:-5]
+                    if not TRANSACTION_ID_RE.fullmatch(transaction_id):
+                        raise SidecarIOError("legacy transaction 名称无效")
+                    transaction_info = os.stat(
+                        name, dir_fd=transactions_fd, follow_symlinks=False
+                    )
+                    if not stat.S_ISREG(transaction_info.st_mode):
+                        raise SidecarIOError("legacy transaction 必须是常规文件")
+                    transaction_ids.append(transaction_id)
+                candidates.append({
+                    "sessionName": session_name,
+                    "expectedCurrentName": (
+                        session_name == f"{Path(deck_name).stem}-{fingerprint[:8]}"
+                    ),
+                    "transactionIds": transaction_ids,
+                    "sessionState": _decode_json_file(session_fd, "session.json"),
+                })
+            finally:
+                if transactions_fd is not None:
+                    os.close(transactions_fd)
+                os.close(session_fd)
+        return {"candidates": candidates}
+
+    def _validate_registry(self, registry):
+        if (
+            not isinstance(registry, dict)
+            or set(registry) != {"version", "sessions"}
+            or registry["version"] != 1
+            or not isinstance(registry["sessions"], dict)
+        ):
+            raise SidecarIOError("sessions.json schema 无效")
+        normalized = {"version": 1, "sessions": {}}
+        for session_id, entry in registry["sessions"].items():
+            if (
+                not isinstance(session_id, str)
+                or not TRANSACTION_ID_RE.fullmatch(session_id)
+                or not isinstance(entry, dict)
+                or set(entry) != {
+                    "sessionId", "deckRealPath", "initialFingerprint", "sessionName",
+                    "mode", "status",
+                }
+                or entry.get("sessionId") != session_id
+                or not isinstance(entry.get("deckRealPath"), str)
+                or not isinstance(entry.get("initialFingerprint"), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", entry["initialFingerprint"])
+                or not isinstance(entry.get("sessionName"), str)
+                or entry.get("mode") not in {"fresh", "legacy"}
+                or entry.get("status") not in {"preparing", "active"}
+            ):
+                raise SidecarIOError("sessions.json session 记录无效")
+            expected_name = (
+                f"{Path(entry['deckRealPath']).stem}-{entry['initialFingerprint'][:8]}"
+            )
+            if entry["sessionName"] != expected_name:
+                raise SidecarIOError("registry sessionName 未绑定 initialFingerprint")
+            normalized["sessions"][session_id] = dict(entry)
+        return normalized
+
+    def prepare_session(self, payload):
+        required = {
+            "deckName", "sessionId", "initialFingerprint", "sessionName", "mode"
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise SidecarIOError("prepare-session payload 格式无效")
+        if self.root_fd is None:
+            raise SidecarIOError("尚未绑定可信 sidecar root")
+        deck_name = _require_name(payload["deckName"])
+        session_id = payload["sessionId"]
+        fingerprint = payload["initialFingerprint"]
+        session_name = _require_name(payload["sessionName"])
+        mode = payload["mode"]
+        if (
+            not deck_name.endswith(".html")
+            or not isinstance(session_id, str)
+            or not TRANSACTION_ID_RE.fullmatch(session_id)
+            or not isinstance(fingerprint, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)
+            or session_name != f"{Path(deck_name).stem}-{fingerprint[:8]}"
+            or mode not in {"fresh", "legacy"}
+        ):
+            raise SidecarIOError("prepare-session 参数未严格绑定 Deck/session")
+        try:
+            registry = self._validate_registry(
+                json.loads(_read_fd_file(self.root_fd, "sessions.json"))
+            )
+        except FileNotFoundError:
+            registry = {"version": 1, "sessions": {}}
+        deck_real_path = str(Path(self.project_identity["realPath"]) / deck_name)
+        entry = {
+            "sessionId": session_id,
+            "deckRealPath": deck_real_path,
+            "initialFingerprint": fingerprint,
+            "sessionName": session_name,
+            "mode": mode,
+            "status": "preparing",
+        }
+        existing = registry["sessions"].get(session_id)
+        if existing is not None and existing != entry:
+            raise SidecarIOError("sessionId 已绑定其他 session")
+        for other_id, other in registry["sessions"].items():
+            if other_id != session_id and other["sessionName"] == session_name:
+                raise SidecarIOError("session 目录已绑定其他 sessionId")
+        registry["sessions"][session_id] = entry
+        _atomic_write_fd(
+            self.root_fd,
+            "sessions.json",
+            json.dumps(registry, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        return entry
+
+    def activate_session(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"sessionId"}:
+            raise SidecarIOError("activate-session payload 格式无效")
+        self._require_bound_session()
+        session_id = payload["sessionId"]
+        if not isinstance(session_id, str) or not TRANSACTION_ID_RE.fullmatch(session_id):
+            raise SidecarIOError("activate-session sessionId 无效")
+        registry = self._validate_registry(
+            json.loads(_read_fd_file(self.root_fd, "sessions.json"))
+        )
+        entry = registry["sessions"].get(session_id)
+        if (
+            entry is None
+            or entry["sessionName"] != self.session_name
+            or entry["status"] not in {"preparing", "active"}
+        ):
+            raise SidecarIOError("activate-session 未绑定当前 preparing session")
+        state = _decode_json_file(self.session_fd, "session.json")
+        if (
+            not isinstance(state, dict)
+            or state.get("sessionId") != session_id
+            or os.path.realpath(str(state.get("deckPath", ""))) != entry["deckRealPath"]
+            or state.get("deckFingerprint") != entry["initialFingerprint"]
+        ):
+            raise SidecarIOError("session.json 未严格绑定 preparing registry")
+        if entry["status"] == "active":
+            return entry
+        active = {**entry, "status": "active"}
+        registry["sessions"][session_id] = active
+        _atomic_write_fd(
+            self.root_fd,
+            "sessions.json",
+            json.dumps(registry, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        return active
+
+    def dispatch(self, request):
+        if not isinstance(request, dict) or set(request) != {"id", "command", "payload"}:
+            raise SidecarIOError("helper request schema 无效")
+        command = request["command"]
+        if command == "initialize":
+            return self.initialize(request["payload"])
+        if command == "ensure-root":
+            return self.ensure_root(request["payload"])
+        if command == "discover":
+            return self.discover(request["payload"])
+        if command == "inspect-legacy":
+            return self.inspect_legacy(request["payload"])
+        if command == "prepare-session":
+            return self.prepare_session(request["payload"])
+        if command == "activate-session":
+            return self.activate_session(request["payload"])
+        if command == "bind-session":
+            return self.bind_session(request["payload"])
+        if command == "read-session":
+            return self.read_session(request["payload"])
+        if command == "assert-bound":
+            return self.assert_bound(request["payload"])
+        if command == "read-transaction":
+            return self.read_transaction(request["payload"])
+        if command == "list-transactions":
+            return self.list_transactions(request["payload"])
+        if command == "verify-backup":
+            return self.verify_backup(request["payload"])
+        if command == "hash-deck":
+            return self.hash_deck(request["payload"])
+        if command == "write-session":
+            return self.write_session(request["payload"])
+        if command == "write-snapshot":
+            return self.write_snapshot(request["payload"])
+        if command == "delete-snapshot":
+            return self.delete_snapshot(request["payload"])
+        if command == "delete-transaction":
+            return self.delete_transaction(request["payload"])
+        if command == "prune-transactions":
+            return self.prune_transactions(request["payload"])
+        if command == "restore-deck":
+            return self.restore_bound_deck(request["payload"])
+        if command == "close":
+            if request["payload"] != {}:
+                raise SidecarIOError("close payload 格式无效")
+            return {"closed": True}
+        raise SidecarIOError("未知 persistent helper command")
 
 
-def main():
+def serve():
+    helper = PersistentHelper()
     try:
-        result = dispatch(json.load(sys.stdin))
-        print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
-    except Exception as error:
-        print(json.dumps({
-            "ok": False,
-            "message": str(error),
-            "stage": getattr(error, "stage", "open"),
-            "committed": bool(getattr(error, "committed", False)),
-        }, ensure_ascii=False))
+        while True:
+            line = sys.stdin.buffer.readline(MAX_REQUEST_BYTES + 1)
+            if not line:
+                return
+            if len(line) > MAX_REQUEST_BYTES or not line.endswith(b"\n"):
+                raise SidecarIOError("helper 输入超过上限")
+            request = None
+            try:
+                request = json.loads(line)
+                result = helper.dispatch(request)
+                response = {"id": request["id"], "ok": True, "result": result}
+            except Exception as error:
+                response = {
+                    "id": request.get("id") if isinstance(request, dict) else None,
+                    "ok": False,
+                    "message": str(error),
+                    "stage": getattr(error, "stage", "sidecar"),
+                    "committed": bool(getattr(error, "committed", False)),
+                }
+            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+            if isinstance(request, dict) and request.get("command") == "close":
+                return
+    finally:
+        helper.close()
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] != ["--serve"]:
+        raise SystemExit("sidecar_io.py 只支持受控 --serve 模式")
+    serve()
