@@ -56,9 +56,9 @@ style.dataset.deckEditorUi = '';
 style.textContent = `
   [data-region-selection],[data-task-highlight]{position:fixed;z-index:2147483638;pointer-events:none;box-sizing:border-box}
   [data-region-selection]{border:2px solid #c7000b;background:rgba(199,0,11,.08);box-shadow:0 0 0 1px rgba(255,255,255,.85) inset}
-  [data-region-popover]{position:fixed;z-index:2147483640;width:336px;padding:16px;border:1px solid rgba(25,25,25,.16);border-radius:12px;background:#fff;color:#191919;box-shadow:0 14px 38px rgba(25,25,25,.24);box-sizing:border-box;font:14px/1.45 "Huawei Sans","HarmonyOS Sans SC","PingFang SC",sans-serif}
+  [data-region-popover]{position:fixed;z-index:2147483640;width:336px;padding:16px;border:1px solid rgba(25,25,25,.16);border-radius:12px;background:#fff;color:#191919;box-shadow:0 14px 38px rgba(25,25,25,.24);box-sizing:border-box;font:14px/1.45 "Huawei Sans","HarmonyOS Sans SC","PingFang SC",sans-serif;transform-origin:0 0}
   [data-region-popover] label{display:block;margin-bottom:8px;font-size:12px;font-weight:700;color:#5f6268}
-  [data-region-popover] textarea{display:block;width:100%;min-height:88px;resize:vertical;padding:10px 11px;border:1px solid #c9cbd0;border-radius:8px;outline:none;color:#191919;background:#fff;font:inherit;line-height:1.5;box-sizing:border-box}
+  [data-region-popover] textarea{display:block;width:100%;min-height:88px;resize:vertical;padding:10px 11px;border:1px solid #c9cbd0;border-radius:8px;outline:none;color:#191919;background:#fff;font:inherit;font-size:14px;line-height:1.5;box-sizing:border-box}
   [data-region-popover] textarea:focus{border-color:#c7000b;box-shadow:0 0 0 3px rgba(199,0,11,.10)}
   [data-region-actions]{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:12px}
   [data-region-actions] button{min-height:34px;padding:0 14px;border-radius:7px;border:1px solid #d7d8dc;background:#fff;color:#34363a;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
@@ -117,7 +117,39 @@ function setBox(node, rect) {
   });
 }
 
+function frameVisualScale() {
+  const frame = window.frameElement;
+  if (!frame) return { x: 1, y: 1 };
+  const rect = frame.getBoundingClientRect();
+  const layoutWidth = frame.offsetWidth || innerWidth;
+  const layoutHeight = frame.offsetHeight || innerHeight;
+  const x = rect.width / layoutWidth;
+  const y = rect.height / layoutHeight;
+  return {
+    x: Number.isFinite(x) && x > 0 ? x : 1,
+    y: Number.isFinite(y) && y > 0 ? y : 1,
+  };
+}
+
+function elementIsVisible(element, rect, canvas) {
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  if (typeof element.checkVisibility === 'function' && !element.checkVisibility({
+    checkOpacity: true,
+    checkVisibilityCSS: true,
+  })) return false;
+  for (let current = element; current && current !== canvas.parentElement; current = current.parentElement) {
+    const computed = getComputedStyle(current);
+    if (computed.display === 'none' || computed.visibility === 'hidden'
+      || computed.contentVisibility === 'hidden' || Number(computed.opacity || 1) <= 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function rankCandidates(canvas, region) {
+  const canvasRect = canvas.getBoundingClientRect();
+  const canvasArea = Math.max(1, canvasRect.width * canvasRect.height);
   const intersectionArea = rect => (
     Math.max(0, Math.min(rect.right, region.right) - Math.max(rect.left, region.left))
     * Math.max(0, Math.min(rect.bottom, region.bottom) - Math.max(rect.top, region.top))
@@ -128,13 +160,21 @@ function rankCandidates(canvas, region) {
       && !element.querySelector('.stage,.slide-canvas'))
     .map(element => {
       const rect = element.getBoundingClientRect();
-      const computed = getComputedStyle(element);
-      const visible = rect.width > 0 && rect.height > 0
-        && computed.display !== 'none' && computed.visibility !== 'hidden'
-        && Number(computed.opacity || 1) > 0;
-      return { element, rect, visible, score: intersectionArea(rect) / Math.max(1, rect.width * rect.height) };
+      const contentElement = element.matches('img,svg,table');
+      const layoutContainer = !contentElement && (
+        (rect.width >= canvasRect.width * 0.85 && rect.height >= canvasRect.height * 0.85)
+        || rect.width * rect.height >= canvasArea * 0.8
+      );
+      const visible = elementIsVisible(element, rect, canvas);
+      return {
+        element,
+        rect,
+        visible,
+        layoutContainer,
+        score: intersectionArea(rect) / Math.max(1, rect.width * rect.height),
+      };
     })
-    .filter(item => item.visible && item.score > 0.05)
+    .filter(item => item.visible && !item.layoutContainer && item.score > 0.05)
     .sort((a, b) => b.score - a.score)
     .slice(0, 12)
     .map(item => {
@@ -165,21 +205,29 @@ function isRegionMode() {
 }
 
 function positionPopover(popover, region) {
-  const gap = 12;
-  const margin = 8;
-  const width = popover.offsetWidth;
-  const height = popover.offsetHeight;
-  const top = Math.max(margin, Math.min(innerHeight - height - margin, region.top));
+  const scale = frameVisualScale();
+  const gapX = 12 / scale.x;
+  const marginX = 8 / scale.x;
+  const marginY = 8 / scale.y;
+  const width = popover.offsetWidth / scale.x;
+  const height = popover.offsetHeight / scale.y;
+  popover.style.transform = `scale(${1 / scale.x}, ${1 / scale.y})`;
+  popover.dataset.screenScaleX = String(scale.x);
+  popover.dataset.screenScaleY = String(scale.y);
   let left;
+  let top;
   let placement;
-  if (region.right + gap + width <= innerWidth - margin) {
-    left = region.right + gap;
+  if (region.right + gapX + width <= innerWidth - marginX) {
+    left = region.right + gapX;
+    top = Math.max(marginY, Math.min(innerHeight - height - marginY, region.top));
     placement = 'right';
-  } else if (region.left - gap - width >= margin) {
-    left = region.left - gap - width;
+  } else if (region.left - gapX - width >= marginX) {
+    left = region.left - gapX - width;
+    top = Math.max(marginY, Math.min(innerHeight - height - marginY, region.top));
     placement = 'left';
   } else {
-    left = Math.max(margin, Math.min(innerWidth - width - margin, region.right - width));
+    left = Math.max(marginX, Math.min(innerWidth - width - marginX, region.right - width));
+    top = Math.max(marginY, Math.min(innerHeight - height - marginY, region.bottom - height));
     placement = 'inside';
   }
   popover.style.left = `${left}px`;
@@ -337,7 +385,8 @@ function finishPointer(event) {
   state.canvas.releasePointerCapture?.(event.pointerId);
   const region = regionFromPoints(state.start, state.current, state.bounds);
   state.selection.remove();
-  if (region.width < 6 || region.height < 6) return;
+  const visualScale = frameVisualScale();
+  if (region.width * visualScale.x + 0.01 < 6 || region.height * visualScale.y + 0.01 < 6) return;
   const candidates = rankCandidates(state.canvas, region);
   openPopover(state.canvas, region, candidates);
   event.preventDefault();
@@ -399,7 +448,7 @@ function onParentMessage(event) {
       const completedPopover = activePopover;
       activePopover.submitting = false;
       status.dataset.state = 'success';
-      status.textContent = '任务已添加';
+      status.textContent = event.data.snapshotDropped ? '快照过大，已无图添加任务' : '任务已添加';
       submit.textContent = '已添加';
       setTimeout(() => {
         if (activePopover === completedPopover) removePopover();

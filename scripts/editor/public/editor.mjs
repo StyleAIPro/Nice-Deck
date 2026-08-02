@@ -26,6 +26,7 @@ let tasks = [];
 let revision = 0;
 let editorMode = 'preview';
 const createRequests = new Set();
+const MAX_SNAPSHOT_BYTES = 512 * 1024;
 
 deckFrame.src = `/preview?token=${encodeURIComponent(token)}`;
 
@@ -53,6 +54,14 @@ function uniqueTasks(values) {
     if (task?.id) byId.set(task.id, task);
   }
   return [...byId.values()].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+}
+
+function snapshotByteLength(snapshot) {
+  if (typeof snapshot !== 'string') return 0;
+  const match = snapshot.match(/^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/);
+  if (!match) return 0;
+  const padding = match[1].endsWith('==') ? 2 : (match[1].endsWith('=') ? 1 : 0);
+  return Math.floor(match[1].length * 3 / 4) - padding;
 }
 
 function updatePageBadges() {
@@ -163,22 +172,34 @@ async function createRegionTask(message) {
   createRequests.add(requestId);
   try {
     let result;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    let submittedSnapshot = snapshot;
+    let revisionRetried = false;
+    let snapshotDropped = snapshotByteLength(snapshot) > MAX_SNAPSHOT_BYTES;
+    if (snapshotDropped) submittedSnapshot = null;
+    while (!result) {
       try {
         result = await requestJson('/api/tasks', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ expectedRevision: revision, ...payload, snapshot }),
+          body: JSON.stringify({ expectedRevision: revision, ...payload, snapshot: submittedSnapshot }),
         });
-        break;
       } catch (error) {
-        if (error.status !== 409 || attempt > 0) throw error;
-        await loadSession();
+        if (error.code === 'SNAPSHOT_TOO_LARGE' && submittedSnapshot !== null && !snapshotDropped) {
+          submittedSnapshot = null;
+          snapshotDropped = true;
+          continue;
+        }
+        if (error.status === 409 && !revisionRetried) {
+          revisionRetried = true;
+          await loadSession();
+          continue;
+        }
+        throw error;
       }
     }
     revision = Math.max(revision, result.revision);
     upsertTask(result.task);
-    postRegionResult(requestId, { ok: true, taskId: result.task.id });
+    postRegionResult(requestId, { ok: true, taskId: result.task.id, snapshotDropped });
   } catch (error) {
     postRegionResult(requestId, { ok: false, message: error.message || '任务提交失败' });
   } finally {
