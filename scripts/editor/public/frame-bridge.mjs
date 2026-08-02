@@ -405,6 +405,7 @@ function manualFailureMessage(result, fallback) {
 }
 
 function manualSuccessMessage(result, fallback) {
+  if (result.sessionRefreshPending) return result.message || '动作已保存、会话同步待重试';
   if (result.syncPending) return result.message || '动作已保存、同步待确认';
   if (result.commitConfirmed === false && result.recoveredBySync) return '动作已保存并恢复同步';
   return fallback;
@@ -654,7 +655,7 @@ function finishTransformPointer(event) {
     kind: state.kind, payload: state.current,
   };
   submitManualActions([action], result => {
-    if (result.ok && (result.syncPending || result.recoveredBySync)) {
+    if (result.ok && (result.sessionRefreshPending || result.syncPending || result.recoveredBySync)) {
       showStatus(manualSuccessMessage(result, '变换已记录'));
     } else if (!result.ok) showStatus(manualFailureMessage(result, '变换失败，已恢复原状态'), 'error');
     positionTransformSelection();

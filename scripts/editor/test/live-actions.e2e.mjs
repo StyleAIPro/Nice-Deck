@@ -855,6 +855,93 @@ test('普通人工动作成功后 iframe-only reload 仍按最新 sessionGroups 
   assert.deepEqual(resourceProblems,[]);
 });
 
+test('durable manual 成功后 session refresh 瞬时失败仍回成功并由 deck-ready 重试', async t => {
+  for (const scenario of [
+    { name:'normal', syncPending:false },
+    { name:'syncPending', syncPending:true },
+  ]) {
+    await t.test(scenario.name, async t => {
+      const app=await startFixtureServer({bridgeTimeoutMs:100});
+      t.after(() => app.close());
+      const {browser,page,browserProblems,resourceProblems,resourceRequests}=await openEditor(app);
+      t.after(() => browser.close());
+      page.setDefaultTimeout(4_000);
+      for (let attempt=0; attempt<50 && sessionRequestCount(resourceRequests)<1; attempt+=1) {
+        await page.waitForTimeout(20);
+      }
+      assert.equal(sessionRequestCount(resourceRequests),1,JSON.stringify(resourceRequests));
+      let actionPosts=0;
+      page.on('request',request => {
+        if (request.method()==='POST' && new URL(request.url()).pathname==='/api/actions') actionPosts+=1;
+      });
+      let abortedSessionRequests=0;
+      await page.route('**/api/session*',route => {
+        if (route.request().method()==='GET' && abortedSessionRequests===0) {
+          abortedSessionRequests+=1;
+          return route.abort('connectionreset');
+        }
+        return route.continue();
+      });
+      let heading=page.frameLocator('#deck-frame').locator('h2').first();
+      await heading.evaluate(() => {
+        window.__manualActionResults=[];
+        window.addEventListener('message',event => {
+          if (event.data?.type==='manual-actions-result') window.__manualActionResults.push(event.data);
+        });
+      });
+      if (scenario.syncPending) {
+        await page.evaluate(() => {
+          const originalSend=WebSocket.prototype.send;
+          WebSocket.prototype.send=function patchedSend(data) {
+            let message;
+            try { message=JSON.parse(String(data)); } catch { return originalSend.call(this,data); }
+            if (message.type==='actions-committed' || message.type==='actions-synced') return;
+            return originalSend.call(this,data);
+          };
+        });
+      }
+      const text=`${scenario.name} durable 后会话待重试`;
+      await page.click('[data-mode="text"]');
+      await heading.dblclick(); await heading.fill(text); await heading.press('Meta+Enter');
+      await page.waitForFunction(() => {
+        const frame=document.querySelector('#deck-frame');
+        return frame?.contentWindow.__manualActionResults?.length===1;
+      });
+      const manualResult=await heading.evaluate(() => window.__manualActionResults[0]);
+      assert.equal(manualResult.ok,true,JSON.stringify(manualResult));
+      assert.equal(manualResult.sessionRefreshPending,true,JSON.stringify(manualResult));
+      assert.equal(manualResult.revision,1);
+      assert.equal(manualResult.syncPending,scenario.syncPending);
+      const status=page.frameLocator('#deck-frame').locator('[data-direct-status]');
+      await status.waitFor();
+      assert.notEqual(await status.getAttribute('data-state'),'error');
+      assert.match(await status.innerText(),/已保存.*会话同步待重试/);
+      assert.equal(await page.locator('[data-revision]').textContent(),'1');
+      const durableState=await session(app);
+      assert.equal(durableState.revision,1);
+      assert.equal(durableState.groups.length,1);
+      assert.equal(await heading.textContent(),text);
+      assert.equal(actionPosts,1);
+      assert.equal(abortedSessionRequests,1);
+
+      await reloadDeckFrame(page);
+      await page.waitForFunction(expected => (
+        document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent===expected
+      ),text);
+      heading=page.frameLocator('#deck-frame').locator('h2').first();
+      assert.equal(await heading.textContent(),text);
+      assert.equal(actionPosts,1);
+      assert.equal(sessionRequestCount(resourceRequests),3,JSON.stringify(resourceRequests));
+      const injectedBrowserFailures=browserProblems.filter(problem => problem.includes('ERR_CONNECTION_RESET'));
+      assert.equal(injectedBrowserFailures.length,1,JSON.stringify(browserProblems));
+      assert.equal(browserProblems.filter(problem => !problem.includes('ERR_CONNECTION_RESET')).length,0,
+        JSON.stringify(browserProblems));
+      assert.equal(resourceProblems.filter(problem => !problem.includes('/api/session')).length,0,
+        JSON.stringify(resourceProblems));
+    });
+  }
+});
+
 test('sidecar 已提交但 sync ACK 也丢失时 apply/undo/redo 均成功且各广播一次', async t => {
   const app=await startFixtureServer({bridgeTimeoutMs:100});
   t.after(() => app.close());

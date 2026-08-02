@@ -258,8 +258,13 @@ async function submitManualActions(message) {
       }
     }
     updateRevision(result.revision);
-    await ensureSessionRevision(result.revision);
-    postManualResult(requestId, { ok: true, ...result });
+    let sessionRefreshPending = false;
+    try { await ensureSessionRevision(result.revision); }
+    catch { sessionRefreshPending = true; }
+    postManualResult(requestId, {
+      ok:true, ...result, sessionRefreshPending,
+      ...(sessionRefreshPending ? { message:'动作已保存、会话同步待重试' } : {}),
+    });
   } catch (error) {
     if (error.committed === true) {
       updateRevision(error.revision);
