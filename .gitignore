@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.tmp-applybg
 node_modules/
+.worktrees/
 # 工作产物（转换 / 截图输出）
 *.pptx
 !assets/**/*.pptx
