@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { loadChromium } from '../../verify/load-playwright.mjs';
 import { startServer } from '../server.mjs';
 
-export async function startFixtureServer() {
+export async function startFixtureServer(options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'deck-editor-fixture-'));
   const deckPath = join(root, 'minimal-deck.html');
   await copyFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), deckPath);
@@ -16,6 +16,7 @@ export async function startFixtureServer() {
       openBrowser: false,
       token: 'fixture-token',
       editorToken: 'fixture-editor-token',
+      bridgeTimeoutMs: options.bridgeTimeoutMs,
     });
     const closeServer = app.close;
     let closePromise;

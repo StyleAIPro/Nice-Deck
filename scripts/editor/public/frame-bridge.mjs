@@ -54,7 +54,9 @@ let directEdit = null;
 let transformDrag = null;
 let transformSelection = null;
 const pendingManual = new Map();
+const tentativeCommands = new Map();
 let statusTimer;
+const INTERACTIVE_TRANSFORM_SELECTOR = 'svg,a,button,input,select,textarea,iframe,[role="button"],.layer-panel';
 
 const style = document.createElement('style');
 style.dataset.deckEditorUi = '';
@@ -77,7 +79,7 @@ style.textContent = `
   [data-direct-status][data-state="error"]{background:#8f1018}
   [data-transform-selection]{position:fixed;z-index:2147483637;box-sizing:border-box;border:2px solid #c7000b;background:rgba(199,0,11,.035);pointer-events:none}
   [data-resize-handle]{position:fixed;z-index:2147483640;box-sizing:border-box;border:2px solid #fff;border-radius:3px;background:#c7000b;box-shadow:0 1px 5px rgba(0,0,0,.3);cursor:nwse-resize;touch-action:none}
-  [data-direct-editing]{outline:3px solid #c7000b!important;outline-offset:3px;background:rgba(255,255,255,.96)!important;cursor:text!important}
+  [data-direct-editing]{outline-style:solid!important;outline-color:#c7000b!important;outline-width:calc(3px / var(--deck-editor-ui-scale-x,1))!important;outline-offset:calc(3px / var(--deck-editor-ui-scale-x,1));background:rgba(255,255,255,.96)!important;cursor:text!important}
   @keyframes deck-editor-pulse{from{box-shadow:0 0 0 0 rgba(230,0,18,.35)}to{box-shadow:0 0 0 8px rgba(230,0,18,0)}}
 `;
 document.head.append(style);
@@ -92,6 +94,10 @@ function pageInfo(canvas) {
 }
 
 function showPage(pageKey) {
+  finishDirectEdit();
+  cancelTransformDrag();
+  removeTransformSelection();
+  removePopover();
   const canvas = canvases.find(candidate => runtime.pageKey(candidate) === pageKey);
   if (!canvas) {
     parent.postMessage({ type: 'page-shown', pageKey, shown: false, reason: 'PAGE_NOT_FOUND' }, location.origin);
@@ -139,6 +145,13 @@ function frameVisualScale() {
     x: Number.isFinite(x) && x > 0 ? x : 1,
     y: Number.isFinite(y) && y > 0 ? y : 1,
   };
+}
+
+function updateUiScale() {
+  const scale = frameVisualScale();
+  document.documentElement.style.setProperty('--deck-editor-ui-scale-x', String(scale.x));
+  document.documentElement.style.setProperty('--deck-editor-ui-scale-y', String(scale.y));
+  return scale;
 }
 
 function elementIsVisible(element, rect, canvas) {
@@ -204,14 +217,19 @@ function removePopover() {
   activePopover = null;
 }
 
-function isRegionMode() {
-  if (mode === 'region') return true;
+function effectiveMode() {
   try {
-    // postMessage 状态仍是主路径；仅兼容同源父页点击与消息派发之间的极短窗口。
-    return parent.document.querySelector('[data-mode="region"]')?.getAttribute('aria-pressed') === 'true';
+    const pending = parent.document.querySelector('[data-mode][aria-pressed="true"]')?.dataset.mode;
+    // confirmed mode 是主状态；父页值只覆盖消息派发尚未抵达的模式切换窗口。
+    if (pending && pending !== mode) return pending;
   } catch {
-    return false;
+    // 跨源时只使用 confirmed postMessage 状态。
   }
+  return mode;
+}
+
+function isRegionMode() {
+  return effectiveMode() === 'region';
 }
 
 function positionPopover(popover, region) {
@@ -376,8 +394,24 @@ function submitManualActions(actions, onResult = () => {}) {
   parent.postMessage({ type: 'submit-manual-actions', requestId, actions }, location.origin);
 }
 
+function manualFailureMessage(result, fallback) {
+  const details = [];
+  if (result.failedActionId) details.push(`动作 ${result.failedActionId}`);
+  if (Array.isArray(result.candidates) && result.candidates.length) {
+    details.push(`${result.candidates.length} 个候选位置`);
+  }
+  const suffix = details.length ? `（${details.join('，')}）` : '';
+  return `${result.message || fallback}${suffix}`;
+}
+
 function textTargetFromEvent(event) {
-  return event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,td,th,span,div');
+  const semantic = event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,td,th');
+  if (semantic) return semantic;
+  const leaf = event.target.closest?.('span,div');
+  if (leaf?.parentElement?.closest('.slide-canvas') && leaf.parentElement.children.length > 1) {
+    return leaf.parentElement;
+  }
+  return leaf;
 }
 
 function textRejection(element) {
@@ -398,6 +432,7 @@ function finishDirectEdit({ restore = true } = {}) {
   state.element.removeAttribute('contenteditable');
   delete state.element.dataset.directEditing;
   state.element.spellcheck = state.originalSpellcheck;
+  state.resumeReplay?.();
 }
 
 function commitDirectEdit() {
@@ -414,12 +449,12 @@ function commitDirectEdit() {
   showStatus('正在应用文字修改…');
   submitManualActions([action], result => {
     if (result.ok) showStatus('文字修改已记录');
-    else showStatus(result.message || '文字修改失败，原文已恢复', 'error');
+    else showStatus(manualFailureMessage(result, '文字修改失败，原文已恢复'), 'error');
   });
 }
 
 function onDoubleClick(event) {
-  if (mode !== 'text') return;
+  if (effectiveMode() !== 'text') return;
   const element = textTargetFromEvent(event);
   const rejection = textRejection(element);
   if (rejection) {
@@ -434,25 +469,33 @@ function onDoubleClick(event) {
   directEdit = {
     element, target, originalText: element.textContent ?? '',
     originalSpellcheck: element.spellcheck, committing: false,
+    resumeReplay: runtime.suspendTarget?.(target),
   };
   element.setAttribute('contenteditable', 'plaintext-only');
   element.dataset.directEditing = '';
   element.spellcheck = false;
+  updateUiScale();
   element.focus({ preventScroll: true });
   const selection = getSelection();
   selection?.selectAllChildren(element);
+  showStatus('Cmd/Ctrl+Enter 提交 · Escape 取消');
   event.preventDefault();
 }
 
 function editableTransformTarget(event) {
+  const canvas = event.target.closest?.('.slide-canvas');
+  if (!canvas || !canvases.includes(canvas) || event.target.closest?.('[data-deck-editor-ui]')) return null;
+  const interactive = event.target.closest?.(INTERACTIVE_TRANSFORM_SELECTOR);
+  if (interactive && interactive.closest('.slide-canvas') === canvas) return interactive;
   const element = event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,span,img,svg,table,.card,[class]');
-  if (!element || !element.closest('.slide-canvas') || element.closest('[data-deck-editor-ui]')) return null;
+  if (!element || element.closest('.slide-canvas') !== canvas) return null;
   if (element.matches('.stage,.slide-canvas') || element.querySelector('.stage,.slide-canvas')) return null;
   return element;
 }
 
 function currentTranslate(element) {
-  const [x = '0', y = '0'] = (element.style.translate || '0px 0px').split(/\s+/);
+  const computed = getComputedStyle(element).translate;
+  const [x = '0', y = '0'] = (computed && computed !== 'none' ? computed : '0px 0px').split(/\s+/);
   return { x: Number.parseFloat(x) || 0, y: Number.parseFloat(y) || 0 };
 }
 
@@ -537,7 +580,8 @@ function beginMove(event, element) {
 }
 
 function isScaleTarget(element) {
-  return element.matches('svg,button,[role="button"]') || Boolean(element.querySelector('svg,* *'));
+  return element.matches(INTERACTIVE_TRANSFORM_SELECTOR)
+    || Boolean(element.querySelector(INTERACTIVE_TRANSFORM_SELECTOR));
 }
 
 function beginResize(event) {
@@ -551,9 +595,9 @@ function beginResize(event) {
     kind: 'resize', pointerId: event.pointerId, capture: event.target, element, target,
     canvas: element.closest('.slide-canvas'), start: { x: event.clientX, y: event.clientY },
     scaleTarget, changed: false,
-    baseScale: Number.parseFloat(element.style.scale) || 1,
+    baseScale: Number.parseFloat(getComputedStyle(element).scale) || 1,
     baseSize: { width: rect.width, height: rect.height },
-    current: scaleTarget ? { scale: Number.parseFloat(element.style.scale) || 1 }
+    current: scaleTarget ? { scale: Number.parseFloat(getComputedStyle(element).scale) || 1 }
       : { width: rect.width, height: rect.height },
     originalScale: element.style.scale, originalWidth: element.style.width,
     originalHeight: element.style.height,
@@ -604,7 +648,7 @@ function finishTransformPointer(event) {
     kind: state.kind, payload: state.current,
   };
   submitManualActions([action], result => {
-    if (!result.ok) showStatus(result.message || '变换失败，已恢复原状态', 'error');
+    if (!result.ok) showStatus(manualFailureMessage(result, '变换失败，已恢复原状态'), 'error');
     positionTransformSelection();
   });
   event.preventDefault();
@@ -612,16 +656,17 @@ function finishTransformPointer(event) {
 }
 
 function onPointerDown(event) {
-  if (mode === 'resize' && event.target.closest?.('[data-resize-handle]')) {
+  const currentMode = effectiveMode();
+  if (currentMode === 'resize' && event.target.closest?.('[data-resize-handle]')) {
     beginResize(event);
     return;
   }
-  if (mode === 'move' && event.button === 0) {
+  if (currentMode === 'move' && event.button === 0) {
     const element = editableTransformTarget(event);
     if (element) beginMove(event, element);
     return;
   }
-  if (mode === 'resize' && event.button === 0) {
+  if (currentMode === 'resize' && event.button === 0) {
     const element = editableTransformTarget(event);
     if (element) {
       selectTransformElement(element, true);
@@ -727,6 +772,11 @@ function onKeyDown(event) {
   }
 }
 
+function rollbackAllTentative() {
+  for (const pending of tentativeCommands.values()) pending.transaction.rollback();
+  tentativeCommands.clear();
+}
+
 function onParentMessage(event) {
   if (event.origin !== location.origin || event.source !== parent) return;
   if (event.data?.type === 'show-page' && typeof event.data.pageKey === 'string') {
@@ -748,12 +798,27 @@ function onParentMessage(event) {
     return;
   }
   if (event.data?.type === 'apply-actions' && typeof event.data.commandId === 'string') {
+    const existing = tentativeCommands.get(event.data.commandId);
+    if (existing) {
+      parent.postMessage(existing.reply, location.origin);
+      return;
+    }
     try {
-      const results = runtime.applyTransaction(event.data.actions);
-      parent.postMessage({
-        type: 'actions-applied', commandId: event.data.commandId,
-        applied: results.length, results,
-      }, location.origin);
+      if (event.data.tentative === true) {
+        const transaction = runtime.beginTransaction(event.data.actions);
+        const reply = {
+          type: 'actions-prepared', commandId: event.data.commandId,
+          applied: transaction.results.length, results: transaction.results,
+        };
+        tentativeCommands.set(event.data.commandId, { transaction, reply });
+        parent.postMessage(reply, location.origin);
+      } else {
+        const results = runtime.applyTransaction(event.data.actions);
+        parent.postMessage({
+          type: 'actions-applied', commandId: event.data.commandId,
+          applied: results.length, results,
+        }, location.origin);
+      }
     } catch (error) {
       parent.postMessage({
         type: 'actions-rejected', commandId: event.data.commandId,
@@ -764,8 +829,32 @@ function onParentMessage(event) {
     }
     return;
   }
+  if (event.data?.type === 'commit-actions' && typeof event.data.commandId === 'string') {
+    const pending = tentativeCommands.get(event.data.commandId);
+    const committed = pending?.transaction.commit() ?? false;
+    tentativeCommands.delete(event.data.commandId);
+    parent.postMessage({ type:'actions-committed', commandId:event.data.commandId, committed }, location.origin);
+    return;
+  }
+  if (event.data?.type === 'rollback-actions' && typeof event.data.commandId === 'string') {
+    const pending = tentativeCommands.get(event.data.commandId);
+    const rolledBack = pending?.transaction.rollback() ?? false;
+    tentativeCommands.delete(event.data.commandId);
+    parent.postMessage({ type:'actions-rolled-back', commandId:event.data.commandId, rolledBack }, location.origin);
+    return;
+  }
+  if (event.data?.type === 'rollback-all-tentative') {
+    rollbackAllTentative();
+    return;
+  }
   if (event.data?.type === 'sync-actions' && Array.isArray(event.data.actions)) {
-    try { runtime.applyAll(event.data.actions); }
+    try {
+      rollbackAllTentative();
+      runtime.applyAll(event.data.actions);
+      if (typeof event.data.commandId === 'string') {
+        parent.postMessage({ type:'actions-synced', commandId:event.data.commandId }, location.origin);
+      }
+    }
     catch (error) { showStatus(`会话动作恢复失败：${error.code || error.message}`, 'error'); }
     return;
   }
@@ -821,6 +910,7 @@ function teardown() {
   cancelTransformDrag();
   removeTransformSelection();
   pendingManual.clear();
+  rollbackAllTentative();
   dragging?.selection.remove();
   dragging = null;
   removePopover();
@@ -829,6 +919,8 @@ function teardown() {
   style.remove();
   document.documentElement.style.cursor = '';
   delete document.documentElement.dataset.deckEditorMode;
+  document.documentElement.style.removeProperty('--deck-editor-ui-scale-x');
+  document.documentElement.style.removeProperty('--deck-editor-ui-scale-y');
   window.removeEventListener('message', onParentMessage);
   window.removeEventListener('dblclick', onDoubleClick, true);
   window.removeEventListener('keydown', onKeyDown, true);

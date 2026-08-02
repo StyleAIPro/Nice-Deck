@@ -100,25 +100,38 @@ export function hasCanonicalValues(action) {
   if (!Object.hasOwn(action, 'before') || !Object.hasOwn(action, 'after')) return false;
   if (action.kind === 'setText' || action.kind === 'setStyle'
     || action.kind === 'hide' || action.kind === 'show') {
-    return typeof action.before === 'string' && typeof action.after === 'string';
+    if (typeof action.before !== 'string' || typeof action.after !== 'string') return false;
+    if (action.kind === 'setText') return action.after === action.payload.text;
+    if (action.kind === 'setStyle') return action.after === action.payload.value;
+    if (action.kind === 'hide') return action.after === 'none';
+    return action.after === (action.payload.display ?? '');
   }
   if (action.kind === 'translate') {
-    return [action.before, action.after].every(value => (
+    const valid = value => (
       value && typeof value === 'object' && !Array.isArray(value)
       && Number.isFinite(value.x) && Number.isFinite(value.y)
       && Object.keys(value).every(key => ['x', 'y'].includes(key))
-    ));
+    );
+    return valid(action.before) && valid(action.after)
+      && action.after.x === action.payload.x && action.after.y === action.payload.y;
   }
   if (action.kind === 'resize') {
-    const valid = value => {
+    const branch = value => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
       const keys = Object.keys(value);
-      return (keys.length === 1 && Number.isFinite(value.scale) && value.scale > 0)
-        || (keys.length === 2 && keys.every(key => ['width', 'height'].includes(key))
-          && Number.isFinite(value.width) && value.width > 0
-          && Number.isFinite(value.height) && value.height > 0);
+      if (keys.length === 1 && keys[0] === 'scale'
+        && Number.isFinite(value.scale) && value.scale > 0) return 'scale';
+      if (keys.length === 2 && keys.every(key => ['width', 'height'].includes(key))
+        && Number.isFinite(value.width) && value.width > 0
+        && Number.isFinite(value.height) && value.height > 0) return 'size';
+      return null;
     };
-    return valid(action.before) && valid(action.after);
+    const payloadBranch = branch(action.payload);
+    if (!payloadBranch || branch(action.before) !== payloadBranch
+      || branch(action.after) !== payloadBranch) return false;
+    return payloadBranch === 'scale'
+      ? action.after.scale === action.payload.scale
+      : action.after.width === action.payload.width && action.after.height === action.payload.height;
   }
   return false;
 }

@@ -28,6 +28,7 @@ let revision = 0;
 let editorMode = 'preview';
 let deckReady = false;
 let sessionGroups = [];
+let seenOnline = false;
 const createRequests = new Set();
 const manualRequests = new Set();
 const commandReplies = new Map();
@@ -48,6 +49,8 @@ async function requestJson(pathname, options) {
     const error = new Error(body.message || `HTTP ${response.status}`);
     error.status = response.status;
     error.code = body.error;
+    error.failedActionId = body.failedActionId;
+    error.candidates = body.candidates;
     throw error;
   }
   return body;
@@ -233,6 +236,7 @@ async function submitManualActions(message) {
   } catch (error) {
     postManualResult(requestId, {
       ok: false, code: error.code, message: error.message || '动作提交失败',
+      failedActionId: error.failedActionId, candidates: error.candidates,
     });
   } finally {
     manualRequests.delete(requestId);
@@ -297,9 +301,10 @@ function onFrameMessage(event) {
     void submitManualActions(event.data);
     return;
   }
-  if (['actions-applied', 'actions-rejected'].includes(event.data?.type)
+  if (['actions-applied', 'actions-rejected', 'actions-prepared', 'actions-committed',
+    'actions-rolled-back', 'actions-synced'].includes(event.data?.type)
     && typeof event.data.commandId === 'string') {
-    commandReplies.set(event.data.commandId, event.data);
+    commandReplies.set(`${event.data.type}:${event.data.commandId}`, event.data);
     if (commandReplies.size > 100) commandReplies.delete(commandReplies.keys().next().value);
     eventsClient?.send(event.data);
     return;
@@ -355,8 +360,14 @@ eventsClient = connectEvents({
   url: eventsUrl,
   token,
   onEvent: event => {
-    if (event?.type === 'apply-actions' && typeof event.commandId === 'string') {
-      const reply = commandReplies.get(event.commandId);
+    const replyTypes = {
+      'apply-actions': event?.tentative === true ? 'actions-prepared' : 'actions-applied',
+      'commit-actions': 'actions-committed',
+      'rollback-actions': 'actions-rolled-back',
+      'sync-actions': 'actions-synced',
+    };
+    if (replyTypes[event?.type] && typeof event.commandId === 'string') {
+      const reply = commandReplies.get(`${replyTypes[event.type]}:${event.commandId}`);
       if (reply) eventsClient?.send(reply);
       else deckFrame.contentWindow?.postMessage(event, location.origin);
       return;
@@ -367,6 +378,13 @@ eventsClient = connectEvents({
   onState: state => {
     wsState.dataset.wsState = state;
     wsLabel.textContent = state === 'online' ? '在线' : '离线';
+    if (state === 'offline') {
+      deckFrame.contentWindow?.postMessage({ type:'rollback-all-tentative' }, location.origin);
+    } else if (seenOnline) {
+      void loadSession().catch(() => {});
+    } else {
+      seenOnline = true;
+    }
   },
 });
 void loadSession().catch(error => {

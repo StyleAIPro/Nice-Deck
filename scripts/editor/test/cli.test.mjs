@@ -106,9 +106,30 @@ function connect(url) {
 
 function nextMessage(socket) {
   return new Promise((resolvePromise, reject) => {
-    socket.once('message', data => resolvePromise(JSON.parse(data)));
-    socket.once('error', reject);
+    const onMessage = data => {
+      socket.off('error', onError);
+      resolvePromise(JSON.parse(data));
+    };
+    const onError = error => {
+      socket.off('message', onMessage);
+      reject(error);
+    };
+    socket.once('message', onMessage);
+    socket.once('error', onError);
   });
+}
+
+async function prepareAndCommit(socket, command) {
+  socket.send(JSON.stringify({
+    type: 'actions-prepared', commandId: command.commandId,
+    applied: command.actions.length, results: command.actions,
+  }));
+  const commit = await nextMessage(socket);
+  assert.equal(commit.type, 'commit-actions');
+  assert.equal(commit.commandId, command.commandId);
+  socket.send(JSON.stringify({
+    type: 'actions-committed', commandId: command.commandId, committed: true,
+  }));
 }
 
 function parseJsonOutput(result) {
@@ -186,9 +207,7 @@ test('Agent CLI 经真实服务完成 status/tasks/task/apply/undo', async t => 
   const apply = spawnCli([...common, 'apply', actionsPath]);
   const applyMessage = await applyCommand;
   assert.equal(applyMessage.type, 'apply-actions');
-  editor.send(JSON.stringify({
-    type: 'actions-applied', commandId: applyMessage.commandId, applied: 1,
-  }));
+  await prepareAndCommit(editor, applyMessage);
   const applied = parseJsonOutput(await apply.result);
   assert.equal(applied.revision, 2);
   assert.equal(typeof applied.groupId, 'string');
@@ -197,9 +216,7 @@ test('Agent CLI 经真实服务完成 status/tasks/task/apply/undo', async t => 
   const undo = spawnCli([...common, 'undo', applied.groupId]);
   const undoMessage = await undoCommand;
   assert.equal(undoMessage.type, 'apply-actions');
-  editor.send(JSON.stringify({
-    type: 'actions-applied', commandId: undoMessage.commandId, applied: 1,
-  }));
+  await prepareAndCommit(editor, undoMessage);
   assert.equal(parseJsonOutput(await undo.result).revision, 3);
 });
 
@@ -225,9 +242,7 @@ test('apply 数组经真实服务以 taskId null 记录未关联动作组', asyn
   const first = await Promise.race([commandPromise, resultPromise]);
   assert.equal(first.type, 'command', first.result?.stderr);
   assert.equal(first.message.type, 'apply-actions');
-  editor.send(JSON.stringify({
-    type: 'actions-applied', commandId: first.message.commandId, applied: 1,
-  }));
+  await prepareAndCommit(editor, first.message);
   const applied = parseJsonOutput((await resultPromise).result);
   assert.equal(applied.revision, 1);
   assert.equal(typeof applied.groupId, 'string');

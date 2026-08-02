@@ -310,6 +310,7 @@ export async function startServer({
   openBrowser = false,
   token = randomUUID(),
   editorToken = randomUUID(),
+  bridgeTimeoutMs = 10_000,
   writerTimeoutMs = 10_000,
   writerKillGraceMs = 250,
   spawnWriter = spawn,
@@ -319,7 +320,7 @@ export async function startServer({
   if (!deckPath) throw new TypeError('缺少 deckPath');
   const absoluteDeckPath = resolve(deckPath);
   const sessionStore = await SessionStore.open({ deckPath: absoluteDeckPath });
-  const bridge = new BridgeService({ sessionStore });
+  const bridge = new BridgeService({ sessionStore, timeoutMs: bridgeTimeoutMs });
   const webSockets = new WebSocketServer({ noServer: true });
   const activeWriters = new Map();
 
@@ -374,6 +375,9 @@ export async function startServer({
           throw httpError('INVALID_INPUT', 400, 'actions 必须为非空数组');
         }
         actions.forEach(validateAction);
+        if (new Set(actions.map(action => action.id)).size !== actions.length) {
+          throw httpError('DUPLICATE_ACTION_ID', 400, '同一批次 action id 不得重复');
+        }
         const result = await bridge.applyActions({ taskId, actions, expectedRevision });
         broadcast('actions-recorded', result.revision, result);
         json(response, 200, result);

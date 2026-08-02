@@ -38,6 +38,7 @@ async function makeApp(t, options = {}) {
     openBrowser: false,
     token: 'secret',
     editorToken: options.editorToken ?? 'editor-secret',
+    bridgeTimeoutMs: options.bridgeTimeoutMs,
     writerTimeoutMs: options.writerTimeoutMs,
     writerKillGraceMs: options.writerKillGraceMs,
     spawnWriter: options.spawnWriter,
@@ -57,9 +58,43 @@ function connect(url) {
 
 function nextMessage(socket) {
   return new Promise((resolve, reject) => {
-    socket.once('message', data => resolve(JSON.parse(data)));
-    socket.once('error', reject);
+    const onMessage = data => {
+      socket.off('error', onError);
+      resolve(JSON.parse(data));
+    };
+    const onError = error => {
+      socket.off('message', onMessage);
+      reject(error);
+    };
+    socket.once('message', onMessage);
+    socket.once('error', onError);
   });
+}
+
+async function prepareAndCommit(socket, command, results = command.actions) {
+  socket.send(JSON.stringify({
+    type: 'actions-prepared', commandId: command.commandId,
+    applied: command.actions.length, results,
+  }));
+  const commit = await nextMessage(socket);
+  assert.equal(commit.type, 'commit-actions');
+  assert.equal(commit.commandId, command.commandId);
+  socket.send(JSON.stringify({
+    type: 'actions-committed', commandId: command.commandId, committed: true,
+  }));
+}
+
+async function sendInvalidPrepared(socket, command, acknowledgement) {
+  socket.send(JSON.stringify({
+    type: 'actions-prepared', commandId: command.commandId,
+    results: command.actions, ...acknowledgement,
+  }));
+  const rollback = await nextMessage(socket);
+  assert.equal(rollback.type, 'rollback-actions');
+  assert.equal(rollback.commandId, command.commandId);
+  socket.send(JSON.stringify({
+    type: 'actions-rolled-back', commandId: command.commandId, rolledBack: true,
+  }));
 }
 
 function rejectedWebSocketStatus(url) {
@@ -223,9 +258,10 @@ test('editor capability 隔离 observer 且拒绝错误或重复 editor', async 
   assert.equal(received.message.type, 'apply-actions');
 
   observer.send(JSON.stringify({
-    type: 'actions-applied',
+    type: 'actions-prepared',
     commandId: received.message.commandId,
     applied: 1,
+    results: received.message.actions,
   }));
   const forgedSettled = await Promise.race([
     responsePromise.then(() => true),
@@ -234,11 +270,7 @@ test('editor capability 隔离 observer 且拒绝错误或重复 editor', async 
   assert.equal(forgedSettled, false);
   assert.equal(app.session.revision, 0);
 
-  editor.send(JSON.stringify({
-    type: 'actions-applied',
-    commandId: received.message.commandId,
-    applied: 1,
-  }));
+  await prepareAndCommit(editor, received.message);
   const response = await responsePromise;
   assert.equal(response.status, 200);
   assert.equal((await response.json()).revision, 1);
@@ -280,7 +312,7 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   assert.equal(beforeAck.revision, 0);
   assert.deepEqual(beforeAck.groups, []);
 
-  ws.send(JSON.stringify({ type: 'actions-applied', commandId: command.commandId, applied: 1 }));
+  await prepareAndCommit(ws, command);
   const response = await responsePromise;
   assert.equal(response.status, 200);
   const result = await response.json();
@@ -301,7 +333,7 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   assert.equal((await conflict.json()).error, 'REVISION_CONFLICT');
 });
 
-test('actions-applied 只接受与动作数一致的安全非负整数', async t => {
+test('actions-prepared 只接受与动作数一致的安全非负整数', async t => {
   const app = await makeApp(t);
   const ws = await connect(app.editorWsUrl);
   t.after(() => ws.close());
@@ -315,9 +347,9 @@ test('actions-applied 只接受与动作数一致的安全非负整数', async t
       body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
     });
     const command = await commandPromise;
-    const acknowledgement = { type: 'actions-applied', commandId: command.commandId };
+    const acknowledgement = {};
     if (applied !== undefined) acknowledgement.applied = applied;
-    ws.send(JSON.stringify(acknowledgement));
+    await sendInvalidPrepared(ws, command, acknowledgement);
 
     const response = await responsePromise;
     assert.equal(response.status, 502, `applied=${applied}`);
@@ -333,7 +365,7 @@ test('actions-applied 只接受与动作数一致的安全非负整数', async t
     body: JSON.stringify({ expectedRevision: 0, taskId: 'task-1', actions: [action] }),
   });
   const command = await commandPromise;
-  ws.send(JSON.stringify({ type: 'actions-applied', commandId: command.commandId, applied: 1 }));
+  await prepareAndCommit(ws, command);
   assert.equal((await responsePromise).status, 200);
   assert.equal(app.session.revision, 1);
 });
@@ -352,7 +384,7 @@ test('缺 canonical、错配 canonical 与浏览器拒绝均不得写 Journal', 
     body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [incomplete] }),
   });
   let command = await commandPromise;
-  ws.send(JSON.stringify({ type: 'actions-applied', commandId: command.commandId, applied: 1 }));
+  await sendInvalidPrepared(ws, command, { applied: 1, results: undefined });
   let response = await responsePromise;
   assert.equal(response.status, 502);
   assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
@@ -363,10 +395,10 @@ test('缺 canonical、错配 canonical 与浏览器拒绝均不得写 Journal', 
     body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [incomplete] }),
   });
   command = await commandPromise;
-  ws.send(JSON.stringify({
-    type: 'actions-applied', commandId: command.commandId, applied: 1,
+  await sendInvalidPrepared(ws, command, {
+    applied: 1,
     results: [{ ...action, id: 'wrong-id' }],
-  }));
+  });
   response = await responsePromise;
   assert.equal(response.status, 502);
   assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
@@ -392,6 +424,67 @@ test('缺 canonical、错配 canonical 与浏览器拒绝均不得写 Journal', 
   assert.deepEqual(app.session.groups, []);
 });
 
+test('重复 action id 与伪造 payload/after 的 canonical ACK 均拒绝', async t => {
+  const app = await makeApp(t);
+  const ws = await connect(app.editorWsUrl);
+  t.after(() => ws.close());
+  const duplicate = await fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [action, action] }),
+  });
+  assert.equal(duplicate.status, 400);
+  assert.equal((await duplicate.json()).error, 'DUPLICATE_ACTION_ID');
+
+  const incomplete = { ...action };
+  delete incomplete.before;
+  delete incomplete.after;
+  let commandPromise = nextMessage(ws);
+  let responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [incomplete] }),
+  });
+  let command = await commandPromise;
+  await sendInvalidPrepared(ws, command, {
+    applied: 1,
+    results: [{ ...action, payload: { text: '另一份 payload' } }],
+  });
+  let response = await responsePromise;
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
+
+  const resize = {
+    id: 'resize-forged-branch', taskId: null, target: action.target,
+    kind: 'resize', payload: { scale: 2 },
+  };
+  commandPromise = nextMessage(ws);
+  responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [resize] }),
+  });
+  command = await commandPromise;
+  await sendInvalidPrepared(ws, command, {
+    applied: 1,
+    results: [{ ...resize, before: { width: 100, height: 50 }, after: { scale: 2 } }],
+  });
+  response = await responsePromise;
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
+
+  const forgedLegacy = { ...action, after: 'FORGED' };
+  commandPromise = nextMessage(ws);
+  responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [forgedLegacy] }),
+  });
+  command = await commandPromise;
+  await sendInvalidPrepared(ws, command, { applied: 1, results: [forgedLegacy] });
+  response = await responsePromise;
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.groups, []);
+});
+
 test('等待 Action 回执期间串行化其他 revision mutation', async t => {
   const app = await makeApp(t);
   const ws = await connect(app.editorWsUrl);
@@ -410,7 +503,7 @@ test('等待 Action 回执期间串行化其他 revision mutation', async t => {
     body: JSON.stringify(taskInput),
   });
   await new Promise(resolve => setTimeout(resolve, 25));
-  ws.send(JSON.stringify({ type: 'actions-applied', commandId: command.commandId, applied: 1 }));
+  await prepareAndCommit(ws, command);
 
   const actionResponse = await actionResponsePromise;
   const taskResponse = await taskResponsePromise;

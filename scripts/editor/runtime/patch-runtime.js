@@ -2,7 +2,8 @@
   const slides = () => [...document.querySelectorAll('.stage .slide-canvas')];
   const fnv1a = text => { let h=2166136261; for (const c of text) { h ^= c.charCodeAt(0); h = Math.imul(h,16777619); } return (h>>>0).toString(16).padStart(8,'0'); };
   const pageKeys = new WeakMap(), locators = new WeakMap(), resolved = new Map();
-  let activeActions = [], replayTimer = 0;
+  const suspendedTargets = new Set();
+  let activeActions = [], activeBaselines = new Map(), replayTimer = 0, tentativeCount = 0;
   const pageKey = canvas => {
     if (!canvas) throw runtimeError('PAGE_NOT_FOUND');
     if (pageKeys.has(canvas)) return pageKeys.get(canvas);
@@ -118,7 +119,8 @@
     if (!['setText','setStyle','translate','resize','hide','show'].includes(action.kind)) throw runtimeError('INVALID_ACTION');
   }
   const translateOf = el => {
-    const parts=(el.style.translate || '0px 0px').split(/\s+/);
+    const computed=getComputedStyle(el).translate;
+    const parts=(computed && computed!=='none' ? computed : '0px 0px').split(/\s+/);
     return { x:parseFloat(parts[0])||0, y:parseFloat(parts[1])||0 };
   };
   function applyOne(action, el=resolve(action.target)) {
@@ -135,7 +137,7 @@
     }
     if (action.kind === 'resize') {
       if (Object.hasOwn(action.payload,'scale')) {
-        before={ scale:parseFloat(el.style.scale)||1 }; after={ scale:action.payload.scale };
+        before={ scale:parseFloat(getComputedStyle(el).scale)||1 }; after={ scale:action.payload.scale };
         el.style.scale=String(after.scale);
       } else {
         const computed=getComputedStyle(el);
@@ -154,14 +156,49 @@
     }
     return { ...action, before, after, appliedAt:new Date().toISOString() };
   }
-  function recordActive(action) {
+  const inlineProperty = (el,property) => ({
+    value:el.style.getPropertyValue(property), priority:el.style.getPropertyPriority(property),
+  });
+  const restoreInlineProperty = (el,property,snapshot) => {
+    if (snapshot.value) el.style.setProperty(property,snapshot.value,snapshot.priority);
+    else el.style.removeProperty(property);
+  };
+  function captureBaseline(action,el) {
+    if (action.kind==='setText') return { text:el.textContent };
+    if (action.kind==='translate') return { translate:inlineProperty(el,'translate') };
+    if (action.kind==='resize') return {
+      width:inlineProperty(el,'width'), height:inlineProperty(el,'height'), scale:inlineProperty(el,'scale'),
+    };
+    if (action.kind==='setStyle') {
+      return { property:action.payload.property, style:inlineProperty(el,action.payload.property) };
+    }
+    return { display:inlineProperty(el,'display') };
+  }
+  function restoreBaseline(action,baseline) {
+    const el=baseline.el?.isConnected ? baseline.el : resolve(action.target);
+    if (action.kind==='setText') el.textContent=baseline.text;
+    else if (action.kind==='translate') restoreInlineProperty(el,'translate',baseline.translate);
+    else if (action.kind==='resize') {
+      restoreInlineProperty(el,'width',baseline.width);
+      restoreInlineProperty(el,'height',baseline.height);
+      restoreInlineProperty(el,'scale',baseline.scale);
+    } else if (action.kind==='setStyle') restoreInlineProperty(el,baseline.property,baseline.style);
+    else restoreInlineProperty(el,'display',baseline.display);
+  }
+  const resizeBranch = action => action?.kind==='resize'
+    ? (Object.hasOwn(action.payload,'scale') ? 'scale' : 'size') : null;
+  function recordActive(action,baseline) {
     const key=actionKey(action), index=activeActions.findIndex(active => actionKey(active) === key);
-    if (index < 0) activeActions.push(action); else activeActions[index]=action;
+    if (index < 0) {
+      activeActions.push(action);
+      activeBaselines.set(key,{ ...baseline,el:baseline.el });
+    } else activeActions[index]=action;
   }
   function applyAction(action) {
-    const applied=applyOne(action); recordActive(action); return applied;
+    const el=resolve(action.target), baseline={ ...captureBaseline(action,el),el };
+    const applied=applyOne(action,el); recordActive(applied,baseline); return applied;
   }
-  function applyTransaction(actions, { replace=false }={}) {
+  function beginTransaction(actions) {
     if (!Array.isArray(actions) || !actions.length) throw runtimeError('INVALID_ACTION');
     const prepared=[];
     for (const action of actions) {
@@ -169,35 +206,118 @@
       catch (error) { error.failedActionId=action?.id; throw error; }
     }
     const oldActions=[...activeActions];
+    const oldBaselines=new Map(activeBaselines);
     const snapshots=new Map(prepared.map(({el}) => [el,{ html:el.innerHTML, style:el.getAttribute('style') }]));
     const results=[];
+    const transactionBaselines=new Map();
+    const currentByKey=new Map(activeActions.map(active => [actionKey(active),active]));
+    let settled=false;
+    tentativeCount+=1;
     try {
-      if (replace) activeActions=[];
       for (const {action,el} of prepared) {
-        results.push(applyOne(action,el));
-        if (!replace) recordActive(action);
+        const key=actionKey(action);
+        const existingBaseline=activeBaselines.get(key) ?? transactionBaselines.get(key);
+        const baseline=existingBaseline ?? { ...captureBaseline(action,el),el };
+        const current=currentByKey.get(key);
+        if (resizeBranch(current) && resizeBranch(current)!==resizeBranch(action)) {
+          restoreBaseline(current,baseline);
+        }
+        const result=applyOne(action,el);
+        results.push(result);
+        transactionBaselines.set(key,baseline);
+        currentByKey.set(key,result);
       }
-      if (replace) activeActions=[...actions];
-      return results;
     } catch (error) {
       for (const [el,snapshot] of snapshots) {
         el.innerHTML=snapshot.html;
         if (snapshot.style === null) el.removeAttribute('style'); else el.setAttribute('style',snapshot.style);
       }
       activeActions=oldActions;
+      activeBaselines=oldBaselines;
+      tentativeCount-=1;
       throw error;
     }
+    const finish = method => {
+      if (settled) return false;
+      settled=true;
+      tentativeCount-=1;
+      clearTimeout(replayTimer);
+      if (method==='commit') {
+        for (const [index,action] of results.entries()) {
+          recordActive(action,transactionBaselines.get(actionKey(actions[index])));
+        }
+      } else {
+        for (const [el,snapshot] of snapshots) {
+          if (!el.isConnected) continue;
+          el.innerHTML=snapshot.html;
+          if (snapshot.style===null) el.removeAttribute('style'); else el.setAttribute('style',snapshot.style);
+        }
+        activeActions=oldActions;
+        activeBaselines=oldBaselines;
+      }
+      return true;
+    };
+    return {
+      results,
+      commit:() => finish('commit'),
+      rollback:() => finish('rollback'),
+    };
+  }
+  function applyTransaction(actions, options) {
+    const transaction=beginTransaction(actions,options);
+    transaction.commit();
+    return transaction.results;
   }
   function applyAll(actions) {
-    if (!actions.length) { activeActions=[]; return []; }
-    return applyTransaction(actions,{replace:true});
+    if (!Array.isArray(actions)) throw runtimeError('INVALID_ACTION');
+    const oldActions=[...activeActions];
+    tentativeCount+=1;
+    clearTimeout(replayTimer);
+    try {
+      for (const action of [...activeActions].reverse()) {
+        const baseline=activeBaselines.get(actionKey(action));
+        if (baseline) restoreBaseline(action,baseline);
+      }
+      activeActions=[];
+      activeBaselines=new Map();
+      if (!actions.length) return [];
+      return applyTransaction(actions);
+    } catch (error) {
+      for (const action of [...activeActions].reverse()) {
+        const baseline=activeBaselines.get(actionKey(action));
+        if (baseline) restoreBaseline(action,baseline);
+      }
+      activeActions=[];
+      activeBaselines=new Map();
+      try { if (oldActions.length) applyTransaction(oldActions); } catch { /* 保留原始 sync 错误。 */ }
+      throw error;
+    } finally {
+      tentativeCount-=1;
+    }
+  }
+  function suspendTarget(locator) {
+    const key=locatorKey(locator);
+    suspendedTargets.add(key);
+    let resumed=false;
+    return () => {
+      if (resumed) return;
+      resumed=true;
+      suspendedTargets.delete(key);
+    };
+  }
+  function replayActive() {
+    if (tentativeCount>0) return;
+    for (const action of activeActions) {
+      if (suspendedTargets.has(locatorKey(action.target))) continue;
+      try { applyOne(action); } catch { /* Deck 可能仍在重建。 */ }
+    }
   }
   new MutationObserver(() => {
     clearTimeout(replayTimer);
-    replayTimer=setTimeout(() => {
-      if (!activeActions.length) return;
-      try { applyAll(activeActions); } catch { /* 等待 Deck 完成重建后再次重放。 */ }
-    },30);
+    replayTimer=setTimeout(replayActive,30);
   }).observe(document.documentElement,{childList:true,subtree:true});
-  window.HuaweiDeckPatchRuntime={ pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction };
+  window.HuaweiDeckPatchRuntime={
+    pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,
+    pendingTransactionCount:() => tentativeCount,
+  };
 })();

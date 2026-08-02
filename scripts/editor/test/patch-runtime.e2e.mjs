@@ -149,6 +149,45 @@ test('applyAll 失败后恢复旧 authoritative 集合且不产生异步 pageerr
   assert.deepEqual(pageErrors, []);
 });
 
+test('authoritative replace 按 key 恢复基线并隔离 resize 分支', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const rt=window.HuaweiDeckPatchRuntime;
+    const heading=document.querySelector('h2');
+    const card=document.querySelector('.card');
+    const headingTarget=rt.makeLocator(heading);
+    const cardTarget=rt.makeLocator(card);
+    rt.applyAll([
+      { id:'move',target:headingTarget,kind:'translate',payload:{x:40,y:20} },
+      { id:'red',target:headingTarget,kind:'setStyle',payload:{property:'color',value:'red'} },
+    ]);
+    rt.applyAll([
+      { id:'blue',target:headingTarget,kind:'setStyle',payload:{property:'color',value:'blue'} },
+    ]);
+    const oneKey = { translate:heading.style.translate,color:heading.style.color };
+    rt.applyAll([]);
+    const empty = { translate:heading.style.translate,color:heading.style.color };
+
+    rt.applyAll([{ id:'size',target:cardTarget,kind:'resize',payload:{width:500,height:200} }]);
+    rt.applyAll([{ id:'scale',target:cardTarget,kind:'resize',payload:{scale:1.5} }]);
+    const scale = { width:card.style.width,height:card.style.height,scale:card.style.scale };
+    rt.applyAll([{ id:'size-2',target:cardTarget,kind:'resize',payload:{width:450,height:150} }]);
+    const size = { width:card.style.width,height:card.style.height,scale:card.style.scale };
+    return { oneKey,empty,scale,size,pending:rt.pendingTransactionCount() };
+  });
+  assert.deepEqual(result, {
+    oneKey:{ translate:'',color:'blue' },
+    empty:{ translate:'',color:'' },
+    scale:{ width:'300px',height:'100px',scale:'1.5' },
+    size:{ width:'450px',height:'150px',scale:'' },
+    pending:0,
+  });
+});
+
 test('定位失败候选最多五个且排除隐藏祖先下的同标签元素', async t => {
   const chromium = await loadChromium();
   const browser = await chromium.launch({ channel:'chrome', headless:true });
