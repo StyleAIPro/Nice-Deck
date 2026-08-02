@@ -33,6 +33,25 @@ test('画布尺寸无效时抛出中文 RangeError', () => {
   }
 });
 
+test('屏幕框与画布偏移字段必须为有限数', () => {
+  const rect = { left: 0, top: 0, width: 10, height: 10 };
+  const canvas = { left: 0, top: 0, width: 1920, height: 1080 };
+  for (const [invalidRect, invalidCanvas] of [
+    [{ top: 0, width: 10, height: 10 }, canvas],
+    [{ left: 0, top: NaN, width: 10, height: 10 }, canvas],
+    [{ left: 0, top: 0, width: Infinity, height: 10 }, canvas],
+    [{ left: 0, top: 0, width: 10 }, canvas],
+    [rect, { top: 0, width: 1920, height: 1080 }],
+    [rect, { left: NaN, top: 0, width: 1920, height: 1080 }],
+    [rect, { left: 0, top: Infinity, width: 1920, height: 1080 }],
+  ]) {
+    assert.throws(
+      () => normalizeRect(invalidRect, invalidCanvas),
+      new RangeError('屏幕框和画布偏移必须为有限数'),
+    );
+  }
+});
+
 test('同名页仍生成不同 pageKey', () => {
   assert.notEqual(makePageKey(1, '目录页', '<section>A</section>'),
     makePageKey(5, '目录页', '<section>A</section>'));

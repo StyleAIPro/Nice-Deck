@@ -19,6 +19,9 @@ export function normalizeRect(rect, canvas) {
   if (!Number.isFinite(canvas?.width) || !Number.isFinite(canvas?.height) || canvas.width <= 0 || canvas.height <= 0) {
     throw new RangeError('画布尺寸必须为正的有限数');
   }
+  if (![rect?.left, rect?.top, rect?.width, rect?.height, canvas?.left, canvas?.top].every(Number.isFinite)) {
+    throw new RangeError('屏幕框和画布偏移必须为有限数');
+  }
   const sx = 1920 / canvas.width;
   const sy = 1080 / canvas.height;
   const x = Math.max(0, Math.min(1919, Math.round((rect.left - canvas.left) * sx)));
