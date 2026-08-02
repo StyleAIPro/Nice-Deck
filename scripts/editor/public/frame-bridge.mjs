@@ -93,6 +93,48 @@ function pageInfo(canvas) {
   };
 }
 
+function finiteOverflow(scrollSize, clientSize) {
+  const value = Math.max(0, Number(scrollSize) - Number(clientSize));
+  return Number.isFinite(value) ? value : 0;
+}
+
+function diagnosesNestedClip(element) {
+  if (element.matches('[data-deck-editor-ui],[data-deck-editor-ui] *')) return false;
+  const computed = getComputedStyle(element);
+  const clips = value => ['hidden', 'clip', 'auto', 'scroll'].includes(value);
+  return clips(computed.overflowX) || clips(computed.overflowY);
+}
+
+function diagnoseCanvas(canvas) {
+  const { pageKey } = pageInfo(canvas);
+  const section = canvas.querySelector('section[data-label]') ?? canvas.firstElementChild ?? canvas;
+  const sectionOverflow = {
+    x: finiteOverflow(section.scrollWidth, section.clientWidth),
+    y: finiteOverflow(section.scrollHeight, section.clientHeight),
+  };
+  const nestedClips = [];
+  for (const element of section.querySelectorAll('*')) {
+    if (!diagnosesNestedClip(element)) continue;
+    const x = finiteOverflow(element.scrollWidth, element.clientWidth);
+    const y = finiteOverflow(element.scrollHeight, element.clientHeight);
+    if (x <= 0 && y <= 0) continue;
+    nestedClips.push({ locator:runtime.makeLocator(element), x, y });
+  }
+  return { pageKey, sectionOverflow, nestedClips };
+}
+
+function diagnosePages(pageKeys) {
+  const requested = pageKeys === undefined
+    ? canvases
+    : pageKeys.map(pageKey => canvases.find(canvas => runtime.pageKey(canvas) === pageKey));
+  if (requested.some(canvas => !canvas)) {
+    const error = new Error('诊断页面不存在');
+    error.code = 'PAGE_NOT_FOUND';
+    throw error;
+  }
+  return requested.map(diagnoseCanvas);
+}
+
 function showPage(pageKey) {
   finishDirectEdit();
   cancelTransformDrag();
@@ -869,6 +911,27 @@ function onParentMessage(event) {
     catch (error) { showStatus(`会话动作恢复失败：${error.code || error.message}`, 'error'); }
     return;
   }
+  if (event.data?.type === 'diagnose-pages'
+    && typeof event.data.commandId === 'string'
+    && Number.isSafeInteger(event.data.revision)
+    && Array.isArray(event.data.pageKeys)) {
+    try {
+      parent.postMessage({
+        type:'diagnostics-result',
+        commandId:event.data.commandId,
+        revision:event.data.revision,
+        pages:diagnosePages(event.data.pageKeys),
+      }, location.origin);
+    } catch (error) {
+      parent.postMessage({
+        type:'diagnostics-rejected',
+        commandId:event.data.commandId,
+        revision:event.data.revision,
+        code:error.code || 'DIAGNOSTICS_UNAVAILABLE',
+      }, location.origin);
+    }
+    return;
+  }
   if (event.data?.type === 'manual-actions-result'
     && typeof event.data.requestId === 'string') {
     const callback = pendingManual.get(event.data.requestId);
@@ -958,5 +1021,6 @@ if (parent !== window) {
       label: canvas.querySelector('section[data-label]')?.dataset.label ?? `第 ${index + 1} 页`,
       pageKey: runtime.pageKey(canvas),
     })),
+    diagnostics: diagnosePages(),
   }, location.origin);
 }

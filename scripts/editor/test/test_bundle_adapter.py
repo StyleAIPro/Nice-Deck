@@ -144,3 +144,59 @@ class BundleAdapterTest(unittest.TestCase):
 
             self.assertEqual(external, deck.read_bytes())
             self.assertEqual([], list(deck.parent.glob(f".{deck.name}.*.tmp")))
+
+    def test_safe_verify_failure_has_stable_stage_and_diagnostic(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            session = Path(td) / "session"
+            minimal_bundle(deck)
+            original = deck.read_bytes()
+
+            with mock.patch.object(
+                bundle_adapter.eb,
+                "verify",
+                side_effect=AssertionError("verify exploded"),
+            ):
+                result = bundle_adapter.write_patches_safe(deck, [], session)
+
+            self.assertEqual(False, result["ok"])
+            self.assertEqual("VERIFY_FAILED", result["code"])
+            self.assertEqual("verify", result["stage"])
+            self.assertIn("重试", result["recovery"])
+            self.assertTrue((session / result["diagnostic"]).is_file())
+            self.assertEqual(original, deck.read_bytes())
+
+    def test_expected_fingerprint_mismatch_is_conflict_without_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            session = Path(td) / "session"
+            minimal_bundle(deck)
+            original = deck.read_bytes()
+
+            result = bundle_adapter.write_patches_safe(
+                deck, [], session, expected_fingerprint="0" * 64
+            )
+
+            self.assertEqual("DECK_CHANGED", result["code"])
+            self.assertEqual("read", result["stage"])
+            self.assertEqual(original, deck.read_bytes())
+            self.assertEqual([], list((session / "backups").glob("*.html")))
+
+    def test_atomic_replace_failure_keeps_original_and_reports_write_stage(self):
+        with tempfile.TemporaryDirectory() as td:
+            deck = Path(td) / "deck.html"
+            session = Path(td) / "session"
+            minimal_bundle(deck)
+            original = deck.read_bytes()
+
+            with mock.patch.object(
+                bundle_adapter.os,
+                "replace",
+                side_effect=OSError("replace denied"),
+            ):
+                result = bundle_adapter.write_patches_safe(deck, [], session)
+
+            self.assertEqual("WRITE_FAILED", result["code"])
+            self.assertEqual("replace", result["stage"])
+            self.assertEqual(original, deck.read_bytes())
+            self.assertEqual([], list(deck.parent.glob(f".{deck.name}.*.tmp")))

@@ -28,6 +28,7 @@ let tasks = [];
 let revision = 0;
 let editorMode = 'preview';
 let deckReady = false;
+let deckReadyPayload;
 let sessionGroups = [];
 let loadedSessionRevision = -1;
 let sessionRefreshTargetRevision = 0;
@@ -87,6 +88,11 @@ function syncSessionActions() {
   deckFrame.contentWindow?.postMessage({
     type: 'sync-actions', actions: compiledSessionActions(),
   }, location.origin);
+}
+
+function announceDeckReady() {
+  if (!deckReadyPayload) return false;
+  return eventsClient?.send({ ...deckReadyPayload, revision }) ?? false;
 }
 
 function snapshotByteLength(snapshot) {
@@ -330,6 +336,12 @@ function onFrameMessage(event) {
   if (event.origin !== location.origin || event.source !== deckFrame.contentWindow) return;
   if (event.data?.type === 'deck-ready' && Array.isArray(event.data.pages)) {
     deckReady = true;
+    deckReadyPayload = {
+      type:'deck-ready',
+      pages:event.data.pages,
+      diagnostics:Array.isArray(event.data.diagnostics) ? event.data.diagnostics : [],
+    };
+    announceDeckReady();
     renderPages(event.data.pages);
     deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode: editorMode }, location.origin);
     if (loadedSessionRevision >= revision) syncSessionActions();
@@ -345,7 +357,8 @@ function onFrameMessage(event) {
     return;
   }
   if (['actions-applied', 'actions-rejected', 'actions-prepared', 'actions-committed',
-    'actions-rolled-back', 'actions-synced'].includes(event.data?.type)
+    'actions-rolled-back', 'actions-synced', 'diagnostics-result',
+    'diagnostics-rejected'].includes(event.data?.type)
     && typeof event.data.commandId === 'string') {
     commandReplies.set(`${event.data.type}:${event.data.commandId}`, event.data);
     if (commandReplies.size > 100) commandReplies.delete(commandReplies.keys().next().value);
@@ -408,6 +421,7 @@ eventsClient = connectEvents({
       'commit-actions': 'actions-committed',
       'rollback-actions': 'actions-rolled-back',
       'sync-actions': 'actions-synced',
+      'diagnose-pages': 'diagnostics-result',
     };
     if (replyTypes[event?.type] && typeof event.commandId === 'string') {
       const reply = commandReplies.get(`${replyTypes[event.type]}:${event.commandId}`);
@@ -426,10 +440,10 @@ eventsClient = connectEvents({
     wsLabel.textContent = state === 'online' ? '在线' : '离线';
     if (state === 'offline') {
       deckFrame.contentWindow?.postMessage({ type:'rollback-all-tentative' }, location.origin);
-    } else if (seenOnline) {
-      void loadSession().catch(() => {});
     } else {
-      seenOnline = true;
+      announceDeckReady();
+      if (seenOnline) void loadSession().catch(() => {});
+      else seenOnline = true;
     }
   },
 });

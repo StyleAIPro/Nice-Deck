@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { loadChromium } from '../../verify/load-playwright.mjs';
@@ -7,7 +7,20 @@ import { startServer } from '../server.mjs';
 export async function startFixtureServer(options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'deck-editor-fixture-'));
   const deckPath = join(root, 'minimal-deck.html');
-  await copyFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), deckPath);
+  if (options.bundle) {
+    const wrapper = await readFile(resolve('assets/template-deck.html'), 'utf8');
+    const template = (await readFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), 'utf8'))
+      .replace('../../runtime/patch-runtime.js', '/editor/patch-runtime.js');
+    const lines = wrapper.split('\n');
+    const manifest = lines.findIndex(line => line.trim() === '<script type="__bundler/manifest">');
+    const bundledTemplate = lines.findIndex(line => line.trim() === '<script type="__bundler/template">');
+    if (manifest < 0 || bundledTemplate < 0) throw new Error('测试 bundle 外壳缺少 manifest/template');
+    lines[manifest + 1] = '{}';
+    lines[bundledTemplate + 1] = JSON.stringify(template).replaceAll('</', '<\\u002F');
+    await writeFile(deckPath, lines.join('\n'));
+  } else {
+    await copyFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), deckPath);
+  }
   try {
     const app = await startServer({
       deckPath,
@@ -17,13 +30,20 @@ export async function startFixtureServer(options = {}) {
       token: 'fixture-token',
       editorToken: 'fixture-editor-token',
       bridgeTimeoutMs: options.bridgeTimeoutMs,
+      writerTimeoutMs: options.writerTimeoutMs,
+      writerKillGraceMs: options.writerKillGraceMs,
+      spawnWriter: options.spawnWriter,
+      onActiveWritersChange: options.onActiveWritersChange,
     });
     const closeServer = app.close;
     let closePromise;
     app.close = () => {
-      closePromise ??= closeServer().finally(() => rm(root, { recursive: true, force: true }));
+      closePromise ??= options.preserveRoot
+        ? closeServer()
+        : closeServer().finally(() => rm(root, { recursive: true, force: true }));
       return closePromise;
     };
+    app.cleanup = () => rm(root, { recursive: true, force: true });
     return app;
   } catch (error) {
     await rm(root, { recursive: true, force: true });

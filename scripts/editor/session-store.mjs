@@ -43,7 +43,18 @@ export class SessionStore {
 
     const store = new SessionStore(deckPath, deckFingerprint, sessionDir);
     try {
-      store.state = JSON.parse(await readFile(store.sessionPath, 'utf8'));
+      const persisted = JSON.parse(await readFile(store.sessionPath, 'utf8'));
+      store.state = {
+        ...store.state,
+        ...persisted,
+        deckPath,
+        tasks:Array.isArray(persisted.tasks) ? persisted.tasks : [],
+        groups:Array.isArray(persisted.groups) ? persisted.groups : [],
+        redo:Array.isArray(persisted.redo) ? persisted.redo : [],
+        diagnosticsBaseline:persisted.diagnosticsBaseline ?? {},
+        diagnosticsCurrent:persisted.diagnosticsCurrent ?? {},
+        conflict:persisted.conflict ?? null,
+      };
     } catch {
       await store.#persist();
     }
@@ -62,6 +73,10 @@ export class SessionStore {
       tasks: [],
       groups: [],
       redo: [],
+      diagnosticsBaseline: {},
+      diagnosticsCurrent: {},
+      diagnosticsRevision: null,
+      conflict: null,
     };
   }
 
@@ -72,10 +87,17 @@ export class SessionStore {
   }
 
   async #persist() {
-    const temporaryPath = `${this.sessionPath}.tmp`;
+    const temporaryPath = `${this.sessionPath}.${randomUUID()}.tmp`;
     await writeFile(temporaryPath, JSON.stringify(this.state, null, 2));
-    await rename(temporaryPath, this.sessionPath);
+    try {
+      await rename(temporaryPath, this.sessionPath);
+    } catch (error) {
+      await unlink(temporaryPath).catch(() => {});
+      throw error;
+    }
   }
+
+  persistState() { return this.#persist(); }
 
   async createTask(input, expectedRevision) {
     this.#expect(expectedRevision);

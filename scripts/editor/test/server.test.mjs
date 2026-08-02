@@ -71,6 +71,37 @@ function nextMessage(socket) {
   });
 }
 
+async function connectDiagnosticsEditor(t, app) {
+  const socket = await connect(app.editorWsUrl);
+  t.after(() => socket.close());
+  const page = {
+    pageKey:'page-001-save-gate',
+    sectionOverflow:{ x:0, y:0 },
+    nestedClips:[],
+  };
+  socket.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type !== 'diagnose-pages') return;
+    socket.send(JSON.stringify({
+      type:'diagnostics-result',
+      commandId:message.commandId,
+      revision:message.revision,
+      pages:message.pageKeys.map(pageKey => ({ ...page, pageKey })),
+    }));
+  });
+  socket.send(JSON.stringify({
+    type:'deck-ready',
+    pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+    diagnostics:[page],
+  }));
+  const deadline = Date.now() + 1_000;
+  while (!Object.keys(app.session.diagnosticsBaseline ?? {}).length && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(Object.keys(app.session.diagnosticsBaseline ?? {}).length, 1);
+  return socket;
+}
+
 async function prepareAndCommit(socket, command, results = command.actions) {
   socket.send(JSON.stringify({
     type: 'actions-prepared', commandId: command.commandId,
@@ -564,6 +595,7 @@ test('任务查询、输入错误和已列路由都有明确响应', async t => 
 
 test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', async t => {
   const app = await makeApp(t, { deckContents: validBundle() });
+  await connectDiagnosticsEditor(t, app);
   const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -576,6 +608,103 @@ test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', 
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
 });
 
+test('Deck 已替换但 session 基线持久化失败时恢复原文件与内存基线', async () => {
+  const page = {
+    pageKey:'page-001-save-rollback',
+    sectionOverflow:{ x:0, y:0 },
+    nestedClips:[],
+  };
+  const state = {
+    revision:0,
+    tasks:[],
+    groups:[],
+    redo:[],
+    deckFingerprint:'old-fingerprint',
+    diagnosticsBaseline:{ [page.pageKey]:page },
+    diagnosticsCurrent:{ [page.pageKey]:page },
+    diagnosticsRevision:0,
+    conflict:null,
+  };
+  const sessionStore = {
+    state,
+    sessionPath:'/tmp/session.json',
+    async persistState() { throw new Error('session persist failed'); },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      if (message.type !== 'diagnose-pages') return;
+      queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+        type:'diagnostics-result',
+        commandId:message.commandId,
+        revision:message.revision,
+        pages:[page],
+      })));
+    },
+  };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready',
+    pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+    diagnostics:[page],
+  }));
+  let restored = false;
+
+  await assert.rejects(
+    bridge.writeDeck(0, {
+      fingerprint:async () => 'old-fingerprint',
+      writer:async () => ({ fingerprint:'new-fingerprint', backup:'/tmp/backup.html' }),
+      restore:async result => {
+        assert.equal(result.fingerprint, 'new-fingerprint');
+        restored = true;
+      },
+    }),
+    error => error.code === 'WRITE_FAILED' && error.stage === 'session',
+  );
+  assert.equal(restored, true);
+  assert.equal(state.deckFingerprint, 'old-fingerprint');
+  assert.deepEqual(state.diagnosticsBaseline, { [page.pageKey]:page });
+});
+
+test('初始诊断基线持久化失败不得在内存伪装成可保存基线', async () => {
+  const page = {
+    pageKey:'page-001-baseline-failure',
+    sectionOverflow:{ x:0, y:0 },
+    nestedClips:[],
+  };
+  const state = {
+    revision:0, tasks:[], groups:[], redo:[], deckFingerprint:'old',
+    diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+  };
+  const sessionStore = {
+    state,
+    sessionPath:'/tmp/session.json',
+    async persistState() { throw new Error('baseline persist failed'); },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = { readyState:1, send() {} };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready',
+    pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+    diagnostics:[page],
+  }));
+
+  await assert.rejects(
+    bridge.writeDeck(0, {
+      fingerprint:async () => 'old',
+      writer:async () => assert.fail('不得调用 writer'),
+      restore:async () => {},
+    }),
+    error => error.code === 'DIAGNOSTICS_UNAVAILABLE' && error.stage === 'diagnostics',
+  );
+  assert.deepEqual(state.diagnosticsBaseline, {});
+  assert.deepEqual(state.diagnosticsCurrent, {});
+  assert.equal(state.diagnosticsRevision, null);
+});
+
 test('write-deck 超时终止子进程并映射稳定 504', async t => {
   const child = hangingChild();
   const app = await makeApp(t, {
@@ -583,13 +712,17 @@ test('write-deck 超时终止子进程并映射稳定 504', async t => {
     writerTimeoutMs: 20,
     spawnWriter: () => child,
   });
+  await connectDiagnosticsEditor(t, app);
   const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ expectedRevision: 0 }),
   });
   assert.equal(response.status, 504);
-  assert.equal((await response.json()).error, 'WRITE_DECK_TIMEOUT');
+  const error = await response.json();
+  assert.equal(error.error, 'WRITE_DECK_TIMEOUT');
+  assert.equal(error.stage, 'adapter');
+  assert.match(error.recovery, /重试|检查/);
   assert.equal(child.killed, true);
 });
 
@@ -602,13 +735,17 @@ test('write-deck stdin 未 settle 的异步 EPIPE 映射稳定 5xx', async t => 
     writerTimeoutMs: 1_000,
     spawnWriter: () => child,
   });
+  await connectDiagnosticsEditor(t, app);
   const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ expectedRevision: 0 }),
   });
   assert.equal(response.status, 502);
-  assert.equal((await response.json()).error, 'WRITE_DECK_IO_ERROR');
+  const error = await response.json();
+  assert.equal(error.error, 'WRITE_DECK_IO_ERROR');
+  assert.equal(error.stage, 'adapter');
+  assert.match(error.recovery, /重试|检查/);
   assert.equal(child.killed, true);
 });
 
@@ -621,6 +758,7 @@ test('write-deck timeout settle 后吸收 kill 引发的异步 EPIPE', async t =
     writerTimeoutMs: 20,
     spawnWriter: () => child,
   });
+  await connectDiagnosticsEditor(t, app);
   const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -643,6 +781,7 @@ test('write-deck 卡住时 close 取消 child 和请求并在有界时间收敛'
       return child;
     },
   });
+  await connectDiagnosticsEditor(t, app);
   const responsePromise = fetch(`${app.url}/api/write-deck?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -678,6 +817,7 @@ test('kill 后无 close 仍强制 finalize 并清空 active writer', async t => 
       return child;
     },
   });
+  await connectDiagnosticsEditor(t, app);
   const responsePromise = fetch(`${app.url}/api/write-deck?token=secret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

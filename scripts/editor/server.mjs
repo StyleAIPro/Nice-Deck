@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { unwatchFile, watchFile } from 'node:fs';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { BridgeService } from './bridge-service.mjs';
@@ -37,6 +38,52 @@ const EDITOR_ASSETS = new Map([
 
 function httpError(code, statusCode, message = code) {
   return Object.assign(new Error(message), { code, statusCode });
+}
+
+function adapterError(code, statusCode, message) {
+  return Object.assign(httpError(code, statusCode, message), {
+    stage:'adapter',
+    recovery:'检查适配器诊断、目录权限和磁盘空间后重试',
+  });
+}
+
+async function fileFingerprint(path) {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}
+
+function bytesFingerprint(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function restoreDeckBackup(deckPath, sessionDir, result, expectedFingerprint) {
+  if (typeof result?.backup !== 'string' || typeof result?.fingerprint !== 'string') {
+    throw new Error('写回结果缺少可恢复备份信息');
+  }
+  const backupRoot = resolve(sessionDir, 'backups');
+  const backupPath = resolve(result.backup);
+  const backupRelative = relative(backupRoot, backupPath);
+  if (!backupRelative || backupRelative.startsWith('..') || backupRelative.includes('/../')) {
+    throw new Error('备份路径不在当前会话目录内');
+  }
+  const backupBytes = await readFile(backupPath);
+  if (bytesFingerprint(backupBytes) !== expectedFingerprint) {
+    throw new Error('备份指纹与写回前基线不一致');
+  }
+  if (await fileFingerprint(deckPath) !== result.fingerprint) {
+    throw new Error('Deck 写回后又发生外部变化，拒绝自动恢复覆盖');
+  }
+  const temporaryPath = join(
+    dirname(deckPath), `.${basename(deckPath)}.${randomUUID()}.restore.tmp`,
+  );
+  try {
+    await writeFile(temporaryPath, backupBytes, { flag:'wx' });
+    if (await fileFingerprint(deckPath) !== result.fingerprint) {
+      throw new Error('Deck 在自动恢复期间发生外部变化');
+    }
+    await rename(temporaryPath, deckPath);
+  } finally {
+    await unlink(temporaryPath).catch(() => {});
+  }
 }
 
 function authCookieName(token) {
@@ -166,7 +213,9 @@ function errorResponse(response, error) {
   }
   statusCode ??= 500;
   code ??= 'INTERNAL_ERROR';
-  const safeMessages = new Set(['JOURNAL_PERSIST_FAILED', 'EDITOR_SYNC_REQUIRED']);
+  const safeMessages = new Set([
+    'JOURNAL_PERSIST_FAILED', 'EDITOR_SYNC_REQUIRED', 'VERIFY_FAILED', 'WRITE_FAILED',
+  ]);
   const message = statusCode === 500 && !safeMessages.has(code) ? '服务内部错误' : error.message;
   const details = {};
   if (typeof error?.failedActionId === 'string') details.failedActionId = error.failedActionId;
@@ -176,10 +225,17 @@ function errorResponse(response, error) {
   if (typeof error?.recoveredBySync === 'boolean') details.recoveredBySync = error.recoveredBySync;
   if (Number.isSafeInteger(error?.revision)) details.revision = error.revision;
   if (typeof error?.groupId === 'string') details.groupId = error.groupId;
-  json(response, statusCode, { error: code, message, ...details });
+  if (typeof error?.stage === 'string') details.stage = error.stage;
+  if (typeof error?.recovery === 'string') details.recovery = error.recovery;
+  if (typeof error?.diagnostic === 'string') details.diagnostic = error.diagnostic;
+  if (typeof error?.backup === 'string') details.backup = error.backup;
+  if (typeof error?.expectedFingerprint === 'string') details.expectedFingerprint = error.expectedFingerprint;
+  if (typeof error?.actualFingerprint === 'string') details.actualFingerprint = error.actualFingerprint;
+  if (Array.isArray(error?.blockers)) details.blockers = error.blockers;
+  json(response, statusCode, { error: code, code, message, ...details });
 }
 
-function runWritePatches(deckPath, sessionDir, patches, {
+function runWritePatches(deckPath, sessionDir, patches, expectedFingerprint, {
   spawnWriter,
   timeoutMs,
   killGraceMs,
@@ -193,10 +249,12 @@ function runWritePatches(deckPath, sessionDir, patches, {
     'module=importlib.util.module_from_spec(spec)',
     'spec.loader.exec_module(module)',
     'patches=json.load(sys.stdin)',
-    'print(json.dumps(module.write_patches(sys.argv[2],patches,sys.argv[3]),ensure_ascii=False))',
+    'print(json.dumps(module.write_patches_safe(sys.argv[2],patches,sys.argv[3],sys.argv[4]),ensure_ascii=False))',
   ].join(';');
   return new Promise((resolvePromise, reject) => {
-    const child = spawnWriter('python3', ['-c', program, adapterPath, deckPath, sessionDir], {
+    const child = spawnWriter('python3', [
+      '-c', program, adapterPath, deckPath, sessionDir, expectedFingerprint,
+    ], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -267,23 +325,45 @@ function runWritePatches(deckPath, sessionDir, patches, {
     const onStderrData = chunk => { stderr += chunk; };
     const onStdinError = error => {
       if (!requestSettled) {
-        cancel(httpError('WRITE_DECK_IO_ERROR', 502, `写入 Deck 输入失败：${error.code ?? 'IO_ERROR'}`));
+        cancel(adapterError(
+          'WRITE_DECK_IO_ERROR', 502, `写入 Deck 输入失败：${error.code ?? 'IO_ERROR'}`,
+        ));
       }
     };
     const onChildError = error => {
-      settleRequest(error);
+      settleRequest(adapterError(
+        'WRITE_FAILED', 500, `无法启动 Deck 保存适配器：${error.code ?? error.message}`,
+      ));
       finalizeProcess();
     };
     const onChildClose = code => {
       if (!requestSettled) {
         if (code !== 0) {
-          settleRequest(new Error(stderr.trim() || `写入 Deck 进程退出码 ${code}`));
+          settleRequest(adapterError(
+            'WRITE_FAILED', 500, stderr.trim() || `写入 Deck 进程退出码 ${code}`,
+          ));
         } else {
           try {
             const resultLine = stdout.trim().split(/\r?\n/).at(-1);
-            settleRequest(null, JSON.parse(resultLine));
+            const result = JSON.parse(resultLine);
+            if (result?.ok === false) {
+              const statuses = {
+                DECK_CHANGED:409, VERIFY_FAILED:500, WRITE_FAILED:500,
+              };
+              settleRequest(Object.assign(
+                httpError(result.code ?? 'WRITE_FAILED', statuses[result.code] ?? 500,
+                  result.message ?? '写回 Deck 失败'),
+                {
+                  stage:result.stage ?? 'write',
+                  recovery:result.recovery ?? '检查诊断信息后重试',
+                  diagnostic:result.diagnostic,
+                },
+              ));
+            } else {
+              settleRequest(null, result);
+            }
           } catch {
-            settleRequest(new Error('写入 Deck 返回无效结果'));
+            settleRequest(adapterError('WRITE_FAILED', 500, '写入 Deck 返回无效结果'));
           }
         }
       }
@@ -292,7 +372,7 @@ function runWritePatches(deckPath, sessionDir, patches, {
     activeWriters.set(child, { cancel, closed });
     notifyActiveWriters();
     requestTimer = setTimeout(() => {
-      cancel(httpError('WRITE_DECK_TIMEOUT', 504, '写入 Deck 超时'));
+      cancel(adapterError('WRITE_DECK_TIMEOUT', 504, '写入 Deck 超时'));
     }, timeoutMs);
     requestTimer.unref?.();
     child.stdout.setEncoding('utf8');
@@ -330,12 +410,29 @@ export async function startServer({
   const bridge = new BridgeService({ sessionStore, timeoutMs: bridgeTimeoutMs });
   const webSockets = new WebSocketServer({ noServer: true });
   const activeWriters = new Map();
+  let watcherClosed = false;
+  let watcherGeneration = 0;
+  let watcherQueue = Promise.resolve();
 
   const broadcast = (type, revision, payload) => {
     const message = JSON.stringify({ type, revision, payload });
     for (const client of webSockets.clients) {
       if (client.readyState === WebSocket.OPEN) client.send(message);
     }
+  };
+
+  const watchListener = () => {
+    const generation = watcherGeneration;
+    watcherQueue = watcherQueue.then(async () => {
+      let fingerprint;
+      try { fingerprint = await fileFingerprint(absoluteDeckPath); }
+      catch (error) { fingerprint = `unavailable:${error.code ?? 'READ_ERROR'}`; }
+      if (watcherClosed || generation !== watcherGeneration) return;
+      const changed = await bridge.noteDeckFingerprint(fingerprint);
+      if (!watcherClosed && generation === watcherGeneration && changed) {
+        broadcast('deck-conflict', sessionStore.state.revision, sessionStore.state.conflict);
+      }
+    }).catch(() => {});
   };
 
   const server = createServer(async (request, response) => {
@@ -406,16 +503,32 @@ export async function startServer({
       if (request.method === 'POST' && pathname === '/api/write-deck') {
         const { expectedRevision } = await readJson(request);
         requireRevision(expectedRevision);
-        const result = await bridge.writeDeck(
-          expectedRevision,
-          patches => runWritePatches(absoluteDeckPath, sessionStore.sessionDir, patches, {
-            spawnWriter,
-            timeoutMs: writerTimeoutMs,
-            killGraceMs: writerKillGraceMs,
-            activeWriters,
-            onActiveWritersChange,
-          }),
-        );
+        let result;
+        try {
+          result = await bridge.writeDeck(
+            expectedRevision,
+            {
+              fingerprint:() => fileFingerprint(absoluteDeckPath),
+              writer:(patches, expectedFingerprint) => runWritePatches(
+                absoluteDeckPath, sessionStore.sessionDir, patches, expectedFingerprint, {
+                  spawnWriter,
+                  timeoutMs: writerTimeoutMs,
+                  killGraceMs: writerKillGraceMs,
+                  activeWriters,
+                  onActiveWritersChange,
+                },
+              ),
+              restore:(writerResult, expectedFingerprint) => restoreDeckBackup(
+                absoluteDeckPath, sessionStore.sessionDir, writerResult, expectedFingerprint,
+              ),
+            },
+          );
+        } catch (error) {
+          if (error?.conflictCreated === true) {
+            broadcast('deck-conflict', sessionStore.state.revision, sessionStore.state.conflict);
+          }
+          throw error;
+        }
         json(response, 200, { revision: sessionStore.state.revision, ...result });
         return;
       }
@@ -497,10 +610,15 @@ export async function startServer({
   const wsUrl = `ws://${host}:${actualPort}/events`;
   const editorWsUrl = `${wsUrl}?token=${encodeURIComponent(token)}&editorToken=${encodeURIComponent(editorToken)}`;
   let closePromise;
+  watchFile(absoluteDeckPath, { interval:500 }, watchListener);
 
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
+      watcherClosed = true;
+      watcherGeneration += 1;
+      unwatchFile(absoluteDeckPath, watchListener);
+      await watcherQueue;
       bridge.close();
       const writerClosed = [];
       for (const writer of activeWriters.values()) {

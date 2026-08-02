@@ -16,6 +16,103 @@ function copyJournalState(state) {
   };
 }
 
+function diagnosticFailure(code, message, details = {}) {
+  return serviceError(code, 409, message, {
+    stage:'diagnostics',
+    recovery:'打开或重连编辑器，等待页面诊断完成后重试',
+    ...details,
+  });
+}
+
+function locatorIdentity(locator) {
+  return `${locator.pageKey}\u0000${locator.path}\u0000${locator.tag ?? ''}`;
+}
+
+function normalizeDiagnosticPage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || typeof value.pageKey !== 'string' || !value.pageKey) {
+    throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '页面诊断缺少稳定 pageKey');
+  }
+  const finiteNonNegative = number => Number.isFinite(number) && number >= 0;
+  if (!finiteNonNegative(value.sectionOverflow?.x)
+    || !finiteNonNegative(value.sectionOverflow?.y)
+    || !Array.isArray(value.nestedClips)) {
+    throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '页面诊断包含无效几何值');
+  }
+  const seen = new Set();
+  const nestedClips = value.nestedClips.map(clip => {
+    const locator = clip?.locator;
+    if (!locator || locator.pageKey !== value.pageKey
+      || typeof locator.path !== 'string' || !locator.path
+      || !finiteNonNegative(clip.x) || !finiteNonNegative(clip.y)) {
+      throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '内层裁切诊断缺少稳定定位器');
+    }
+    const identity = locatorIdentity(locator);
+    if (seen.has(identity)) {
+      throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '内层裁切诊断定位器重复');
+    }
+    seen.add(identity);
+    return { locator:structuredClone(locator), x:clip.x, y:clip.y };
+  });
+  return {
+    pageKey:value.pageKey,
+    sectionOverflow:{ x:value.sectionOverflow.x, y:value.sectionOverflow.y },
+    nestedClips,
+  };
+}
+
+function diagnosticMap(pages, expectedPageKeys) {
+  if (!Array.isArray(pages)) {
+    throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '编辑器未返回页面诊断');
+  }
+  const normalized = pages.map(normalizeDiagnosticPage);
+  const byPage = Object.fromEntries(normalized.map(page => [page.pageKey, page]));
+  if (Object.keys(byPage).length !== normalized.length
+    || expectedPageKeys.some(pageKey => !byPage[pageKey])
+    || Object.keys(byPage).some(pageKey => !expectedPageKeys.includes(pageKey))) {
+    throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '页面诊断与请求范围不一致');
+  }
+  return byPage;
+}
+
+export function compareDiagnostics(baselineByPage, currentByPage, pageKeys) {
+  const blockers = [];
+  for (const pageKey of pageKeys) {
+    const baseline = baselineByPage?.[pageKey];
+    const current = currentByPage?.[pageKey];
+    if (!baseline || !current) {
+      throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', `缺少 ${pageKey} 的权威诊断`);
+    }
+    const sectionDelta = {
+      x:Math.max(0, current.sectionOverflow.x - baseline.sectionOverflow.x),
+      y:Math.max(0, current.sectionOverflow.y - baseline.sectionOverflow.y),
+    };
+    if (sectionDelta.x > 0 || sectionDelta.y > 0) {
+      blockers.push({ pageKey, kind:'section', ...sectionDelta });
+    }
+    const baselineClips = new Map(
+      baseline.nestedClips.map(clip => [locatorIdentity(clip.locator), clip]),
+    );
+    for (const clip of current.nestedClips) {
+      const previous = baselineClips.get(locatorIdentity(clip.locator));
+      if (!previous) {
+        blockers.push({
+          pageKey, kind:'nested-new', locator:clip.locator, x:clip.x, y:clip.y,
+        });
+        continue;
+      }
+      const delta = { x:clip.x - previous.x, y:clip.y - previous.y };
+      if (delta.x > 2 || delta.y > 2) {
+        blockers.push({
+          pageKey, kind:'nested-delta', locator:clip.locator,
+          x:Math.max(0, delta.x), y:Math.max(0, delta.y),
+        });
+      }
+    }
+  }
+  return blockers;
+}
+
 export class BridgeService {
   constructor({ sessionStore, timeoutMs = 10_000 }) {
     this.sessionStore = sessionStore;
@@ -26,6 +123,9 @@ export class BridgeService {
     this.journal = new PatchJournal(sessionStore.state);
     this.closed = false;
     this.mutationQueue = Promise.resolve();
+    this.editorReady = false;
+    this.editorPageKeys = [];
+    this.readyPromise = null;
   }
 
   assertRevision(expectedRevision) {
@@ -38,6 +138,9 @@ export class BridgeService {
 
   setEditorSocket(socket) {
     this.editorSocket = socket;
+    this.editorReady = false;
+    this.editorPageKeys = [];
+    this.readyPromise = null;
     for (const waiter of this.socketWaiters) {
       clearTimeout(waiter.timer);
       waiter.resolve(socket);
@@ -47,7 +150,12 @@ export class BridgeService {
   hasEditorSocket() { return this.editorSocket?.readyState === 1; }
 
   clearEditorSocket(socket) {
-    if (this.editorSocket === socket) this.editorSocket = null;
+    if (this.editorSocket === socket) {
+      this.editorSocket = null;
+      this.editorReady = false;
+      this.editorPageKeys = [];
+      this.readyPromise = null;
+    }
     for (const [commandId, pending] of this.pending) {
       if (pending.socket === socket) {
         this.#settle(commandId, 'reject', serviceError('EDITOR_OFFLINE', 409, '编辑器连接已断开'));
@@ -58,9 +166,49 @@ export class BridgeService {
   handleMessage(socket, data) {
     let message;
     try { message = JSON.parse(String(data)); } catch { return false; }
+    if (message?.type === 'deck-ready' && socket === this.editorSocket) {
+      if (!Array.isArray(message.pages) || !Array.isArray(message.diagnostics)) return false;
+      const pageKeys = message.pages.map(page => page?.pageKey);
+      if (pageKeys.some(pageKey => typeof pageKey !== 'string' || !pageKey)
+        || new Set(pageKeys).size !== pageKeys.length) return false;
+      let baseline;
+      try { baseline = diagnosticMap(message.diagnostics, pageKeys); }
+      catch { return false; }
+      this.editorReady = true;
+      this.editorPageKeys = pageKeys;
+      this.readyPromise = this.#enqueue(async () => {
+        if (this.closed || socket !== this.editorSocket || !this.editorReady) return;
+        const state = this.sessionStore.state;
+        if (!Object.keys(state.diagnosticsBaseline ?? {}).length) {
+          const snapshot = {
+            diagnosticsBaseline:state.diagnosticsBaseline ?? {},
+            diagnosticsCurrent:state.diagnosticsCurrent ?? {},
+            diagnosticsRevision:state.diagnosticsRevision ?? null,
+          };
+          state.diagnosticsBaseline = baseline;
+          state.diagnosticsCurrent = structuredClone(baseline);
+          state.diagnosticsRevision = state.revision;
+          try {
+            await this.sessionStore.persistState();
+          } catch {
+            Object.assign(state, snapshot);
+            throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '启动诊断基线无法持久化');
+          }
+        }
+      });
+      this.readyPromise.catch(() => {});
+      return true;
+    }
     if (typeof message?.commandId !== 'string') return false;
     const pending = this.pending.get(message.commandId);
     if (!pending || pending.socket !== socket) return false;
+    if (message.type === 'diagnostics-rejected'
+      && pending.expectedType === 'diagnostics-result') {
+      this.#settle(message.commandId, 'reject', diagnosticFailure(
+        'DIAGNOSTICS_UNAVAILABLE', '编辑器无法完成页面诊断', { diagnosticCode:message.code },
+      ));
+      return true;
+    }
     if (message.type === 'actions-rejected' && pending.expectedType === 'actions-prepared') {
       const allowed = new Set(['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND', 'TARGET_AMBIGUOUS', 'INVALID_ACTION']);
       const code = allowed.has(message.code) ? message.code : 'ACTION_REJECTED';
@@ -92,6 +240,18 @@ export class BridgeService {
         this.#settle(message.commandId, 'resolve', {
           commandId: message.commandId, applied: message.applied, results: message.results,
         });
+      }
+      return true;
+    }
+    if (message.type === 'diagnostics-result') {
+      try {
+        if (message.revision !== pending.revision) {
+          throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '诊断 revision 已过期');
+        }
+        const pages = diagnosticMap(message.pages, pending.pageKeys);
+        this.#settle(message.commandId, 'resolve', { revision:message.revision, pages });
+      } catch (error) {
+        this.#settle(message.commandId, 'reject', error);
       }
       return true;
     }
@@ -135,7 +295,10 @@ export class BridgeService {
       }
       const result = { groupId: group.id, revision: this.sessionStore.state.revision, applied: prepared.applied };
       const confirmation = await this.#finalizeCommitted(prepared.commandId);
-      return { ...result, ...confirmation };
+      const diagnosticsPending = !await this.#refreshDiagnostics(
+        this.#pageKeysForActions(prepared.results), result.revision,
+      ).then(() => true, () => false);
+      return { ...result, ...confirmation, diagnosticsPending };
     });
   }
 
@@ -143,11 +306,103 @@ export class BridgeService {
   redoGroup(groupId, expectedRevision) { return this.#changeGroup('redo', groupId, expectedRevision); }
   compiledActions() { return this.journal.compile(); }
 
-  writeDeck(expectedRevision, writer) {
+  writeDeck(expectedRevision, { fingerprint, writer, restore }) {
     return this.#enqueue(async () => {
       if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
       this.assertRevision(expectedRevision);
-      return await writer(this.compiledActions());
+      if (!this.hasEditorSocket() || !this.editorReady) {
+        throw diagnosticFailure('EDITOR_OFFLINE', '编辑器未连接或页面尚未就绪');
+      }
+      await this.readyPromise;
+      const state = this.sessionStore.state;
+      let diskFingerprint;
+      try {
+        diskFingerprint = await fingerprint();
+      } catch (error) {
+        const actualFingerprint = `unavailable:${error.code ?? 'READ_ERROR'}`;
+        const conflictCreated = await this.#recordDeckConflict(actualFingerprint);
+        throw serviceError('DECK_CHANGED', 409, '无法读取磁盘 Deck，拒绝写回', {
+          stage:'fingerprint',
+          recovery:'恢复或重新载入 Deck 文件后重试',
+          expectedFingerprint:state.deckFingerprint,
+          actualFingerprint,
+          conflictCreated,
+        });
+      }
+      if (state.conflict?.code === 'DECK_CHANGED' || diskFingerprint !== state.deckFingerprint) {
+        const conflictCreated = await this.#recordDeckConflict(diskFingerprint);
+        throw serviceError('DECK_CHANGED', 409, '磁盘 Deck 已被外部修改，拒绝覆盖', {
+          stage:'fingerprint',
+          recovery:'重新载入外部文件并在新基线上重放补丁，或另存为副本',
+          expectedFingerprint:state.deckFingerprint,
+          actualFingerprint:diskFingerprint,
+          conflictCreated,
+        });
+      }
+      if (!Object.keys(state.diagnosticsBaseline ?? {}).length) {
+        throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '会话缺少启动诊断基线');
+      }
+      const pageKeys = this.#modifiedPageKeys();
+      const authoritativeKeys = pageKeys.length ? pageKeys : Object.keys(state.diagnosticsBaseline);
+      const current = await this.#diagnose(authoritativeKeys, state.revision);
+      const blockers = compareDiagnostics(state.diagnosticsBaseline, current, authoritativeKeys);
+      if (blockers.length) {
+        throw serviceError('NEW_OVERFLOW', 409, '修改引入了新的页面或内层溢出', {
+          stage:'overflow',
+          recovery:'撤销或修复造成溢出的动作后重试',
+          blockers,
+        });
+      }
+      const result = await writer(this.compiledActions(), diskFingerprint);
+      const snapshot = {
+        deckFingerprint:state.deckFingerprint,
+        conflict:structuredClone(state.conflict),
+        diagnosticsBaseline:structuredClone(state.diagnosticsBaseline),
+        diagnosticsCurrent:structuredClone(state.diagnosticsCurrent),
+        diagnosticsRevision:state.diagnosticsRevision,
+      };
+      state.deckFingerprint = result.fingerprint;
+      state.conflict = null;
+      state.diagnosticsBaseline = {
+        ...state.diagnosticsBaseline,
+        ...structuredClone(current),
+      };
+      state.diagnosticsCurrent = {
+        ...state.diagnosticsCurrent,
+        ...structuredClone(current),
+      };
+      state.diagnosticsRevision = state.revision;
+      try {
+        await this.sessionStore.persistState();
+      } catch (error) {
+        try {
+          await restore(result, snapshot.deckFingerprint);
+        } catch (restoreError) {
+          Object.assign(state, snapshot);
+          throw serviceError('WRITE_FAILED', 500, '会话基线更新与 Deck 自动恢复均失败', {
+            stage:'session-rollback',
+            recovery:'立即使用备份恢复原文件，并检查 sidecar 目录权限',
+            backup:result.backup,
+            committed:true,
+            cause:restoreError,
+          });
+        }
+        Object.assign(state, snapshot);
+        throw serviceError('WRITE_FAILED', 500, '会话基线更新失败，Deck 已从备份恢复', {
+          stage:'session',
+          recovery:'检查 sidecar 目录权限后重试',
+          backup:result.backup,
+          cause:error,
+        });
+      }
+      return result;
+    });
+  }
+
+  noteDeckFingerprint(fingerprint) {
+    return this.#enqueue(async () => {
+      if (this.closed || fingerprint === this.sessionStore.state.deckFingerprint) return false;
+      return this.#recordDeckConflict(fingerprint);
     });
   }
 
@@ -155,6 +410,9 @@ export class BridgeService {
     if (this.closed) return;
     this.closed = true;
     this.editorSocket = null;
+    this.editorReady = false;
+    this.editorPageKeys = [];
+    this.readyPromise = null;
     const error = serviceError('SERVICE_CLOSED', 503, '服务已关闭');
     for (const commandId of [...this.pending.keys()]) this.#settle(commandId, 'reject', error);
     for (const waiter of this.socketWaiters) {
@@ -191,7 +449,11 @@ export class BridgeService {
       }
       const result = { groupId, revision: this.sessionStore.state.revision, applied: prepared.applied };
       const confirmation = await this.#finalizeCommitted(prepared.commandId);
-      return { ...result, ...confirmation };
+      const changedGroup = draftState.groups.find(group => group.id === groupId);
+      const diagnosticsPending = !await this.#refreshDiagnostics(
+        this.#pageKeysForActions(changedGroup?.actions ?? []), result.revision,
+      ).then(() => true, () => false);
+      return { ...result, ...confirmation, diagnosticsPending };
     });
   }
 
@@ -256,6 +518,69 @@ export class BridgeService {
     );
   }
 
+  async #refreshDiagnostics(pageKeys, revision) {
+    if (!pageKeys.length || !this.editorReady) return;
+    const pages = await this.#diagnose(pageKeys, revision);
+    if (revision !== this.sessionStore.state.revision) return;
+    this.sessionStore.state.diagnosticsCurrent = {
+      ...this.sessionStore.state.diagnosticsCurrent,
+      ...pages,
+    };
+    this.sessionStore.state.diagnosticsRevision = revision;
+    await this.sessionStore.persistState();
+  }
+
+  async #diagnose(pageKeys, revision) {
+    if (!this.hasEditorSocket() || !this.editorReady) {
+      throw diagnosticFailure('EDITOR_OFFLINE', '编辑器未连接或页面尚未就绪');
+    }
+    const uniquePageKeys = [...new Set(pageKeys)];
+    if (!uniquePageKeys.length
+      || uniquePageKeys.some(pageKey => !this.editorPageKeys.includes(pageKey))) {
+      throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '修改页不在当前编辑器页面集合中');
+    }
+    const commandId = randomUUID();
+    const result = await this.#send(
+      commandId,
+      { type:'diagnose-pages', commandId, revision, pageKeys:uniquePageKeys },
+      { expectedType:'diagnostics-result', revision, pageKeys:uniquePageKeys },
+    );
+    return result.pages;
+  }
+
+  #pageKeysForActions(actions) {
+    return [...new Set(actions.map(action => action?.target?.pageKey).filter(Boolean))];
+  }
+
+  #modifiedPageKeys() {
+    return this.#pageKeysForActions(
+      (this.sessionStore.state.groups ?? []).flatMap(group => group.actions ?? []),
+    );
+  }
+
+  async #recordDeckConflict(fingerprint) {
+    const state = this.sessionStore.state;
+    if (state.conflict?.code === 'DECK_CHANGED') return false;
+    const previous = state.conflict ?? null;
+    state.conflict = {
+      code:'DECK_CHANGED',
+      expectedFingerprint:state.deckFingerprint,
+      actualFingerprint:fingerprint,
+      detectedAt:new Date().toISOString(),
+    };
+    try {
+      await this.sessionStore.persistState();
+      return true;
+    } catch (error) {
+      state.conflict = previous;
+      throw serviceError('WRITE_FAILED', 500, 'Deck 冲突状态无法持久化', {
+        stage:'session',
+        recovery:'检查 sidecar 目录权限后重试',
+        cause:error,
+      });
+    }
+  }
+
   #waitForEditorSocket() {
     if (this.closed) return Promise.reject(serviceError('SERVICE_CLOSED', 503, '服务已关闭'));
     if (this.hasEditorSocket()) return Promise.resolve(this.editorSocket);
@@ -270,7 +595,9 @@ export class BridgeService {
     });
   }
 
-  #send(commandId, message, { expectedType, actions = [] }) {
+  #send(commandId, message, {
+    expectedType, actions = [], revision = undefined, pageKeys = [],
+  }) {
     const socket = this.editorSocket;
     if (!socket || socket.readyState !== 1) {
       return Promise.reject(serviceError('EDITOR_OFFLINE', 409, '编辑器未连接'));
@@ -280,7 +607,9 @@ export class BridgeService {
         this.#settle(commandId, 'reject', serviceError('COMMAND_TIMEOUT', 504, '编辑器动作回执超时'));
       }, this.timeoutMs);
       timer.unref?.();
-      this.pending.set(commandId, { resolve, reject, timer, socket, expectedType, actions });
+      this.pending.set(commandId, {
+        resolve, reject, timer, socket, expectedType, actions, revision, pageKeys,
+      });
     });
     try { socket.send(JSON.stringify(message)); }
     catch (error) { this.#settle(commandId, 'reject', error); }
