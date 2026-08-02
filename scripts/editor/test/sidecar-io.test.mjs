@@ -50,11 +50,12 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-bound-'));
   const root = join(project, '.huawei-deck-editor');
-  const sessionName = 'deck-deadbeef';
-  const session = join(root, sessionName);
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
   const transactionId = '123e4567-e89b-42d3-a456-426614174000';
   const deckBytes = Buffer.from('trusted-deck');
   const fingerprint = sha256(deckBytes);
+  const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+  const session = join(root, sessionName);
   const backupName = `deck-${fingerprint}.html`;
   const sessionState = { source:'trusted-session' };
   const transaction = { source:'trusted-transaction' };
@@ -72,7 +73,11 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
     root:await identity(root),
   });
   try {
-    await io.bindSession({ deckName:'deck.html', sessionName, create:false });
+    await io.prepareSession({
+      deckName:'deck.html', sessionId, initialFingerprint:fingerprint,
+      sessionName, mode:'legacy',
+    });
+    await io.bindSession({ deckName:'deck.html', sessionId, sessionName, create:false });
     assert.equal(io.atomicWrite, undefined);
     assert.equal(io.read, undefined);
     assert.equal(io.ensureBackup, undefined);
@@ -115,11 +120,11 @@ test('registry 原子发布后 discovery 只接受注册 session，未注册伪�
   await mkdir(join(root, sessionName, 'transactions'));
   await mkdir(join(root, sessionName, 'write-errors'));
   await writeFile(join(project, 'deck.html'), 'deck');
-  const before = await readdir(root, { recursive:true });
   const io = await createPersistentSidecarIO({
     project:await identity(project), root:await identity(root),
   });
   try {
+    const before = await readdir(root, { recursive:true });
     assert.deepEqual(
       await io.discover({ deckName:'deck.html' }),
       { registry:null, sessions:[] },
@@ -128,7 +133,7 @@ test('registry 原子发布后 discovery 只接受注册 session，未注册伪�
     await io.prepareSession({
       deckName:'deck.html', sessionId, initialFingerprint, sessionName, mode:'legacy',
     });
-    await io.bindSession({ deckName:'deck.html', sessionName, create:false });
+    await io.bindSession({ deckName:'deck.html', sessionId, sessionName, create:false });
     await io.writeSession({
       sessionId,
       bytes:Buffer.from(JSON.stringify({
@@ -196,7 +201,7 @@ test('registry preparing 在两处崩溃后都可由重启安全完成而非遗�
   });
   assert.equal((await io.discover({ deckName })).sessions[0].status, 'preparing');
   assert.equal((await io.discover({ deckName })).sessions[0].kind, 'missing');
-  await io.bindSession({ deckName, sessionName, create:true });
+  await io.bindSession({ deckName, sessionId, sessionName, create:true });
   await io.writeSession({
     sessionId,
     bytes:Buffer.from(JSON.stringify({
@@ -212,7 +217,7 @@ test('registry preparing 在两处崩溃后都可由重启安全完成而非遗�
     const pending = (await io.discover({ deckName })).sessions[0];
     assert.equal(pending.status, 'preparing');
     assert.equal(pending.kind, 'directory');
-    await io.bindSession({ deckName, sessionName, create:false });
+    await io.bindSession({ deckName, sessionId, sessionName, create:false });
     assert.equal((await io.readSession()).sessionId, sessionId);
     await io.activateSession({ sessionId });
     assert.equal((await io.discover({ deckName })).sessions[0].status, 'active');
@@ -221,10 +226,102 @@ test('registry preparing 在两处崩溃后都可由重启安全完成而非遗�
   }
 });
 
+test('bind-session 必须携带并匹配 registry sessionId', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-bind-id-'));
+  const root = join(project, '.huawei-deck-editor');
+  const deckName = 'deck.html';
+  const fingerprint = sha256('deck');
+  const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const wrongSessionId = '223e4567-e89b-42d3-a456-426614174000';
+  await mkdir(root);
+  await writeFile(join(project, deckName), 'deck');
+  const io = await createPersistentSidecarIO({
+    project:await identity(project), root:await identity(root),
+  });
+  try {
+    await io.prepareSession({
+      deckName, sessionId, initialFingerprint:fingerprint, sessionName, mode:'fresh',
+    });
+    await assert.rejects(
+      () => io.bindSession({ deckName, sessionId:wrongSessionId, sessionName, create:true }),
+      error => error.code === 'UNSAFE_SIDECAR_IO',
+    );
+    assert.deepEqual(await readdir(root), ['sessions.json']);
+  } finally {
+    await io.close();
+  }
+});
+
+test('transactions 中任意非 UUID .json 都按不可信 record 拒绝', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-invalid-transaction-'));
+  const root = join(project, '.huawei-deck-editor');
+  const deckName = 'deck.html';
+  const fingerprint = sha256('deck');
+  const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  await mkdir(root);
+  await writeFile(join(project, deckName), 'deck');
+  const io = await createPersistentSidecarIO({
+    project:await identity(project), root:await identity(root),
+  });
+  try {
+    await io.prepareSession({
+      deckName, sessionId, initialFingerprint:fingerprint, sessionName, mode:'fresh',
+    });
+    await io.bindSession({ deckName, sessionId, sessionName, create:true });
+    await writeFile(join(root, sessionName, 'transactions', 'notes.json'), '{}');
+    await assert.rejects(
+      () => io.listTransactions(),
+      error => error.code === 'UNSAFE_SIDECAR_IO',
+    );
+  } finally {
+    await io.close();
+  }
+});
+
+test('session JSON 可跨过 1MiB 旧限制并可完整读回', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-large-session-'));
+  const root = join(project, '.huawei-deck-editor');
+  const deckName = 'deck.html';
+  const fingerprint = sha256('deck');
+  const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const state = {
+    sessionId, deckPath:join(project, deckName), deckFingerprint:fingerprint,
+    payload:'x'.repeat(2 * 1024 * 1024),
+  };
+  await mkdir(root);
+  await writeFile(join(project, deckName), 'deck');
+  const io = await createPersistentSidecarIO({
+    project:await identity(project), root:await identity(root), timeoutMs:5_000,
+  });
+  try {
+    await io.prepareSession({
+      deckName, sessionId, initialFingerprint:fingerprint, sessionName, mode:'fresh',
+    });
+    await io.bindSession({ deckName, sessionId, sessionName, create:true });
+    await io.writeSession({ sessionId, bytes:Buffer.from(JSON.stringify(state)) });
+    assert.deepEqual(await io.readSession(), state);
+    await assert.rejects(
+      () => io.writeSession({
+        sessionId, bytes:Buffer.alloc(32 * 1024 * 1024 + 1, 0x78),
+      }),
+      error => error.code === 'SIDECAR_SESSION_TOO_LARGE' && error.statusCode === 413,
+    );
+    assert.deepEqual(await io.readSession(), state, '超硬上限请求不得覆盖已有 session');
+  } finally {
+    await io.close();
+  }
+});
+
 test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回收 child', async t => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
 
-  const fakeChild = onWrite => {
+  const fakeChild = (onWrite, { closesOnKill=true } = {}) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -234,7 +331,10 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
     child.stdin.write = data => { onWrite?.(child, data); return true; };
     child.stdin.end = () => {};
     child.killed = false;
-    child.kill = () => { child.killed = true; queueMicrotask(() => child.emit('close', null)); };
+    child.kill = () => {
+      child.killed = true;
+      if (closesOnKill) queueMicrotask(() => child.emit('close', null));
+    };
     return child;
   };
   const baseIdentity = { path:'/tmp/project', realPath:'/tmp/project', dev:'1', ino:'2' };
@@ -292,5 +392,35 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
     );
     assert.equal(child.killed, true);
     await io.close();
+  });
+
+  await t.test('stdin error 会立即终止 child', async () => {
+    const child = fakeChild();
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity,
+      spawnHelper:() => child,
+      timeoutMs:1_000,
+      skipReadyHandshake:true,
+    });
+    const pending = io.discover({ deckName:'deck.html' });
+    child.stdin.emit('error', Object.assign(new Error('stdin EPIPE'), { code:'EPIPE' }));
+    await assert.rejects(pending, { code:'EPIPE' });
+    assert.equal(child.killed, true);
+    await io.close();
+  });
+
+  await t.test('child 不发 close 时 close 仍在 50ms 内 settle', async () => {
+    const child = fakeChild(undefined, { closesOnKill:false });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity,
+      spawnHelper:() => child,
+      timeoutMs:1_000,
+      skipReadyHandshake:true,
+    });
+    const settled = await Promise.race([
+      io.close().then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 40)),
+    ]);
+    assert.equal(settled, true);
   });
 });

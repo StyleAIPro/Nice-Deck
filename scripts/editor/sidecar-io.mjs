@@ -12,7 +12,8 @@ const plainIdentity = identity => Object.fromEntries(
 
 function helperError(payload) {
   return Object.assign(new Error(payload?.message ?? '可信 sidecar I/O 失败'), {
-    code:'UNSAFE_SIDECAR_IO',
+    code:payload?.code ?? 'UNSAFE_SIDECAR_IO',
+    statusCode:Number.isInteger(payload?.statusCode) ? payload.statusCode : 500,
     stage:payload?.stage ?? 'sidecar',
     committed:payload?.committed === true,
   });
@@ -23,16 +24,22 @@ function lifecycleError(code, message) {
 }
 
 class PersistentSidecarIO {
-  constructor(child, { timeoutMs, maxInputBytes, maxOutputBytes }) {
+  constructor(child, {
+    timeoutMs, maxInputBytes, maxOutputBytes,
+    maxSessionInputBytes, maxSessionOutputBytes,
+  }) {
     this.child = child;
     this.timeoutMs = timeoutMs;
     this.maxInputBytes = maxInputBytes;
     this.maxOutputBytes = maxOutputBytes;
+    this.maxSessionInputBytes = maxSessionInputBytes;
+    this.maxSessionOutputBytes = maxSessionOutputBytes;
     this.pending = new Map();
     this.stdout = '';
     this.stderr = '';
     this.closed = false;
     this.finished = false;
+    this.reapTimer = null;
     this.closePromise = new Promise(resolve => { this.resolveClosed = resolve; });
 
     child.stdout.setEncoding('utf8');
@@ -41,7 +48,7 @@ class PersistentSidecarIO {
     child.stderr.on('data', chunk => {
       this.stderr = `${this.stderr}${String(chunk)}`.slice(-this.maxOutputBytes);
     });
-    child.stdin.on('error', error => this.#failAll(error));
+    child.stdin.on('error', error => this.#abort(error));
     child.once('error', error => this.#finish(error));
     child.once('close', () => this.#finish());
   }
@@ -49,6 +56,7 @@ class PersistentSidecarIO {
   #finish(error = lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭')) {
     if (this.finished) return;
     this.finished = true;
+    clearTimeout(this.reapTimer);
     this.#failAll(error);
     this.resolveClosed();
   }
@@ -65,12 +73,19 @@ class PersistentSidecarIO {
     if (this.finished) return;
     this.#failAll(error);
     this.child.kill?.('SIGKILL');
+    clearTimeout(this.reapTimer);
+    this.reapTimer = setTimeout(() => this.#finish(error), 20);
+    this.reapTimer.unref?.();
   }
 
   #onStdout(chunk) {
     if (this.finished) return;
     this.stdout += chunk;
-    if (Buffer.byteLength(this.stdout) > this.maxOutputBytes) {
+    const pendingLimits = [...this.pending.values()].map(pending => (
+      pending.command === 'read-session' ? this.maxSessionOutputBytes : this.maxOutputBytes
+    ));
+    const activeLimit = pendingLimits.length ? Math.max(...pendingLimits) : this.maxOutputBytes;
+    if (Buffer.byteLength(this.stdout) > activeLimit) {
       this.#abort(lifecycleError(
         'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 输出超过上限',
       ));
@@ -88,6 +103,14 @@ class PersistentSidecarIO {
       }
       const pending = this.pending.get(response?.id);
       if (!pending) continue;
+      const responseLimit = pending.command === 'read-session'
+        ? this.maxSessionOutputBytes : this.maxOutputBytes;
+      if (Buffer.byteLength(line) > responseLimit) {
+        this.#abort(lifecycleError(
+          'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 命令输出超过上限',
+        ));
+        return;
+      }
       this.pending.delete(response.id);
       clearTimeout(pending.timer);
       if (response.ok === true) pending.resolve(response.result);
@@ -101,7 +124,9 @@ class PersistentSidecarIO {
     }
     const id = randomUUID();
     const line = `${JSON.stringify({ id, command, payload })}\n`;
-    if (Buffer.byteLength(line) > this.maxInputBytes) {
+    const inputLimit = command === 'write-session'
+      ? this.maxSessionInputBytes : this.maxInputBytes;
+    if (Buffer.byteLength(line) > inputLimit) {
       const error = lifecycleError(
         'SIDECAR_HELPER_INPUT_LIMIT', 'sidecar helper 输入超过上限',
       );
@@ -116,7 +141,7 @@ class PersistentSidecarIO {
         this.#abort(error);
       }, this.timeoutMs);
       timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, command });
       try {
         this.child.stdin.write(line);
       } catch (error) {
@@ -141,8 +166,8 @@ class PersistentSidecarIO {
   activateSession({ sessionId }) {
     return this.#request('activate-session', { sessionId });
   }
-  bindSession({ deckName, sessionName, create=false }) {
-    return this.#request('bind-session', { deckName, sessionName, create });
+  bindSession({ deckName, sessionId, sessionName, create=false }) {
+    return this.#request('bind-session', { deckName, sessionId, sessionName, create });
   }
   readSession({ missingOk=false } = {}) {
     return this.#request('read-session', { missingOk });
@@ -184,7 +209,9 @@ class PersistentSidecarIO {
   async close() {
     if (this.closed) return this.closePromise;
     this.closed = true;
-    if (!this.finished) this.child.kill?.('SIGKILL');
+    if (!this.finished) {
+      this.#abort(lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭'));
+    }
     await this.closePromise;
   }
 }
@@ -196,12 +223,17 @@ export async function createPersistentSidecarIO({
   timeoutMs=1_000,
   maxInputBytes=1024 * 1024,
   maxOutputBytes=1024 * 1024,
+  maxSessionInputBytes=64 * 1024 * 1024,
+  maxSessionOutputBytes=64 * 1024 * 1024,
   skipReadyHandshake=false,
 } = {}) {
   const child = spawnHelper('python3', ['-u', HELPER, '--serve'], {
     stdio:['pipe', 'pipe', 'pipe'],
   });
-  const io = new PersistentSidecarIO(child, { timeoutMs, maxInputBytes, maxOutputBytes });
+  const io = new PersistentSidecarIO(child, {
+    timeoutMs, maxInputBytes, maxOutputBytes,
+    maxSessionInputBytes, maxSessionOutputBytes,
+  });
   if (!skipReadyHandshake) {
     try { await io.initialize(root ? { project:plainIdentity(project), root:plainIdentity(root) } : {
       project:plainIdentity(project),

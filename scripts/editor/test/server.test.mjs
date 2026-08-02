@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { createServer as createNetServer } from 'node:net';
 import {
   mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, unlink, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import WebSocket from 'ws';
 import { BridgeService } from '../bridge-service.mjs';
 import { startServer } from '../server.mjs';
@@ -309,6 +312,72 @@ function hangingChild() {
 function epipe() {
   return Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
 }
+
+test('session lock 跨 helper 进程互斥，失败方零副作用且 close 后可重启', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-lock-'));
+  const deckPath = join(root, 'deck.html');
+  await writeFile(deckPath, 'deck');
+  const first = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+  });
+  let contender;
+  try {
+    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const treeBefore = await sidecarTree(sidecarRoot);
+    const registryBefore = await readFile(join(sidecarRoot, 'sessions.json'));
+    const sessionBefore = await readFile(join(first.sessionDir, 'session.json'));
+    const outcome = await startServer({
+      deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    }).then(app => ({ app }), error => ({ error }));
+    contender = outcome.app;
+    assert.equal(contender, undefined, '同一 Deck 的第二个 server 不得初始化成功');
+    assert.equal(outcome.error?.code, 'SESSION_LOCKED');
+    assert.equal(outcome.error?.statusCode, 409);
+    assert.deepEqual(await sidecarTree(sidecarRoot), treeBefore);
+    assert.deepEqual(await readFile(join(sidecarRoot, 'sessions.json')), registryBefore);
+    assert.deepEqual(await readFile(join(first.sessionDir, 'session.json')), sessionBefore);
+  } finally {
+    await contender?.close();
+    await first.close();
+  }
+  const restarted = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+  });
+  await restarted.close();
+});
+
+test('listen 端口占用会释放 helper/lock，随后可重启', async () => {
+  const holder = createNetServer();
+  await new Promise((resolvePromise, reject) => {
+    holder.once('error', reject);
+    holder.listen(0, '127.0.0.1', resolvePromise);
+  });
+  const port = holder.address().port;
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-lock-port-'));
+  const deckPath = join(root, 'deck.html');
+  await writeFile(deckPath, 'deck');
+  await assert.rejects(
+    () => startServer({ deckPath, host:'127.0.0.1', port, openBrowser:false }),
+    error => error.code === 'EADDRINUSE',
+  );
+  await new Promise(resolvePromise => holder.close(resolvePromise));
+  const restarted = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+  });
+  await restarted.close();
+});
+
+test('空闲 server.close 并行回收活跃 helper，50ms 内收敛', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-helper-close-bound-'));
+  const deckPath = join(root, 'deck.html');
+  await writeFile(deckPath, 'deck');
+  const app = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+  });
+  const startedAt = performance.now();
+  await app.close();
+  assert.ok(performance.now() - startedAt < 50);
+});
 
 test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，未注册新会话只读拒绝', async t => {
   await t.test('新会话发布 registry，重启复用同一随机 sessionId', async () => {
@@ -638,6 +707,50 @@ test('服务启动后 sidecar root 或 session 身份被替换时保存前拒绝
   }
 });
 
+test('server guard 后项目根目录被替换时 adapter 以启动 identity 拒绝且零写入', async t => {
+  let swapped = false;
+  let trustedProject;
+  let trustedDeck;
+  let replacementDeck;
+  let outsideFile;
+  const replacementBytes = Buffer.from('replacement deck must stay untouched');
+  const outsideBytes = Buffer.from('outside sentinel must stay untouched');
+  const originalBytes = Buffer.from(validBundle());
+  const app = await makeApp(t, {
+    deckContents:originalBytes,
+    spawnWriter:(command, args, options) => {
+      if (!swapped) {
+        swapped = true;
+        const project = dirname(app.deckPath);
+        trustedProject = `${project}-trusted`;
+        trustedDeck = join(trustedProject, 'deck.html');
+        replacementDeck = app.deckPath;
+        outsideFile = `${project}-outside.txt`;
+        renameSync(project, trustedProject);
+        mkdirSync(project);
+        writeFileSync(replacementDeck, replacementBytes);
+        writeFileSync(outsideFile, outsideBytes);
+      }
+      return spawnProcess(command, args, options);
+    },
+  });
+  await connectDiagnosticsEditor(t, app);
+
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+  const body = await response.json();
+
+  assert.equal(swapped, true);
+  assert.equal(response.status, 500);
+  assert.equal(body.code, 'UNSAFE_SIDECAR', JSON.stringify(body));
+  assert.deepEqual(await readFile(trustedDeck), originalBytes);
+  assert.deepEqual(await readFile(replacementDeck), replacementBytes);
+  assert.deepEqual(await readFile(outsideFile), outsideBytes);
+  assert.deepEqual(await readdir(dirname(replacementDeck)), ['deck.html']);
+});
+
 test('SessionStore 每次 persist 前复核启动时 sidecar 身份', async t => {
   for (const level of ['root', 'session']) {
     await t.test(level, async subtest => {
@@ -754,6 +867,289 @@ test('Action RPC 仅在编辑器回执后写入 Journal 并持久化 revision', 
   });
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json()).error, 'REVISION_CONFLICT');
+});
+
+test('action 的 session 写已 committed 后发布候选并冻结，且不回滚或 finalize', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-action-committed-session-'));
+  const sessionPath = join(root, 'session.json');
+  const state = {
+    version:1, sessionId:'session-action', deckPath:join(root, 'deck.html'),
+    deckFingerprint:'deck', revision:0, tasks:[], groups:[], redo:[],
+    diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+  };
+  let observedRevisionDuringWrite = null;
+  let createTaskCalls = 0;
+  const sessionStore = {
+    state, sessionPath,
+    async persistState(candidate = state) {
+      observedRevisionDuringWrite = state.revision;
+      await writeFile(sessionPath, JSON.stringify(candidate));
+      throw Object.assign(new Error('session directory fsync failed after rename'), {
+        committed:true,
+      });
+    },
+    async createTask() { createTaskCalls += 1; },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  let rollbackCommands = 0;
+  let finalizeCommands = 0;
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      if (message.type === 'apply-actions') {
+        queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+          type:'actions-prepared', commandId:message.commandId,
+          applied:message.actions.length, results:message.actions,
+        })));
+      } else if (message.type === 'rollback-actions') {
+        rollbackCommands += 1;
+        queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+          type:'actions-rolled-back', commandId:message.commandId, rolledBack:true,
+        })));
+      } else if (message.type === 'commit-actions') {
+        finalizeCommands += 1;
+      }
+    },
+  };
+  bridge.setEditorSocket(socket);
+
+  await assert.rejects(
+    bridge.applyActions({ taskId:'task-1', actions:[action], expectedRevision:0 }),
+    error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503
+      && error.committed === true,
+  );
+
+  const disk = JSON.parse(await readFile(sessionPath, 'utf8'));
+  assert.equal(observedRevisionDuringWrite, 0, 'journal 写成功前不得发布候选 revision');
+  assert.equal(state.revision, 1);
+  assert.equal(state.groups.length, 1);
+  assert.equal(disk.revision, 1);
+  assert.deepEqual(disk.groups, state.groups);
+  assert.equal(rollbackCommands, 0);
+  assert.equal(finalizeCommands, 0);
+  await assert.rejects(
+    bridge.createTask({ instruction:'later' }, 1),
+    error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503,
+  );
+  assert.equal(createTaskCalls, 0);
+  await assert.rejects(
+    bridge.writeDeck(1, {}),
+    error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503,
+  );
+});
+
+test('undo/redo 的 session 写已 committed 后保留候选 journal 并冻结', async t => {
+  for (const method of ['undo', 'redo']) {
+    await t.test(method, async () => {
+      const root = await mkdtemp(join(tmpdir(), `deck-${method}-committed-session-`));
+      const sessionPath = join(root, 'session.json');
+      const groupId = `group-${method}`;
+      const initiallyActive = method === 'undo';
+      const state = {
+        version:1, sessionId:`session-${method}`, deckPath:join(root, 'deck.html'),
+        deckFingerprint:'deck', revision:1, tasks:[],
+        groups:[{ id:groupId, taskId:'task-1', actions:[action], active:initiallyActive }],
+        redo:initiallyActive ? [] : [groupId], diagnosticsBaseline:{},
+        diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+      };
+      let observedRevisionDuringWrite = null;
+      const sessionStore = {
+        state, sessionPath,
+        async persistState(candidate = state) {
+          observedRevisionDuringWrite = state.revision;
+          await writeFile(sessionPath, JSON.stringify(candidate));
+          throw Object.assign(new Error('session committed'), { committed:true });
+        },
+      };
+      const bridge = new BridgeService({ sessionStore });
+      let rollbackCommands = 0;
+      let finalizeCommands = 0;
+      const socket = {
+        readyState:1,
+        send(data) {
+          const message = JSON.parse(data);
+          if (message.type === 'apply-actions') {
+            queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+              type:'actions-prepared', commandId:message.commandId,
+              applied:message.actions.length, results:message.actions,
+            })));
+          } else if (message.type === 'rollback-actions') {
+            rollbackCommands += 1;
+          } else if (message.type === 'commit-actions') {
+            finalizeCommands += 1;
+          }
+        },
+      };
+      bridge.setEditorSocket(socket);
+
+      await assert.rejects(
+        method === 'undo'
+          ? bridge.undoGroup(groupId, 1)
+          : bridge.redoGroup(groupId, 1),
+        error => error.code === 'RECOVERY_REQUIRED' && error.committed === true,
+      );
+
+      const disk = JSON.parse(await readFile(sessionPath, 'utf8'));
+      assert.equal(observedRevisionDuringWrite, 1);
+      assert.equal(state.revision, 2);
+      assert.equal(state.groups[0].active, method === 'redo');
+      assert.deepEqual(state.redo, method === 'undo' ? [groupId] : []);
+      assert.equal(disk.revision, state.revision);
+      assert.deepEqual(disk.groups, state.groups);
+      assert.equal(rollbackCommands, 0);
+      assert.equal(finalizeCommands, 0);
+    });
+  }
+});
+
+test('diagnostics 的 session 写已 committed 后发布候选并冻结后续 mutation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-diagnostics-committed-session-'));
+  const sessionPath = join(root, 'session.json');
+  const page = {
+    pageKey:'page-001-committed-diagnostics',
+    sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+  };
+  const state = {
+    version:1, sessionId:'session-diagnostics', deckPath:join(root, 'deck.html'),
+    deckFingerprint:'deck', revision:0, tasks:[], groups:[], redo:[],
+    diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+  };
+  let observedBaselineDuringWrite = null;
+  let createTaskCalls = 0;
+  const sessionStore = {
+    state, sessionPath,
+    async persistState(candidate = state) {
+      observedBaselineDuringWrite = Object.keys(state.diagnosticsBaseline).length;
+      await writeFile(sessionPath, JSON.stringify(candidate));
+      throw Object.assign(new Error('session directory fsync failed after rename'), {
+        committed:true,
+      });
+    },
+    async createTask() { createTaskCalls += 1; },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = { readyState:1, send() {} };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready',
+    pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+    diagnostics:[page],
+  }));
+
+  await assert.rejects(
+    bridge.writeDeck(0, {
+      fingerprint:async () => 'deck',
+      writer:async () => assert.fail('RECOVERY_REQUIRED 不得调用 writer'),
+    }),
+    error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503
+      && error.committed === true,
+  );
+
+  const disk = JSON.parse(await readFile(sessionPath, 'utf8'));
+  assert.equal(observedBaselineDuringWrite, 0);
+  assert.deepEqual(state.diagnosticsBaseline, { [page.pageKey]:page });
+  assert.deepEqual(state.diagnosticsCurrent, { [page.pageKey]:page });
+  assert.equal(state.diagnosticsRevision, 0);
+  assert.deepEqual(disk.diagnosticsBaseline, state.diagnosticsBaseline);
+  await assert.rejects(
+    bridge.createTask({ instruction:'later' }, 0),
+    error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503,
+  );
+  assert.equal(createTaskCalls, 0);
+});
+
+test('conflict 的 session 写已 committed 后保留冲突并冻结', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-conflict-committed-session-'));
+  const sessionPath = join(root, 'session.json');
+  const state = {
+    version:1, sessionId:'session-conflict', deckPath:join(root, 'deck.html'),
+    deckFingerprint:'expected', revision:0, tasks:[], groups:[], redo:[],
+    diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+  };
+  const sessionStore = {
+    state, sessionPath,
+    async persistState(candidate = state) {
+      await writeFile(sessionPath, JSON.stringify(candidate));
+      throw Object.assign(new Error('session committed'), { committed:true });
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+
+  await assert.rejects(
+    bridge.noteDeckFingerprint('external'),
+    error => error.code === 'RECOVERY_REQUIRED' && error.committed === true,
+  );
+
+  const disk = JSON.parse(await readFile(sessionPath, 'utf8'));
+  assert.equal(state.conflict.code, 'DECK_CHANGED');
+  assert.equal(state.conflict.actualFingerprint, 'external');
+  assert.deepEqual(disk.conflict, state.conflict);
+  await assert.rejects(
+    bridge.noteDeckFingerprint('another'),
+    error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503,
+  );
+});
+
+test('write-deck 的 session 写已 committed 后保留新基线、保留 record 并冻结', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-write-committed-session-'));
+  const sessionPath = join(root, 'session.json');
+  const page = {
+    pageKey:'page-001-write-committed',
+    sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+  };
+  const state = {
+    version:1, sessionId:'session-write', deckPath:join(root, 'deck.html'),
+    deckFingerprint:'old', revision:0, tasks:[], groups:[], redo:[],
+    diagnosticsBaseline:{ [page.pageKey]:page },
+    diagnosticsCurrent:{ [page.pageKey]:page }, diagnosticsRevision:0, conflict:null,
+  };
+  const sessionStore = {
+    state, sessionPath,
+    async persistState(candidate = state) {
+      await writeFile(sessionPath, JSON.stringify(candidate));
+      throw Object.assign(new Error('session committed'), { committed:true });
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      if (message.type !== 'diagnose-pages') return;
+      queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+        type:'diagnostics-result', commandId:message.commandId,
+        revision:message.revision, pages:[page],
+      })));
+    },
+  };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready', pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+    diagnostics:[page],
+  }));
+  let restoreCalls = 0;
+  let finalizeCalls = 0;
+
+  await assert.rejects(
+    bridge.writeDeck(0, {
+      fingerprint:async () => 'old',
+      writer:async () => ({ fingerprint:'new', backup:'/tmp/backup.html' }),
+      restore:async () => { restoreCalls += 1; },
+      finalize:async () => { finalizeCalls += 1; },
+    }),
+    error => error.code === 'RECOVERY_REQUIRED' && error.committed === true,
+  );
+
+  const disk = JSON.parse(await readFile(sessionPath, 'utf8'));
+  assert.equal(state.deckFingerprint, 'new');
+  assert.equal(disk.deckFingerprint, 'new');
+  assert.equal(restoreCalls, 0);
+  assert.equal(finalizeCalls, 0, 'committed 异常后必须保留 transaction record 供重启收敛');
+  await assert.rejects(
+    bridge.writeDeck(0, {}),
+    error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503,
+  );
 });
 
 test('actions-prepared 只接受与动作数一致的安全非负整数', async t => {

@@ -17,18 +17,31 @@ import sys
 import uuid
 import re
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - 当前生产平台为 macOS/Linux
+    fcntl = None
 
-MAX_REQUEST_BYTES = 1024 * 1024
+
+CONTROL_REQUEST_BYTES = 1024 * 1024
+MAX_SESSION_BYTES = 32 * 1024 * 1024
+MAX_SESSION_REQUEST_BYTES = 64 * 1024 * 1024
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 TRANSACTION_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 
 
 class SidecarIOError(RuntimeError):
-    def __init__(self, message, *, stage="open", committed=False):
+    def __init__(
+        self, message, *, stage="open", committed=False,
+        code="UNSAFE_SIDECAR_IO", status_code=500,
+    ):
         super().__init__(message)
         self.stage = stage
         self.committed = committed
+        self.code = code
+        self.status_code = status_code
 
 
 def _require_name(name: str) -> str:
@@ -72,7 +85,7 @@ def _open_directory(identity: dict) -> int:
     return fd
 
 
-def _read_fd_file(directory_fd: int, name: str) -> bytes:
+def _read_fd_file(directory_fd: int, name: str, *, max_bytes=None) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(_require_name(name), flags, dir_fd=directory_fd)
     try:
@@ -84,6 +97,11 @@ def _read_fd_file(directory_fd: int, name: str) -> bytes:
             if not chunk:
                 return b"".join(chunks)
             chunks.append(chunk)
+            if max_bytes is not None and sum(map(len, chunks)) > max_bytes:
+                raise SidecarIOError(
+                    f"文件超过 {max_bytes} 字节上限",
+                    code="SIDECAR_SESSION_TOO_LARGE", status_code=413,
+                )
     finally:
         os.close(fd)
 
@@ -104,9 +122,9 @@ def _open_child_directory(parent_fd: int, name: str, *, create: bool) -> int:
     return fd
 
 
-def _decode_json_file(directory_fd: int, name: str):
+def _decode_json_file(directory_fd: int, name: str, *, max_bytes=None):
     try:
-        return json.loads(_read_fd_file(directory_fd, name))
+        return json.loads(_read_fd_file(directory_fd, name, max_bytes=max_bytes))
     except json.JSONDecodeError as error:
         raise SidecarIOError(f"{name} 不是有效 JSON") from error
 
@@ -147,10 +165,21 @@ def _atomic_write_fd(directory_fd: int, name: str, contents: bytes):
                 pass
 
 
-def _decode_bytes(value):
+def _decode_bytes(value, *, max_bytes=None):
     if not isinstance(value, str):
         raise SidecarIOError("bytes 必须是 base64 字符串")
-    return base64.b64decode(value, validate=True)
+    if max_bytes is not None and len(value) > 4 * ((max_bytes + 2) // 3):
+        raise SidecarIOError(
+            f"bytes 解码后不得超过 {max_bytes} 字节",
+            code="SIDECAR_SESSION_TOO_LARGE", status_code=413,
+        )
+    decoded = base64.b64decode(value, validate=True)
+    if max_bytes is not None and len(decoded) > max_bytes:
+        raise SidecarIOError(
+            f"bytes 解码后不得超过 {max_bytes} 字节",
+            code="SIDECAR_SESSION_TOO_LARGE", status_code=413,
+        )
+    return decoded
 
 
 class PersistentHelper:
@@ -161,7 +190,9 @@ class PersistentHelper:
         self.root_fd = None
         self.project_identity = None
         self.root_identity = None
+        self.root_locked = False
         self.deck_name = None
+        self.session_id = None
         self.session_name = None
         self.session_fd = None
         self.snapshots_fd = None
@@ -170,6 +201,10 @@ class PersistentHelper:
         self.write_errors_fd = None
 
     def close(self):
+        if self.root_locked and self.root_fd is not None:
+            if fcntl is not None:
+                fcntl.flock(self.root_fd, fcntl.LOCK_UN)
+            self.root_locked = False
         for name in (
             "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd",
             "session_fd", "root_fd", "project_fd",
@@ -179,25 +214,65 @@ class PersistentHelper:
                 os.close(fd)
                 setattr(self, name, None)
 
+    def _acquire_session_lock(self):
+        if fcntl is None:
+            raise SidecarIOError(
+                "当前平台不支持 sidecar session lock",
+                code="SIDECAR_LOCK_UNSUPPORTED", status_code=500,
+            )
+        try:
+            fcntl.flock(self.root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise SidecarIOError(
+                "当前 Deck 已由另一编辑服务占用",
+                stage="session-lock", code="SESSION_LOCKED", status_code=409,
+            ) from error
+        self.root_locked = True
+
     def _require_bound_session(self):
         if self.session_fd is None:
             raise SidecarIOError("尚未绑定可信 session")
 
     def bind_session(self, payload):
         if not isinstance(payload, dict) or set(payload) != {
-            "deckName", "sessionName", "create"
+            "deckName", "sessionId", "sessionName", "create"
         }:
             raise SidecarIOError("bind-session payload 格式无效")
         if self.root_fd is None:
             raise SidecarIOError("尚未绑定可信 sidecar root")
         deck_name = _require_name(payload["deckName"])
-        if not deck_name.endswith(".html") or not isinstance(payload["create"], bool):
+        session_id = payload["sessionId"]
+        if (
+            not deck_name.endswith(".html")
+            or not isinstance(session_id, str)
+            or not TRANSACTION_ID_RE.fullmatch(session_id)
+            or not isinstance(payload["create"], bool)
+        ):
             raise SidecarIOError("bind-session 参数无效")
         session_name = _require_name(payload["sessionName"])
         expected_prefix = f"{Path(deck_name).stem}-"
         suffix = session_name.removeprefix(expected_prefix)
         if not session_name.startswith(expected_prefix) or not re.fullmatch(r"[a-f0-9]{8}", suffix):
             raise SidecarIOError("session 名称未严格绑定 Deck 和 old8")
+        try:
+            registry = self._validate_registry(
+                json.loads(_read_fd_file(self.root_fd, "sessions.json"))
+            )
+        except FileNotFoundError as error:
+            raise SidecarIOError("bind-session 缺少 registry") from error
+        entry = registry["sessions"].get(session_id)
+        deck_real_path = str(Path(self.project_identity["realPath"]) / deck_name)
+        if (
+            entry is None
+            or entry["sessionName"] != session_name
+            or entry["deckRealPath"] != deck_real_path
+            or entry["status"] not in {"preparing", "active"}
+            or (
+                payload["create"]
+                and not (entry["status"] == "preparing" and entry["mode"] == "fresh")
+            )
+        ):
+            raise SidecarIOError("bind-session 未绑定 registry 中的当前 sessionId")
 
         for name in (
             "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd", "session_fd"
@@ -232,6 +307,7 @@ class PersistentHelper:
                     setattr(self, name, None)
             raise
         self.deck_name = deck_name
+        self.session_id = session_id
         self.session_name = session_name
         identities = {}
         for key, fd, child in (
@@ -253,7 +329,9 @@ class PersistentHelper:
             raise SidecarIOError("read-session payload 格式无效")
         self._require_bound_session()
         try:
-            return _decode_json_file(self.session_fd, "session.json")
+            return _decode_json_file(
+                self.session_fd, "session.json", max_bytes=MAX_SESSION_BYTES
+            )
         except FileNotFoundError:
             if payload["missingOk"] is True:
                 return None
@@ -307,7 +385,7 @@ class PersistentHelper:
                 continue
             transaction_id = name[:-5]
             if not TRANSACTION_ID_RE.fullmatch(transaction_id):
-                continue
+                raise SidecarIOError("transactions 目录包含无效 record-like JSON")
             info = os.stat(name, dir_fd=self.transactions_fd, follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode):
                 raise SidecarIOError("transaction record 必须是非符号链接的常规文件")
@@ -349,7 +427,9 @@ class PersistentHelper:
         session_id = payload["sessionId"]
         if not isinstance(session_id, str) or not TRANSACTION_ID_RE.fullmatch(session_id):
             raise SidecarIOError("write-session sessionId 无效")
-        contents = _decode_bytes(payload["bytes"])
+        if session_id != self.session_id:
+            raise SidecarIOError("write-session sessionId 与已绑定 registry 不一致")
+        contents = _decode_bytes(payload["bytes"], max_bytes=MAX_SESSION_BYTES)
         try:
             state = json.loads(contents)
         except json.JSONDecodeError as error:
@@ -409,8 +489,10 @@ class PersistentHelper:
         self._require_bound_session()
         candidates = []
         for name in os.listdir(self.transactions_fd):
-            if not name.endswith(".json") or not TRANSACTION_ID_RE.fullmatch(name[:-5]):
+            if not name.endswith(".json"):
                 continue
+            if not TRANSACTION_ID_RE.fullmatch(name[:-5]):
+                raise SidecarIOError("transactions 目录包含无效 record-like JSON")
             info = os.stat(name, dir_fd=self.transactions_fd, follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode):
                 raise SidecarIOError("transaction record 必须是常规文件")
@@ -495,7 +577,23 @@ class PersistentHelper:
         if "root" in payload:
             self.root_identity = _require_identity(payload["root"])
             self.root_fd = _open_directory(self.root_identity)
-        return {"ready": True}
+        else:
+            root_name = ".huawei-deck-editor"
+            try:
+                os.mkdir(root_name, 0o700, dir_fd=self.project_fd)
+                os.fsync(self.project_fd)
+            except FileExistsError:
+                pass
+            self.root_fd = _open_child_directory(
+                self.project_fd, root_name, create=False
+            )
+            self.root_identity = self._identity_for_fd(
+                self.root_fd,
+                str(Path(self.project_identity["path"]) / root_name),
+                str(Path(self.project_identity["realPath"]) / root_name),
+            )
+        self._acquire_session_lock()
+        return {"ready": True, "root": self.root_identity}
 
     @staticmethod
     def _identity_for_fd(fd, path, real_path):
@@ -508,21 +606,9 @@ class PersistentHelper:
         }
 
     def ensure_root(self, payload):
-        if payload != {} or self.project_fd is None or self.root_fd is not None:
+        if payload != {} or self.project_fd is None or self.root_fd is None:
             raise SidecarIOError("ensure-root 状态或 payload 无效")
-        root_name = ".huawei-deck-editor"
-        created = False
-        try:
-            os.mkdir(root_name, 0o700, dir_fd=self.project_fd)
-            os.fsync(self.project_fd)
-            created = True
-        except FileExistsError:
-            pass
-        self.root_fd = _open_child_directory(self.project_fd, root_name, create=False)
-        root_path = str(Path(self.project_identity["path"]) / root_name)
-        root_real = str(Path(self.project_identity["realPath"]) / root_name)
-        self.root_identity = self._identity_for_fd(self.root_fd, root_path, root_real)
-        return {"created": created, "identity": self.root_identity}
+        return {"created": False, "identity": self.root_identity}
 
     def discover(self, payload):
         if (
@@ -607,7 +693,9 @@ class PersistentHelper:
                         session_name == f"{Path(deck_name).stem}-{fingerprint[:8]}"
                     ),
                     "transactionIds": transaction_ids,
-                    "sessionState": _decode_json_file(session_fd, "session.json"),
+                    "sessionState": _decode_json_file(
+                        session_fd, "session.json", max_bytes=MAX_SESSION_BYTES
+                    ),
                 })
             finally:
                 if transactions_fd is not None:
@@ -791,14 +879,25 @@ def serve():
     helper = PersistentHelper()
     try:
         while True:
-            line = sys.stdin.buffer.readline(MAX_REQUEST_BYTES + 1)
+            line = sys.stdin.buffer.readline(MAX_SESSION_REQUEST_BYTES + 1)
             if not line:
                 return
-            if len(line) > MAX_REQUEST_BYTES or not line.endswith(b"\n"):
+            if len(line) > MAX_SESSION_REQUEST_BYTES or not line.endswith(b"\n"):
                 raise SidecarIOError("helper 输入超过上限")
             request = None
             try:
                 request = json.loads(line)
+                command = request.get("command") if isinstance(request, dict) else None
+                request_limit = (
+                    MAX_SESSION_REQUEST_BYTES
+                    if command == "write-session"
+                    else CONTROL_REQUEST_BYTES
+                )
+                if len(line) > request_limit:
+                    raise SidecarIOError(
+                        "helper 控制命令输入超过上限",
+                        code="SIDECAR_HELPER_INPUT_LIMIT", status_code=413,
+                    )
                 result = helper.dispatch(request)
                 response = {"id": request["id"], "ok": True, "result": result}
             except Exception as error:
@@ -806,11 +905,29 @@ def serve():
                     "id": request.get("id") if isinstance(request, dict) else None,
                     "ok": False,
                     "message": str(error),
+                    "code": getattr(error, "code", "UNSAFE_SIDECAR_IO"),
+                    "statusCode": getattr(error, "status_code", 500),
                     "stage": getattr(error, "stage", "sidecar"),
                     "committed": bool(getattr(error, "committed", False)),
                 }
-            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            encoded = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
+            response_limit = (
+                MAX_RESPONSE_BYTES
+                if isinstance(request, dict) and request.get("command") == "read-session"
+                else CONTROL_REQUEST_BYTES
+            )
+            if len(encoded) > response_limit:
+                encoded = (json.dumps({
+                    "id": request.get("id") if isinstance(request, dict) else None,
+                    "ok": False,
+                    "message": "helper 输出超过命令上限",
+                    "code": "SIDECAR_HELPER_OUTPUT_LIMIT",
+                    "statusCode": 500,
+                    "stage": "sidecar",
+                    "committed": False,
+                }, ensure_ascii=False) + "\n").encode("utf-8")
+            sys.stdout.buffer.write(encoded)
+            sys.stdout.buffer.flush()
             if isinstance(request, dict) and request.get("command") == "close":
                 return
     finally:

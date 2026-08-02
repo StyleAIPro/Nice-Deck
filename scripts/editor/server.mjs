@@ -549,6 +549,7 @@ function runWritePatches(
             if (result?.ok === false) {
               const statuses = {
                 DECK_CHANGED:409, VERIFY_FAILED:500, WRITE_FAILED:500,
+                UNSAFE_SIDECAR:500,
               };
               settleRequest(Object.assign(
                 httpError(result.code ?? 'WRITE_FAILED', statuses[result.code] ?? 500,
@@ -628,6 +629,7 @@ async function runWriteTransaction({
     await pruneTransactionRecords(sessionDir, 32, sidecarBoundary);
     return result;
   } catch (error) {
+    if (error?.code === 'SERVICE_CLOSED') throw error;
     const actualFingerprint = await sidecarBoundary.io.hashDeck()
       .then(result => result.fingerprint).catch(readError => (
       `unavailable:${readError.code ?? 'READ_ERROR'}`
@@ -841,7 +843,8 @@ async function initializePersistentSidecar(deckPath) {
         throw new Error('registry session 目录缺失或不安全');
       }
       binding = await io.bindSession({
-        deckName, sessionName:entry.sessionName, create:entry.kind === 'missing',
+        deckName, sessionId:entry.sessionId,
+        sessionName:entry.sessionName, create:entry.kind === 'missing',
       });
       persistedState = await io.readSession({ missingOk:entry.status === 'preparing' });
       if (entry.status === 'active') {
@@ -885,7 +888,9 @@ async function initializePersistentSidecar(deckPath) {
       entry = await io.prepareSession({
         deckName, sessionId, initialFingerprint:currentFingerprint, sessionName, mode,
       });
-      binding = await io.bindSession({ deckName, sessionName, create:mode === 'fresh' });
+      binding = await io.bindSession({
+        deckName, sessionId, sessionName, create:mode === 'fresh',
+      });
       if (candidate) {
         persistedState = { ...candidate.sessionState, sessionId };
         await io.writeSession({
@@ -947,6 +952,9 @@ export async function startServer({
     initialization = await initializePersistentSidecar(absoluteDeckPath);
     sidecarBoundary = initialization.sidecarBoundary;
   } catch (error) {
+    if (error?.code === 'SESSION_LOCKED') {
+      throw httpError('SESSION_LOCKED', 409, '当前 Deck 已由另一编辑服务占用');
+    }
     if (error?.code === 'UNSAFE_SIDECAR') throw error;
     throw unsafeSidecarError('sidecar 路径不可信，拒绝启动编辑服务', error);
   }
@@ -973,6 +981,7 @@ export async function startServer({
     throw unsafeSidecarError('session/registry 无法安全完成初始化', error);
   }
   if (resolve(sessionStore.sessionDir) !== resolve(sidecarBoundary.sessionDir)) {
+    await sidecarBoundary.io.close();
     throw unsafeSidecarError('Deck 在 sidecar 初始化期间发生变化，请重试');
   }
   const bridge = new BridgeService({
@@ -1204,13 +1213,19 @@ export async function startServer({
     });
   });
 
-  await new Promise((resolvePromise, reject) => {
-    server.once('error', reject);
-    server.listen(port, host, () => {
-      server.off('error', reject);
-      resolvePromise();
+  try {
+    await new Promise((resolvePromise, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => {
+        server.off('error', reject);
+        resolvePromise();
+      });
     });
-  });
+  } catch (error) {
+    bridge.close();
+    await sidecarBoundary.io.close();
+    throw error;
+  }
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : port;
   const url = `http://${urlHost}:${actualPort}`;
@@ -1226,7 +1241,7 @@ export async function startServer({
       watcherClosed = true;
       watcherGeneration += 1;
       unwatchFile(absoluteDeckPath, watchListener);
-      await watcherQueue;
+      const helperClosed = sidecarBoundary.io.close();
       bridge.close();
       const writerClosed = [];
       for (const writer of activeWriters.values()) {
@@ -1240,11 +1255,12 @@ export async function startServer({
       server.closeIdleConnections?.();
       const writersSettled = Promise.allSettled(writerClosed);
       await Promise.all([
+        watcherQueue,
+        helperClosed,
         webSocketClosed,
         httpClosed,
         writersSettled,
       ]);
-      await sidecarBoundary.io.close();
       server.closeAllConnections?.();
     })();
     return closePromise;

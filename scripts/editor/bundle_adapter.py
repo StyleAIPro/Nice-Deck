@@ -127,6 +127,65 @@ def _open_directory_fd(path, expected_identity=None):
     return fd
 
 
+def _identity_entry(identity, name):
+    if not isinstance(identity, dict) or not isinstance(identity.get(name), dict):
+        raise RuntimeError(f"缺少启动时 {name} identity")
+    expected = identity[name]
+    required = {"path", "realPath", "dev", "ino"}
+    if set(expected) != required or any(
+        not isinstance(expected[key], str) for key in required
+    ):
+        raise RuntimeError(f"{name} identity 格式无效")
+    return expected
+
+
+def _unsafe_project_error(message, cause=None):
+    error = RuntimeError(message if cause is None else f"{message}：{cause}")
+    error.deck_code = "UNSAFE_SIDECAR"
+    error.deck_stage = "open-project"
+    return error
+
+
+def _open_project_fd(deck_path, sidecar_identity):
+    project = deck_path.parent
+    expected = None
+    if sidecar_identity is not None:
+        try:
+            expected = _identity_entry(sidecar_identity, "project")
+            if expected["path"] != str(project):
+                raise RuntimeError("project identity 路径与 Deck 项目目录不一致")
+        except Exception as error:
+            raise _unsafe_project_error("启动时项目 identity 无效", error) from error
+    try:
+        return _open_directory_fd(project, expected)
+    except Exception as error:
+        raise _unsafe_project_error("Deck 项目目录身份已在服务运行期间变化", error) from error
+
+
+def _read_regular_file_fd(directory_fd, name, label):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError(f"{label} 必须是非符号链接的常规文件")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            return stream.read()
+    finally:
+        os.close(fd)
+
+
+def _write_new_file_fd(directory_fd, name, contents):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        os.close(fd)
+
+
 def _write_new_file(directory, name, contents, expected_identity=None):
     directory_fd = _open_directory_fd(directory, expected_identity)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -204,21 +263,51 @@ def write_patches(
     session_id=None,
 ):
     deck_path = _absolute_path(deck_path)
-    session_dir = _ensure_sidecar_session(
-        deck_path, _absolute_path(session_dir), sidecar_identity
-    )
-    transaction_id = _normalize_transaction_id(transaction_id)
-    session_id = _normalize_transaction_id(session_id) if session_id is not None else None
-    if sidecar_identity is None:
-        backups = _ensure_plain_directory(session_dir / "backups", parent=session_dir)
-        backup_identity = _identity_for(backups, "backups")
-    else:
-        backups = session_dir / "backups"
-        backup_identity = _require_identity(sidecar_identity, "backups", backups)
-    phase = "read"
-    tmp = None
+    session_dir = _absolute_path(session_dir)
+    phase = "open-project"
+    project_fd = None
+    candidate_name = None
+    candidate_bytes = None
+    transaction_written = False
     try:
-        original_bytes = deck_path.read_bytes()
+        project_fd = _open_project_fd(deck_path, sidecar_identity)
+        deck_name = deck_path.name
+        if not deck_name or deck_name in {".", ".."}:
+            raise _unsafe_project_error("Deck 文件名不是安全的单段名称")
+
+        phase = "sidecar"
+        try:
+            session_dir = _ensure_sidecar_session(
+                deck_path, session_dir, sidecar_identity
+            )
+        except Exception as error:
+            if sidecar_identity is not None:
+                raise _unsafe_project_error(
+                    "sidecar identity 已在服务运行期间变化", error
+                ) from error
+            raise
+        transaction_id = _normalize_transaction_id(transaction_id)
+        session_id = (
+            _normalize_transaction_id(session_id) if session_id is not None else None
+        )
+        if sidecar_identity is None:
+            backups = _ensure_plain_directory(
+                session_dir / "backups", parent=session_dir
+            )
+            backup_identity = _identity_for(backups, "backups")
+        else:
+            backups = session_dir / "backups"
+            try:
+                backup_identity = _require_identity(
+                    sidecar_identity, "backups", backups
+                )
+            except Exception as error:
+                raise _unsafe_project_error(
+                    "backups identity 已在服务运行期间变化", error
+                ) from error
+
+        phase = "read"
+        original_bytes = _read_regular_file_fd(project_fd, deck_name, "Deck")
         digest = hashlib.sha256(original_bytes).hexdigest()
         if expected_fingerprint is not None and digest != expected_fingerprint:
             error = RuntimeError("Deck 指纹与保存请求基线不一致，拒绝覆盖")
@@ -233,44 +322,49 @@ def write_patches(
         )
 
         phase = "decode"
-        lines = eb.load(deck_path)
-        template = eb.get_template(lines)
-        block = _block(patches)
-        begin_count = template.count(BEGIN)
-        end_count = template.count(END)
-        if begin_count or end_count:
-            if (
-                begin_count != 1
-                or end_count != 1
-                or template.index(BEGIN) >= template.index(END)
-            ):
-                raise ValueError("Deck 补丁标记必须各恰好出现一次且顺序正确")
-            start = template.index(BEGIN)
-            end = template.index(END) + len(END)
-            template = template[:start] + block + template[end:]
-        else:
-            if template.count("</body>") != 1:
-                raise ValueError("Deck 模板必须恰好包含一个精确 </body> 插入点")
-            template = template.replace("</body>", block + "\n</body>", 1)
+        # edit-bundle 仍是唯一 bundle 编辑器；它只接触可信 dirfd 读出的系统临时副本。
+        with tempfile.TemporaryDirectory(prefix="huawei-deck-editor-") as work_dir:
+            work_path = Path(work_dir) / deck_name
+            work_path.write_bytes(original_bytes)
+            lines = eb.load(work_path)
+            template = eb.get_template(lines)
+            block = _block(patches)
+            begin_count = template.count(BEGIN)
+            end_count = template.count(END)
+            if begin_count or end_count:
+                if (
+                    begin_count != 1
+                    or end_count != 1
+                    or template.index(BEGIN) >= template.index(END)
+                ):
+                    raise ValueError("Deck 补丁标记必须各恰好出现一次且顺序正确")
+                start = template.index(BEGIN)
+                end = template.index(END) + len(END)
+                template = template[:start] + block + template[end:]
+            else:
+                if template.count("</body>") != 1:
+                    raise ValueError("Deck 模板必须恰好包含一个精确 </body> 插入点")
+                template = template.replace("</body>", block + "\n</body>", 1)
 
-        if template.count(BEGIN) != 1 or template.count(END) != 1:
-            raise ValueError("构造后的 Deck 补丁标记必须各恰好出现一次")
-        eb.set_template(lines, template)
+            if template.count(BEGIN) != 1 or template.count(END) != 1:
+                raise ValueError("构造后的 Deck 补丁标记必须各恰好出现一次")
+            eb.set_template(lines, template)
 
-        phase = "temp-write"
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{deck_path.name}.", suffix=".tmp", dir=deck_path.parent
-        )
-        os.close(fd)
-        tmp = Path(tmp_name)
-        eb.save(tmp, lines)
+            phase = "temp-write"
+            eb.save(work_path, lines)
+            candidate_bytes = work_path.read_bytes()
 
-        phase = "verify"
-        eb.verify(tmp)
-        written_fingerprint = hashlib.sha256(tmp.read_bytes()).hexdigest()
+            phase = "verify"
+            eb.verify(work_path)
+        written_fingerprint = hashlib.sha256(candidate_bytes).hexdigest()
+
+        phase = "candidate-write"
+        candidate_name = f".{deck_name}.{uuid.uuid4().hex}.tmp"
+        _write_new_file_fd(project_fd, candidate_name, candidate_bytes)
+        os.fsync(project_fd)
 
         phase = "fingerprint"
-        if deck_path.read_bytes() != original_bytes:
+        if _read_regular_file_fd(project_fd, deck_name, "Deck") != original_bytes:
             error = RuntimeError("Deck 在写入期间已发生变化，拒绝覆盖")
             error.deck_code = "DECK_CHANGED"
             raise error
@@ -283,9 +377,14 @@ def write_patches(
             transaction_identity = _identity_for(transactions, "transactions")
         else:
             transactions = session_dir / "transactions"
-            transaction_identity = _require_identity(
-                sidecar_identity, "transactions", transactions
-            )
+            try:
+                transaction_identity = _require_identity(
+                    sidecar_identity, "transactions", transactions
+                )
+            except Exception as error:
+                raise _unsafe_project_error(
+                    "transactions identity 已在服务运行期间变化", error
+                ) from error
         transaction_name = f"{transaction_id}.json"
         transaction = transactions / transaction_name
         transaction_payload = {
@@ -307,33 +406,50 @@ def write_patches(
             ).encode("utf-8"),
             transaction_identity,
         )
-        error_transaction = str(transaction)
+        transaction_written = True
 
         phase = "fingerprint"
-        if deck_path.read_bytes() != original_bytes:
+        if _read_regular_file_fd(project_fd, deck_name, "Deck") != original_bytes:
             _unlink_regular_file(
                 transactions, transaction_name, transaction_identity
             )
+            transaction_written = False
             error = RuntimeError("Deck 在 transaction 落盘后、replace 前发生变化，拒绝覆盖")
             error.deck_code = "DECK_CHANGED"
             raise error
 
         phase = "replace"
-        os.replace(tmp, deck_path)
+        if _read_regular_file_fd(
+            project_fd, candidate_name, "Deck 候选文件"
+        ) != candidate_bytes:
+            raise RuntimeError("Deck 候选文件在 replace 前发生变化，拒绝覆盖")
+        os.replace(
+            candidate_name,
+            deck_name,
+            src_dir_fd=project_fd,
+            dst_dir_fd=project_fd,
+        )
+        candidate_name = None
+        os.fsync(project_fd)
     except Exception as error:
         if not hasattr(error, "deck_stage"):
             error.deck_stage = phase
-        if tmp is not None and tmp.exists():
-            try:
-                error.deck_candidate_bytes = tmp.read_bytes()
-            except OSError:
-                pass
-        if "error_transaction" in locals() and Path(error_transaction).exists():
-            error.deck_transaction = error_transaction
+        if isinstance(candidate_bytes, bytes):
+            error.deck_candidate_bytes = candidate_bytes
+        if transaction_written:
+            error.deck_transaction = str(transaction)
         raise
     finally:
-        if tmp is not None and tmp.exists():
-            tmp.unlink()
+        if project_fd is not None:
+            if candidate_name is not None:
+                try:
+                    os.unlink(candidate_name, dir_fd=project_fd)
+                    os.fsync(project_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+            os.close(project_fd)
 
     return {
         "ok": True,
@@ -374,6 +490,7 @@ def write_patches_safe(
             "DECK_CHANGED": "重新载入外部文件并在新基线上重放补丁，或另存为副本",
             "VERIFY_FAILED": "检查 bundle 结构和补丁定位器后重试",
             "WRITE_FAILED": "检查备份、目录权限和磁盘空间后重试",
+            "UNSAFE_SIDECAR": "恢复启动时项目目录后重新启动编辑服务",
         }[code]
         result = {
             "ok": False,
@@ -384,6 +501,8 @@ def write_patches_safe(
         }
         if isinstance(getattr(error, "deck_transaction", None), str):
             result["transaction"] = error.deck_transaction
+        if code == "UNSAFE_SIDECAR":
+            return result
         try:
             safe_session = _ensure_sidecar_session(
                 deck_path, session_dir, sidecar_identity

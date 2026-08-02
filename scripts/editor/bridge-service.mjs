@@ -157,6 +157,34 @@ export class BridgeService {
     return this.#recoveryError();
   }
 
+  #publishSessionCandidate(candidate) {
+    const published = this.sessionStore.state;
+    const next = structuredClone(candidate);
+    for (const key of Object.keys(published)) {
+      if (!(key in next)) delete published[key];
+    }
+    Object.assign(published, next);
+    this.journal = new PatchJournal(published);
+  }
+
+  async #persistCandidate(candidate, recoveryDetails = {}) {
+    try {
+      await this.sessionStore.persistState(candidate);
+    } catch (error) {
+      if (error?.committed === true) {
+        this.#publishSessionCandidate(candidate);
+        throw this.#enterRecoveryRequired({
+          ...recoveryDetails,
+          committed:true,
+          cause:error,
+        });
+      }
+      throw error;
+    }
+    this.#publishSessionCandidate(candidate);
+    return this.sessionStore.state;
+  }
+
   assertRevision(expectedRevision) {
     if (expectedRevision !== this.sessionStore.state.revision) {
       throw new RevisionConflict(
@@ -212,17 +240,16 @@ export class BridgeService {
         if (this.closed || socket !== this.editorSocket || !this.editorReady) return;
         const state = this.sessionStore.state;
         if (!Object.keys(state.diagnosticsBaseline ?? {}).length) {
+          const candidate = {
+            ...structuredClone(state),
+            diagnosticsBaseline:baseline,
+            diagnosticsCurrent:structuredClone(baseline),
+            diagnosticsRevision:state.revision,
+          };
           try {
-            await this.sessionStore.persistState({
-              ...state,
-              diagnosticsBaseline:baseline,
-              diagnosticsCurrent:structuredClone(baseline),
-              diagnosticsRevision:state.revision,
-            });
-            state.diagnosticsBaseline = baseline;
-            state.diagnosticsCurrent = structuredClone(baseline);
-            state.diagnosticsRevision = state.revision;
-          } catch {
+            await this.#persistCandidate(candidate, { operation:'diagnostics-baseline' });
+          } catch (error) {
+            if (error?.code === 'RECOVERY_REQUIRED') throw error;
             throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '启动诊断基线无法持久化');
           }
         }
@@ -306,6 +333,11 @@ export class BridgeService {
       const snapshot = { revision: state.revision, tasks: structuredClone(state.tasks ?? []) };
       try { return await this.sessionStore.createTask(input, expectedRevision); }
       catch (error) {
+        if (error?.committed === true) {
+          throw this.#enterRecoveryRequired({
+            operation:'task', committed:true, cause:error,
+          });
+        }
         state.revision = snapshot.revision;
         state.tasks = snapshot.tasks;
         // 仅兼容不具备可信 I/O 接口的最小测试替身；生产 SessionStore 自行清理 dirfd temp。
@@ -324,15 +356,19 @@ export class BridgeService {
       let group;
       try {
         group = await this.#commitJournal(journal => journal.appendGroup(taskId, prepared.results));
-      } catch {
+      } catch (error) {
+        if (error?.code === 'RECOVERY_REQUIRED') throw error;
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
       const result = { groupId: group.id, revision: this.sessionStore.state.revision, applied: prepared.applied };
       const confirmation = await this.#finalizeCommitted(prepared.commandId);
-      const diagnosticsPending = !await this.#refreshDiagnostics(
+      const diagnosticsPending = await this.#refreshDiagnostics(
         this.#pageKeysForActions(prepared.results), result.revision,
-      ).then(() => true, () => false);
+      ).then(() => false, error => {
+        if (error?.code === 'RECOVERY_REQUIRED') throw error;
+        return true;
+      });
       return { ...result, ...confirmation, diagnosticsPending };
     });
   }
@@ -416,43 +452,36 @@ export class BridgeService {
       }
       const snapshot = {
         deckFingerprint:state.deckFingerprint,
-        conflict:structuredClone(state.conflict),
-        diagnosticsBaseline:structuredClone(state.diagnosticsBaseline),
-        diagnosticsCurrent:structuredClone(state.diagnosticsCurrent),
-        diagnosticsRevision:state.diagnosticsRevision,
       };
-      state.deckFingerprint = result.fingerprint;
-      state.conflict = null;
-      state.diagnosticsBaseline = {
-        ...state.diagnosticsBaseline,
-        ...structuredClone(current),
+      const candidate = {
+        ...structuredClone(state),
+        deckFingerprint:result.fingerprint,
+        conflict:null,
+        diagnosticsBaseline:{
+          ...structuredClone(state.diagnosticsBaseline),
+          ...structuredClone(current),
+        },
+        diagnosticsCurrent:{
+          ...structuredClone(state.diagnosticsCurrent),
+          ...structuredClone(current),
+        },
+        diagnosticsRevision:state.revision,
       };
-      state.diagnosticsCurrent = {
-        ...state.diagnosticsCurrent,
-        ...structuredClone(current),
-      };
-      state.diagnosticsRevision = state.revision;
       try {
-        await this.sessionStore.persistState();
+        await this.#persistCandidate(candidate, {
+          operation:'write-deck', backup:result.backup,
+        });
       } catch (error) {
-        if (error?.committed === true) {
-          throw this.#enterRecoveryRequired({
-            backup:result.backup,
-            committed:true,
-            cause:error,
-          });
-        }
+        if (error?.code === 'RECOVERY_REQUIRED') throw error;
         try {
           await restore(result, snapshot.deckFingerprint);
         } catch (restoreError) {
-          Object.assign(state, snapshot);
           throw this.#enterRecoveryRequired({
             backup:result.backup,
             committed:true,
             cause:restoreError,
           });
         }
-        Object.assign(state, snapshot);
         try { await finalize(result); }
         catch (finalizeError) {
           throw this.#enterRecoveryRequired({
@@ -481,6 +510,7 @@ export class BridgeService {
 
   noteDeckFingerprint(fingerprintOrProvider) {
     return this.#enqueue(async () => {
+      this.#assertMutable();
       const fingerprint = typeof fingerprintOrProvider === 'function'
         ? await fingerprintOrProvider()
         : fingerprintOrProvider;
@@ -522,21 +552,25 @@ export class BridgeService {
       const actions = draft.compile();
       const prepared = await this.#prepare(actions, expectedRevision, { replace:true });
       try {
-        await this.#commitJournal(() => {
-          this.sessionStore.state.groups = draftState.groups;
-          this.sessionStore.state.redo = draftState.redo;
+        await this.#commitJournal(journal => {
+          journal.state.groups = structuredClone(draftState.groups);
+          journal.state.redo = structuredClone(draftState.redo);
           return { id: groupId };
         });
-      } catch {
+      } catch (error) {
+        if (error?.code === 'RECOVERY_REQUIRED') throw error;
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
       const result = { groupId, revision: this.sessionStore.state.revision, applied: prepared.applied };
       const confirmation = await this.#finalizeCommitted(prepared.commandId);
       const changedGroup = draftState.groups.find(group => group.id === groupId);
-      const diagnosticsPending = !await this.#refreshDiagnostics(
+      const diagnosticsPending = await this.#refreshDiagnostics(
         this.#pageKeysForActions(changedGroup?.actions ?? []), result.revision,
-      ).then(() => true, () => false);
+      ).then(() => false, error => {
+        if (error?.code === 'RECOVERY_REQUIRED') throw error;
+        return true;
+      });
       return { ...result, ...confirmation, diagnosticsPending };
     });
   }
@@ -606,12 +640,16 @@ export class BridgeService {
     if (!pageKeys.length || !this.editorReady) return;
     const pages = await this.#diagnose(pageKeys, revision);
     if (revision !== this.sessionStore.state.revision) return;
-    this.sessionStore.state.diagnosticsCurrent = {
-      ...this.sessionStore.state.diagnosticsCurrent,
-      ...pages,
+    const state = this.sessionStore.state;
+    const candidate = {
+      ...structuredClone(state),
+      diagnosticsCurrent:{
+        ...structuredClone(state.diagnosticsCurrent),
+        ...pages,
+      },
+      diagnosticsRevision:revision,
     };
-    this.sessionStore.state.diagnosticsRevision = revision;
-    await this.sessionStore.persistState();
+    await this.#persistCandidate(candidate, { operation:'diagnostics-refresh' });
   }
 
   async #diagnose(pageKeys, revision) {
@@ -655,18 +693,20 @@ export class BridgeService {
   async #recordDeckConflict(fingerprint) {
     const state = this.sessionStore.state;
     if (state.conflict?.code === 'DECK_CHANGED') return false;
-    const previous = state.conflict ?? null;
-    state.conflict = {
-      code:'DECK_CHANGED',
-      expectedFingerprint:state.deckFingerprint,
-      actualFingerprint:fingerprint,
-      detectedAt:new Date().toISOString(),
+    const candidate = {
+      ...structuredClone(state),
+      conflict:{
+        code:'DECK_CHANGED',
+        expectedFingerprint:state.deckFingerprint,
+        actualFingerprint:fingerprint,
+        detectedAt:new Date().toISOString(),
+      },
     };
     try {
-      await this.sessionStore.persistState();
+      await this.#persistCandidate(candidate, { operation:'deck-conflict' });
       return true;
     } catch (error) {
-      state.conflict = previous;
+      if (error?.code === 'RECOVERY_REQUIRED') throw error;
       throw serviceError('WRITE_FAILED', 500, 'Deck 冲突状态无法持久化', {
         stage:'session',
         recovery:'检查 sidecar 目录权限后重试',
@@ -712,24 +752,12 @@ export class BridgeService {
 
   async #commitJournal(change) {
     const state = this.sessionStore.state;
-    const snapshot = {
-      revision: state.revision,
-      groups: structuredClone(state.groups ?? []),
-      redo: structuredClone(state.redo ?? []),
-    };
-    const result = change(this.journal);
-    state.revision += 1;
-    try {
-      await this.sessionStore.persistState();
-      this.journal = new PatchJournal(state);
-      return result;
-    } catch (error) {
-      state.revision = snapshot.revision;
-      state.groups = snapshot.groups;
-      state.redo = snapshot.redo;
-      this.journal = new PatchJournal(state);
-      throw error;
-    }
+    const candidate = structuredClone(state);
+    const journal = new PatchJournal(candidate);
+    const result = change(journal);
+    candidate.revision += 1;
+    await this.#persistCandidate(candidate, { operation:'journal' });
+    return result;
   }
 
   #settle(commandId, method, value) {

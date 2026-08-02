@@ -133,7 +133,7 @@ export class SessionStore {
     await this.sidecarGuard();
     if (typeof this.sidecarIO.writeSession === 'function') {
       await this.sidecarIO.writeSession({
-        sessionId:this.state.sessionId,
+        sessionId:state.sessionId,
         bytes:Buffer.from(JSON.stringify(state, null, 2)),
       });
       return;
@@ -145,7 +145,25 @@ export class SessionStore {
     });
   }
 
-  persistState(state = this.state) { return this.#persist(state); }
+  #publish(state) {
+    const candidate = structuredClone(state);
+    for (const key of Object.keys(this.state)) {
+      if (!(key in candidate)) delete this.state[key];
+    }
+    Object.assign(this.state, candidate);
+    return this.state;
+  }
+
+  async persistState(state = this.state) {
+    const candidate = structuredClone(state);
+    try {
+      await this.#persist(candidate);
+    } catch (error) {
+      if (error?.committed === true) this.#publish(candidate);
+      throw error;
+    }
+    return this.#publish(candidate);
+  }
 
   async createTask(input, expectedRevision) {
     this.#expect(expectedRevision);
@@ -165,8 +183,10 @@ export class SessionStore {
     };
     const snapshotsDirectory = join(this.sessionDir, 'snapshots');
     const snapshotName = snapshotBytes ? `${id}.png` : null;
-    const previousRevision = this.state.revision;
-    const previousTasks = structuredClone(this.state.tasks);
+    const candidate = structuredClone(this.state);
+    candidate.tasks.push(task);
+    candidate.revision += 1;
+    let sessionPersistStarted = false;
     try {
       if (snapshotBytes) {
         await this.sidecarGuard();
@@ -178,14 +198,11 @@ export class SessionStore {
           });
         }
       }
-      this.state.tasks.push(task);
-      this.state.revision += 1;
-      await this.#persist();
+      sessionPersistStarted = true;
+      await this.persistState(candidate);
       return { task, revision: this.state.revision };
     } catch (error) {
-      if (error?.committed !== true) {
-        this.state.revision = previousRevision;
-        this.state.tasks = previousTasks;
+      if (!sessionPersistStarted || error?.committed !== true) {
         if (snapshotName) {
           const cleanup = typeof this.sidecarIO.deleteSnapshot === 'function'
             ? this.sidecarIO.deleteSnapshot({ snapshotId:id })

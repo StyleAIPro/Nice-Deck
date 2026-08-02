@@ -95,6 +95,54 @@ test('session 持久化失败会回滚 task/revision 并清理快照和临时文
   assert.deepEqual(await readdir(join(store.sessionDir, 'snapshots')), []);
 });
 
+test('task 的 session 写已 committed 后保留候选内存并由重启收敛', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-committed-task-'));
+  const deck = join(root, 'deck.html');
+  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  await writeFile(deck, 'deck-v1');
+  let sessionWrites = 0;
+  let store;
+  let observedRevisionDuringWrite = null;
+  const sidecarIO = {
+    async writeSession({ bytes }) {
+      sessionWrites += 1;
+      await writeFile(join(sessionDir, 'session.json'), bytes);
+      if (sessionWrites === 2) {
+        observedRevisionDuringWrite = store.state.revision;
+        throw Object.assign(new Error('directory fsync failed after rename'), {
+          committed:true,
+        });
+      }
+    },
+  };
+  store = await SessionStore.open({
+    deckPath:deck,
+    rootDir:join(root, '.huawei-deck-editor'),
+    sessionDir,
+    sidecarIO,
+  });
+
+  await assert.rejects(() => store.createTask({
+    pageKey:'page-001-a', pageIndex:1, pageLabel:'A',
+    rect:{ x:1, y:2, w:30, h:40 }, instruction:'已提交任务',
+  }, 0), error => error.committed === true);
+
+  const disk = JSON.parse(await readFile(store.sessionPath, 'utf8'));
+  assert.equal(observedRevisionDuringWrite, 0, '持久化完成前不得发布候选 task 状态');
+  assert.equal(store.state.revision, 1);
+  assert.equal(store.state.tasks.length, 1);
+  assert.equal(disk.revision, 1);
+  assert.deepEqual(disk.tasks, store.state.tasks);
+
+  const reopened = await SessionStore.open({
+    deckPath:deck,
+    rootDir:join(root, '.huawei-deck-editor'),
+    sessionDir,
+  });
+  assert.equal(reopened.state.revision, 1);
+  assert.deepEqual(reopened.state.tasks, store.state.tasks);
+});
+
 test('SessionStore 的 session 与 snapshot 只通过可信 atomic I/O 层提交', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-secure-io-'));
   const deck = join(root, 'deck.html');
