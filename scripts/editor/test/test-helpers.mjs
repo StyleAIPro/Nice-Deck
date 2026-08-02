@@ -36,14 +36,26 @@ export async function openEditor(app) {
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const browserProblems = [];
+    const resourceProblems = [];
+    const resourceRequests = [];
     page.on('console', message => {
       if (['error', 'warning'].includes(message.type())) browserProblems.push(message.text());
     });
     page.on('pageerror', error => browserProblems.push(error.message));
+    page.on('request', request => resourceRequests.push(request.url()));
+    page.on('requestfailed', request => {
+      resourceProblems.push(`${request.resourceType()} ${request.url()} ${request.failure()?.errorText ?? ''}`);
+    });
+    page.on('response', response => {
+      const type = response.request().resourceType();
+      if (['script', 'stylesheet', 'image'].includes(type) && !response.ok()) {
+        resourceProblems.push(`${type} ${response.status()} ${response.url()}`);
+      }
+    });
     await page.goto(`${app.url}/?token=${encodeURIComponent(app.token)}`
       + `&editorToken=${encodeURIComponent(app.editorToken)}`);
     await page.waitForSelector('#deck-frame', { timeout: 3_000 });
-    return { browser, page, browserProblems };
+    return { browser, page, browserProblems, resourceProblems, resourceRequests };
   } catch (error) {
     await browser.close();
     throw error;

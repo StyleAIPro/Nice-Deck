@@ -13,15 +13,27 @@ const wsLabel = document.querySelector('[data-ws-label]');
 const frameViewport = document.querySelector('[data-frame-viewport]');
 const frameScene = document.querySelector('[data-frame-scene]');
 const zoomValue = document.querySelector('[data-zoom]');
+let pendingPageKey;
+let tornDown = false;
+let fitFrameRequest;
+let eventsClient;
 
 deckFrame.src = `/preview?token=${encodeURIComponent(token)}`;
 
-function selectPage(button) {
+function confirmPage(button) {
   for (const item of pageList.querySelectorAll('[data-page-key]')) {
     item.setAttribute('aria-current', item === button ? 'page' : 'false');
   }
   currentPage.textContent = button.textContent;
   currentKey.textContent = button.dataset.pageKey;
+}
+
+function requestPage(button) {
+  pendingPageKey = button.dataset.pageKey;
+  deckFrame.contentWindow?.postMessage({
+    type: 'show-page',
+    pageKey: pendingPageKey,
+  }, location.origin);
 }
 
 function renderPages(pages) {
@@ -33,19 +45,29 @@ function renderPages(pages) {
     button.dataset.pageKey = page.pageKey;
     button.textContent = `${String(page.index).padStart(2, '0')} ${page.label}`;
     button.setAttribute('aria-current', 'false');
-    button.addEventListener('click', () => selectPage(button));
+    button.addEventListener('click', () => requestPage(button));
     pageList.append(button);
   }
   pageCount.textContent = `${pages.length} 页`;
   const firstPage = pageList.querySelector('[data-page-key]');
-  if (firstPage) selectPage(firstPage);
+  if (firstPage) requestPage(firstPage);
 }
 
-window.addEventListener('message', event => {
+function onFrameMessage(event) {
   if (event.origin !== location.origin || event.source !== deckFrame.contentWindow) return;
-  if (event.data?.type !== 'deck-ready' || !Array.isArray(event.data.pages)) return;
-  renderPages(event.data.pages);
-});
+  if (event.data?.type === 'deck-ready' && Array.isArray(event.data.pages)) {
+    renderPages(event.data.pages);
+    return;
+  }
+  if (event.data?.type !== 'page-shown' || event.data.pageKey !== pendingPageKey) return;
+  pendingPageKey = undefined;
+  if (event.data.shown !== true) return;
+  const button = [...pageList.querySelectorAll('[data-page-key]')]
+    .find(candidate => candidate.dataset.pageKey === event.data.pageKey);
+  if (button) confirmPage(button);
+}
+
+window.addEventListener('message', onFrameMessage);
 
 function fitFrame() {
   const availableWidth = Math.max(frameViewport.clientWidth - 56, 1);
@@ -57,14 +79,17 @@ function fitFrame() {
   zoomValue.textContent = `${Math.round(scale * 100)}%`;
 }
 
-const resizeObserver = new ResizeObserver(() => requestAnimationFrame(fitFrame));
+const resizeObserver = new ResizeObserver(() => {
+  cancelAnimationFrame(fitFrameRequest);
+  fitFrameRequest = requestAnimationFrame(fitFrame);
+});
 resizeObserver.observe(frameViewport);
 fitFrame();
 
 const eventsUrl = new URL('/events', location.href);
 eventsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 eventsUrl.searchParams.set('editorToken', editorToken);
-connectEvents({
+eventsClient = connectEvents({
   url: eventsUrl,
   token,
   onEvent: () => {},
@@ -73,3 +98,17 @@ connectEvents({
     wsLabel.textContent = state === 'online' ? '在线' : '离线';
   },
 });
+
+function teardown() {
+  if (tornDown) return;
+  tornDown = true;
+  eventsClient?.close();
+  resizeObserver.disconnect();
+  cancelAnimationFrame(fitFrameRequest);
+  window.removeEventListener('message', onFrameMessage);
+  window.removeEventListener('pagehide', teardown);
+  window.removeEventListener('unload', teardown);
+}
+
+window.addEventListener('pagehide', teardown);
+window.addEventListener('unload', teardown);

@@ -44,6 +44,27 @@ function waitForCanvases() {
 
 const [runtime, canvases] = await Promise.all([ensurePatchRuntime(), waitForCanvases()]);
 if (parent !== window) {
+  const onParentMessage = event => {
+    if (event.origin !== location.origin || event.source !== parent) return;
+    if (event.data?.type !== 'show-page' || typeof event.data.pageKey !== 'string') return;
+    const { pageKey } = event.data;
+    const canvas = canvases.find(candidate => runtime.pageKey(candidate) === pageKey);
+    if (!canvas) {
+      parent.postMessage({
+        type: 'page-shown',
+        pageKey,
+        shown: false,
+        reason: 'PAGE_NOT_FOUND',
+      }, location.origin);
+      return;
+    }
+    const top = canvas.getBoundingClientRect().top + window.scrollY;
+    window.scrollTo({ top, left: 0, behavior: 'auto' });
+    requestAnimationFrame(() => {
+      parent.postMessage({ type: 'page-shown', pageKey, shown: true }, location.origin);
+    });
+  };
+  window.addEventListener('message', onParentMessage);
   parent.postMessage({
     type: 'deck-ready',
     pages: canvases.map((canvas, index) => ({

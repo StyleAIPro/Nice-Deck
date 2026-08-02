@@ -1,6 +1,14 @@
 const RECONNECT_DELAYS = [250, 500, 1000, 2000, 5000];
 
-export function connectEvents({ url, token, onEvent = () => {}, onState = () => {} }) {
+export function connectEvents({
+  url,
+  token,
+  onEvent = () => {},
+  onState = () => {},
+  WebSocketImpl = globalThis.WebSocket,
+  setTimer = globalThis.setTimeout,
+  clearTimer = globalThis.clearTimeout,
+}) {
   let socket;
   let reconnectTimer;
   let reconnectIndex = 0;
@@ -17,24 +25,30 @@ export function connectEvents({ url, token, onEvent = () => {}, onState = () => 
     if (disposed) return;
     const endpoint = new URL(url, globalThis.location?.href);
     endpoint.searchParams.set('token', token);
-    socket = new WebSocket(endpoint);
-    socket.addEventListener('open', () => {
+    const nextSocket = new WebSocketImpl(endpoint);
+    socket = nextSocket;
+    nextSocket.addEventListener('open', () => {
+      if (disposed || socket !== nextSocket) return;
       reconnectIndex = 0;
       setState('online');
     });
-    socket.addEventListener('message', event => {
+    nextSocket.addEventListener('message', event => {
+      if (disposed || socket !== nextSocket) return;
       try {
         onEvent(JSON.parse(event.data));
       } catch {
         // 非 JSON 事件不属于 Deck 协议，安全忽略。
       }
     });
-    socket.addEventListener('close', () => {
-      if (disposed) return;
+    nextSocket.addEventListener('close', () => {
+      if (disposed || socket !== nextSocket || reconnectTimer !== undefined) return;
       setState('offline');
       const delay = RECONNECT_DELAYS[Math.min(reconnectIndex, RECONNECT_DELAYS.length - 1)];
       reconnectIndex += 1;
-      reconnectTimer = setTimeout(connect, delay);
+      reconnectTimer = setTimer(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, delay);
     });
   };
 
@@ -43,14 +57,20 @@ export function connectEvents({ url, token, onEvent = () => {}, onState = () => 
 
   return {
     send(message) {
-      if (socket?.readyState !== WebSocket.OPEN) return false;
+      if (socket?.readyState !== WebSocketImpl.OPEN) return false;
       socket.send(JSON.stringify(message));
       return true;
     },
     close() {
+      if (disposed) return;
       disposed = true;
-      clearTimeout(reconnectTimer);
-      socket?.close();
+      if (reconnectTimer !== undefined) {
+        clearTimer(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      const currentSocket = socket;
+      socket = undefined;
+      currentSocket?.close();
     },
   };
 }
