@@ -27,6 +27,10 @@ def minimal_bundle(path, template=None):
     )
 
 
+def sidecar_session(deck):
+    return deck.parent / ".huawei-deck-editor" / "deck-session"
+
+
 class BundleAdapterTest(unittest.TestCase):
     def test_write_is_idempotent_and_backup_is_exact(self):
         with tempfile.TemporaryDirectory() as td:
@@ -35,11 +39,11 @@ class BundleAdapterTest(unittest.TestCase):
             original = hashlib.sha256(deck.read_bytes()).hexdigest()
 
             result = bundle_adapter.write_patches(
-                deck, [{"kind": "setText"}], Path(td) / "session"
+                deck, [{"kind": "setText"}], sidecar_session(deck)
             )
             first = deck.read_text(encoding="utf-8")
             bundle_adapter.write_patches(
-                deck, [{"kind": "setText"}], Path(td) / "session"
+                deck, [{"kind": "setText"}], sidecar_session(deck)
             )
 
             self.assertEqual(first, deck.read_text(encoding="utf-8"))
@@ -64,7 +68,7 @@ class BundleAdapterTest(unittest.TestCase):
                 side_effect=AssertionError("bad"),
             ):
                 with self.assertRaises(AssertionError):
-                    bundle_adapter.write_patches(deck, [], Path(td) / "session")
+                    bundle_adapter.write_patches(deck, [], sidecar_session(deck))
 
             self.assertEqual(original, deck.read_bytes())
             self.assertEqual([], list(deck.parent.glob(f".{deck.name}.*.tmp")))
@@ -81,7 +85,7 @@ class BundleAdapterTest(unittest.TestCase):
                 original = deck.read_bytes()
 
                 with self.assertRaisesRegex(ValueError, "必须恰好包含一个"):
-                    bundle_adapter.write_patches(deck, [], Path(td) / "session")
+                    bundle_adapter.write_patches(deck, [], sidecar_session(deck))
 
                 self.assertEqual(original, deck.read_bytes())
 
@@ -102,7 +106,7 @@ class BundleAdapterTest(unittest.TestCase):
                 original = deck.read_bytes()
 
                 with self.assertRaisesRegex(ValueError, "补丁标记"):
-                    bundle_adapter.write_patches(deck, [], Path(td) / "session")
+                    bundle_adapter.write_patches(deck, [], sidecar_session(deck))
 
                 self.assertEqual(original, deck.read_bytes())
 
@@ -112,13 +116,13 @@ class BundleAdapterTest(unittest.TestCase):
             minimal_bundle(deck)
             original = deck.read_bytes()
             digest = hashlib.sha256(original).hexdigest()
-            backups = Path(td) / "session" / "backups"
+            backups = sidecar_session(deck) / "backups"
             backups.mkdir(parents=True)
             backup = backups / f"deck-{digest}.html"
             backup.write_bytes(b"corrupt")
 
             with self.assertRaisesRegex(RuntimeError, "备份"):
-                bundle_adapter.write_patches(deck, [], Path(td) / "session")
+                bundle_adapter.write_patches(deck, [], sidecar_session(deck))
 
             self.assertEqual(original, deck.read_bytes())
             self.assertEqual(b"corrupt", backup.read_bytes())
@@ -129,14 +133,14 @@ class BundleAdapterTest(unittest.TestCase):
             minimal_bundle(deck)
             original = deck.read_bytes()
             digest = hashlib.sha256(original).hexdigest()
-            backups = Path(td) / "session" / "backups"
+            backups = sidecar_session(deck) / "backups"
             backups.mkdir(parents=True)
             outside = Path(td) / "outside-backup.html"
             outside.write_bytes(original)
             (backups / f"deck-{digest}.html").symlink_to(outside)
 
             with self.assertRaisesRegex(RuntimeError, "符号链接|常规文件|备份"):
-                bundle_adapter.write_patches(deck, [], Path(td) / "session")
+                bundle_adapter.write_patches(deck, [], sidecar_session(deck))
 
             self.assertEqual(original, deck.read_bytes())
             self.assertEqual(original, outside.read_bytes())
@@ -146,8 +150,8 @@ class BundleAdapterTest(unittest.TestCase):
             deck = Path(td) / "deck.html"
             minimal_bundle(deck)
             original = deck.read_bytes()
-            session = Path(td) / "session"
-            session.mkdir()
+            session = sidecar_session(deck)
+            session.mkdir(parents=True)
             outside = Path(td) / "outside-backups"
             outside.mkdir()
             (session / "backups").symlink_to(outside, target_is_directory=True)
@@ -158,6 +162,59 @@ class BundleAdapterTest(unittest.TestCase):
             self.assertEqual("WRITE_FAILED", result["code"])
             self.assertEqual(original, deck.read_bytes())
             self.assertEqual([], list(outside.iterdir()))
+
+    def test_sidecar_root_or_session_symlink_cannot_write_outside_project(self):
+        for level in ("root", "session"):
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as td:
+                project = Path(td) / "project"
+                project.mkdir()
+                deck = project / "deck.html"
+                minimal_bundle(deck)
+                original = deck.read_bytes()
+                outside = Path(td) / "outside"
+                outside.mkdir()
+                sidecar_root = project / ".huawei-deck-editor"
+                session = sidecar_root / "deck-session"
+                if level == "root":
+                    sidecar_root.symlink_to(outside, target_is_directory=True)
+                else:
+                    sidecar_root.mkdir()
+                    session.symlink_to(outside, target_is_directory=True)
+
+                result = bundle_adapter.write_patches_safe(deck, [], session)
+
+                self.assertEqual(False, result["ok"])
+                self.assertEqual("WRITE_FAILED", result["code"])
+                self.assertEqual(original, deck.read_bytes())
+                self.assertEqual([], list(outside.iterdir()))
+
+    def test_success_persists_deck_bound_durable_transaction_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            deck = project / "deck.html"
+            minimal_bundle(deck)
+            original_fingerprint = hashlib.sha256(deck.read_bytes()).hexdigest()
+            session = project / ".huawei-deck-editor" / "deck-session"
+            transaction_id = "123e4567-e89b-42d3-a456-426614174000"
+
+            result = bundle_adapter.write_patches(
+                deck,
+                [],
+                session,
+                expected_fingerprint=original_fingerprint,
+                transaction_id=transaction_id,
+            )
+
+            transaction = session / "transactions" / f"{transaction_id}.json"
+            record = json.loads(transaction.read_text(encoding="utf-8"))
+            self.assertEqual(transaction_id, record["transactionId"])
+            self.assertEqual(str(deck), record["deckPath"])
+            self.assertEqual(str(session), record["sessionDir"])
+            self.assertEqual(original_fingerprint, record["oldFingerprint"])
+            self.assertEqual(result["fingerprint"], record["candidateFingerprint"])
+            self.assertEqual(result["backup"], record["backup"])
+            self.assertEqual(str(transaction), result["transaction"])
 
     def test_external_change_before_replace_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
@@ -176,7 +233,7 @@ class BundleAdapterTest(unittest.TestCase):
                 side_effect=verify_then_change,
             ):
                 with self.assertRaisesRegex(RuntimeError, "写入期间"):
-                    bundle_adapter.write_patches(deck, [], Path(td) / "session")
+                    bundle_adapter.write_patches(deck, [], sidecar_session(deck))
 
             self.assertEqual(external, deck.read_bytes())
             self.assertEqual([], list(deck.parent.glob(f".{deck.name}.*.tmp")))
@@ -184,7 +241,7 @@ class BundleAdapterTest(unittest.TestCase):
     def test_safe_verify_failure_has_stable_stage_and_diagnostic(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
-            session = Path(td) / "session"
+            session = sidecar_session(deck)
             minimal_bundle(deck)
             original = deck.read_bytes()
 
@@ -211,10 +268,10 @@ class BundleAdapterTest(unittest.TestCase):
     def test_write_errors_symlink_cannot_emit_diagnostics_outside_session(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
-            session = Path(td) / "session"
+            session = sidecar_session(deck)
             outside = Path(td) / "outside-errors"
             minimal_bundle(deck)
-            session.mkdir()
+            session.mkdir(parents=True)
             outside.mkdir()
             (session / "write-errors").symlink_to(outside, target_is_directory=True)
 
@@ -234,7 +291,7 @@ class BundleAdapterTest(unittest.TestCase):
     def test_expected_fingerprint_mismatch_is_conflict_without_write(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
-            session = Path(td) / "session"
+            session = sidecar_session(deck)
             minimal_bundle(deck)
             original = deck.read_bytes()
 
@@ -250,7 +307,7 @@ class BundleAdapterTest(unittest.TestCase):
     def test_atomic_replace_failure_keeps_original_and_reports_write_stage(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
-            session = Path(td) / "session"
+            session = sidecar_session(deck)
             minimal_bundle(deck)
             original = deck.read_bytes()
 

@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import tempfile
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +55,30 @@ def _ensure_plain_directory(path, parent=None):
     return path
 
 
+def _ensure_sidecar_session(deck_path, session_dir):
+    project_dir = deck_path.parent
+    project_info = project_dir.lstat()
+    if stat.S_ISLNK(project_info.st_mode) or not stat.S_ISDIR(project_info.st_mode):
+        raise RuntimeError(f"Deck 项目目录必须是非符号链接的真实目录：{project_dir}")
+    sidecar_root = project_dir / ".huawei-deck-editor"
+    if session_dir.parent != sidecar_root:
+        raise RuntimeError(f"session 必须直属 Deck 项目的 sidecar root：{session_dir}")
+    sidecar_root = _ensure_plain_directory(sidecar_root, parent=project_dir)
+    return _ensure_plain_directory(session_dir, parent=sidecar_root)
+
+
+def _normalize_transaction_id(transaction_id):
+    if transaction_id is None:
+        return str(uuid.uuid4())
+    try:
+        normalized = str(uuid.UUID(str(transaction_id)))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError("transaction_id 必须是规范 UUID") from error
+    if normalized != transaction_id:
+        raise ValueError("transaction_id 必须是小写规范 UUID")
+    return normalized
+
+
 def _open_directory_fd(path):
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
@@ -75,6 +100,7 @@ def _write_new_file(directory, name, contents):
                 os.fsync(stream.fileno())
         finally:
             os.close(fd)
+        os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
 
@@ -91,6 +117,18 @@ def _read_regular_file(directory, name):
                 return stream.read()
         finally:
             os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _unlink_regular_file(directory, name):
+    directory_fd = _open_directory_fd(directory)
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError(f"拒绝删除非常规事务记录：{directory / name}")
+        os.unlink(name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
 
@@ -112,9 +150,16 @@ def _ensure_backup(backups, name, original_bytes, digest):
         raise RuntimeError(f"已有备份内容不一致或已损坏，拒绝继续：{backups / name}")
 
 
-def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
+def write_patches(
+    deck_path,
+    patches,
+    session_dir,
+    expected_fingerprint=None,
+    transaction_id=None,
+):
     deck_path = _absolute_path(deck_path)
-    session_dir = _ensure_plain_directory(session_dir)
+    session_dir = _ensure_sidecar_session(deck_path, _absolute_path(session_dir))
+    transaction_id = _normalize_transaction_id(transaction_id)
     backups = _ensure_plain_directory(session_dir / "backups", parent=session_dir)
     phase = "read"
     tmp = None
@@ -174,6 +219,37 @@ def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
             error.deck_code = "DECK_CHANGED"
             raise error
 
+        phase = "transaction"
+        transactions = _ensure_plain_directory(
+            session_dir / "transactions", parent=session_dir
+        )
+        transaction_name = f"{transaction_id}.json"
+        transaction = transactions / transaction_name
+        transaction_payload = {
+            "version": 1,
+            "transactionId": transaction_id,
+            "deckPath": str(deck_path),
+            "sessionDir": str(session_dir),
+            "oldFingerprint": digest,
+            "candidateFingerprint": written_fingerprint,
+            "backup": str(backup),
+        }
+        _write_new_file(
+            transactions,
+            transaction_name,
+            json.dumps(
+                transaction_payload, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8"),
+        )
+        error_transaction = str(transaction)
+
+        phase = "fingerprint"
+        if deck_path.read_bytes() != original_bytes:
+            _unlink_regular_file(transactions, transaction_name)
+            error = RuntimeError("Deck 在 transaction 落盘后、replace 前发生变化，拒绝覆盖")
+            error.deck_code = "DECK_CHANGED"
+            raise error
+
         phase = "replace"
         os.replace(tmp, deck_path)
     except Exception as error:
@@ -184,6 +260,8 @@ def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
                 error.deck_candidate_bytes = tmp.read_bytes()
             except OSError:
                 pass
+        if "error_transaction" in locals() and Path(error_transaction).exists():
+            error.deck_transaction = error_transaction
         raise
     finally:
         if tmp is not None and tmp.exists():
@@ -193,15 +271,27 @@ def write_patches(deck_path, patches, session_dir, expected_fingerprint=None):
         "ok": True,
         "backup": str(backup),
         "fingerprint": written_fingerprint,
+        "transaction": str(transaction),
     }
 
 
-def write_patches_safe(deck_path, patches, session_dir, expected_fingerprint=None):
+def write_patches_safe(
+    deck_path,
+    patches,
+    session_dir,
+    expected_fingerprint=None,
+    transaction_id=None,
+):
     """供 Node 服务调用的稳定结果封装；底层 write_patches 仍保留原异常类型便于测试。"""
+    deck_path = _absolute_path(deck_path)
     session_dir = _absolute_path(session_dir)
     try:
         return write_patches(
-            deck_path, patches, session_dir, expected_fingerprint=expected_fingerprint
+            deck_path,
+            patches,
+            session_dir,
+            expected_fingerprint=expected_fingerprint,
+            transaction_id=transaction_id,
         )
     except Exception as error:
         stage = getattr(error, "deck_stage", "write")
@@ -220,8 +310,10 @@ def write_patches_safe(deck_path, patches, session_dir, expected_fingerprint=Non
             "message": str(error) or "写回 Deck 失败",
             "recovery": recovery,
         }
+        if isinstance(getattr(error, "deck_transaction", None), str):
+            result["transaction"] = error.deck_transaction
         try:
-            safe_session = _ensure_plain_directory(session_dir)
+            safe_session = _ensure_sidecar_session(deck_path, session_dir)
             diagnostics = _ensure_plain_directory(
                 safe_session / "write-errors", parent=safe_session
             )

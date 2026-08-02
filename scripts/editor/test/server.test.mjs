@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -149,6 +149,24 @@ function validBundle() {
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
+async function writeTransactionRecord(app, transactionId, oldBytes, candidateBytes) {
+  const transactions = join(app.sessionDir, 'transactions');
+  await mkdir(transactions, { recursive:true });
+  const oldFingerprint = sha256(oldBytes);
+  const candidateFingerprint = sha256(candidateBytes);
+  const transactionPath = join(transactions, `${transactionId}.json`);
+  await writeFile(transactionPath, JSON.stringify({
+    version:1,
+    transactionId,
+    deckPath:app.deckPath,
+    sessionDir:app.sessionDir,
+    oldFingerprint,
+    candidateFingerprint,
+    backup:join(app.sessionDir, 'backups', `deck-${oldFingerprint}.html`),
+  }));
+  return transactionPath;
+}
+
 function fakeWriterChild({ onEnd, onKill, closesOnKill = true } = {}) {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -276,7 +294,7 @@ test('服务只允许 loopback 监听地址', async t => {
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck');
 
-  for (const host of ['0.0.0.0', '::']) {
+  for (const host of ['0.0.0.0', '::', '127.000.000.001']) {
     await t.test(`拒绝 ${host}`, async () => {
       let app;
       try {
@@ -291,11 +309,20 @@ test('服务只允许 loopback 监听地址', async t => {
     });
   }
 
-  const localhost = await startServer({
-    deckPath:deck, host:'localhost', port:0, openBrowser:false,
-  });
-  assert.match(localhost.url, /^http:\/\/localhost:/);
-  await localhost.close();
+  for (const [name, options, expectedUrl] of [
+    ['默认地址', {}, /^http:\/\/127\.0\.0\.1:/],
+    ['localhost', { host:'localhost' }, /^http:\/\/localhost:/],
+    ['127.0.0.1', { host:'127.0.0.1' }, /^http:\/\/127\.0\.0\.1:/],
+    ['::1', { host:'::1' }, /^http:\/\/\[::1\]:/],
+  ]) {
+    await t.test(`接受 ${name}`, async () => {
+      const app = await startServer({
+        deckPath:deck, port:0, openBrowser:false, ...options,
+      });
+      assert.match(app.url, expectedUrl);
+      await app.close();
+    });
+  }
 });
 
 test('携带 Origin 的 HTTP 与 WebSocket 只接受当前本地服务源', async t => {
@@ -321,6 +348,43 @@ test('携带 Origin 的 HTTP 与 WebSocket 只接受当前本地服务源', asyn
   localSocket.close();
   const cliSocket = await connect(`${app.wsUrl}?token=secret`);
   cliSocket.close();
+});
+
+test('sidecar root 或 session 祖先为 symlink 时 server 启动即拒绝且不写 outside', async t => {
+  for (const level of ['root', 'session']) {
+    await t.test(level, async () => {
+      const project = await mkdtemp(join(tmpdir(), `deck-sidecar-${level}-`));
+      const deck = join(project, 'deck.html');
+      const deckBytes = Buffer.from(validBundle());
+      await writeFile(deck, deckBytes);
+      const outside = join(project, 'outside');
+      await mkdir(outside);
+      const sidecarRoot = join(project, '.huawei-deck-editor');
+      if (level === 'root') {
+        await symlink(outside, sidecarRoot);
+      } else {
+        await mkdir(sidecarRoot);
+        const sessionName = `deck-${sha256(deckBytes).slice(0, 8)}`;
+        await symlink(outside, join(sidecarRoot, sessionName));
+      }
+
+      let app;
+      let startupError;
+      try {
+        app = await startServer({
+          deckPath:deck, host:'127.0.0.1', port:0, openBrowser:false,
+        });
+      } catch (error) {
+        startupError = error;
+      } finally {
+        await app?.close();
+      }
+
+      assert.equal(app, undefined, '不应在不可信 sidecar 上启动服务');
+      assert.equal(startupError?.code, 'UNSAFE_SIDECAR');
+      assert.deepEqual(await readdir(outside), []);
+    });
+  }
 });
 
 test('editor capability 隔离 observer 且拒绝错误或重复 editor', async t => {
@@ -681,16 +745,23 @@ test('writer 已替换 Deck 后无 ACK、坏 ACK、非零退出、EPIPE 或超�
   for (const [name, finish] of cases) {
     await t.test(name, async subtest => {
       let app;
+      let transactionId;
       const child = fakeWriterChild({
         onEnd:current => queueMicrotask(async () => {
-          await writeFile(app.deckPath, `writer-mutated-${name}`);
+          const oldBytes = await readFile(app.deckPath);
+          const candidateBytes = Buffer.from(`writer-mutated-${name}`);
+          await writeFile(app.deckPath, candidateBytes);
+          await writeTransactionRecord(app, transactionId, oldBytes, candidateBytes);
           finish(current);
         }),
       });
       app = await makeApp(subtest, {
         deckContents:validBundle(),
-        writerTimeoutMs:25,
-        spawnWriter:() => child,
+        writerTimeoutMs:100,
+        spawnWriter:(_command, args) => {
+          transactionId = args.at(-1);
+          return child;
+        },
       });
       await connectDiagnosticsEditor(subtest, app);
       const deckBefore = await readFile(app.deckPath);
@@ -757,6 +828,124 @@ test('writer 成功回执必须完整、可信并与官方 Deck 指纹一致', a
       assert.deepEqual(await readFile(join(app.sessionDir, 'session.json')), sessionBefore);
     });
   }
+});
+
+test('adapter 在 replace 前发现真实外改时保留外部 bytes', async t => {
+  let app;
+  const externalBytes = Buffer.from('real external edit before replace');
+  const child = fakeWriterChild({
+    onEnd:current => queueMicrotask(async () => {
+      await writeFile(app.deckPath, externalBytes);
+      current.stdout.emit('data', `${JSON.stringify({
+        ok:false,
+        code:'DECK_CHANGED',
+        stage:'fingerprint',
+        message:'Deck 在 replace 前发生外部变化',
+        recovery:'重新载入后重试',
+      })}\n`);
+      current.emit('close', 0);
+    }),
+  });
+  app = await makeApp(t, {
+    deckContents:validBundle(), spawnWriter:() => child,
+  });
+  await connectDiagnosticsEditor(t, app);
+  const oldFingerprint = app.session.deckFingerprint;
+
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 409, JSON.stringify(body));
+  assert.equal(body.code, 'DECK_CHANGED');
+  assert.deepEqual(await readFile(app.deckPath), externalBytes);
+  assert.equal(app.session.deckFingerprint, oldFingerprint);
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.groups, []);
+  assert.equal(app.session.conflict?.actualFingerprint, sha256(externalBytes));
+});
+
+test('candidate 已 replace 后无 ACK、坏 ACK 或超时仅凭 durable record 恢复并清理记录', async t => {
+  const cases = [
+    ['无 ACK', current => current.emit('close', 0)],
+    ['坏 ACK', current => {
+      current.stdout.emit('data', '{bad json\n');
+      current.emit('close', 0);
+    }],
+    ['超时', () => {}],
+  ];
+  for (const [name, finish] of cases) {
+    await t.test(name, async subtest => {
+      let app;
+      let transactionId;
+      let transactionPath;
+      const candidateBytes = Buffer.from(`candidate-${name}`);
+      const child = fakeWriterChild({
+        onEnd:current => queueMicrotask(async () => {
+          const oldBytes = await readFile(app.deckPath);
+          await writeFile(app.deckPath, candidateBytes);
+          transactionPath = await writeTransactionRecord(
+            app, transactionId, oldBytes, candidateBytes,
+          );
+          finish(current);
+        }),
+      });
+      app = await makeApp(subtest, {
+        deckContents:validBundle(), writerTimeoutMs:100,
+        spawnWriter:(_command, args) => {
+          transactionId = args.at(-1);
+          return child;
+        },
+      });
+      await connectDiagnosticsEditor(subtest, app);
+      const deckBefore = await readFile(app.deckPath);
+
+      const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+        method:'POST', headers:{ 'content-type':'application/json' },
+        body:JSON.stringify({ expectedRevision:0 }),
+      });
+
+      assert.notEqual(response.status, 200);
+      assert.deepEqual(await readFile(app.deckPath), deckBefore);
+      assert.ok(transactionPath, 'writer 必须先落 durable transaction record');
+      await assert.rejects(() => readFile(transactionPath), { code:'ENOENT' });
+    });
+  }
+});
+
+test('candidate replace 后又出现第三方 hash 时绝不恢复旧 Deck', async t => {
+  let app;
+  let transactionId;
+  const candidateBytes = Buffer.from('writer candidate bytes');
+  const thirdPartyBytes = Buffer.from('third party external bytes');
+  const child = fakeWriterChild({
+    onEnd:current => queueMicrotask(async () => {
+      const oldBytes = await readFile(app.deckPath);
+      await writeFile(app.deckPath, candidateBytes);
+      await writeTransactionRecord(app, transactionId, oldBytes, candidateBytes);
+      await writeFile(app.deckPath, thirdPartyBytes);
+      current.emit('close', 0);
+    }),
+  });
+  app = await makeApp(t, {
+    deckContents:validBundle(),
+    spawnWriter:(_command, args) => {
+      transactionId = args.at(-1);
+      return child;
+    },
+  });
+  await connectDiagnosticsEditor(t, app);
+
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+  const body = await response.json();
+
+  assert.ok(['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(body.code), JSON.stringify(body));
+  assert.deepEqual(await readFile(app.deckPath), thirdPartyBytes);
 });
 
 test('Node 恢复边界拒绝当前 session backups 内的符号链接文件', async t => {
@@ -950,6 +1139,71 @@ test('Deck 已替换但 session 基线持久化失败时恢复原文件与内存
   assert.equal(restored, true);
   assert.equal(state.deckFingerprint, 'old-fingerprint');
   assert.deepEqual(state.diagnosticsBaseline, { [page.pageKey]:page });
+});
+
+test('writer success 后 session persist 失败且 Deck 再次外改时保留第三值并进入冲突', async () => {
+  const page = {
+    pageKey:'page-001-session-third-party',
+    sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+  };
+  let diskFingerprint = 'old-fingerprint';
+  let persistCalls = 0;
+  const state = {
+    revision:0, tasks:[], groups:[], redo:[],
+    deckFingerprint:'old-fingerprint', conflict:null,
+    diagnosticsBaseline:{ [page.pageKey]:page },
+    diagnosticsCurrent:{ [page.pageKey]:page }, diagnosticsRevision:0,
+  };
+  const sessionStore = {
+    state, sessionPath:'/tmp/session.json',
+    async persistState() {
+      persistCalls += 1;
+      if (persistCalls === 1) throw new Error('session persist failed');
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      if (message.type !== 'diagnose-pages') return;
+      queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+        type:'diagnostics-result', commandId:message.commandId,
+        revision:message.revision, pages:[page],
+      })));
+    },
+  };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready', pages:[{ index:1, label:'测试页', pageKey:page.pageKey }], diagnostics:[page],
+  }));
+
+  await assert.rejects(
+    bridge.writeDeck(0, {
+      fingerprint:async () => diskFingerprint,
+      writer:async () => {
+        diskFingerprint = 'candidate-fingerprint';
+        return {
+          ok:true, fingerprint:'candidate-fingerprint', backup:'/tmp/backup.html',
+        };
+      },
+      restore:async () => {
+        diskFingerprint = 'third-party-fingerprint';
+        throw Object.assign(new Error('Deck 恢复前已再次外改'), {
+          code:'RESTORE_CONFLICT',
+          statusCode:409,
+          expectedFingerprint:'candidate-fingerprint',
+          actualFingerprint:'third-party-fingerprint',
+        });
+      },
+    }),
+    error => ['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(error.code),
+  );
+  assert.equal(diskFingerprint, 'third-party-fingerprint');
+  assert.equal(state.deckFingerprint, 'old-fingerprint');
+  assert.equal(state.conflict?.code, 'DECK_CHANGED');
+  assert.equal(state.conflict?.actualFingerprint, 'third-party-fingerprint');
+  assert.equal(persistCalls, 2);
 });
 
 test('初始诊断基线持久化失败不得在内存伪装成可保存基线', async () => {

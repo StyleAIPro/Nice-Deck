@@ -365,7 +365,16 @@ export class BridgeService {
           blockers,
         });
       }
-      const result = await writer(runtimeWriteActions(this.compiledActions()), diskFingerprint);
+      let result;
+      try {
+        result = await writer(runtimeWriteActions(this.compiledActions()), diskFingerprint);
+      } catch (error) {
+        if (['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(error?.code)
+          && typeof error?.actualFingerprint === 'string') {
+          error.conflictCreated = await this.#recordDeckConflict(error.actualFingerprint);
+        }
+        throw error;
+      }
       const snapshot = {
         deckFingerprint:state.deckFingerprint,
         conflict:structuredClone(state.conflict),
@@ -391,6 +400,26 @@ export class BridgeService {
           await restore(result, snapshot.deckFingerprint);
         } catch (restoreError) {
           Object.assign(state, snapshot);
+          if (['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(restoreError?.code)
+            && typeof restoreError?.actualFingerprint === 'string') {
+            const conflictCreated = await this.#recordDeckConflict(
+              restoreError.actualFingerprint,
+            );
+            throw serviceError(
+              restoreError.code,
+              restoreError.statusCode ?? 409,
+              restoreError.message,
+              {
+                stage:restoreError.stage ?? 'session-rollback',
+                recovery:restoreError.recovery
+                  ?? '保留磁盘外部版本，重新载入后在新基线上重放补丁',
+                backup:result.backup,
+                expectedFingerprint:restoreError.expectedFingerprint,
+                actualFingerprint:restoreError.actualFingerprint,
+                conflictCreated,
+              },
+            );
+          }
           throw serviceError('WRITE_FAILED', 500, '会话基线更新与 Deck 自动恢复均失败', {
             stage:'session-rollback',
             recovery:'立即使用备份恢复原文件，并检查 sidecar 目录权限',
