@@ -16,10 +16,13 @@ export function makePageKey(index, label, html) {
 }
 
 export function normalizeRect(rect, canvas) {
+  if (!Number.isFinite(canvas?.width) || !Number.isFinite(canvas?.height) || canvas.width <= 0 || canvas.height <= 0) {
+    throw new RangeError('画布尺寸必须为正的有限数');
+  }
   const sx = 1920 / canvas.width;
   const sy = 1080 / canvas.height;
-  const x = Math.max(0, Math.min(1920, Math.round((rect.left - canvas.left) * sx)));
-  const y = Math.max(0, Math.min(1080, Math.round((rect.top - canvas.top) * sy)));
+  const x = Math.max(0, Math.min(1919, Math.round((rect.left - canvas.left) * sx)));
+  const y = Math.max(0, Math.min(1079, Math.round((rect.top - canvas.top) * sy)));
   const w = Math.max(1, Math.min(1920 - x, Math.round(rect.width * sx)));
   const h = Math.max(1, Math.min(1080 - y, Math.round(rect.height * sy)));
   return { x, y, w, h };

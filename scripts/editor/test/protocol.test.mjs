@@ -8,6 +8,31 @@ test('屏幕框换算并约束在 1920×1080', () => {
   assert.deepEqual(rect, { x: 200, y: 100, w: 1000, h: 500 });
 });
 
+test('右侧、下侧和右下角越界仍位于画布内', () => {
+  const canvas = { left: 0, top: 0, width: 1920, height: 1080 };
+  assert.deepEqual(normalizeRect({ left: 2000, top: 100, width: 20, height: 10 }, canvas),
+    { x: 1919, y: 100, w: 1, h: 10 });
+  assert.deepEqual(normalizeRect({ left: 100, top: 1200, width: 10, height: 20 }, canvas),
+    { x: 100, y: 1079, w: 10, h: 1 });
+  assert.deepEqual(normalizeRect({ left: 2000, top: 1200, width: 20, height: 20 }, canvas),
+    { x: 1919, y: 1079, w: 1, h: 1 });
+});
+
+test('画布尺寸无效时抛出中文 RangeError', () => {
+  for (const canvas of [
+    { left: 0, top: 0, width: 0, height: 1080 },
+    { left: 0, top: 0, width: 1920, height: 0 },
+    { left: 0, top: 0 },
+    { left: 0, top: 0, width: NaN, height: 1080 },
+    { left: 0, top: 0, width: 1920, height: Infinity },
+  ]) {
+    assert.throws(
+      () => normalizeRect({ left: 0, top: 0, width: 10, height: 10 }, canvas),
+      new RangeError('画布尺寸必须为正的有限数'),
+    );
+  }
+});
+
 test('同名页仍生成不同 pageKey', () => {
   assert.notEqual(makePageKey(1, '目录页', '<section>A</section>'),
     makePageKey(5, '目录页', '<section>A</section>'));
