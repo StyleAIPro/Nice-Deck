@@ -134,7 +134,7 @@ export class BridgeService {
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
       const result = { groupId: group.id, revision: this.sessionStore.state.revision, applied: prepared.applied };
-      const confirmation = await this.#finalizeCommitted(prepared.commandId, result);
+      const confirmation = await this.#finalizeCommitted(prepared.commandId);
       return { ...result, ...confirmation };
     });
   }
@@ -190,7 +190,7 @@ export class BridgeService {
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
       const result = { groupId, revision: this.sessionStore.state.revision, applied: prepared.applied };
-      const confirmation = await this.#finalizeCommitted(prepared.commandId, result);
+      const confirmation = await this.#finalizeCommitted(prepared.commandId);
       return { ...result, ...confirmation };
     });
   }
@@ -213,23 +213,20 @@ export class BridgeService {
     }
   }
 
-  async #finalizeCommitted(commandId, committedResult) {
+  async #finalizeCommitted(commandId) {
     try {
       const result = await this.#send(
         commandId, { type:'commit-actions', commandId },
         { expectedType:'actions-committed' },
       );
       if (result.committed !== true) throw serviceError('INVALID_ACTION_ACK', 502);
-      return { commitConfirmed:true, recoveredBySync:false };
+      return { commitConfirmed:true, recoveredBySync:false, syncPending:false };
     } catch {
       try { await this.#forceSync(); }
       catch {
-        throw serviceError(
-          'EDITOR_SYNC_REQUIRED', 503, '动作已保存，编辑器同步待确认',
-          { committed:true, commitConfirmed:false, recoveredBySync:false, ...committedResult },
-        );
+        return { commitConfirmed:false, recoveredBySync:false, syncPending:true };
       }
-      return { commitConfirmed:false, recoveredBySync:true };
+      return { commitConfirmed:false, recoveredBySync:true, syncPending:false };
     }
   }
 

@@ -1,5 +1,6 @@
 import { renderTaskDrawer } from './task-drawer.mjs';
 import { connectEvents } from './ws-client.mjs';
+import { compileActionGroups } from './action-compiler.mjs';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -74,21 +75,8 @@ function updateRevision(value) {
   revisionValue.textContent = String(revision);
 }
 
-function actionKey(action) {
-  const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
-  return `${action.target.pageKey}|${action.target.path}|${action.target.tag ?? ''}|${kind}|${action.payload?.property ?? ''}`;
-}
-
 function compiledSessionActions() {
-  const final = new Map();
-  for (const group of sessionGroups) {
-    if (!group.active) continue;
-    for (const action of group.actions ?? []) {
-      const key=actionKey(action), previous=final.get(key);
-      final.set(key,previous ? { ...action,target:previous.target } : action);
-    }
-  }
-  return [...final.values()];
+  return compileActionGroups(sessionGroups);
 }
 
 function syncSessionActions() {

@@ -1,9 +1,5 @@
 import { randomUUID } from 'node:crypto';
-
-const keyOf = action => {
-  const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
-  return `${action.target.pageKey}|${action.target.path}|${action.target.tag ?? ''}|${kind}|${action.payload?.property ?? ''}`;
-};
+import { compileActionGroups } from './action-compiler.mjs';
 
 function inverse(action) {
   let kind = action.kind;
@@ -27,16 +23,7 @@ export class PatchJournal {
   }
 
   compile() {
-    const final = new Map();
-    for (const group of this.state.groups) {
-      if (group.active) {
-        for (const action of group.actions) {
-          const key=keyOf(action), previous=final.get(key);
-          final.set(key,previous ? { ...action,target:previous.target } : action);
-        }
-      }
-    }
-    return [...final.values()];
+    return compileActionGroups(this.state.groups);
   }
 
   undo(id) {

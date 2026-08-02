@@ -16,6 +16,7 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const EDITOR_ASSETS = new Map([
   ['/editor/editor.css', { path: join(PUBLIC_DIR, 'editor.css'), type: 'text/css; charset=utf-8' }],
   ['/editor/editor.mjs', { path: join(PUBLIC_DIR, 'editor.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/action-compiler.mjs', { path: join(EDITOR_DIR, 'action-compiler.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/frame-bridge.mjs', { path: join(PUBLIC_DIR, 'frame-bridge.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/task-drawer.mjs', { path: join(PUBLIC_DIR, 'task-drawer.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/ws-client.mjs', { path: join(PUBLIC_DIR, 'ws-client.mjs'), type: 'text/javascript; charset=utf-8' }],
