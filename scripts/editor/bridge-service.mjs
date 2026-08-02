@@ -398,6 +398,10 @@ export class BridgeService {
     return this.#enqueue(async () => {
       this.#assertMutable();
       this.assertRevision(expectedRevision);
+      if (!Array.isArray(actions)
+        || actions.some(action => action?.taskId !== taskId)) {
+        throw serviceError('INVALID_INPUT', 400, '每个 action.taskId 必须与批次 taskId 严格一致');
+      }
       const linkedTask = taskId === null ? undefined : taskById(this.sessionStore.state, taskId);
       if (taskId !== null && !linkedTask) {
         throw serviceError('TASK_NOT_FOUND', 404, '找不到任务');
@@ -918,6 +922,7 @@ export class BridgeService {
       const source = requested[index];
       try { validateAction(result); } catch { return false; }
       return result.id === source.id
+        && result.taskId === source.taskId
         && result.kind === source.kind
         && isDeepStrictEqual(result.target, source.target)
         && isDeepStrictEqual(result.payload, source.payload)

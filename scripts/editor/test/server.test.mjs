@@ -26,7 +26,7 @@ const taskInput = {
 
 const action = {
   id: 'action-1',
-  taskId: 'task-1',
+  taskId: null,
   target: { pageKey: 'page-001-a', path: '0/1' },
   kind: 'setText',
   payload: { text: '新文案' },
@@ -978,7 +978,10 @@ test('close 对 task、undo/redo 与 diagnostics 的迟到 helper 错误统一�
       const active = method === 'undoGroup';
       const state = {
         revision:1, tasks:[],
-        groups:[{ id:'group-1', taskId:'task-1', actions:[action], active }],
+        groups:[{
+          id:'group-1', taskId:'task-1',
+          actions:[{ ...action, taskId:'task-1' }], active,
+        }],
         redo:active ? [] : ['group-1'],
       };
       let rejectPersist;
@@ -1112,7 +1115,9 @@ test('action 的 session 写已 committed 后发布候选并冻结，且不回�
   bridge.setEditorSocket(socket);
 
   await assert.rejects(
-    bridge.applyActions({ taskId:'task-1', actions:[action], expectedRevision:0 }),
+    bridge.applyActions({
+      taskId:'task-1', actions:[{ ...action, taskId:'task-1' }], expectedRevision:0,
+    }),
     error => error.code === 'RECOVERY_REQUIRED' && error.statusCode === 503
       && error.committed === true,
   );
@@ -1155,7 +1160,10 @@ test('undo/redo 的 session 写已 committed 后保留候选 journal 并冻结',
           id:'task-1', status:initiallyActive ? 'completed' : 'pending',
           ...(initiallyActive ? { groupId } : {}), candidates:[], createdAt, updatedAt:createdAt,
         }],
-        groups:[{ id:groupId, taskId:'task-1', actions:[action], active:initiallyActive }],
+        groups:[{
+          id:groupId, taskId:'task-1',
+          actions:[{ ...action, taskId:'task-1' }], active:initiallyActive,
+        }],
         redo:initiallyActive ? [] : [groupId], diagnosticsBaseline:{},
         diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
       };
@@ -1616,7 +1624,11 @@ test('不存在的 taskId 在发送浏览器 tentative action 前拒绝', async 
 
   const response = await fetch(`${app.url}/api/actions?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ expectedRevision:0, taskId:'missing-task', actions:[action] }),
+    body:JSON.stringify({
+      expectedRevision:0,
+      taskId:'missing-task',
+      actions:[{ ...action, taskId:'missing-task' }],
+    }),
   });
   const body = await response.json();
   await new Promise(resolve => setTimeout(resolve, 25));
@@ -1624,6 +1636,83 @@ test('不存在的 taskId 在发送浏览器 tentative action 前拒绝', async 
   assert.equal(response.status, 404);
   assert.equal(body.error, 'TASK_NOT_FOUND');
   assert.equal(commands, 0);
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.groups, []);
+});
+
+test('顶层 taskId 与 action.taskId 不一致时在 tentative 前原子拒绝', async t => {
+  const app = await makeApp(t);
+  const first = await createTask(app);
+  const second = await createTask(app, {
+    expectedRevision:1, pageKey:'page-002-b', pageIndex:2, pageLabel:'B',
+  });
+  const before = structuredClone(app.session);
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  let tentativeCommands = 0;
+  editor.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type === 'apply-actions') {
+      tentativeCommands += 1;
+      editor.send(JSON.stringify({
+        type:'actions-prepared', commandId:message.commandId,
+        applied:message.actions.length, results:message.actions,
+      }));
+    } else if (message.type === 'commit-actions') {
+      editor.send(JSON.stringify({
+        type:'actions-committed', commandId:message.commandId, committed:true,
+      }));
+    }
+  });
+
+  const response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({
+      expectedRevision:2,
+      taskId:first.task.id,
+      actions:[{ ...action, taskId:second.task.id }],
+    }),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(body.error, 'INVALID_INPUT');
+  assert.match(body.message, /taskId/);
+  assert.equal(tentativeCommands, 0);
+  assert.deepEqual(app.session, before);
+});
+
+test('canonical ACK 篡改 action.taskId 时回滚且不写 Journal', async t => {
+  const app = await makeApp(t);
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  const requested = { ...action, taskId:null };
+  const commandPromise = nextMessage(editor);
+  const responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0, taskId:null, actions:[requested] }),
+  });
+  const command = await commandPromise;
+  editor.send(JSON.stringify({
+    type:'actions-prepared', commandId:command.commandId, applied:1,
+    results:[{ ...command.actions[0], taskId:'forged-task' }],
+  }));
+  const followup = await nextMessage(editor);
+  if (followup.type === 'rollback-actions') {
+    editor.send(JSON.stringify({
+      type:'actions-rolled-back', commandId:command.commandId, rolledBack:true,
+    }));
+  } else if (followup.type === 'commit-actions') {
+    editor.send(JSON.stringify({
+      type:'actions-committed', commandId:command.commandId, committed:true,
+    }));
+  }
+  const response = await responsePromise;
+  const body = await response.json();
+
+  assert.equal(followup.type, 'rollback-actions');
+  assert.equal(response.status, 502);
+  assert.equal(body.error, 'INVALID_ACTION_ACK');
   assert.equal(app.session.revision, 0);
   assert.deepEqual(app.session.groups, []);
 });
@@ -2349,7 +2438,7 @@ test('写入适配器只接收运行时所需的最小动作 DTO', async t => {
   const editor = await connectDiagnosticsEditor(t, app);
   const canonicalAction = {
     ...action,
-    taskId:'ui-task',
+    taskId:null,
     target:{ ...action.target, pageKey:'page-001-save-gate' },
     expectedRevision:0,
     instruction:'仅供 UI 展示',
