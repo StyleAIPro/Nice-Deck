@@ -16,26 +16,18 @@
 
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { loadChromium } from './load-playwright.mjs';
 
 const TRUNC = 36; // 元素文本摘要统一截断长度
-
-async function loadChromium() {
-  const candidates = [process.env.PLAYWRIGHT_CORE, 'playwright-core',
-    '/opt/homebrew/lib/node_modules/openclaw/node_modules/playwright-core/index.js'].filter(Boolean);
-  for (const c of candidates) {
-    try { const m = await import(c); return (m.default ?? m).chromium; } catch { /* 尝试下一个 */ }
-  }
-  console.error(`无法加载 playwright-core（已尝试: ${candidates.join(' → ')}）`);
-  console.error('请在本目录 npm i playwright-core，或设环境变量 PLAYWRIGHT_CORE 指向其 index.js');
-  process.exit(2);
-}
 
 const [deckFile, ...rest] = process.argv.slice(2);
 if (!deckFile) { console.error('用法: node measure_overflow.mjs <deck.html> [label ...|--all]'); process.exit(2); }
 if (!existsSync(deckFile)) { console.error(`找不到 deck 文件: ${deckFile}`); process.exit(2); }
 const wantLabels = rest.filter(a => a !== '--all');
 
-const chromium = await loadChromium();
+let chromium;
+try { chromium = await loadChromium(); }
+catch (error) { console.error(error.message); process.exit(2); }
 let browser, exitCode = 0;
 try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
