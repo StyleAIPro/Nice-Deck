@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -10,15 +10,54 @@ import { validateAction, validateTask } from './protocol.mjs';
 import { RevisionConflict, SessionStore } from './session-store.mjs';
 
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
+const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
+const PUBLIC_DIR = join(EDITOR_DIR, 'public');
 const MAX_BODY_BYTES = 1024 * 1024;
+const EDITOR_ASSETS = new Map([
+  ['/editor/editor.css', { path: join(PUBLIC_DIR, 'editor.css'), type: 'text/css; charset=utf-8' }],
+  ['/editor/editor.mjs', { path: join(PUBLIC_DIR, 'editor.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/frame-bridge.mjs', { path: join(PUBLIC_DIR, 'frame-bridge.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/ws-client.mjs', { path: join(PUBLIC_DIR, 'ws-client.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/html2canvas.min.js', {
+    path: join(PROJECT_DIR, 'node_modules/html2canvas/dist/html2canvas.min.js'),
+    type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/patch-runtime.js', {
+    path: join(EDITOR_DIR, 'runtime/patch-runtime.js'),
+    type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/huawei-logo.png', {
+    path: join(PROJECT_DIR, 'assets/huawei-refs/logos/huawei-横版logo-透明.png'),
+    type: 'image/png',
+  }],
+]);
 
 function httpError(code, statusCode, message = code) {
   return Object.assign(new Error(message), { code, statusCode });
 }
 
+function authCookieName(token) {
+  const sessionId = createHash('sha256').update(token).digest('hex').slice(0, 16);
+  return `huawei_deck_editor_${sessionId}`;
+}
+
+function cookieValue(request, name) {
+  for (const part of (request.headers.cookie ?? '').split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 function authorize(request, url, token) {
   const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (url.searchParams.get('token') !== token && bearer !== token) {
+  const cookieToken = cookieValue(request, authCookieName(token));
+  if (url.searchParams.get('token') !== token && bearer !== token && cookieToken !== token) {
     throw httpError('FORBIDDEN', 403, '无权访问本地编辑服务');
   }
 }
@@ -69,6 +108,47 @@ function json(response, statusCode, value) {
     'cache-control': 'no-store',
   });
   response.end(body);
+}
+
+function send(response, statusCode, body, contentType, headers = {}) {
+  response.writeHead(statusCode, {
+    'content-type': contentType,
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+    ...headers,
+  });
+  response.end(body);
+}
+
+async function sendEditorIndex(request, response, url, token, editorToken) {
+  authorize(request, url, token);
+  if (url.searchParams.get('editorToken') !== editorToken) {
+    throw httpError('FORBIDDEN', 403, '缺少编辑器能力令牌');
+  }
+  const contents = await readFile(join(PUBLIC_DIR, 'index.html'));
+  send(response, 200, contents, 'text/html; charset=utf-8', {
+    'set-cookie': `${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`,
+  });
+}
+
+function injectPreviewBridge(contents) {
+  let preview = contents.replace(
+    /(<script\b[^>]*?\bsrc=)(["'])(?:\.\.\/)+runtime\/patch-runtime\.js\2/gi,
+    '$1$2/editor/patch-runtime.js$2',
+  );
+  const tags = [];
+  if (!/<script\b[^>]*\bsrc=["']\/editor\/html2canvas\.min\.js["'][^>]*>/i.test(preview)) {
+    tags.push('<script src="/editor/html2canvas.min.js"></script>');
+  }
+  if (!/<script\b[^>]*\bsrc=["']\/editor\/frame-bridge\.mjs["'][^>]*>/i.test(preview)) {
+    tags.push('<script type="module" src="/editor/frame-bridge.mjs"></script>');
+  }
+  if (!tags.length) return preview;
+  const injection = `${tags.join('\n')}\n`;
+  const bodyEnd = preview.toLowerCase().lastIndexOf('</body>');
+  if (bodyEnd < 0) return `${preview}\n${injection}`;
+  preview = `${preview.slice(0, bodyEnd)}${injection}${preview.slice(bodyEnd)}`;
+  return preview;
 }
 
 function errorResponse(response, error) {
@@ -251,6 +331,11 @@ export async function startServer({
       const { pathname } = url;
       if (isProtected(pathname)) authorize(request, url, token);
 
+      if (request.method === 'GET' && pathname === '/') {
+        await sendEditorIndex(request, response, url, token, editorToken);
+        return;
+      }
+
       if (request.method === 'GET' && pathname === '/api/session') {
         json(response, 200, sessionStore.state);
         return;
@@ -319,17 +404,23 @@ export async function startServer({
         return;
       }
       if (request.method === 'GET' && pathname === '/preview') {
-        const contents = await readFile(absoluteDeckPath);
-        response.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'content-length': contents.length,
-          'cache-control': 'no-store',
-        });
-        response.end(contents);
+        const contents = await readFile(absoluteDeckPath, 'utf8');
+        const preview = injectPreviewBridge(contents);
+        send(response, 200, preview, 'text/html; charset=utf-8');
+        return;
+      }
+      if (request.method === 'GET' && (pathname === '/editor' || pathname === '/editor/')) {
+        await sendEditorIndex(request, response, url, token, editorToken);
+        return;
+      }
+      if (request.method === 'GET' && EDITOR_ASSETS.has(pathname)) {
+        const asset = EDITOR_ASSETS.get(pathname);
+        const contents = await readFile(asset.path);
+        send(response, 200, contents, asset.type);
         return;
       }
       if (request.method === 'GET' && (pathname === '/editor' || pathname.startsWith('/editor/'))) {
-        throw httpError('EDITOR_ASSET_NOT_FOUND', 404, `编辑器资源尚未创建：${pathname}`);
+        throw httpError('EDITOR_ASSET_NOT_FOUND', 404, `编辑器资源不存在：${pathname}`);
       }
       if (request.method === 'GET' && pathname === '/events') {
         response.setHeader('upgrade', 'websocket');
