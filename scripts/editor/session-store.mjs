@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { dirname, join, parse } from 'node:path';
+import { mkdir, readFile } from 'node:fs/promises';
+import { basename, dirname, join, parse } from 'node:path';
+import { localDurableIO } from './sidecar-io.mjs';
 
 export class RevisionConflict extends Error {}
 
@@ -39,20 +40,29 @@ export class SessionStore {
     rootDir = join(dirname(deckPath), '.huawei-deck-editor'),
     sessionDir: selectedSessionDir,
     sidecarGuard = async () => {},
+    sidecarIO = localDurableIO,
+    directoriesPrepared = false,
   }) {
     await sidecarGuard();
     const bytes = await readFile(deckPath);
     const deckFingerprint = sha256(bytes);
     const sessionDir = selectedSessionDir
       ?? join(rootDir, `${parse(deckPath).name}-${deckFingerprint.slice(0, 8)}`);
-    await sidecarGuard();
-    await mkdir(join(sessionDir, 'snapshots'), { recursive: true });
-    await mkdir(join(sessionDir, 'backups'), { recursive: true });
+    if (!directoriesPrepared) {
+      await sidecarGuard();
+      await mkdir(join(sessionDir, 'snapshots'), { recursive: true });
+      await mkdir(join(sessionDir, 'backups'), { recursive: true });
+    }
 
-    const store = new SessionStore(deckPath, deckFingerprint, sessionDir, sidecarGuard);
+    const store = new SessionStore(
+      deckPath, deckFingerprint, sessionDir, sidecarGuard, sidecarIO,
+    );
     await sidecarGuard();
     try {
-      const persisted = JSON.parse(await readFile(store.sessionPath, 'utf8'));
+      const persistedBytes = directoriesPrepared && typeof sidecarIO.read === 'function'
+        ? await sidecarIO.read({ directory:sessionDir, name:'session.json' })
+        : await readFile(store.sessionPath);
+      const persisted = JSON.parse(persistedBytes.toString('utf8'));
       store.state = {
         ...store.state,
         ...persisted,
@@ -70,11 +80,18 @@ export class SessionStore {
     return store;
   }
 
-  constructor(deckPath, deckFingerprint, sessionDir, sidecarGuard = async () => {}) {
+  constructor(
+    deckPath,
+    deckFingerprint,
+    sessionDir,
+    sidecarGuard = async () => {},
+    sidecarIO = localDurableIO,
+  ) {
     this.deckPath = deckPath;
     this.sessionDir = sessionDir;
     this.sessionPath = join(sessionDir, 'session.json');
     this.sidecarGuard = sidecarGuard;
+    this.sidecarIO = sidecarIO;
     this.state = {
       version: 1,
       deckPath,
@@ -96,20 +113,16 @@ export class SessionStore {
     }
   }
 
-  async #persist() {
+  async #persist(state = this.state) {
     await this.sidecarGuard();
-    const temporaryPath = `${this.sessionPath}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify(this.state, null, 2));
-    try {
-      await this.sidecarGuard();
-      await rename(temporaryPath, this.sessionPath);
-    } catch (error) {
-      await unlink(temporaryPath).catch(() => {});
-      throw error;
-    }
+    await this.sidecarIO.atomicWrite({
+      directory:dirname(this.sessionPath),
+      name:basename(this.sessionPath),
+      bytes:Buffer.from(JSON.stringify(state, null, 2)),
+    });
   }
 
-  persistState() { return this.#persist(); }
+  persistState(state = this.state) { return this.#persist(state); }
 
   async createTask(input, expectedRevision) {
     this.#expect(expectedRevision);
@@ -127,31 +140,31 @@ export class SessionStore {
       createdAt: now,
       updatedAt: now,
     };
-    const temporarySnapshotPath = snapshotBytes
-      ? join(this.sessionDir, 'snapshots', `.${id}.${randomUUID()}.tmp`)
-      : null;
-    const finalSnapshotPath = snapshotPath ? join(this.sessionDir, snapshotPath) : null;
+    const snapshotsDirectory = join(this.sessionDir, 'snapshots');
+    const snapshotName = snapshotBytes ? `${id}.png` : null;
     const previousRevision = this.state.revision;
     const previousTasks = structuredClone(this.state.tasks);
     try {
       if (snapshotBytes) {
         await this.sidecarGuard();
-        await writeFile(temporarySnapshotPath, snapshotBytes);
-        await this.sidecarGuard();
-        await rename(temporarySnapshotPath, finalSnapshotPath);
+        await this.sidecarIO.atomicWrite({
+          directory:snapshotsDirectory, name:snapshotName, bytes:snapshotBytes,
+        });
       }
       this.state.tasks.push(task);
       this.state.revision += 1;
       await this.#persist();
       return { task, revision: this.state.revision };
     } catch (error) {
-      this.state.revision = previousRevision;
-      this.state.tasks = previousTasks;
-      await Promise.all([
-        temporarySnapshotPath ? unlink(temporarySnapshotPath).catch(() => {}) : undefined,
-        finalSnapshotPath ? unlink(finalSnapshotPath).catch(() => {}) : undefined,
-        unlink(`${this.sessionPath}.tmp`).catch(() => {}),
-      ]);
+      if (error?.committed !== true) {
+        this.state.revision = previousRevision;
+        this.state.tasks = previousTasks;
+        if (snapshotName) {
+          await this.sidecarIO.unlink({
+            directory:snapshotsDirectory, name:snapshotName, missingOk:true,
+          }).catch(() => {});
+        }
+      }
       throw error;
     }
   }

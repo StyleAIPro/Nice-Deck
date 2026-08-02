@@ -204,7 +204,7 @@ def write_patches(
     transaction_id = _normalize_transaction_id(transaction_id)
     if sidecar_identity is None:
         backups = _ensure_plain_directory(session_dir / "backups", parent=session_dir)
-        backup_identity = None
+        backup_identity = _identity_for(backups, "backups")
     else:
         backups = session_dir / "backups"
         backup_identity = _require_identity(sidecar_identity, "backups", backups)
@@ -273,7 +273,7 @@ def write_patches(
             transactions = _ensure_plain_directory(
                 session_dir / "transactions", parent=session_dir
             )
-            transaction_identity = None
+            transaction_identity = _identity_for(transactions, "transactions")
         else:
             transactions = session_dir / "transactions"
             transaction_identity = _require_identity(
@@ -377,15 +377,24 @@ def write_patches_safe(
             safe_session = _ensure_sidecar_session(
                 deck_path, session_dir, sidecar_identity
             )
-            diagnostics = _ensure_plain_directory(
-                safe_session / "write-errors", parent=safe_session
-            )
+            if sidecar_identity is None:
+                diagnostics = _ensure_plain_directory(
+                    safe_session / "write-errors", parent=safe_session
+                )
+                diagnostic_identity = _identity_for(diagnostics, "writeErrors")
+            else:
+                diagnostics = safe_session / "write-errors"
+                diagnostic_identity = _require_identity(
+                    sidecar_identity, "writeErrors", diagnostics
+                )
             token = hashlib.sha256(os.urandom(32)).hexdigest()[:16]
             candidate_bytes = getattr(error, "deck_candidate_bytes", None)
             candidate_relative = None
             if isinstance(candidate_bytes, bytes):
                 candidate_name = f"candidate-{token}.html"
-                _write_new_file(diagnostics, candidate_name, candidate_bytes)
+                _write_new_file(
+                    diagnostics, candidate_name, candidate_bytes, diagnostic_identity
+                )
                 candidate_relative = f"write-errors/{candidate_name}"
                 result["candidate"] = candidate_relative
             diagnostic_name = f"write-{token}.json"
@@ -404,6 +413,7 @@ def write_patches_safe(
                 json.dumps(
                     diagnostic_payload, ensure_ascii=False, indent=2
                 ).encode("utf-8"),
+                diagnostic_identity,
             )
             result["diagnostic"] = diagnostic_relative
         except Exception as diagnostic_error:

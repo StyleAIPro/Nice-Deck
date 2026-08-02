@@ -94,3 +94,38 @@ test('session 持久化失败会回滚 task/revision 并清理快照和临时文
   assert.deepEqual(store.state.tasks, []);
   assert.deepEqual(await readdir(join(store.sessionDir, 'snapshots')), []);
 });
+
+test('SessionStore 的 session 与 snapshot 只通过可信 atomic I/O 层提交', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-secure-io-'));
+  const deck = join(root, 'deck.html');
+  await writeFile(deck, 'deck-v1');
+  const writes = [];
+  const sidecarIO = {
+    async atomicWrite({ directory, name, bytes }) {
+      writes.push({ directory, name, bytes:Buffer.from(bytes) });
+      await writeFile(join(directory, name), bytes);
+    },
+    async unlink({ directory, name }) {
+      writes.push({ directory, name, unlink:true });
+    },
+  };
+  const store = await SessionStore.open({
+    deckPath:deck,
+    rootDir:join(root, '.huawei-deck-editor'),
+    sidecarIO,
+  });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].directory, store.sessionDir);
+  assert.equal(writes[0].name, 'session.json');
+  writes.length = 0;
+
+  const result = await store.createTask({
+    pageKey:'page-001-a', pageIndex:1, pageLabel:'A',
+    rect:{ x:1, y:2, w:30, h:40 }, instruction:'改 A', snapshot:PNG_DATA_URL,
+  }, 0);
+
+  assert.deepEqual(writes.map(write => [write.directory, write.name]), [
+    [join(store.sessionDir, 'snapshots'), `${result.task.id}.png`],
+    [store.sessionDir, 'session.json'],
+  ]);
+});

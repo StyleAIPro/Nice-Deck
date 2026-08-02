@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
-  mkdir, mkdtemp, readFile, readdir, rename, symlink, writeFile,
+  mkdir, mkdtemp, readFile, readdir, rename, symlink, unlink, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -159,6 +159,10 @@ async function writeTransactionRecord(app, transactionId, oldBytes, candidateByt
   const oldFingerprint = sha256(oldBytes);
   const candidateFingerprint = sha256(candidateBytes);
   const transactionPath = join(transactions, `${transactionId}.json`);
+  await writeFile(
+    join(app.sessionDir, 'backups', `deck-${oldFingerprint}.html`),
+    oldBytes,
+  );
   await writeFile(transactionPath, JSON.stringify({
     version:1,
     transactionId,
@@ -226,6 +230,10 @@ async function replaceSidecarIdentity(app, level) {
   await mkdir(join(replacementSession, 'backups'), { recursive:true });
   await mkdir(join(replacementSession, 'transactions'), { recursive:true });
   return replacementSession;
+}
+
+async function sidecarTree(root) {
+  return (await readdir(root, { recursive:true })).sort();
 }
 
 function fakeWriterChild({ onEnd, onKill, closesOnKill = true } = {}) {
@@ -1004,6 +1012,87 @@ test('重启按 durable record 收敛 old、candidate 与 third 状态后才清�
       }
     });
   }
+});
+
+test('启动拒绝 forged/stale transaction 且发现阶段保持 sidecar 只读', async t => {
+  const oldBytes = Buffer.from(validBundle());
+  const candidateBytes = Buffer.from(validBundle().replace('stage', 'stage candidate'));
+
+  const runRejectedStartup = async fixture => {
+    const deckBefore = await readFile(fixture.deckPath);
+    const treeBefore = await sidecarTree(fixture.sidecarRoot);
+    let app;
+    let startupError;
+    try {
+      app = await startServer({
+        deckPath:fixture.deckPath,
+        host:'127.0.0.1', port:0, openBrowser:false,
+      });
+    } catch (error) {
+      startupError = error;
+    } finally {
+      await app?.close();
+    }
+    assert.equal(app, undefined, '不可信 pending record 不得启动服务');
+    assert.equal(startupError?.code, 'UNSAFE_SIDECAR');
+    assert.deepEqual(await readFile(fixture.deckPath), deckBefore);
+    assert.deepEqual(await sidecarTree(fixture.sidecarRoot), treeBefore);
+  };
+
+  await t.test('错误 session 目录名即使 record 自洽也拒绝', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-forged-session-name-'));
+    const fixture = await createPendingTransactionFixture({
+      root, diskBytes:candidateBytes, oldBytes, candidateBytes,
+      sessionFingerprint:sha256(oldBytes),
+    });
+    const forgedSession = join(fixture.sidecarRoot, 'deck-deadbeef');
+    await rename(fixture.sessionDir, forgedSession);
+    const transaction = join(forgedSession, 'transactions', '123e4567-e89b-42d3-a456-426614174000.json');
+    const record = JSON.parse(await readFile(transaction, 'utf8'));
+    record.sessionDir = forgedSession;
+    record.backup = join(forgedSession, 'backups', `deck-${fixture.oldFingerprint}.html`);
+    await writeFile(transaction, JSON.stringify(record));
+    await runRejectedStartup({ ...fixture, sessionDir:forgedSession, transaction });
+  });
+
+  await t.test('session.json deckPath 与当前 Deck 不一致时拒绝', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-forged-session-state-'));
+    const fixture = await createPendingTransactionFixture({
+      root, diskBytes:candidateBytes, oldBytes, candidateBytes,
+      sessionFingerprint:sha256(oldBytes),
+    });
+    const sessionPath = join(fixture.sessionDir, 'session.json');
+    const state = JSON.parse(await readFile(sessionPath, 'utf8'));
+    state.deckPath = join(root, 'other-deck.html');
+    await writeFile(sessionPath, JSON.stringify(state));
+    await runRejectedStartup(fixture);
+  });
+
+  await t.test('record-like symlink 不得被忽略后另建 session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-record-symlink-'));
+    const fixture = await createPendingTransactionFixture({
+      root, diskBytes:candidateBytes, oldBytes, candidateBytes,
+      sessionFingerprint:sha256(oldBytes),
+    });
+    const outsideRecord = join(root, 'outside-record.json');
+    await writeFile(outsideRecord, await readFile(fixture.transaction));
+    await unlink(fixture.transaction);
+    await symlink(outsideRecord, fixture.transaction);
+    await runRejectedStartup(fixture);
+  });
+
+  await t.test('无效 record 验证前不得创建任何 session 子目录', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-invalid-record-readonly-'));
+    const deckPath = join(root, 'deck.html');
+    await writeFile(deckPath, candidateBytes);
+    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sessionDir = join(sidecarRoot, `deck-${sha256(oldBytes).slice(0, 8)}`);
+    const transactions = join(sessionDir, 'transactions');
+    const transaction = join(transactions, '123e4567-e89b-42d3-a456-426614174000.json');
+    await mkdir(transactions, { recursive:true });
+    await writeFile(transaction, '{invalid');
+    await runRejectedStartup({ deckPath, sidecarRoot, sessionDir, transaction });
+  });
 });
 
 test('writer 已替换 Deck 后无 ACK、坏 ACK、非零退出、EPIPE 或超时都必须恢复原子状态', async t => {

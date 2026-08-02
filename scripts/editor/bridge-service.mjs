@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { rename, unlink, writeFile } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { PatchJournal } from './patch-journal.mjs';
 import { hasCanonicalValues, validateAction } from './protocol.mjs';
@@ -193,18 +193,17 @@ export class BridgeService {
         if (this.closed || socket !== this.editorSocket || !this.editorReady) return;
         const state = this.sessionStore.state;
         if (!Object.keys(state.diagnosticsBaseline ?? {}).length) {
-          const snapshot = {
-            diagnosticsBaseline:state.diagnosticsBaseline ?? {},
-            diagnosticsCurrent:state.diagnosticsCurrent ?? {},
-            diagnosticsRevision:state.diagnosticsRevision ?? null,
-          };
-          state.diagnosticsBaseline = baseline;
-          state.diagnosticsCurrent = structuredClone(baseline);
-          state.diagnosticsRevision = state.revision;
           try {
-            await this.sessionStore.persistState();
+            await this.sessionStore.persistState({
+              ...state,
+              diagnosticsBaseline:baseline,
+              diagnosticsCurrent:structuredClone(baseline),
+              diagnosticsRevision:state.revision,
+            });
+            state.diagnosticsBaseline = baseline;
+            state.diagnosticsCurrent = structuredClone(baseline);
+            state.diagnosticsRevision = state.revision;
           } catch {
-            Object.assign(state, snapshot);
             throw diagnosticFailure('DIAGNOSTICS_UNAVAILABLE', '启动诊断基线无法持久化');
           }
         }
@@ -290,7 +289,10 @@ export class BridgeService {
       catch (error) {
         state.revision = snapshot.revision;
         state.tasks = snapshot.tasks;
-        await unlink(`${this.sessionStore.sessionPath}.tmp`).catch(() => {});
+        // 仅兼容不具备可信 I/O 接口的最小测试替身；生产 SessionStore 自行清理 dirfd temp。
+        if (!this.sessionStore.sidecarIO) {
+          await unlink(`${this.sessionStore.sessionPath}.tmp`).catch(() => {});
+        }
         throw error;
       }
     });
@@ -401,6 +403,15 @@ export class BridgeService {
       try {
         await this.sessionStore.persistState();
       } catch (error) {
+        if (error?.committed === true) {
+          throw serviceError('WRITE_FAILED', 500, '会话基线目录同步失败，保留事务记录等待重启收敛', {
+            stage:'session-durability',
+            recovery:'停止继续修改并重启编辑服务，让 durable transaction 自动收敛',
+            backup:result.backup,
+            committed:true,
+            cause:error,
+          });
+        }
         try {
           await restore(result, snapshot.deckFingerprint);
         } catch (restoreError) {
@@ -410,7 +421,6 @@ export class BridgeService {
             const conflictCreated = await this.#recordDeckConflict(
               restoreError.actualFingerprint,
             );
-            await finalize(result);
             throw serviceError(
               restoreError.code,
               restoreError.statusCode ?? 409,
@@ -435,8 +445,7 @@ export class BridgeService {
           });
         }
         Object.assign(state, snapshot);
-        await finalize(result);
-        throw serviceError('WRITE_FAILED', 500, '会话基线更新失败，Deck 已从备份恢复', {
+        throw serviceError('WRITE_FAILED', 500, '会话基线更新失败，Deck 已从备份恢复并保留事务记录', {
           stage:'session',
           recovery:'检查 sidecar 目录权限后重试',
           backup:result.backup,
@@ -687,10 +696,8 @@ export class BridgeService {
     };
     const result = change(this.journal);
     state.revision += 1;
-    const temporaryPath = `${this.sessionStore.sessionPath}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporaryPath, JSON.stringify(state, null, 2));
-      await rename(temporaryPath, this.sessionStore.sessionPath);
+      await this.sessionStore.persistState();
       this.journal = new PatchJournal(state);
       return result;
     } catch (error) {
@@ -698,7 +705,6 @@ export class BridgeService {
       state.groups = snapshot.groups;
       state.redo = snapshot.redo;
       this.journal = new PatchJournal(state);
-      await unlink(temporaryPath).catch(() => {});
       throw error;
     }
   }

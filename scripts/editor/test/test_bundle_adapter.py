@@ -343,6 +343,64 @@ class BundleAdapterTest(unittest.TestCase):
             self.assertNotIn("candidate", result)
             self.assertEqual([], list(outside.iterdir()))
 
+    def test_write_errors_identity_swap_between_guard_and_open_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            deck = project / "deck.html"
+            minimal_bundle(deck)
+            original = deck.read_bytes()
+            root = project / ".huawei-deck-editor"
+            session = root / "deck-session"
+            backups = session / "backups"
+            transactions = session / "transactions"
+            write_errors = session / "write-errors"
+            backups.mkdir(parents=True)
+            transactions.mkdir()
+            write_errors.mkdir()
+            identity = {
+                "root": directory_identity(root),
+                "session": directory_identity(session),
+                "backups": directory_identity(backups),
+                "transactions": directory_identity(transactions),
+                "writeErrors": directory_identity(write_errors),
+            }
+            trusted_root = root.with_name(f"{root.name}.trusted-original")
+            replacement_errors = session / "write-errors"
+            swapped = False
+
+            original_require = bundle_adapter._require_identity
+
+            def require_then_swap(current_identity, name, path):
+                nonlocal swapped
+                result = original_require(current_identity, name, path)
+                if name == "writeErrors" and not swapped:
+                    swapped = True
+                    root.rename(trusted_root)
+                    replacement_errors.mkdir(parents=True)
+                    (session / "backups").mkdir()
+                    (session / "transactions").mkdir()
+                return result
+
+            with mock.patch.object(
+                bundle_adapter.eb,
+                "verify",
+                side_effect=AssertionError("verify exploded"),
+            ), mock.patch.object(
+                bundle_adapter,
+                "_require_identity",
+                side_effect=require_then_swap,
+            ):
+                result = bundle_adapter.write_patches_safe(
+                    deck, [], session, sidecar_identity=identity
+                )
+
+            self.assertEqual(False, result["ok"])
+            self.assertNotIn("diagnostic", result)
+            self.assertNotIn("candidate", result)
+            self.assertEqual([], list(replacement_errors.iterdir()))
+            self.assertEqual(original, deck.read_bytes())
+
     def test_expected_fingerprint_mismatch_is_conflict_without_write(self):
         with tempfile.TemporaryDirectory() as td:
             deck = Path(td) / "deck.html"
