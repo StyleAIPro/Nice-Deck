@@ -420,3 +420,114 @@ export async function startServer({
     close,
   };
 }
+
+function serverHelp() {
+  return [
+    '用法: node scripts/editor/server.mjs <deck> [选项]',
+    '',
+    '选项:',
+    '  --host HOST   监听地址（默认 127.0.0.1）',
+    '  --port PORT   监听端口（默认 0，自动分配）',
+    '  --no-open     不自动打开浏览器',
+    '  --help        显示帮助',
+  ].join('\n');
+}
+
+function parseServerArguments(argv) {
+  let deckPath;
+  let host = '127.0.0.1';
+  let port = 0;
+  let openBrowser = true;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === '--help' || argument === '-h') return { help: true };
+    if (argument === '--no-open') {
+      openBrowser = false;
+      continue;
+    }
+    if (argument === '--host' || argument === '--port') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) throw new TypeError(`${argument} 缺少值`);
+      if (argument === '--host') host = value;
+      else {
+        port = Number(value);
+        if (!Number.isSafeInteger(port) || port < 0 || port > 65535) {
+          throw new TypeError('--port 必须是 0 到 65535 的整数');
+        }
+      }
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('-')) throw new TypeError(`未知参数: ${argument}`);
+    if (deckPath) throw new TypeError(`多余参数: ${argument}`);
+    deckPath = argument;
+  }
+  if (!deckPath) throw new TypeError('缺少 deck 文件');
+  return { help: false, deckPath, host, port, openBrowser };
+}
+
+function openEditor(editorUrl) {
+  let command;
+  let args;
+  if (process.platform === 'darwin') {
+    command = 'open';
+    args = [editorUrl];
+  } else if (process.platform === 'win32') {
+    command = 'cmd';
+    args = ['/c', 'start', '', editorUrl];
+  } else {
+    command = 'xdg-open';
+    args = [editorUrl];
+  }
+  const opener = spawn(command, args, { detached: true, stdio: 'ignore' });
+  opener.once('error', () => {});
+  opener.unref();
+}
+
+export async function runServerCli(argv = process.argv.slice(2)) {
+  let options;
+  try {
+    options = parseServerArguments(argv);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 2;
+  }
+  if (options.help) {
+    process.stdout.write(`${serverHelp()}\n`);
+    return 0;
+  }
+
+  let app;
+  try {
+    app = await startServer({
+      deckPath: options.deckPath,
+      host: options.host,
+      port: options.port,
+      openBrowser: false,
+    });
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+  const editorUrl = `${app.url}/editor/?token=${encodeURIComponent(app.token)}`
+    + `&editorToken=${encodeURIComponent(app.editorToken)}`;
+  process.stdout.write(`${JSON.stringify({ url: app.url, token: app.token, editorUrl })}\n`);
+  if (options.openBrowser) openEditor(editorUrl);
+
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true;
+    process.off('SIGINT', shutdown);
+    process.off('SIGTERM', shutdown);
+    await app.close();
+    process.exit(0);
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  return 0;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exitCode = await runServerCli();
+}
