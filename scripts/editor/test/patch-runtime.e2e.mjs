@@ -148,3 +148,46 @@ test('applyAll 失败后恢复旧 authoritative 集合且不产生异步 pageerr
   assert.deepEqual(texts, ['第一页标题', '保留动作']);
   assert.deepEqual(pageErrors, []);
 });
+
+test('定位失败候选最多五个且排除隐藏祖先下的同标签元素', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const rt = window.HuaweiDeckPatchRuntime;
+    const canvas = document.querySelector('.slide-canvas');
+    const section = canvas.querySelector('section');
+    const hiddenParent = document.createElement('div');
+    hiddenParent.style.opacity = '0';
+    const hidden = document.createElement('h2');
+    hidden.textContent = '隐藏候选';
+    Object.assign(hidden.style, { position:'absolute', left:'100px', top:'100px', width:'200px', height:'80px' });
+    hiddenParent.append(hidden);
+    section.append(hiddenParent);
+    for (let index=0; index<8; index+=1) {
+      const visible = document.createElement('h2');
+      visible.textContent = `可见候选 ${index}`;
+      Object.assign(visible.style, {
+        position:'absolute', left:`${400+index*30}px`, top:'100px', width:'200px', height:'80px',
+      });
+      section.append(visible);
+    }
+    const hiddenPath = rt.makeLocator(hidden).path;
+    const base = rt.makeLocator(document.querySelector('h2'));
+    try {
+      rt.applyTransaction([{
+        id:'missing', target:{ ...base, path:'999', rect:{ x:100,y:100,w:200,h:80 } },
+        kind:'setText', payload:{ text:'不应用' },
+      }]);
+      return null;
+    } catch (error) {
+      return { code:error.code, hiddenPath, candidates:error.candidates };
+    }
+  });
+  assert.equal(result.code, 'TARGET_NOT_FOUND');
+  assert.ok(result.candidates.length <= 5);
+  assert.ok(result.candidates.every(candidate => candidate.tag === 'H2'));
+  assert.ok(!result.candidates.some(candidate => candidate.path === result.hiddenPath));
+});

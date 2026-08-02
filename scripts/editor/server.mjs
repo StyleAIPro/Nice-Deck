@@ -166,7 +166,10 @@ function errorResponse(response, error) {
   statusCode ??= 500;
   code ??= 'INTERNAL_ERROR';
   const message = statusCode === 500 ? '服务内部错误' : error.message;
-  json(response, statusCode, { error: code, message });
+  const details = {};
+  if (typeof error?.failedActionId === 'string') details.failedActionId = error.failedActionId;
+  if (Array.isArray(error?.candidates)) details.candidates = error.candidates.slice(0, 5);
+  json(response, statusCode, { error: code, message, ...details });
 }
 
 function runWritePatches(deckPath, sessionDir, patches, {

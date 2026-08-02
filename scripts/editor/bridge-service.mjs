@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { rename, unlink, writeFile } from 'node:fs/promises';
 import { PatchJournal } from './patch-journal.mjs';
+import { hasCanonicalValues, validateAction } from './protocol.mjs';
 import { RevisionConflict } from './session-store.mjs';
 
-function serviceError(code, statusCode, message = code) {
-  return Object.assign(new Error(message), { code, statusCode });
+function serviceError(code, statusCode, message = code, details = {}) {
+  return Object.assign(new Error(message), { code, statusCode, ...details });
 }
 
 function copyJournalState(state) {
@@ -57,11 +58,24 @@ export class BridgeService {
     } catch {
       return false;
     }
-    if (message?.type !== 'actions-applied' || typeof message.commandId !== 'string') {
+    if (!['actions-applied', 'actions-rejected'].includes(message?.type)
+      || typeof message.commandId !== 'string') {
       return false;
     }
     const pending = this.pending.get(message.commandId);
     if (!pending || pending.socket !== socket) return false;
+    if (message.type === 'actions-rejected') {
+      const allowedCodes = new Set(['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND', 'TARGET_AMBIGUOUS', 'INVALID_ACTION']);
+      const code = allowedCodes.has(message.code) ? message.code : 'ACTION_REJECTED';
+      const candidates = Array.isArray(message.candidates) ? message.candidates.slice(0, 5) : [];
+      this.#settle(message.commandId, 'reject', serviceError(
+        code,
+        409,
+        '编辑器拒绝动作批次',
+        { failedActionId: message.failedActionId, candidates },
+      ));
+      return true;
+    }
     if (!Number.isSafeInteger(message.applied)
       || message.applied < 0
       || message.applied !== pending.expectedActionCount) {
@@ -72,11 +86,23 @@ export class BridgeService {
       );
       return true;
     }
-    this.#settle(message.commandId, 'resolve', message.applied);
+    let results = message.results;
+    if (results === undefined && pending.actions.every(hasCanonicalValues)) {
+      results = pending.actions;
+    }
+    if (!this.#validCanonicalResults(pending.actions, results)) {
+      this.#settle(
+        message.commandId,
+        'reject',
+        serviceError('INVALID_ACTION_ACK', 502, '编辑器动作 canonical 回执无效'),
+      );
+      return true;
+    }
+    this.#settle(message.commandId, 'resolve', { applied: message.applied, results });
     return true;
   }
 
-  waitFor(commandId, socket, expectedActionCount) {
+  waitFor(commandId, socket, actions) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#settle(
@@ -91,7 +117,8 @@ export class BridgeService {
         reject,
         timer,
         socket,
-        expectedActionCount,
+        actions,
+        expectedActionCount: actions.length,
       });
     });
   }
@@ -104,7 +131,7 @@ export class BridgeService {
     }
     this.assertRevision(expectedRevision);
     const commandId = randomUUID();
-    const acknowledgement = this.waitFor(commandId, socket, actions.length);
+    const acknowledgement = this.waitFor(commandId, socket, actions);
     try {
       socket.send(JSON.stringify({ type: 'apply-actions', commandId, actions }));
     } catch (error) {
@@ -134,9 +161,15 @@ export class BridgeService {
 
   applyActions({ taskId, actions, expectedRevision }) {
     return this.#enqueue(async () => {
-      const applied = await this.requestApply(actions, expectedRevision);
-      const group = await this.#commitJournal(journal => journal.appendGroup(taskId, actions));
-      return { groupId: group.id, revision: this.sessionStore.state.revision, applied };
+      const acknowledgement = await this.requestApply(actions, expectedRevision);
+      const group = await this.#commitJournal(
+        journal => journal.appendGroup(taskId, acknowledgement.results),
+      );
+      return {
+        groupId: group.id,
+        revision: this.sessionStore.state.revision,
+        applied: acknowledgement.applied,
+      };
     });
   }
 
@@ -191,13 +224,17 @@ export class BridgeService {
       } catch {
         throw serviceError('GROUP_NOT_FOUND', 404, '找不到动作组');
       }
-      const applied = await this.requestApply(actions, expectedRevision);
+      const acknowledgement = await this.requestApply(actions, expectedRevision);
       await this.#commitJournal(() => {
         this.sessionStore.state.groups = draftState.groups;
         this.sessionStore.state.redo = draftState.redo;
         return { id: groupId };
       });
-      return { groupId, revision: this.sessionStore.state.revision, applied };
+      return {
+        groupId,
+        revision: this.sessionStore.state.revision,
+        applied: acknowledgement.applied,
+      };
     });
   }
 
@@ -232,5 +269,21 @@ export class BridgeService {
     this.pending.delete(commandId);
     clearTimeout(pending.timer);
     pending[method](value);
+  }
+
+  #validCanonicalResults(requested, results) {
+    if (!Array.isArray(results) || results.length !== requested.length) return false;
+    return results.every((result, index) => {
+      const source = requested[index];
+      try {
+        validateAction(result);
+      } catch {
+        return false;
+      }
+      return result.id === source.id
+        && result.kind === source.kind
+        && JSON.stringify(result.target) === JSON.stringify(source.target)
+        && hasCanonicalValues(result);
+    });
   }
 }

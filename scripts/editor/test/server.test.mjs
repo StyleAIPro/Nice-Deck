@@ -338,6 +338,60 @@ test('actions-applied 只接受与动作数一致的安全非负整数', async t
   assert.equal(app.session.revision, 1);
 });
 
+test('缺 canonical、错配 canonical 与浏览器拒绝均不得写 Journal', async t => {
+  const app = await makeApp(t);
+  const ws = await connect(app.editorWsUrl);
+  t.after(() => ws.close());
+  const incomplete = { ...action };
+  delete incomplete.before;
+  delete incomplete.after;
+
+  let commandPromise = nextMessage(ws);
+  let responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [incomplete] }),
+  });
+  let command = await commandPromise;
+  ws.send(JSON.stringify({ type: 'actions-applied', commandId: command.commandId, applied: 1 }));
+  let response = await responsePromise;
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
+
+  commandPromise = nextMessage(ws);
+  responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [incomplete] }),
+  });
+  command = await commandPromise;
+  ws.send(JSON.stringify({
+    type: 'actions-applied', commandId: command.commandId, applied: 1,
+    results: [{ ...action, id: 'wrong-id' }],
+  }));
+  response = await responsePromise;
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'INVALID_ACTION_ACK');
+
+  commandPromise = nextMessage(ws);
+  responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0, taskId: null, actions: [incomplete] }),
+  });
+  command = await commandPromise;
+  ws.send(JSON.stringify({
+    type: 'actions-rejected', commandId: command.commandId,
+    code: 'TARGET_AMBIGUOUS', failedActionId: incomplete.id,
+    candidates: Array.from({ length: 8 }, (_, index) => ({ path: String(index) })),
+  }));
+  response = await responsePromise;
+  assert.equal(response.status, 409);
+  const rejected = await response.json();
+  assert.equal(rejected.error, 'TARGET_AMBIGUOUS');
+  assert.equal(rejected.failedActionId, incomplete.id);
+  assert.equal(rejected.candidates.length, 5);
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.groups, []);
+});
+
 test('等待 Action 回执期间串行化其他 revision mutation', async t => {
   const app = await makeApp(t);
   const ws = await connect(app.editorWsUrl);

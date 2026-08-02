@@ -50,6 +50,11 @@ let dragging = null;
 let activePopover = null;
 let highlightTimer;
 let tornDown = false;
+let directEdit = null;
+let transformDrag = null;
+let transformSelection = null;
+const pendingManual = new Map();
+let statusTimer;
 
 const style = document.createElement('style');
 style.dataset.deckEditorUi = '';
@@ -68,6 +73,11 @@ style.textContent = `
   [data-region-status][data-state="error"]{color:#b42318}
   [data-region-status][data-state="success"]{color:#16803b}
   [data-task-highlight]{border:3px dashed #e60012;background:rgba(230,0,18,.08);animation:deck-editor-pulse .45s ease-in-out 2 alternate}
+  [data-direct-status]{position:fixed;z-index:2147483641;left:50%;bottom:24px;max-width:520px;padding:10px 16px;border-radius:8px;background:#24262b;color:#fff;box-shadow:0 10px 26px rgba(0,0,0,.24);font:600 14px/1.45 "Huawei Sans","HarmonyOS Sans SC","PingFang SC",sans-serif;transform:translateX(-50%);pointer-events:none}
+  [data-direct-status][data-state="error"]{background:#8f1018}
+  [data-transform-selection]{position:fixed;z-index:2147483637;box-sizing:border-box;border:2px solid #c7000b;background:rgba(199,0,11,.035);pointer-events:none}
+  [data-resize-handle]{position:fixed;z-index:2147483640;box-sizing:border-box;border:2px solid #fff;border-radius:3px;background:#c7000b;box-shadow:0 1px 5px rgba(0,0,0,.3);cursor:nwse-resize;touch-action:none}
+  [data-direct-editing]{outline:3px solid #c7000b!important;outline-offset:3px;background:rgba(255,255,255,.96)!important;cursor:text!important}
   @keyframes deck-editor-pulse{from{box-shadow:0 0 0 0 rgba(230,0,18,.35)}to{box-shadow:0 0 0 8px rgba(230,0,18,0)}}
 `;
 document.head.append(style);
@@ -195,13 +205,13 @@ function removePopover() {
 }
 
 function isRegionMode() {
+  if (mode === 'region') return true;
   try {
-    const control = parent.document.querySelector('[data-mode="region"]');
-    if (control) return control.getAttribute('aria-pressed') === 'true';
+    // postMessage 状态仍是主路径；仅兼容同源父页点击与消息派发之间的极短窗口。
+    return parent.document.querySelector('[data-mode="region"]')?.getAttribute('aria-pressed') === 'true';
   } catch {
-    // 跨源嵌入时退回已确认的 postMessage 状态。
+    return false;
   }
-  return mode === 'region';
 }
 
 function positionPopover(popover, region) {
@@ -347,7 +357,278 @@ function openPopover(canvas, screenRect, candidates) {
   });
 }
 
+function showStatus(message, state = 'info') {
+  clearTimeout(statusTimer);
+  document.querySelector('[data-direct-status]')?.remove();
+  const status = document.createElement('div');
+  status.dataset.deckEditorUi = '';
+  status.dataset.directStatus = '';
+  status.dataset.state = state;
+  status.setAttribute('role', 'status');
+  status.textContent = message;
+  document.body.append(status);
+  statusTimer = setTimeout(() => status.remove(), state === 'error' ? 4200 : 1800);
+}
+
+function submitManualActions(actions, onResult = () => {}) {
+  const requestId = crypto.randomUUID();
+  pendingManual.set(requestId, onResult);
+  parent.postMessage({ type: 'submit-manual-actions', requestId, actions }, location.origin);
+}
+
+function textTargetFromEvent(event) {
+  return event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,td,th,span,div');
+}
+
+function textRejection(element) {
+  if (!element || !element.closest('.slide-canvas')) return '请在页面文字上双击';
+  if (element.closest('[data-deck-editor-ui],button,a,input,textarea,select,[role="button"],.layer-panel')
+    || element.matches('svg,iframe') || element.querySelector('svg,iframe,.layer-panel')) {
+    return '该元素包含交互或复杂组件，请改用区域标记';
+  }
+  if (element.children.length > 0) return '该文字包含复杂富文本结构，请改用区域标记';
+  return null;
+}
+
+function finishDirectEdit({ restore = true } = {}) {
+  if (!directEdit) return;
+  const state = directEdit;
+  directEdit = null;
+  if (restore) state.element.textContent = state.originalText;
+  state.element.removeAttribute('contenteditable');
+  delete state.element.dataset.directEditing;
+  state.element.spellcheck = state.originalSpellcheck;
+}
+
+function commitDirectEdit() {
+  if (!directEdit || directEdit.committing) return;
+  directEdit.committing = true;
+  const state = directEdit;
+  const nextText = state.element.textContent ?? '';
+  finishDirectEdit({ restore: true });
+  if (!nextText.trim() || nextText === state.originalText) return;
+  const action = {
+    id: crypto.randomUUID(), taskId: null, target: state.target,
+    kind: 'setText', payload: { text: nextText },
+  };
+  showStatus('正在应用文字修改…');
+  submitManualActions([action], result => {
+    if (result.ok) showStatus('文字修改已记录');
+    else showStatus(result.message || '文字修改失败，原文已恢复', 'error');
+  });
+}
+
+function onDoubleClick(event) {
+  if (mode !== 'text') return;
+  const element = textTargetFromEvent(event);
+  const rejection = textRejection(element);
+  if (rejection) {
+    showStatus(rejection, 'error');
+    event.preventDefault();
+    return;
+  }
+  finishDirectEdit();
+  let target;
+  try { target = runtime.makeLocator(element); }
+  catch { showStatus('无法定位该文字，请改用区域标记', 'error'); return; }
+  directEdit = {
+    element, target, originalText: element.textContent ?? '',
+    originalSpellcheck: element.spellcheck, committing: false,
+  };
+  element.setAttribute('contenteditable', 'plaintext-only');
+  element.dataset.directEditing = '';
+  element.spellcheck = false;
+  element.focus({ preventScroll: true });
+  const selection = getSelection();
+  selection?.selectAllChildren(element);
+  event.preventDefault();
+}
+
+function editableTransformTarget(event) {
+  const element = event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,span,img,svg,table,.card,[class]');
+  if (!element || !element.closest('.slide-canvas') || element.closest('[data-deck-editor-ui]')) return null;
+  if (element.matches('.stage,.slide-canvas') || element.querySelector('.stage,.slide-canvas')) return null;
+  return element;
+}
+
+function currentTranslate(element) {
+  const [x = '0', y = '0'] = (element.style.translate || '0px 0px').split(/\s+/);
+  return { x: Number.parseFloat(x) || 0, y: Number.parseFloat(y) || 0 };
+}
+
+function removeTransformSelection() {
+  transformSelection?.overlay.remove();
+  transformSelection?.handle?.remove();
+  transformSelection = null;
+}
+
+function positionTransformSelection() {
+  if (!transformSelection?.element.isConnected) return removeTransformSelection();
+  const rect = transformSelection.element.getBoundingClientRect();
+  setBox(transformSelection.overlay, rect);
+  if (!transformSelection.handle) return;
+  const scale = frameVisualScale();
+  const width = 14 / scale.x;
+  const height = 14 / scale.y;
+  setBox(transformSelection.handle, {
+    left: rect.right - width / 2,
+    top: rect.bottom - height / 2,
+    width,
+    height,
+  });
+  transformSelection.handle.dataset.screenSize = '14';
+}
+
+function selectTransformElement(element, withHandle) {
+  removeTransformSelection();
+  const overlay = document.createElement('div');
+  overlay.dataset.deckEditorUi = '';
+  overlay.dataset.transformSelection = '';
+  let handle = null;
+  if (withHandle) {
+    handle = document.createElement('div');
+    handle.dataset.deckEditorUi = '';
+    handle.dataset.resizeHandle = '';
+    handle.setAttribute('role', 'button');
+    handle.setAttribute('aria-label', '拖动缩放元素');
+  }
+  document.body.append(overlay);
+  if (handle) document.body.append(handle);
+  transformSelection = { element, overlay, handle };
+  positionTransformSelection();
+}
+
+function restoreTransformPreview(state) {
+  if (state.kind === 'translate') {
+    if (state.originalTranslate) state.element.style.translate = state.originalTranslate;
+    else state.element.style.removeProperty('translate');
+  } else if (state.scaleTarget) {
+    if (state.originalScale) state.element.style.scale = state.originalScale;
+    else state.element.style.removeProperty('scale');
+  } else {
+    if (state.originalWidth) state.element.style.width = state.originalWidth;
+    else state.element.style.removeProperty('width');
+    if (state.originalHeight) state.element.style.height = state.originalHeight;
+    else state.element.style.removeProperty('height');
+  }
+  positionTransformSelection();
+}
+
+function cancelTransformDrag() {
+  if (!transformDrag) return;
+  const state = transformDrag;
+  transformDrag = null;
+  state.capture?.releasePointerCapture?.(state.pointerId);
+  restoreTransformPreview(state);
+}
+
+function beginMove(event, element) {
+  let target;
+  try { target = runtime.makeLocator(element); } catch { return; }
+  const canvas = element.closest('.slide-canvas');
+  selectTransformElement(element, false);
+  transformDrag = {
+    kind: 'translate', pointerId: event.pointerId, capture: element, element, target, canvas,
+    start: { x: event.clientX, y: event.clientY }, base: currentTranslate(element),
+    current: currentTranslate(element), originalTranslate: element.style.translate,
+  };
+  element.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function isScaleTarget(element) {
+  return element.matches('svg,button,[role="button"]') || Boolean(element.querySelector('svg,* *'));
+}
+
+function beginResize(event) {
+  if (!transformSelection?.element) return;
+  const element = transformSelection.element;
+  let target;
+  try { target = runtime.makeLocator(element); } catch { return; }
+  const rect = element.getBoundingClientRect();
+  const scaleTarget = isScaleTarget(element);
+  transformDrag = {
+    kind: 'resize', pointerId: event.pointerId, capture: event.target, element, target,
+    canvas: element.closest('.slide-canvas'), start: { x: event.clientX, y: event.clientY },
+    scaleTarget, changed: false,
+    baseScale: Number.parseFloat(element.style.scale) || 1,
+    baseSize: { width: rect.width, height: rect.height },
+    current: scaleTarget ? { scale: Number.parseFloat(element.style.scale) || 1 }
+      : { width: rect.width, height: rect.height },
+    originalScale: element.style.scale, originalWidth: element.style.width,
+    originalHeight: element.style.height,
+  };
+  event.target.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onTransformPointerMove(event) {
+  if (!transformDrag || event.pointerId !== transformDrag.pointerId) return false;
+  const state = transformDrag;
+  const bounds = state.canvas.getBoundingClientRect();
+  const dx = (event.clientX - state.start.x) * 1920 / bounds.width;
+  const dy = (event.clientY - state.start.y) * 1080 / bounds.height;
+  if (state.kind === 'translate') {
+    state.current = { x: Math.round(state.base.x + dx), y: Math.round(state.base.y + dy) };
+    state.element.style.translate = `${state.current.x}px ${state.current.y}px`;
+  } else if (state.scaleTarget) {
+    const delta = Math.max(dx / Math.max(1, state.baseSize.width), dy / Math.max(1, state.baseSize.height));
+    state.current = { scale: Math.max(.1, Math.round(state.baseScale * (1 + delta) * 1000) / 1000) };
+    state.element.style.scale = String(state.current.scale);
+  } else {
+    state.current = {
+      width: Math.max(1, Math.round(state.baseSize.width + dx)),
+      height: Math.max(1, Math.round(state.baseSize.height + dy)),
+    };
+    state.element.style.width = `${state.current.width}px`;
+    state.element.style.height = `${state.current.height}px`;
+  }
+  state.changed = Math.abs(dx) >= 1 || Math.abs(dy) >= 1;
+  positionTransformSelection();
+  event.preventDefault();
+  return true;
+}
+
+function finishTransformPointer(event) {
+  if (!transformDrag || event.pointerId !== transformDrag.pointerId) return false;
+  const state = transformDrag;
+  transformDrag = null;
+  state.capture?.releasePointerCapture?.(state.pointerId);
+  restoreTransformPreview(state);
+  if (!state.changed && state.kind === 'resize') return true;
+  if (state.kind === 'translate'
+    && state.current.x === state.base.x && state.current.y === state.base.y) return true;
+  const action = {
+    id: crypto.randomUUID(), taskId: null, target: state.target,
+    kind: state.kind, payload: state.current,
+  };
+  submitManualActions([action], result => {
+    if (!result.ok) showStatus(result.message || '变换失败，已恢复原状态', 'error');
+    positionTransformSelection();
+  });
+  event.preventDefault();
+  return true;
+}
+
 function onPointerDown(event) {
+  if (mode === 'resize' && event.target.closest?.('[data-resize-handle]')) {
+    beginResize(event);
+    return;
+  }
+  if (mode === 'move' && event.button === 0) {
+    const element = editableTransformTarget(event);
+    if (element) beginMove(event, element);
+    return;
+  }
+  if (mode === 'resize' && event.button === 0) {
+    const element = editableTransformTarget(event);
+    if (element) {
+      selectTransformElement(element, true);
+      event.preventDefault();
+    }
+    return;
+  }
   if (!isRegionMode() || activePopover?.submitting
     || event.button !== 0 || event.target.closest?.('[data-deck-editor-ui]')) return;
   const canvas = event.target.closest?.('.slide-canvas');
@@ -371,6 +652,7 @@ function onPointerDown(event) {
 }
 
 function onPointerMove(event) {
+  if (onTransformPointerMove(event)) return;
   if (!dragging || event.pointerId !== dragging.pointerId) return;
   dragging.current = { x: event.clientX, y: event.clientY };
   setBox(dragging.selection, regionFromPoints(dragging.start, dragging.current, dragging.bounds));
@@ -378,6 +660,7 @@ function onPointerMove(event) {
 }
 
 function finishPointer(event) {
+  if (finishTransformPointer(event)) return;
   if (!dragging || event.pointerId !== dragging.pointerId) return;
   const state = dragging;
   dragging = null;
@@ -393,6 +676,10 @@ function finishPointer(event) {
 }
 
 function cancelPointer(event) {
+  if (transformDrag && event.pointerId === transformDrag.pointerId) {
+    cancelTransformDrag();
+    return;
+  }
   if (!dragging || event.pointerId !== dragging.pointerId) return;
   const state = dragging;
   dragging = null;
@@ -421,16 +708,73 @@ function locateTask(pageKey, rect) {
   }));
 }
 
+function onKeyDown(event) {
+  if (directEdit) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      finishDirectEdit();
+      showStatus('已取消文字修改');
+    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      commitDirectEdit();
+    }
+    return;
+  }
+  if (event.key === 'Escape' && (transformDrag || transformSelection)) {
+    event.preventDefault();
+    cancelTransformDrag();
+    removeTransformSelection();
+  }
+}
+
 function onParentMessage(event) {
   if (event.origin !== location.origin || event.source !== parent) return;
   if (event.data?.type === 'show-page' && typeof event.data.pageKey === 'string') {
     showPage(event.data.pageKey);
     return;
   }
-  if (event.data?.type === 'set-editor-mode' && ['preview', 'region'].includes(event.data.mode)) {
+  if (event.data?.type === 'set-editor-mode'
+    && ['preview', 'region', 'text', 'move', 'resize'].includes(event.data.mode)) {
+    if (event.data.mode !== mode) {
+      finishDirectEdit();
+      cancelTransformDrag();
+      removeTransformSelection();
+    }
     mode = event.data.mode;
-    document.documentElement.style.cursor = mode === 'region' ? 'crosshair' : '';
+    document.documentElement.dataset.deckEditorMode = mode;
+    document.documentElement.style.cursor = mode === 'region' ? 'crosshair'
+      : (mode === 'move' ? 'move' : '');
     if (mode !== 'region') removePopover();
+    return;
+  }
+  if (event.data?.type === 'apply-actions' && typeof event.data.commandId === 'string') {
+    try {
+      const results = runtime.applyTransaction(event.data.actions);
+      parent.postMessage({
+        type: 'actions-applied', commandId: event.data.commandId,
+        applied: results.length, results,
+      }, location.origin);
+    } catch (error) {
+      parent.postMessage({
+        type: 'actions-rejected', commandId: event.data.commandId,
+        code: error.code || error.message || 'ACTION_REJECTED',
+        failedActionId: error.failedActionId,
+        candidates: Array.isArray(error.candidates) ? error.candidates.slice(0, 5) : [],
+      }, location.origin);
+    }
+    return;
+  }
+  if (event.data?.type === 'sync-actions' && Array.isArray(event.data.actions)) {
+    try { runtime.applyAll(event.data.actions); }
+    catch (error) { showStatus(`会话动作恢复失败：${error.code || error.message}`, 'error'); }
+    return;
+  }
+  if (event.data?.type === 'manual-actions-result'
+    && typeof event.data.requestId === 'string') {
+    const callback = pendingManual.get(event.data.requestId);
+    if (!callback) return;
+    pendingManual.delete(event.data.requestId);
+    callback(event.data);
     return;
   }
   if (event.data?.type === 'locate-task' && typeof event.data.pageKey === 'string') {
@@ -472,13 +816,22 @@ function teardown() {
   if (tornDown) return;
   tornDown = true;
   clearTimeout(highlightTimer);
+  clearTimeout(statusTimer);
+  finishDirectEdit();
+  cancelTransformDrag();
+  removeTransformSelection();
+  pendingManual.clear();
   dragging?.selection.remove();
   dragging = null;
   removePopover();
   document.querySelector('[data-task-highlight]')?.remove();
+  document.querySelector('[data-direct-status]')?.remove();
   style.remove();
   document.documentElement.style.cursor = '';
+  delete document.documentElement.dataset.deckEditorMode;
   window.removeEventListener('message', onParentMessage);
+  window.removeEventListener('dblclick', onDoubleClick, true);
+  window.removeEventListener('keydown', onKeyDown, true);
   window.removeEventListener('pointerdown', onPointerDown, true);
   window.removeEventListener('pointermove', onPointerMove, true);
   window.removeEventListener('pointerup', finishPointer, true);
@@ -488,6 +841,8 @@ function teardown() {
 
 if (parent !== window) {
   window.addEventListener('message', onParentMessage);
+  window.addEventListener('dblclick', onDoubleClick, true);
+  window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('pointerdown', onPointerDown, true);
   window.addEventListener('pointermove', onPointerMove, true);
   window.addEventListener('pointerup', finishPointer, true);

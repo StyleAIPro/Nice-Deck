@@ -43,11 +43,82 @@ export function validateTask(task) {
 }
 
 export function validateAction(action) {
+  if (!action || typeof action !== 'object' || Array.isArray(action)) {
+    throw new TypeError('动作必须为对象');
+  }
+  if (typeof action.id !== 'string' || action.id.length === 0) {
+    throw new TypeError('动作缺少 id');
+  }
   if (!ACTION_KINDS.has(action.kind)) {
     throw new TypeError(`不支持的动作: ${action.kind}`);
   }
   if (!action.target?.pageKey || !action.target?.path) {
     throw new TypeError('动作缺少目标定位器');
   }
+  const payload = action.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || Object.getPrototypeOf(payload) !== Object.prototype) {
+    throw new TypeError('动作 payload 必须为对象');
+  }
+  if (action.kind === 'setText' && typeof payload.text !== 'string') {
+    throw new TypeError('setText.text 必须为字符串');
+  }
+  if (action.kind === 'translate'
+    && (![payload.x, payload.y].every(Number.isFinite)
+      || Object.keys(payload).some(key => !['x', 'y'].includes(key)))) {
+    throw new TypeError('translate 只接受有限数 x/y');
+  }
+  if (action.kind === 'resize') {
+    const keys = Object.keys(payload);
+    const scaleOnly = keys.length === 1 && Number.isFinite(payload.scale) && payload.scale > 0;
+    const sizeOnly = keys.length === 2
+      && keys.every(key => ['width', 'height'].includes(key))
+      && Number.isFinite(payload.width) && payload.width > 0
+      && Number.isFinite(payload.height) && payload.height > 0;
+    if (!scaleOnly && !sizeOnly) {
+      throw new TypeError('resize 只接受正数 scale 或 width/height');
+    }
+  }
+  if (action.kind === 'setStyle') {
+    const allowed = new Set(['color', 'background-color', 'font-size', 'font-weight', 'opacity']);
+    if (!allowed.has(payload.property) || typeof payload.value !== 'string') {
+      throw new TypeError('setStyle 属性不在白名单内');
+    }
+  }
+  if (action.kind === 'hide' && Object.keys(payload).length !== 0) {
+    throw new TypeError('hide payload 必须为空对象');
+  }
+  if (action.kind === 'show'
+    && (Object.keys(payload).some(key => key !== 'display')
+      || (payload.display !== undefined && typeof payload.display !== 'string'))) {
+    throw new TypeError('show.display 必须为字符串');
+  }
   return action;
+}
+
+export function hasCanonicalValues(action) {
+  if (!Object.hasOwn(action, 'before') || !Object.hasOwn(action, 'after')) return false;
+  if (action.kind === 'setText' || action.kind === 'setStyle'
+    || action.kind === 'hide' || action.kind === 'show') {
+    return typeof action.before === 'string' && typeof action.after === 'string';
+  }
+  if (action.kind === 'translate') {
+    return [action.before, action.after].every(value => (
+      value && typeof value === 'object' && !Array.isArray(value)
+      && Number.isFinite(value.x) && Number.isFinite(value.y)
+      && Object.keys(value).every(key => ['x', 'y'].includes(key))
+    ));
+  }
+  if (action.kind === 'resize') {
+    const valid = value => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+      const keys = Object.keys(value);
+      return (keys.length === 1 && Number.isFinite(value.scale) && value.scale > 0)
+        || (keys.length === 2 && keys.every(key => ['width', 'height'].includes(key))
+          && Number.isFinite(value.width) && value.width > 0
+          && Number.isFinite(value.height) && value.height > 0);
+    };
+    return valid(action.before) && valid(action.after);
+  }
+  return false;
 }

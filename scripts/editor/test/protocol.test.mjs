@@ -61,3 +61,22 @@ test('拒绝越界任务和任意动作类型', () => {
   assert.throws(() => validateTask({ pageKey: 'p', rect: { x: -1, y: 0, w: 10, h: 10 }, instruction: '改' }));
   assert.throws(() => validateAction({ kind: 'replaceOuterHTML', payload: {} }));
 });
+
+test('动作 payload 严格拒绝非有限位移、非正缩放和对象污染字段', () => {
+  const target = { pageKey: 'page-001-a', path: '0/1' };
+  assert.throws(() => validateAction({
+    id: 'bad-text', target, kind: 'setText', payload: { text: { html: '<script>' } },
+  }), /字符串/);
+  assert.throws(() => validateAction({
+    id: 'bad-move', target, kind: 'translate', payload: { x: Infinity, y: 0 },
+  }), /有限数/);
+  assert.throws(() => validateAction({
+    id: 'pollute-move', target, kind: 'translate', payload: { x: 1, y: 2, __proto__: null },
+  }), /对象/);
+  assert.throws(() => validateAction({
+    id: 'bad-resize', target, kind: 'resize', payload: { scale: 0 },
+  }), /正数/);
+  assert.throws(() => validateAction({
+    id: 'mixed-resize', target, kind: 'resize', payload: { scale: 1, width: 200, height: 100 },
+  }), /正数/);
+});

@@ -60,7 +60,7 @@ test('iframe 挂载后发现两个同名页并显示独立页序', async t => {
   assert.equal(await page.locator('[data-agent-placeholder]').count(), 1);
   assert.ok(await page.locator('.brand-logo').evaluate(image => image.naturalWidth > 0));
   assert.equal(await page.locator('.mode-badge').innerText(), '预览模式');
-  assert.match(await page.locator('.inspector-empty').innerText(), /元素属性编辑将在下一阶段启用/);
+  assert.match(await page.locator('.inspector-empty').innerText(), /选择文字或画面元素开始编辑/);
   await page.waitForTimeout(100);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);

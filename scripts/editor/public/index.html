@@ -48,12 +48,16 @@
             <span data-current-key>等待 Deck 响应</span>
           </div>
           <div class="canvas-tools" aria-label="画布状态">
-            <button class="region-mode-button" type="button" data-mode="region" aria-pressed="false">
-              <span class="region-mode-icon" aria-hidden="true"></span>
-              区域标记
-            </button>
+            <div class="mode-tools" role="toolbar" aria-label="编辑模式">
+              <button class="mode-button" type="button" data-mode="preview" aria-pressed="true">预览</button>
+              <button class="mode-button" type="button" data-mode="region" aria-pressed="false">区域标记</button>
+              <button class="mode-button" type="button" data-mode="text" aria-pressed="false">文字</button>
+              <button class="mode-button" type="button" data-mode="move" aria-pressed="false">移动</button>
+              <button class="mode-button" type="button" data-mode="resize" aria-pressed="false">缩放</button>
+            </div>
             <span>1920 × 1080</span>
             <span class="zoom-value" data-zoom>—</span>
+            <span class="revision-value">R<span data-revision>0</span></span>
           </div>
         </div>
         <div class="frame-viewport" data-frame-viewport>
@@ -73,8 +77,8 @@
         </div>
         <div class="inspector-empty">
           <div class="selection-frame" aria-hidden="true"></div>
-          <h3>元素属性编辑将在下一阶段启用</h3>
-          <p>当前版本用于预览页面与确认画布内容。</p>
+          <h3>选择文字或画面元素开始编辑</h3>
+          <p>文字用双击提交；移动与缩放用拖拽提交，所有动作均可统一撤销。</p>
         </div>
         <section class="agent-placeholder" data-agent-placeholder aria-label="Agent 任务面板占位">
           <div>

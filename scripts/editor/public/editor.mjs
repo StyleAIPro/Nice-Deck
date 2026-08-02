@@ -14,7 +14,8 @@ const wsLabel = document.querySelector('[data-ws-label]');
 const frameViewport = document.querySelector('[data-frame-viewport]');
 const frameScene = document.querySelector('[data-frame-scene]');
 const zoomValue = document.querySelector('[data-zoom]');
-const regionButton = document.querySelector('[data-mode="region"]');
+const revisionValue = document.querySelector('[data-revision]');
+const modeButtons = [...document.querySelectorAll('[data-mode]')];
 const modeBadge = document.querySelector('.mode-badge');
 const taskDrawer = document.querySelector('[data-task-drawer]');
 let pendingPageKey;
@@ -25,7 +26,11 @@ let pages = [];
 let tasks = [];
 let revision = 0;
 let editorMode = 'preview';
+let deckReady = false;
+let sessionGroups = [];
 const createRequests = new Set();
+const manualRequests = new Set();
+const commandReplies = new Map();
 const MAX_SNAPSHOT_BYTES = 512 * 1024;
 
 deckFrame.src = `/preview?token=${encodeURIComponent(token)}`;
@@ -54,6 +59,32 @@ function uniqueTasks(values) {
     if (task?.id) byId.set(task.id, task);
   }
   return [...byId.values()].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+}
+
+function updateRevision(value) {
+  if (Number.isSafeInteger(value)) revision = Math.max(revision, value);
+  revisionValue.textContent = String(revision);
+}
+
+function actionKey(action) {
+  const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
+  return `${action.target.pageKey}|${action.target.path}|${kind}|${action.payload?.property ?? ''}`;
+}
+
+function compiledSessionActions() {
+  const final = new Map();
+  for (const group of sessionGroups) {
+    if (!group.active) continue;
+    for (const action of group.actions ?? []) final.set(actionKey(action), action);
+  }
+  return [...final.values()];
+}
+
+function syncSessionActions() {
+  if (!deckReady) return;
+  deckFrame.contentWindow?.postMessage({
+    type: 'sync-actions', actions: compiledSessionActions(),
+  }, location.origin);
 }
 
 function snapshotByteLength(snapshot) {
@@ -113,9 +144,11 @@ async function loadSession() {
     requestJson('/api/session'),
     requestJson('/api/tasks'),
   ]);
-  revision = Math.max(revision, session.revision ?? 0);
+  updateRevision(session.revision ?? 0);
+  sessionGroups = Array.isArray(session.groups) ? session.groups : [];
   tasks = uniqueTasks([...(Array.isArray(persistedTasks) ? persistedTasks : []), ...tasks]);
   renderTasks();
+  syncSessionActions();
 }
 
 function confirmPage(button) {
@@ -166,6 +199,46 @@ function postRegionResult(requestId, result) {
   }, location.origin);
 }
 
+function postManualResult(requestId, result) {
+  deckFrame.contentWindow?.postMessage({
+    type: 'manual-actions-result', requestId, ...result,
+  }, location.origin);
+}
+
+async function submitManualActions(message) {
+  const { requestId, actions } = message;
+  if (typeof requestId !== 'string' || manualRequests.has(requestId)) return;
+  manualRequests.add(requestId);
+  try {
+    let result;
+    let retried = false;
+    while (!result) {
+      try {
+        result = await requestJson('/api/actions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ expectedRevision: revision, taskId: null, actions }),
+        });
+      } catch (error) {
+        if (error.status === 409 && error.code === 'REVISION_CONFLICT' && !retried) {
+          retried = true;
+          await loadSession();
+          continue;
+        }
+        throw error;
+      }
+    }
+    updateRevision(result.revision);
+    postManualResult(requestId, { ok: true, ...result });
+  } catch (error) {
+    postManualResult(requestId, {
+      ok: false, code: error.code, message: error.message || '动作提交失败',
+    });
+  } finally {
+    manualRequests.delete(requestId);
+  }
+}
+
 async function createRegionTask(message) {
   const { requestId, payload, snapshot = null } = message;
   if (typeof requestId !== 'string' || createRequests.has(requestId)) return;
@@ -210,12 +283,25 @@ async function createRegionTask(message) {
 function onFrameMessage(event) {
   if (event.origin !== location.origin || event.source !== deckFrame.contentWindow) return;
   if (event.data?.type === 'deck-ready' && Array.isArray(event.data.pages)) {
+    deckReady = true;
     renderPages(event.data.pages);
     deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode: editorMode }, location.origin);
+    syncSessionActions();
     return;
   }
   if (event.data?.type === 'create-region-task') {
     void createRegionTask(event.data);
+    return;
+  }
+  if (event.data?.type === 'submit-manual-actions') {
+    void submitManualActions(event.data);
+    return;
+  }
+  if (['actions-applied', 'actions-rejected'].includes(event.data?.type)
+    && typeof event.data.commandId === 'string') {
+    commandReplies.set(event.data.commandId, event.data);
+    if (commandReplies.size > 100) commandReplies.delete(commandReplies.keys().next().value);
+    eventsClient?.send(event.data);
     return;
   }
   if (event.data?.type !== 'page-shown' || event.data.pageKey !== pendingPageKey) return;
@@ -230,14 +316,19 @@ window.addEventListener('message', onFrameMessage);
 
 function setEditorMode(mode) {
   editorMode = mode;
-  const active = mode === 'region';
-  regionButton.setAttribute('aria-pressed', String(active));
-  modeBadge.textContent = active ? '区域标记模式' : '预览模式';
+  for (const button of modeButtons) {
+    button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
+  }
+  const labels = {
+    preview: '预览模式', region: '区域标记模式', text: '文字模式',
+    move: '移动模式', resize: '缩放模式',
+  };
+  modeBadge.textContent = labels[mode] ?? '预览模式';
   deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode }, location.origin);
 }
 
-const onRegionMode = () => setEditorMode(editorMode === 'region' ? 'preview' : 'region');
-regionButton.addEventListener('click', onRegionMode);
+const onModeClick = event => setEditorMode(event.currentTarget.dataset.mode);
+for (const button of modeButtons) button.addEventListener('click', onModeClick);
 
 function fitFrame() {
   const availableWidth = Math.max(frameViewport.clientWidth - 56, 1);
@@ -264,7 +355,13 @@ eventsClient = connectEvents({
   url: eventsUrl,
   token,
   onEvent: event => {
-    if (Number.isSafeInteger(event?.revision)) revision = Math.max(revision, event.revision);
+    if (event?.type === 'apply-actions' && typeof event.commandId === 'string') {
+      const reply = commandReplies.get(event.commandId);
+      if (reply) eventsClient?.send(reply);
+      else deckFrame.contentWindow?.postMessage(event, location.origin);
+      return;
+    }
+    updateRevision(event?.revision);
     if (event?.type === 'task-created' && event.payload?.id) upsertTask(event.payload);
   },
   onState: state => {
@@ -285,7 +382,7 @@ function teardown() {
   eventsClient?.close();
   resizeObserver.disconnect();
   cancelAnimationFrame(fitFrameRequest);
-  regionButton.removeEventListener('click', onRegionMode);
+  for (const button of modeButtons) button.removeEventListener('click', onModeClick);
   window.removeEventListener('message', onFrameMessage);
   window.removeEventListener('pagehide', teardown);
   window.removeEventListener('unload', teardown);

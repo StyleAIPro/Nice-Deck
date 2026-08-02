@@ -301,42 +301,44 @@ p {
   gap: 12px;
 }
 
-.region-mode-button {
+.mode-tools {
   display: inline-flex;
-  min-height: 32px;
   align-items: center;
-  gap: 7px;
-  padding: 0 11px;
+  padding: 2px;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
-  color: var(--ink-secondary);
-  cursor: pointer;
-  transition: color var(--motion), border-color var(--motion), background var(--motion);
+  border-radius: 8px;
+  background: var(--surface-subtle);
 }
 
-.region-mode-button:hover {
-  border-color: #b7b9be;
+.mode-button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--motion), background var(--motion), box-shadow var(--motion);
+}
+
+.mode-button:hover {
   color: var(--ink);
 }
 
-.region-mode-button:focus-visible {
+.mode-button:focus-visible {
   outline: 2px solid var(--brand-red);
   outline-offset: 2px;
 }
 
-.region-mode-button[aria-pressed="true"] {
-  border-color: rgb(199 0 11 / 35%);
-  background: rgb(199 0 11 / 7%);
+.mode-button[aria-pressed="true"] {
+  background: var(--panel);
   color: var(--brand-red);
-  font-weight: 650;
-}
-
-.region-mode-icon {
-  width: 14px;
-  height: 11px;
-  border: 1.5px dashed currentcolor;
-  border-radius: 2px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 10%), inset 0 -2px 0 var(--brand-red);
+  font-weight: 700;
 }
 
 .canvas-tools .zoom-value {
@@ -345,6 +347,12 @@ p {
   border-left: 1px solid var(--line);
   color: var(--ink-secondary);
   text-align: right;
+}
+
+.canvas-tools .revision-value {
+  min-width: 28px;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .frame-viewport {
