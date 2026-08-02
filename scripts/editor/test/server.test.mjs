@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir, mkdtemp, readFile, readdir, rename, symlink, writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -44,6 +46,8 @@ async function makeApp(t, options = {}) {
     writerKillGraceMs: options.writerKillGraceMs,
     spawnWriter: options.spawnWriter,
     onActiveWritersChange: options.onActiveWritersChange,
+    beforeSessionPersist: options.beforeSessionPersist,
+    syncDirectory: options.syncDirectory,
   });
   t.after(() => app.close());
   return app;
@@ -165,6 +169,63 @@ async function writeTransactionRecord(app, transactionId, oldBytes, candidateByt
     backup:join(app.sessionDir, 'backups', `deck-${oldFingerprint}.html`),
   }));
   return transactionPath;
+}
+
+async function createPendingTransactionFixture({
+  root, diskBytes, oldBytes, candidateBytes, sessionFingerprint,
+}) {
+  const deckPath = join(root, 'deck.html');
+  await writeFile(deckPath, diskBytes);
+  const oldFingerprint = sha256(oldBytes);
+  const candidateFingerprint = sha256(candidateBytes);
+  const sidecarRoot = join(root, '.huawei-deck-editor');
+  const sessionDir = join(sidecarRoot, `deck-${oldFingerprint.slice(0, 8)}`);
+  const backup = join(sessionDir, 'backups', `deck-${oldFingerprint}.html`);
+  const transactionId = '123e4567-e89b-42d3-a456-426614174000';
+  const transaction = join(sessionDir, 'transactions', `${transactionId}.json`);
+  await mkdir(join(sessionDir, 'snapshots'), { recursive:true });
+  await mkdir(join(sessionDir, 'backups'), { recursive:true });
+  await mkdir(join(sessionDir, 'transactions'), { recursive:true });
+  await writeFile(backup, oldBytes);
+  await writeFile(join(sessionDir, 'session.json'), JSON.stringify({
+    version:1,
+    deckPath,
+    deckFingerprint:sessionFingerprint,
+    revision:0,
+    tasks:[],
+    groups:[],
+    redo:[],
+    diagnosticsBaseline:{},
+    diagnosticsCurrent:{},
+    diagnosticsRevision:null,
+    conflict:null,
+  }, null, 2));
+  await writeFile(transaction, JSON.stringify({
+    version:1,
+    transactionId,
+    deckPath,
+    sessionDir,
+    oldFingerprint,
+    candidateFingerprint,
+    backup,
+  }));
+  return {
+    deckPath, sidecarRoot, sessionDir, backup, transaction,
+    oldFingerprint, candidateFingerprint,
+  };
+}
+
+async function replaceSidecarIdentity(app, level) {
+  const sidecarRoot = join(app.deckPath, '..', '.huawei-deck-editor');
+  const sessionName = app.sessionDir.split('/').at(-1);
+  const target = level === 'root' ? sidecarRoot : app.sessionDir;
+  await rename(target, `${target}.trusted-original`);
+  if (level === 'root') await mkdir(sidecarRoot);
+  const replacementSession = level === 'root' ? join(sidecarRoot, sessionName) : app.sessionDir;
+  await mkdir(join(replacementSession, 'snapshots'), { recursive:true });
+  await mkdir(join(replacementSession, 'backups'), { recursive:true });
+  await mkdir(join(replacementSession, 'transactions'), { recursive:true });
+  return replacementSession;
 }
 
 function fakeWriterChild({ onEnd, onKill, closesOnKill = true } = {}) {
@@ -383,6 +444,68 @@ test('sidecar root 或 session 祖先为 symlink 时 server 启动即拒绝且�
       assert.equal(app, undefined, '不应在不可信 sidecar 上启动服务');
       assert.equal(startupError?.code, 'UNSAFE_SIDECAR');
       assert.deepEqual(await readdir(outside), []);
+    });
+  }
+});
+
+test('服务启动后 sidecar root 或 session 身份被替换时保存前拒绝且不写替换目录', async t => {
+  for (const level of ['root', 'session']) {
+    await t.test(level, async subtest => {
+      let spawnCalls = 0;
+      const child = fakeWriterChild({
+        onEnd:current => queueMicrotask(() => {
+          current.stdout.emit('data', `${JSON.stringify({
+            ok:false, code:'WRITE_FAILED', stage:'write', message:'stop',
+          })}\n`);
+          current.emit('close', 0);
+        }),
+      });
+      const app = await makeApp(subtest, {
+        deckContents:validBundle(),
+        spawnWriter:() => {
+          spawnCalls += 1;
+          return child;
+        },
+      });
+      await connectDiagnosticsEditor(subtest, app);
+      const deckBefore = await readFile(app.deckPath);
+      const memoryBefore = structuredClone(app.session);
+      const replacementSession = await replaceSidecarIdentity(app, level);
+
+      const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+        method:'POST', headers:{ 'content-type':'application/json' },
+        body:JSON.stringify({ expectedRevision:0 }),
+      });
+      const body = await response.json();
+
+      assert.equal(body.code, 'UNSAFE_SIDECAR', JSON.stringify(body));
+      assert.equal(spawnCalls, 0, '身份 guard 必须先于 backup 和 writer');
+      assert.deepEqual(await readdir(join(replacementSession, 'backups')), []);
+      assert.deepEqual(await readdir(join(replacementSession, 'transactions')), []);
+      assert.deepEqual(await readFile(app.deckPath), deckBefore);
+      assert.deepEqual(app.session, memoryBefore);
+    });
+  }
+});
+
+test('SessionStore 每次 persist 前复核启动时 sidecar 身份', async t => {
+  for (const level of ['root', 'session']) {
+    await t.test(level, async subtest => {
+      const app = await makeApp(subtest);
+      const memoryBefore = structuredClone(app.session);
+      const replacementSession = await replaceSidecarIdentity(app, level);
+
+      const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+        method:'POST', headers:{ 'content-type':'application/json' },
+        body:JSON.stringify(taskInput),
+      });
+      const body = await response.json();
+
+      assert.equal(body.code, 'UNSAFE_SIDECAR', JSON.stringify(body));
+      assert.deepEqual(await readdir(replacementSession), [
+        'backups', 'snapshots', 'transactions',
+      ]);
+      assert.deepEqual(app.session, memoryBefore);
     });
   }
 });
@@ -725,6 +848,162 @@ test('write-deck 调用安全适配器并解析验证诊断后的 JSON 结果', 
   assert.equal(result.revision, 0);
   assert.match(result.backup, /backups\/deck-[a-f0-9]{64}\.html$/);
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
+});
+
+test('writer 成功但 session persist 前中断时 durable record 仍存在', async t => {
+  let app;
+  let transactionId;
+  let transactionPath;
+  const candidateBytes = Buffer.from('candidate before session persist interruption');
+  const child = fakeWriterChild({
+    onEnd:current => queueMicrotask(async () => {
+      const oldBytes = await readFile(app.deckPath);
+      await writeFile(app.deckPath, candidateBytes);
+      transactionPath = await writeTransactionRecord(
+        app, transactionId, oldBytes, candidateBytes,
+      );
+      current.stdout.emit('data', `${JSON.stringify({
+        ok:true,
+        fingerprint:sha256(candidateBytes),
+        backup:join(app.sessionDir, 'backups', `deck-${sha256(oldBytes)}.html`),
+        transaction:transactionPath,
+      })}\n`);
+      current.emit('close', 0);
+    }),
+  });
+  app = await makeApp(t, {
+    deckContents:validBundle(),
+    spawnWriter:(_command, args) => {
+      transactionId = args.at(-1);
+      return child;
+    },
+    beforeSessionPersist:async () => {
+      assert.ok((await readFile(transactionPath)).length > 0);
+      throw Object.assign(new Error('模拟 session persist 前进程中断'), {
+        code:'INJECTED_INTERRUPTION', statusCode:500,
+      });
+    },
+  });
+  await connectDiagnosticsEditor(t, app);
+  const sessionBefore = await readFile(join(app.sessionDir, 'session.json'));
+
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(await readFile(app.deckPath), candidateBytes);
+  assert.deepEqual(await readFile(join(app.sessionDir, 'session.json')), sessionBefore);
+  assert.ok((await readFile(transactionPath)).length > 0);
+});
+
+test('backup 父目录 fsync 失败时不得启动 writer 或发布 transaction record', async t => {
+  const order = [];
+  const child = fakeWriterChild({
+    onEnd:current => queueMicrotask(() => {
+      current.stdout.emit('data', `${JSON.stringify({
+        ok:false, code:'WRITE_FAILED', stage:'write', message:'不应启动 writer',
+      })}\n`);
+      current.emit('close', 0);
+    }),
+  });
+  const app = await makeApp(t, {
+    deckContents:validBundle(),
+    syncDirectory:async directory => {
+      if (!directory.endsWith('/backups')) return;
+      order.push('backup-directory-fsync');
+      throw new Error('injected backup directory fsync failure');
+    },
+    spawnWriter:() => {
+      order.push('writer');
+      return child;
+    },
+  });
+  await connectDiagnosticsEditor(t, app);
+  const deckBefore = await readFile(app.deckPath);
+
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(order, ['backup-directory-fsync']);
+  assert.deepEqual(await readdir(join(app.sessionDir, 'transactions')), []);
+  assert.deepEqual(await readFile(app.deckPath), deckBefore);
+});
+
+test('重启按 durable record 收敛 old、candidate 与 third 状态后才清理记录', async t => {
+  const oldBytes = Buffer.from(validBundle());
+  const candidateBytes = Buffer.from(validBundle().replace('stage', 'stage candidate'));
+  const thirdBytes = Buffer.from(validBundle().replace('stage', 'stage external third'));
+  const cases = [
+    {
+      name:'disk candidate + session old 回滚 old',
+      diskBytes:candidateBytes,
+      sessionFingerprint:sha256(oldBytes),
+      expectedBytes:oldBytes,
+      expectedSessionFingerprint:sha256(oldBytes),
+      conflict:false,
+    },
+    {
+      name:'disk candidate + session candidate 仅清陈旧记录',
+      diskBytes:candidateBytes,
+      sessionFingerprint:sha256(candidateBytes),
+      expectedBytes:candidateBytes,
+      expectedSessionFingerprint:sha256(candidateBytes),
+      conflict:false,
+    },
+    {
+      name:'disk old + session old 仅清陈旧记录',
+      diskBytes:oldBytes,
+      sessionFingerprint:sha256(oldBytes),
+      expectedBytes:oldBytes,
+      expectedSessionFingerprint:sha256(oldBytes),
+      conflict:false,
+    },
+    {
+      name:'disk third 保留第三方版本并持久化冲突',
+      diskBytes:thirdBytes,
+      sessionFingerprint:sha256(oldBytes),
+      expectedBytes:thirdBytes,
+      expectedSessionFingerprint:sha256(oldBytes),
+      conflict:true,
+    },
+  ];
+
+  for (const current of cases) {
+    await t.test(current.name, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'deck-restart-transaction-'));
+      const fixture = await createPendingTransactionFixture({
+        root,
+        diskBytes:current.diskBytes,
+        oldBytes,
+        candidateBytes,
+        sessionFingerprint:current.sessionFingerprint,
+      });
+      let app;
+      try {
+        app = await startServer({
+          deckPath:fixture.deckPath,
+          host:'127.0.0.1', port:0, openBrowser:false,
+        });
+        assert.equal(app.sessionDir, fixture.sessionDir);
+        assert.deepEqual(await readFile(fixture.deckPath), current.expectedBytes);
+        assert.equal(app.session.deckFingerprint, current.expectedSessionFingerprint);
+        if (current.conflict) {
+          assert.equal(app.session.conflict?.code, 'DECK_CHANGED');
+          assert.equal(app.session.conflict?.actualFingerprint, sha256(thirdBytes));
+        } else {
+          assert.equal(app.session.conflict, null);
+        }
+        await assert.rejects(() => readFile(fixture.transaction), { code:'ENOENT' });
+      } finally {
+        await app?.close();
+      }
+    });
+  }
 });
 
 test('writer 已替换 Deck 后无 ACK、坏 ACK、非零退出、EPIPE 或超时都必须恢复原子状态', async t => {

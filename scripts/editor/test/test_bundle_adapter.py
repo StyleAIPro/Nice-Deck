@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import inspect
 import json
 import tempfile
 import unittest
@@ -29,6 +30,16 @@ def minimal_bundle(path, template=None):
 
 def sidecar_session(deck):
     return deck.parent / ".huawei-deck-editor" / "deck-session"
+
+
+def directory_identity(path):
+    info = path.stat()
+    return {
+        "path": str(path),
+        "realPath": str(path.resolve(strict=True)),
+        "dev": str(info.st_dev),
+        "ino": str(info.st_ino),
+    }
 
 
 class BundleAdapterTest(unittest.TestCase):
@@ -187,6 +198,50 @@ class BundleAdapterTest(unittest.TestCase):
                 self.assertEqual("WRITE_FAILED", result["code"])
                 self.assertEqual(original, deck.read_bytes())
                 self.assertEqual([], list(outside.iterdir()))
+
+    def test_runtime_sidecar_identity_replacement_is_rejected_before_any_write(self):
+        self.assertIn(
+            "sidecar_identity",
+            inspect.signature(bundle_adapter.write_patches_safe).parameters,
+            "adapter 必须接收 server 启动时捕获的 sidecar identity",
+        )
+        for level in ("root", "session"):
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as td:
+                project = Path(td) / "project"
+                project.mkdir()
+                deck = project / "deck.html"
+                minimal_bundle(deck)
+                original = deck.read_bytes()
+                root = project / ".huawei-deck-editor"
+                session = root / "deck-session"
+                backups = session / "backups"
+                transactions = session / "transactions"
+                backups.mkdir(parents=True)
+                transactions.mkdir()
+                identity = {
+                    "root": directory_identity(root),
+                    "session": directory_identity(session),
+                    "backups": directory_identity(backups),
+                    "transactions": directory_identity(transactions),
+                }
+                target = root if level == "root" else session
+                target.rename(target.with_name(f"{target.name}.trusted-original"))
+                if level == "root":
+                    root.mkdir()
+                replacement_session = root / "deck-session"
+                (replacement_session / "backups").mkdir(parents=True)
+                (replacement_session / "transactions").mkdir()
+
+                result = bundle_adapter.write_patches_safe(
+                    deck, [], session, sidecar_identity=identity
+                )
+
+                self.assertEqual(False, result["ok"])
+                self.assertEqual(original, deck.read_bytes())
+                self.assertEqual([], list((replacement_session / "backups").iterdir()))
+                self.assertEqual(
+                    [], list((replacement_session / "transactions").iterdir())
+                )
 
     def test_success_persists_deck_bound_durable_transaction_record(self):
         with tempfile.TemporaryDirectory() as td:

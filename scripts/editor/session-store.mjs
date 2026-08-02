@@ -34,14 +34,23 @@ function decodeSnapshot(snapshot) {
 }
 
 export class SessionStore {
-  static async open({ deckPath, rootDir = join(dirname(deckPath), '.huawei-deck-editor') }) {
+  static async open({
+    deckPath,
+    rootDir = join(dirname(deckPath), '.huawei-deck-editor'),
+    sessionDir: selectedSessionDir,
+    sidecarGuard = async () => {},
+  }) {
+    await sidecarGuard();
     const bytes = await readFile(deckPath);
     const deckFingerprint = sha256(bytes);
-    const sessionDir = join(rootDir, `${parse(deckPath).name}-${deckFingerprint.slice(0, 8)}`);
+    const sessionDir = selectedSessionDir
+      ?? join(rootDir, `${parse(deckPath).name}-${deckFingerprint.slice(0, 8)}`);
+    await sidecarGuard();
     await mkdir(join(sessionDir, 'snapshots'), { recursive: true });
     await mkdir(join(sessionDir, 'backups'), { recursive: true });
 
-    const store = new SessionStore(deckPath, deckFingerprint, sessionDir);
+    const store = new SessionStore(deckPath, deckFingerprint, sessionDir, sidecarGuard);
+    await sidecarGuard();
     try {
       const persisted = JSON.parse(await readFile(store.sessionPath, 'utf8'));
       store.state = {
@@ -61,10 +70,11 @@ export class SessionStore {
     return store;
   }
 
-  constructor(deckPath, deckFingerprint, sessionDir) {
+  constructor(deckPath, deckFingerprint, sessionDir, sidecarGuard = async () => {}) {
     this.deckPath = deckPath;
     this.sessionDir = sessionDir;
     this.sessionPath = join(sessionDir, 'session.json');
+    this.sidecarGuard = sidecarGuard;
     this.state = {
       version: 1,
       deckPath,
@@ -87,9 +97,11 @@ export class SessionStore {
   }
 
   async #persist() {
+    await this.sidecarGuard();
     const temporaryPath = `${this.sessionPath}.${randomUUID()}.tmp`;
     await writeFile(temporaryPath, JSON.stringify(this.state, null, 2));
     try {
+      await this.sidecarGuard();
       await rename(temporaryPath, this.sessionPath);
     } catch (error) {
       await unlink(temporaryPath).catch(() => {});
@@ -123,7 +135,9 @@ export class SessionStore {
     const previousTasks = structuredClone(this.state.tasks);
     try {
       if (snapshotBytes) {
+        await this.sidecarGuard();
         await writeFile(temporarySnapshotPath, snapshotBytes);
+        await this.sidecarGuard();
         await rename(temporarySnapshotPath, finalSnapshotPath);
       }
       this.state.tasks.push(task);

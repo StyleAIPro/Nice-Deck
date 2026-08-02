@@ -55,7 +55,35 @@ def _ensure_plain_directory(path, parent=None):
     return path
 
 
-def _ensure_sidecar_session(deck_path, session_dir):
+def _identity_for(path, label):
+    path = _absolute_path(path)
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"{label} 必须是非符号链接的真实目录：{path}")
+    return {
+        "path": str(path),
+        "realPath": os.path.realpath(path),
+        "dev": str(info.st_dev),
+        "ino": str(info.st_ino),
+    }
+
+
+def _require_identity(identity, name, path):
+    if not isinstance(identity, dict) or not isinstance(identity.get(name), dict):
+        raise RuntimeError(f"缺少启动时 {name} identity")
+    expected = identity[name]
+    required = {"path", "realPath", "dev", "ino"}
+    if set(expected) != required or any(
+        not isinstance(expected[key], str) for key in required
+    ):
+        raise RuntimeError(f"{name} identity 格式无效")
+    current = _identity_for(path, name)
+    if current != expected:
+        raise RuntimeError(f"{name} identity 已在服务运行期间变化")
+    return expected
+
+
+def _ensure_sidecar_session(deck_path, session_dir, sidecar_identity=None):
     project_dir = deck_path.parent
     project_info = project_dir.lstat()
     if stat.S_ISLNK(project_info.st_mode) or not stat.S_ISDIR(project_info.st_mode):
@@ -63,6 +91,10 @@ def _ensure_sidecar_session(deck_path, session_dir):
     sidecar_root = project_dir / ".huawei-deck-editor"
     if session_dir.parent != sidecar_root:
         raise RuntimeError(f"session 必须直属 Deck 项目的 sidecar root：{session_dir}")
+    if sidecar_identity is not None:
+        _require_identity(sidecar_identity, "root", sidecar_root)
+        _require_identity(sidecar_identity, "session", session_dir)
+        return session_dir
     sidecar_root = _ensure_plain_directory(sidecar_root, parent=project_dir)
     return _ensure_plain_directory(session_dir, parent=sidecar_root)
 
@@ -79,17 +111,24 @@ def _normalize_transaction_id(transaction_id):
     return normalized
 
 
-def _open_directory_fd(path):
+def _open_directory_fd(path, expected_identity=None):
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
-    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
         os.close(fd)
         raise RuntimeError(f"目录句柄不是常规目录：{path}")
+    if expected_identity is not None and (
+        str(info.st_dev) != expected_identity["dev"]
+        or str(info.st_ino) != expected_identity["ino"]
+    ):
+        os.close(fd)
+        raise RuntimeError(f"目录句柄 identity 与启动时不一致：{path}")
     return fd
 
 
-def _write_new_file(directory, name, contents):
-    directory_fd = _open_directory_fd(directory)
+def _write_new_file(directory, name, contents, expected_identity=None):
+    directory_fd = _open_directory_fd(directory, expected_identity)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
@@ -105,8 +144,8 @@ def _write_new_file(directory, name, contents):
         os.close(directory_fd)
 
 
-def _read_regular_file(directory, name):
-    directory_fd = _open_directory_fd(directory)
+def _read_regular_file(directory, name, expected_identity=None):
+    directory_fd = _open_directory_fd(directory, expected_identity)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
@@ -121,8 +160,8 @@ def _read_regular_file(directory, name):
         os.close(directory_fd)
 
 
-def _unlink_regular_file(directory, name):
-    directory_fd = _open_directory_fd(directory)
+def _unlink_regular_file(directory, name, expected_identity=None):
+    directory_fd = _open_directory_fd(directory, expected_identity)
     try:
         info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode):
@@ -133,14 +172,14 @@ def _unlink_regular_file(directory, name):
         os.close(directory_fd)
 
 
-def _ensure_backup(backups, name, original_bytes, digest):
+def _ensure_backup(backups, name, original_bytes, digest, expected_identity=None):
     try:
-        _write_new_file(backups, name, original_bytes)
+        _write_new_file(backups, name, original_bytes, expected_identity)
     except FileExistsError:
         pass
 
     try:
-        backup_bytes = _read_regular_file(backups, name)
+        backup_bytes = _read_regular_file(backups, name, expected_identity)
     except OSError as error:
         raise RuntimeError(
             f"备份必须是非符号链接的常规文件：{backups / name}"
@@ -156,11 +195,19 @@ def write_patches(
     session_dir,
     expected_fingerprint=None,
     transaction_id=None,
+    sidecar_identity=None,
 ):
     deck_path = _absolute_path(deck_path)
-    session_dir = _ensure_sidecar_session(deck_path, _absolute_path(session_dir))
+    session_dir = _ensure_sidecar_session(
+        deck_path, _absolute_path(session_dir), sidecar_identity
+    )
     transaction_id = _normalize_transaction_id(transaction_id)
-    backups = _ensure_plain_directory(session_dir / "backups", parent=session_dir)
+    if sidecar_identity is None:
+        backups = _ensure_plain_directory(session_dir / "backups", parent=session_dir)
+        backup_identity = None
+    else:
+        backups = session_dir / "backups"
+        backup_identity = _require_identity(sidecar_identity, "backups", backups)
     phase = "read"
     tmp = None
     try:
@@ -174,7 +221,9 @@ def write_patches(
         phase = "backup"
         backup_name = f"{deck_path.stem}-{digest}.html"
         backup = backups / backup_name
-        _ensure_backup(backups, backup_name, original_bytes, digest)
+        _ensure_backup(
+            backups, backup_name, original_bytes, digest, backup_identity
+        )
 
         phase = "decode"
         lines = eb.load(deck_path)
@@ -220,9 +269,16 @@ def write_patches(
             raise error
 
         phase = "transaction"
-        transactions = _ensure_plain_directory(
-            session_dir / "transactions", parent=session_dir
-        )
+        if sidecar_identity is None:
+            transactions = _ensure_plain_directory(
+                session_dir / "transactions", parent=session_dir
+            )
+            transaction_identity = None
+        else:
+            transactions = session_dir / "transactions"
+            transaction_identity = _require_identity(
+                sidecar_identity, "transactions", transactions
+            )
         transaction_name = f"{transaction_id}.json"
         transaction = transactions / transaction_name
         transaction_payload = {
@@ -240,12 +296,15 @@ def write_patches(
             json.dumps(
                 transaction_payload, ensure_ascii=False, separators=(",", ":")
             ).encode("utf-8"),
+            transaction_identity,
         )
         error_transaction = str(transaction)
 
         phase = "fingerprint"
         if deck_path.read_bytes() != original_bytes:
-            _unlink_regular_file(transactions, transaction_name)
+            _unlink_regular_file(
+                transactions, transaction_name, transaction_identity
+            )
             error = RuntimeError("Deck 在 transaction 落盘后、replace 前发生变化，拒绝覆盖")
             error.deck_code = "DECK_CHANGED"
             raise error
@@ -281,6 +340,7 @@ def write_patches_safe(
     session_dir,
     expected_fingerprint=None,
     transaction_id=None,
+    sidecar_identity=None,
 ):
     """供 Node 服务调用的稳定结果封装；底层 write_patches 仍保留原异常类型便于测试。"""
     deck_path = _absolute_path(deck_path)
@@ -292,6 +352,7 @@ def write_patches_safe(
             session_dir,
             expected_fingerprint=expected_fingerprint,
             transaction_id=transaction_id,
+            sidecar_identity=sidecar_identity,
         )
     except Exception as error:
         stage = getattr(error, "deck_stage", "write")
@@ -313,7 +374,9 @@ def write_patches_safe(
         if isinstance(getattr(error, "deck_transaction", None), str):
             result["transaction"] = error.deck_transaction
         try:
-            safe_session = _ensure_sidecar_session(deck_path, session_dir)
+            safe_session = _ensure_sidecar_session(
+                deck_path, session_dir, sidecar_identity
+            )
             diagnostics = _ensure_plain_directory(
                 safe_session / "write-errors", parent=safe_session
             )

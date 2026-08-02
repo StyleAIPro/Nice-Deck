@@ -78,39 +78,118 @@ function unsafeSidecarError(message, cause) {
   });
 }
 
-async function ensureTrustedChildDirectory(parentPath, childPath, label) {
-  const parentInfo = await lstat(parentPath);
-  if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) {
-    throw new Error(`${label} 的父目录不是可信真实目录`);
+async function captureDirectoryIdentity(path, label, parentIdentity = null) {
+  const absolutePath = resolve(path);
+  const info = await lstat(absolutePath, { bigint:true });
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`${label} 必须是非符号链接的真实目录`);
   }
-  const parentReal = await realpath(parentPath);
+  const realPath = await realpath(absolutePath);
+  if (parentIdentity && dirname(realPath) !== parentIdentity.realPath) {
+    throw new Error(`${label} 真实路径逃逸预期父目录`);
+  }
+  return {
+    path:absolutePath,
+    realPath,
+    dev:String(info.dev),
+    ino:String(info.ino),
+    label,
+  };
+}
+
+async function assertDirectoryIdentity(identity, parentIdentity = null) {
+  const current = await captureDirectoryIdentity(
+    identity.path, identity.label, parentIdentity,
+  );
+  if (current.realPath !== identity.realPath
+    || current.dev !== identity.dev
+    || current.ino !== identity.ino) {
+    throw new Error(`${identity.label} 身份已在服务运行期间变化`);
+  }
+  return current;
+}
+
+async function ensureTrustedChildDirectory(parentIdentity, childPath, label) {
+  await assertDirectoryIdentity(parentIdentity);
   await mkdir(childPath, { mode:0o700 }).catch(error => {
     if (error.code !== 'EEXIST') throw error;
   });
-  const childInfo = await lstat(childPath);
-  if (childInfo.isSymbolicLink() || !childInfo.isDirectory()) {
-    throw new Error(`${label} 必须是非符号链接的真实目录`);
-  }
-  const childReal = await realpath(childPath);
-  if (dirname(childReal) !== parentReal) {
-    throw new Error(`${label} 真实路径逃逸预期父目录`);
-  }
-  return childPath;
+  return captureDirectoryIdentity(childPath, label, parentIdentity);
 }
 
-async function prepareSidecarBoundary(deckPath, deckFingerprint) {
+async function prepareSidecarRoot(deckPath) {
   const projectDir = dirname(deckPath);
+  const project = await captureDirectoryIdentity(projectDir, 'Deck 项目目录');
   const sidecarRoot = join(projectDir, '.huawei-deck-editor');
-  await ensureTrustedChildDirectory(projectDir, sidecarRoot, 'sidecar root');
-  const sessionDir = join(
-    sidecarRoot,
-    `${basename(deckPath, '.html')}-${deckFingerprint.slice(0, 8)}`,
-  );
-  await ensureTrustedChildDirectory(sidecarRoot, sessionDir, 'sidecar session');
-  return { sidecarRoot, sessionDir };
+  const root = await ensureTrustedChildDirectory(project, sidecarRoot, 'sidecar root');
+  const boundary = { project, root, sidecarRoot:root.path };
+  boundary.guard = async () => {
+    try {
+      await assertDirectoryIdentity(project);
+      await assertDirectoryIdentity(root, project);
+    } catch (error) {
+      throw unsafeSidecarError('sidecar root 身份已变化，拒绝继续写入', error);
+    }
+  };
+  return boundary;
 }
 
-async function safeBackupsDirectory(sessionDir) {
+async function prepareSidecarSession(rootBoundary, sessionDir) {
+  await rootBoundary.guard();
+  const session = await ensureTrustedChildDirectory(
+    rootBoundary.root, sessionDir, 'sidecar session',
+  );
+  const snapshots = await ensureTrustedChildDirectory(
+    session, join(session.path, 'snapshots'), 'snapshots',
+  );
+  const backups = await ensureTrustedChildDirectory(
+    session, join(session.path, 'backups'), 'backups',
+  );
+  const transactions = await ensureTrustedChildDirectory(
+    session, join(session.path, 'transactions'), 'transactions',
+  );
+  const boundary = {
+    ...rootBoundary,
+    session,
+    snapshots,
+    backups,
+    transactions,
+    sessionDir:session.path,
+  };
+  boundary.guard = async () => {
+    try {
+      await assertDirectoryIdentity(boundary.project);
+      await assertDirectoryIdentity(boundary.root, boundary.project);
+      await assertDirectoryIdentity(boundary.session, boundary.root);
+      await assertDirectoryIdentity(boundary.snapshots, boundary.session);
+      await assertDirectoryIdentity(boundary.backups, boundary.session);
+      await assertDirectoryIdentity(boundary.transactions, boundary.session);
+    } catch (error) {
+      throw unsafeSidecarError('sidecar 身份已在服务运行期间变化，拒绝继续写入', error);
+    }
+  };
+  boundary.pythonIdentity = Object.fromEntries(
+    ['root', 'session', 'backups', 'transactions'].map(name => [name, {
+      path:boundary[name].path,
+      realPath:boundary[name].realPath,
+      dev:boundary[name].dev,
+      ino:boundary[name].ino,
+    }]),
+  );
+  return boundary;
+}
+
+async function safeBackupsDirectory(sessionDir, sidecarBoundary = null) {
+  if (sidecarBoundary) {
+    await sidecarBoundary.guard();
+    if (resolve(sessionDir) !== sidecarBoundary.session.path) {
+      throw new Error('session 路径与启动身份不一致');
+    }
+    return {
+      backupRoot:sidecarBoundary.backups.path,
+      backupReal:sidecarBoundary.backups.realPath,
+    };
+  }
   const absoluteSession = resolve(sessionDir);
   const sessionInfo = await lstat(absoluteSession);
   if (sessionInfo.isSymbolicLink() || !sessionInfo.isDirectory()) {
@@ -132,7 +211,17 @@ async function safeBackupsDirectory(sessionDir) {
   return { backupRoot, backupReal };
 }
 
-async function safeTransactionsDirectory(sessionDir) {
+async function safeTransactionsDirectory(sessionDir, sidecarBoundary = null) {
+  if (sidecarBoundary) {
+    await sidecarBoundary.guard();
+    if (resolve(sessionDir) !== sidecarBoundary.session.path) {
+      throw new Error('session 路径与启动身份不一致');
+    }
+    return {
+      transactionRoot:sidecarBoundary.transactions.path,
+      transactionReal:sidecarBoundary.transactions.realPath,
+    };
+  }
   const absoluteSession = resolve(sessionDir);
   const sessionInfo = await lstat(absoluteSession);
   if (sessionInfo.isSymbolicLink() || !sessionInfo.isDirectory()) {
@@ -167,9 +256,12 @@ async function readTransactionRecord(
   transactionId,
   expectedFingerprint,
   backupRecord,
+  sidecarBoundary = null,
 ) {
   requireTransactionId(transactionId);
-  const { transactionRoot, transactionReal } = await safeTransactionsDirectory(sessionDir);
+  const { transactionRoot, transactionReal } = await safeTransactionsDirectory(
+    sessionDir, sidecarBoundary,
+  );
   const transactionPath = join(transactionRoot, `${transactionId}.json`);
   const info = await lstat(transactionPath);
   if (info.isSymbolicLink() || !info.isFile()) {
@@ -207,12 +299,16 @@ async function readTransactionRecord(
     || resolve(record.backup ?? '') !== backupRecord.backupPath) {
     throw new Error('事务记录未严格绑定当前 Deck、session 和保存基线');
   }
-  await readTrustedBackup(sessionDir, record.backup, expectedFingerprint);
+  await readTrustedBackup(
+    sessionDir, record.backup, expectedFingerprint, sidecarBoundary,
+  );
   return { transactionPath, record };
 }
 
-async function removeTransactionRecord(sessionDir, transactionId) {
-  const { transactionRoot, transactionReal } = await safeTransactionsDirectory(sessionDir);
+async function removeTransactionRecord(sessionDir, transactionId, sidecarBoundary = null) {
+  const { transactionRoot, transactionReal } = await safeTransactionsDirectory(
+    sessionDir, sidecarBoundary,
+  );
   const transactionPath = join(transactionRoot, `${requireTransactionId(transactionId)}.json`);
   let info;
   try { info = await lstat(transactionPath); }
@@ -227,8 +323,8 @@ async function removeTransactionRecord(sessionDir, transactionId) {
   await unlink(transactionPath);
 }
 
-async function pruneTransactionRecords(sessionDir, maximum = 32) {
-  const { transactionRoot } = await safeTransactionsDirectory(sessionDir);
+async function pruneTransactionRecords(sessionDir, maximum = 32, sidecarBoundary = null) {
+  const { transactionRoot } = await safeTransactionsDirectory(sessionDir, sidecarBoundary);
   const candidates = [];
   for (const entry of await readdir(transactionRoot, { withFileTypes:true })) {
     if (!entry.isFile() || !/^[0-9a-f-]{36}\.json$/.test(entry.name)) continue;
@@ -240,8 +336,12 @@ async function pruneTransactionRecords(sessionDir, maximum = 32) {
   for (const candidate of candidates.slice(maximum)) await unlink(candidate.path);
 }
 
-async function readTrustedBackup(sessionDir, backupPath, expectedFingerprint) {
-  const { backupRoot, backupReal } = await safeBackupsDirectory(sessionDir);
+async function readTrustedBackup(
+  sessionDir, backupPath, expectedFingerprint, sidecarBoundary = null,
+) {
+  const { backupRoot, backupReal } = await safeBackupsDirectory(
+    sessionDir, sidecarBoundary,
+  );
   const absoluteBackup = resolve(backupPath);
   if (dirname(absoluteBackup) !== backupRoot) {
     throw new Error('备份路径不在当前会话 backups 目录内');
@@ -272,8 +372,23 @@ async function readTrustedBackup(sessionDir, backupPath, expectedFingerprint) {
   return { backupPath:absoluteBackup, backupBytes };
 }
 
-async function ensureTransactionBackup(deckPath, sessionDir, expectedFingerprint) {
-  const { backupRoot } = await safeBackupsDirectory(sessionDir);
+async function syncDirectoryPath(path) {
+  const handle = await open(
+    path,
+    fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try { await handle.sync(); }
+  finally { await handle.close(); }
+}
+
+async function ensureTransactionBackup(
+  deckPath,
+  sessionDir,
+  expectedFingerprint,
+  sidecarBoundary = null,
+  syncDirectory = syncDirectoryPath,
+) {
+  const { backupRoot } = await safeBackupsDirectory(sessionDir, sidecarBoundary);
   const originalBytes = await readFile(deckPath);
   const actualFingerprint = bytesFingerprint(originalBytes);
   if (actualFingerprint !== expectedFingerprint) {
@@ -300,7 +415,12 @@ async function ensureTransactionBackup(deckPath, sessionDir, expectedFingerprint
   } finally {
     await handle?.close();
   }
-  const trusted = await readTrustedBackup(sessionDir, backupPath, expectedFingerprint);
+  await sidecarBoundary?.guard();
+  await syncDirectory(backupRoot);
+  await sidecarBoundary?.guard();
+  const trusted = await readTrustedBackup(
+    sessionDir, backupPath, expectedFingerprint, sidecarBoundary,
+  );
   return { ...trusted, expectedFingerprint };
 }
 
@@ -310,8 +430,11 @@ async function restoreDeckBackup(
   backupRecord,
   expectedFingerprint,
   candidateFingerprint,
+  sidecarBoundary = null,
 ) {
-  const trusted = await readTrustedBackup(sessionDir, backupRecord.backupPath, expectedFingerprint);
+  const trusted = await readTrustedBackup(
+    sessionDir, backupRecord.backupPath, expectedFingerprint, sidecarBoundary,
+  );
   const currentFingerprint = await fileFingerprint(deckPath);
   if (currentFingerprint === expectedFingerprint) return;
   if (currentFingerprint !== candidateFingerprint) {
@@ -358,6 +481,7 @@ async function validateWriterResult(
   result,
   backupRecord,
   transactionId,
+  sidecarBoundary = null,
 ) {
   if (result?.ok !== true) throw adapterError('WRITE_FAILED', 500, '写入 Deck 未返回成功状态');
   if (typeof result.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(result.fingerprint)) {
@@ -373,13 +497,16 @@ async function validateWriterResult(
     || resolve(result.transaction) !== resolve(expectedTransactionPath)) {
     throw adapterError('WRITE_FAILED', 500, '写入 Deck 返回不可信 transaction');
   }
-  await readTrustedBackup(sessionDir, result.backup, backupRecord.expectedFingerprint);
+  await readTrustedBackup(
+    sessionDir, result.backup, backupRecord.expectedFingerprint, sidecarBoundary,
+  );
   const { record } = await readTransactionRecord(
     deckPath,
     sessionDir,
     transactionId,
     backupRecord.expectedFingerprint,
     backupRecord,
+    sidecarBoundary,
   );
   if (record.candidateFingerprint !== result.fingerprint) {
     throw adapterError('WRITE_FAILED', 500, '事务记录 candidate 与 writer 回执不一致');
@@ -548,7 +675,14 @@ function errorResponse(response, error) {
   json(response, statusCode, { error: code, code, message, ...details });
 }
 
-function runWritePatches(deckPath, sessionDir, patches, expectedFingerprint, transactionId, {
+function runWritePatches(
+  deckPath,
+  sessionDir,
+  patches,
+  expectedFingerprint,
+  transactionId,
+  sidecarIdentity,
+  {
   spawnWriter,
   timeoutMs,
   killGraceMs,
@@ -562,11 +696,13 @@ function runWritePatches(deckPath, sessionDir, patches, expectedFingerprint, tra
     'module=importlib.util.module_from_spec(spec)',
     'spec.loader.exec_module(module)',
     'patches=json.load(sys.stdin)',
-    'print(json.dumps(module.write_patches_safe(sys.argv[2],patches,sys.argv[3],sys.argv[4],sys.argv[5]),ensure_ascii=False))',
+    'identity=json.loads(sys.argv[5])',
+    'print(json.dumps(module.write_patches_safe(sys.argv[2],patches,sys.argv[3],sys.argv[4],sys.argv[6],identity),ensure_ascii=False))',
   ].join(';');
   return new Promise((resolvePromise, reject) => {
     const child = spawnWriter('python3', [
-      '-c', program, adapterPath, deckPath, sessionDir, expectedFingerprint, transactionId,
+      '-c', program, adapterPath, deckPath, sessionDir, expectedFingerprint,
+      JSON.stringify(sidecarIdentity), transactionId,
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -711,22 +847,31 @@ async function runWriteTransaction({
   sessionDir,
   expectedFingerprint,
   runWriter,
+  sidecarBoundary,
+  syncDirectory,
 }) {
   const transactionId = randomUUID();
   let backupRecord;
   try {
-    backupRecord = await ensureTransactionBackup(deckPath, sessionDir, expectedFingerprint);
-    await pruneTransactionRecords(sessionDir);
+    await sidecarBoundary?.guard();
+    backupRecord = await ensureTransactionBackup(
+      deckPath,
+      sessionDir,
+      expectedFingerprint,
+      sidecarBoundary,
+      syncDirectory,
+    );
+    await pruneTransactionRecords(sessionDir, 32, sidecarBoundary);
   } catch (error) {
+    if (error?.code === 'UNSAFE_SIDECAR') throw error;
     if (error?.code === 'DECK_CHANGED') throw error;
     throw adapterError('WRITE_FAILED', 500, `无法建立可信事务备份：${error.message}`);
   }
   try {
     const result = await runWriter(transactionId);
     await validateWriterResult(
-      deckPath, sessionDir, result, backupRecord, transactionId,
+      deckPath, sessionDir, result, backupRecord, transactionId, sidecarBoundary,
     );
-    await removeTransactionRecord(sessionDir, transactionId);
     return result;
   } catch (error) {
     const actualFingerprint = await fileFingerprint(deckPath).catch(readError => (
@@ -740,6 +885,7 @@ async function runWriteTransaction({
         transactionId,
         expectedFingerprint,
         backupRecord,
+        sidecarBoundary,
       );
     } catch (recordError) {
       if (actualFingerprint === expectedFingerprint) throw error;
@@ -754,28 +900,166 @@ async function runWriteTransaction({
         recordError,
       );
     }
-    try {
-      if (actualFingerprint === expectedFingerprint) throw error;
-      if (actualFingerprint !== transaction.record.candidateFingerprint) {
-        throw restoreConflictError(
-          transaction.record.candidateFingerprint,
-          actualFingerprint,
-          'writer 失败后磁盘 Deck 已是第三方版本，拒绝恢复旧文件',
-          error,
-        );
-      }
-      await restoreDeckBackup(
-        deckPath,
-        sessionDir,
-        backupRecord,
-        expectedFingerprint,
-        transaction.record.candidateFingerprint,
-      );
+    if (actualFingerprint === expectedFingerprint) {
+      await removeTransactionRecord(sessionDir, transactionId, sidecarBoundary);
       throw error;
-    } finally {
-      await removeTransactionRecord(sessionDir, transactionId);
+    }
+    if (actualFingerprint !== transaction.record.candidateFingerprint) {
+      const conflict = restoreConflictError(
+        transaction.record.candidateFingerprint,
+        actualFingerprint,
+        'writer 失败后磁盘 Deck 已是第三方版本，拒绝恢复旧文件',
+        error,
+      );
+      conflict.transaction = transaction.transactionPath;
+      throw conflict;
+    }
+    await restoreDeckBackup(
+      deckPath,
+      sessionDir,
+      backupRecord,
+      expectedFingerprint,
+      transaction.record.candidateFingerprint,
+      sidecarBoundary,
+    );
+    await removeTransactionRecord(sessionDir, transactionId, sidecarBoundary);
+    throw error;
+  }
+}
+
+async function finalizeWriteTransaction(value, sessionDir, sidecarBoundary) {
+  if (typeof value?.transaction !== 'string') return;
+  const transactionPath = resolve(value.transaction);
+  const expectedRoot = resolve(sessionDir, 'transactions');
+  if (dirname(transactionPath) !== expectedRoot) {
+    throw unsafeSidecarError('拒绝清理当前 session 外的 transaction record');
+  }
+  const match = basename(transactionPath).match(
+    /^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/,
+  );
+  if (!match) throw unsafeSidecarError('transaction record 名称不可信');
+  await removeTransactionRecord(sessionDir, match[1], sidecarBoundary);
+}
+
+async function readGuardedJsonFile(path, sidecarBoundary, label) {
+  await sidecarBoundary.guard();
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error(`${label} 必须是非符号链接的常规文件`);
+  }
+  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error(`${label} 句柄不是常规文件`);
+    return JSON.parse(await handle.readFile('utf8'));
+  } finally {
+    await handle.close();
+  }
+}
+
+async function findPendingDeckTransaction(deckPath, rootBoundary) {
+  await rootBoundary.guard();
+  const deckPrefix = `${basename(deckPath, '.html')}-`;
+  const candidates = [];
+  for (const entry of await readdir(rootBoundary.sidecarRoot, { withFileTypes:true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(deckPrefix)) continue;
+    const sessionDir = join(rootBoundary.sidecarRoot, entry.name);
+    const transactionDir = join(sessionDir, 'transactions');
+    let transactionEntries;
+    try { transactionEntries = await readdir(transactionDir, { withFileTypes:true }); }
+    catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const transactionEntry of transactionEntries) {
+      const match = transactionEntry.isFile()
+        && transactionEntry.name.match(
+          /^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/,
+        );
+      if (match) candidates.push({ sessionDir, transactionId:match[1] });
     }
   }
+  if (!candidates.length) return null;
+  if (candidates.length !== 1) {
+    throw new Error('当前 Deck 存在多个未完成 transaction，拒绝猜测恢复顺序');
+  }
+  const candidate = candidates[0];
+  const sidecarBoundary = await prepareSidecarSession(
+    rootBoundary, candidate.sessionDir,
+  );
+  const transactionPath = join(
+    sidecarBoundary.transactions.path, `${candidate.transactionId}.json`,
+  );
+  const rawRecord = await readGuardedJsonFile(
+    transactionPath, sidecarBoundary, 'transaction record',
+  );
+  if (resolve(rawRecord?.deckPath ?? '') !== resolve(deckPath)
+    || resolve(rawRecord?.sessionDir ?? '') !== resolve(candidate.sessionDir)
+    || !/^[a-f0-9]{64}$/.test(rawRecord?.oldFingerprint ?? '')) {
+    throw new Error('未完成 transaction 未绑定当前 Deck/session');
+  }
+  const backupRecord = { backupPath:resolve(rawRecord.backup ?? '') };
+  const { record } = await readTransactionRecord(
+    deckPath,
+    candidate.sessionDir,
+    candidate.transactionId,
+    rawRecord.oldFingerprint,
+    backupRecord,
+    sidecarBoundary,
+  );
+  const sessionState = await readGuardedJsonFile(
+    join(candidate.sessionDir, 'session.json'), sidecarBoundary, 'session.json',
+  );
+  if (!/^[a-f0-9]{64}$/.test(sessionState?.deckFingerprint ?? '')) {
+    throw new Error('未完成 transaction 对应 session 缺少有效 deckFingerprint');
+  }
+  return {
+    ...candidate,
+    transactionPath,
+    record,
+    backupRecord,
+    sessionState,
+    sidecarBoundary,
+  };
+}
+
+async function recoverPendingDeckTransaction(deckPath, rootBoundary) {
+  const pending = await findPendingDeckTransaction(deckPath, rootBoundary);
+  if (!pending) return null;
+  const diskFingerprint = await fileFingerprint(deckPath);
+  const sessionFingerprint = pending.sessionState.deckFingerprint;
+  const { oldFingerprint, candidateFingerprint } = pending.record;
+  if (diskFingerprint === candidateFingerprint && sessionFingerprint === oldFingerprint) {
+    await restoreDeckBackup(
+      deckPath,
+      pending.sessionDir,
+      pending.backupRecord,
+      oldFingerprint,
+      candidateFingerprint,
+      pending.sidecarBoundary,
+    );
+    await removeTransactionRecord(
+      pending.sessionDir, pending.transactionId, pending.sidecarBoundary,
+    );
+    return { sessionDir:pending.sessionDir, sidecarBoundary:pending.sidecarBoundary };
+  }
+  if ((diskFingerprint === candidateFingerprint && sessionFingerprint === candidateFingerprint)
+    || (diskFingerprint === oldFingerprint && sessionFingerprint === oldFingerprint)) {
+    await removeTransactionRecord(
+      pending.sessionDir, pending.transactionId, pending.sidecarBoundary,
+    );
+    return { sessionDir:pending.sessionDir, sidecarBoundary:pending.sidecarBoundary };
+  }
+  if (![oldFingerprint, candidateFingerprint].includes(sessionFingerprint)) {
+    throw new Error('session fingerprint 与未完成 transaction 不一致');
+  }
+  return {
+    sessionDir:pending.sessionDir,
+    sidecarBoundary:pending.sidecarBoundary,
+    pendingConflict:{
+      actualFingerprint:diskFingerprint,
+      transactionId:pending.transactionId,
+    },
+  };
 }
 
 export async function startServer({
@@ -790,6 +1074,8 @@ export async function startServer({
   writerKillGraceMs = 250,
   spawnWriter = spawn,
   onActiveWritersChange = () => {},
+  beforeSessionPersist = async () => {},
+  syncDirectory = syncDirectoryPath,
 } = {}) {
   void openBrowser;
   if (!deckPath) throw new TypeError('缺少 deckPath');
@@ -802,22 +1088,62 @@ export async function startServer({
   const urlHost = host.includes(':') ? `[${host}]` : host;
   const absoluteDeckPath = resolve(deckPath);
   let sidecarBoundary;
+  let pendingRecovery;
   try {
-    sidecarBoundary = await prepareSidecarBoundary(
-      absoluteDeckPath,
-      await fileFingerprint(absoluteDeckPath),
+    const rootBoundary = await prepareSidecarRoot(absoluteDeckPath);
+    pendingRecovery = await recoverPendingDeckTransaction(
+      absoluteDeckPath, rootBoundary,
     );
+    if (pendingRecovery) {
+      sidecarBoundary = pendingRecovery.sidecarBoundary;
+    } else {
+      const deckFingerprint = await fileFingerprint(absoluteDeckPath);
+      sidecarBoundary = await prepareSidecarSession(
+        rootBoundary,
+        join(
+          rootBoundary.sidecarRoot,
+          `${basename(absoluteDeckPath, '.html')}-${deckFingerprint.slice(0, 8)}`,
+        ),
+      );
+    }
   } catch (error) {
+    if (error?.code === 'UNSAFE_SIDECAR') throw error;
     throw unsafeSidecarError('sidecar 路径不可信，拒绝启动编辑服务', error);
   }
   const sessionStore = await SessionStore.open({
     deckPath:absoluteDeckPath,
     rootDir:sidecarBoundary.sidecarRoot,
+    sessionDir:sidecarBoundary.sessionDir,
+    sidecarGuard:sidecarBoundary.guard,
   });
   if (resolve(sessionStore.sessionDir) !== resolve(sidecarBoundary.sessionDir)) {
     throw unsafeSidecarError('Deck 在 sidecar 初始化期间发生变化，请重试');
   }
-  const bridge = new BridgeService({ sessionStore, timeoutMs: bridgeTimeoutMs });
+  if (pendingRecovery?.pendingConflict) {
+    const previousConflict = sessionStore.state.conflict;
+    sessionStore.state.conflict = {
+      code:'DECK_CHANGED',
+      expectedFingerprint:sessionStore.state.deckFingerprint,
+      actualFingerprint:pendingRecovery.pendingConflict.actualFingerprint,
+      detectedAt:new Date().toISOString(),
+    };
+    try {
+      await sessionStore.persistState();
+      await removeTransactionRecord(
+        sessionStore.sessionDir,
+        pendingRecovery.pendingConflict.transactionId,
+        sidecarBoundary,
+      );
+    } catch (error) {
+      sessionStore.state.conflict = previousConflict;
+      throw unsafeSidecarError('未完成 transaction 冲突状态无法安全持久化', error);
+    }
+  }
+  const bridge = new BridgeService({
+    sessionStore,
+    timeoutMs:bridgeTimeoutMs,
+    beforeSessionPersist,
+  });
   const webSockets = new WebSocketServer({ noServer: true });
   const activeWriters = new Map();
   let watcherClosed = false;
@@ -927,12 +1253,15 @@ export async function startServer({
                 deckPath:absoluteDeckPath,
                 sessionDir:sessionStore.sessionDir,
                 expectedFingerprint,
+                sidecarBoundary,
+                syncDirectory,
                 runWriter:transactionId => runWritePatches(
                   absoluteDeckPath,
                   sessionStore.sessionDir,
                   patches,
                   expectedFingerprint,
                   transactionId,
+                  sidecarBoundary.pythonIdentity,
                   {
                     spawnWriter,
                     timeoutMs: writerTimeoutMs,
@@ -948,6 +1277,10 @@ export async function startServer({
                 { backupPath:resolve(writerResult.backup) },
                 expectedFingerprint,
                 writerResult.fingerprint,
+                sidecarBoundary,
+              ),
+              finalize:value => finalizeWriteTransaction(
+                value, sessionStore.sessionDir, sidecarBoundary,
               ),
             },
           );

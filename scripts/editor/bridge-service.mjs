@@ -123,9 +123,10 @@ export function compareDiagnostics(baselineByPage, currentByPage, pageKeys) {
 }
 
 export class BridgeService {
-  constructor({ sessionStore, timeoutMs = 10_000 }) {
+  constructor({ sessionStore, timeoutMs = 10_000, beforeSessionPersist = async () => {} }) {
     this.sessionStore = sessionStore;
     this.timeoutMs = timeoutMs;
+    this.beforeSessionPersist = beforeSessionPersist;
     this.editorSocket = null;
     this.pending = new Map();
     this.socketWaiters = new Set();
@@ -318,7 +319,9 @@ export class BridgeService {
   redoGroup(groupId, expectedRevision) { return this.#changeGroup('redo', groupId, expectedRevision); }
   compiledActions() { return this.journal.compile(); }
 
-  writeDeck(expectedRevision, { fingerprint, writer, restore }) {
+  writeDeck(expectedRevision, {
+    fingerprint, writer, restore, finalize = async () => {},
+  }) {
     return this.#enqueue(async () => {
       if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
       this.assertRevision(expectedRevision);
@@ -372,9 +375,11 @@ export class BridgeService {
         if (['DECK_CHANGED', 'RESTORE_CONFLICT'].includes(error?.code)
           && typeof error?.actualFingerprint === 'string') {
           error.conflictCreated = await this.#recordDeckConflict(error.actualFingerprint);
+          await finalize(error);
         }
         throw error;
       }
+      await this.beforeSessionPersist(result);
       const snapshot = {
         deckFingerprint:state.deckFingerprint,
         conflict:structuredClone(state.conflict),
@@ -405,6 +410,7 @@ export class BridgeService {
             const conflictCreated = await this.#recordDeckConflict(
               restoreError.actualFingerprint,
             );
+            await finalize(result);
             throw serviceError(
               restoreError.code,
               restoreError.statusCode ?? 409,
@@ -429,6 +435,7 @@ export class BridgeService {
           });
         }
         Object.assign(state, snapshot);
+        await finalize(result);
         throw serviceError('WRITE_FAILED', 500, '会话基线更新失败，Deck 已从备份恢复', {
           stage:'session',
           recovery:'检查 sidecar 目录权限后重试',
@@ -436,6 +443,7 @@ export class BridgeService {
           cause:error,
         });
       }
+      await finalize(result);
       return result;
     });
   }
