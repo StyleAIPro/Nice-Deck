@@ -82,7 +82,9 @@ function errorResponse(response, error) {
 function runWritePatches(deckPath, sessionDir, patches, {
   spawnWriter,
   timeoutMs,
+  killGraceMs,
   activeWriters,
+  onActiveWritersChange,
 }) {
   const adapterPath = join(EDITOR_DIR, 'bundle_adapter.py');
   const program = [
@@ -100,62 +102,110 @@ function runWritePatches(deckPath, sessionDir, patches, {
     let stdout = '';
     let stderr = '';
     let requestSettled = false;
-    let processClosed = false;
+    let processFinalized = false;
+    let cancelStarted = false;
     let resolveClosed;
     const closed = new Promise(resolveClosedPromise => { resolveClosed = resolveClosedPromise; });
-    let timer;
+    let requestTimer;
+    let killGraceTimer;
+    const absorbLateError = () => {};
+    const notifyActiveWriters = () => {
+      try {
+        onActiveWritersChange(activeWriters.size);
+      } catch {
+        // 测试/诊断 hook 不得影响 writer 生命周期。
+      }
+    };
     const settleRequest = (error, value) => {
       if (requestSettled) return;
       requestSettled = true;
-      clearTimeout(timer);
+      clearTimeout(requestTimer);
       if (error) reject(error);
       else resolvePromise(value);
     };
-    const markProcessClosed = () => {
-      if (processClosed) return;
-      processClosed = true;
-      activeWriters.delete(child);
+    const finalizeProcess = ({ force = false } = {}) => {
+      if (processFinalized) return;
+      processFinalized = true;
+      clearTimeout(requestTimer);
+      clearTimeout(killGraceTimer);
+      child.removeListener('error', onChildError);
+      child.removeListener('close', onChildClose);
+      child.stdout.removeListener('data', onStdoutData);
+      child.stderr.removeListener('data', onStderrData);
+      child.stdin.removeListener('error', onStdinError);
+      child.on('error', absorbLateError);
+      child.stdin.on('error', absorbLateError);
+      if (force) {
+        for (const stream of [child.stdin, child.stdout, child.stderr]) {
+          try {
+            stream.destroy?.();
+          } catch {
+            // 强制收敛阶段只做尽力清理。
+          }
+        }
+        child.unref?.();
+      }
+      if (activeWriters.delete(child)) notifyActiveWriters();
       resolveClosed();
     };
     const cancel = error => {
       settleRequest(error);
+      if (cancelStarted || processFinalized) return;
+      cancelStarted = true;
       try {
-        if (!processClosed) child.kill('SIGKILL');
+        child.kill('SIGKILL');
       } catch {
-        markProcessClosed();
-      }
-    };
-    activeWriters.set(child, { cancel, closed });
-    timer = setTimeout(() => {
-      cancel(httpError('WRITE_DECK_TIMEOUT', 504, '写入 Deck 超时'));
-    }, timeoutMs);
-    timer.unref?.();
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.once('error', error => {
-      markProcessClosed();
-      settleRequest(error);
-    });
-    child.once('close', code => {
-      markProcessClosed();
-      if (requestSettled) return;
-      if (code !== 0) {
-        settleRequest(new Error(stderr.trim() || `写入 Deck 进程退出码 ${code}`));
+        finalizeProcess({ force: true });
         return;
       }
-      try {
-        const resultLine = stdout.trim().split(/\r?\n/).at(-1);
-        settleRequest(null, JSON.parse(resultLine));
-      } catch {
-        settleRequest(new Error('写入 Deck 返回无效结果'));
+      if (!processFinalized) {
+        killGraceTimer = setTimeout(() => finalizeProcess({ force: true }), killGraceMs);
+        killGraceTimer.unref?.();
       }
-    });
+    };
+    const onStdoutData = chunk => { stdout += chunk; };
+    const onStderrData = chunk => { stderr += chunk; };
+    const onStdinError = error => {
+      if (!requestSettled) {
+        cancel(httpError('WRITE_DECK_IO_ERROR', 502, `写入 Deck 输入失败：${error.code ?? 'IO_ERROR'}`));
+      }
+    };
+    const onChildError = error => {
+      settleRequest(error);
+      finalizeProcess();
+    };
+    const onChildClose = code => {
+      if (!requestSettled) {
+        if (code !== 0) {
+          settleRequest(new Error(stderr.trim() || `写入 Deck 进程退出码 ${code}`));
+        } else {
+          try {
+            const resultLine = stdout.trim().split(/\r?\n/).at(-1);
+            settleRequest(null, JSON.parse(resultLine));
+          } catch {
+            settleRequest(new Error('写入 Deck 返回无效结果'));
+          }
+        }
+      }
+      finalizeProcess();
+    };
+    activeWriters.set(child, { cancel, closed });
+    notifyActiveWriters();
+    requestTimer = setTimeout(() => {
+      cancel(httpError('WRITE_DECK_TIMEOUT', 504, '写入 Deck 超时'));
+    }, timeoutMs);
+    requestTimer.unref?.();
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', onStdoutData);
+    child.stderr.on('data', onStderrData);
+    child.stdin.on('error', onStdinError);
+    child.once('error', onChildError);
+    child.once('close', onChildClose);
     try {
       child.stdin.end(JSON.stringify(patches));
     } catch (error) {
-      cancel(error);
+      cancel(httpError('WRITE_DECK_IO_ERROR', 502, `写入 Deck 输入失败：${error.code ?? 'IO_ERROR'}`));
     }
   });
 }
@@ -168,7 +218,9 @@ export async function startServer({
   token = randomUUID(),
   editorToken = randomUUID(),
   writerTimeoutMs = 10_000,
+  writerKillGraceMs = 250,
   spawnWriter = spawn,
+  onActiveWritersChange = () => {},
 } = {}) {
   void openBrowser;
   if (!deckPath) throw new TypeError('缺少 deckPath');
@@ -249,7 +301,9 @@ export async function startServer({
           patches => runWritePatches(absoluteDeckPath, sessionStore.sessionDir, patches, {
             spawnWriter,
             timeoutMs: writerTimeoutMs,
+            killGraceMs: writerKillGraceMs,
             activeWriters,
+            onActiveWritersChange,
           }),
         );
         json(response, 200, { revision: sessionStore.state.revision, ...result });
@@ -343,17 +397,11 @@ export async function startServer({
       await new Promise(resolvePromise => setImmediate(resolvePromise));
       server.closeIdleConnections?.();
       const writersSettled = Promise.allSettled(writerClosed);
-      let writerWaitTimer;
-      const writerWaitBound = new Promise(resolvePromise => {
-        writerWaitTimer = setTimeout(resolvePromise, 1_000);
-        writerWaitTimer.unref?.();
-      });
       await Promise.all([
         webSocketClosed,
         httpClosed,
-        Promise.race([writersSettled, writerWaitBound]),
+        writersSettled,
       ]);
-      clearTimeout(writerWaitTimer);
       server.closeAllConnections?.();
     })();
     return closePromise;

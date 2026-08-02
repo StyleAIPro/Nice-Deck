@@ -39,7 +39,9 @@ async function makeApp(t, options = {}) {
     token: 'secret',
     editorToken: options.editorToken ?? 'editor-secret',
     writerTimeoutMs: options.writerTimeoutMs,
+    writerKillGraceMs: options.writerKillGraceMs,
     spawnWriter: options.spawnWriter,
+    onActiveWritersChange: options.onActiveWritersChange,
   });
   t.after(() => app.close());
   return app;
@@ -78,20 +80,32 @@ function validBundle() {
     + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
 }
 
-function hangingChild() {
+function fakeWriterChild({ onEnd, onKill, closesOnKill = true } = {}) {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.stdout.setEncoding = () => {};
   child.stderr.setEncoding = () => {};
-  child.stdin = { end() {} };
+  child.stdin = new EventEmitter();
+  child.stdin.end = () => onEnd?.(child);
   child.killed = false;
+  child.unrefCalled = false;
+  child.unref = () => { child.unrefCalled = true; };
   child.kill = () => {
     child.killed = true;
-    queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+    onKill?.(child);
+    if (closesOnKill) queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
     return true;
   };
   return child;
+}
+
+function hangingChild() {
+  return fakeWriterChild();
+}
+
+function epipe() {
+  return Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
 }
 
 test('拒绝无令牌请求并向 WebSocket 推送新任务', async t => {
@@ -391,6 +405,44 @@ test('write-deck 超时终止子进程并映射稳定 504', async t => {
   assert.equal(child.killed, true);
 });
 
+test('write-deck stdin 未 settle 的异步 EPIPE 映射稳定 5xx', async t => {
+  const child = fakeWriterChild({
+    onEnd: current => queueMicrotask(() => current.stdin.emit('error', epipe())),
+  });
+  const app = await makeApp(t, {
+    deckContents: validBundle(),
+    writerTimeoutMs: 1_000,
+    spawnWriter: () => child,
+  });
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0 }),
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'WRITE_DECK_IO_ERROR');
+  assert.equal(child.killed, true);
+});
+
+test('write-deck timeout settle 后吸收 kill 引发的异步 EPIPE', async t => {
+  const child = fakeWriterChild({
+    onKill: current => queueMicrotask(() => current.stdin.emit('error', epipe())),
+  });
+  const app = await makeApp(t, {
+    deckContents: validBundle(),
+    writerTimeoutMs: 20,
+    spawnWriter: () => child,
+  });
+  const response = await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0 }),
+  });
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).error, 'WRITE_DECK_TIMEOUT');
+  assert.equal(child.killed, true);
+});
+
 test('write-deck 卡住时 close 取消 child 和请求并在有界时间收敛', async t => {
   const child = hangingChild();
   let signalStarted;
@@ -421,6 +473,40 @@ test('write-deck 卡住时 close 取消 child 和请求并在有界时间收敛'
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error, 'SERVICE_CLOSED');
   assert.equal(child.killed, true);
+});
+
+test('kill 后无 close 仍强制 finalize 并清空 active writer', async t => {
+  const child = fakeWriterChild({ closesOnKill: false });
+  const activeCounts = [];
+  let signalStarted;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const app = await makeApp(t, {
+    deckContents: validBundle(),
+    writerTimeoutMs: 10_000,
+    writerKillGraceMs: 20,
+    onActiveWritersChange: count => activeCounts.push(count),
+    spawnWriter: () => {
+      signalStarted();
+      return child;
+    },
+  });
+  const responsePromise = fetch(`${app.url}/api/write-deck?token=secret`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 0 }),
+  });
+  await started;
+
+  const beforeClose = performance.now();
+  await app.close();
+  assert.ok(performance.now() - beforeClose < 500);
+  const response = await responsePromise;
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'SERVICE_CLOSED');
+  assert.equal(child.killed, true);
+  assert.equal(child.unrefCalled, true);
+  assert.deepEqual(activeCounts, [1, 0]);
+  assert.doesNotThrow(() => child.stdin.emit('error', epipe()));
 });
 
 test('close 关闭 WebSocket、HTTP 端口并拒绝未完成命令', async () => {
