@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-const keyOf = action => `${action.target.pageKey}|${action.target.path}|${action.kind}|${action.payload?.property ?? ''}`;
+const keyOf = action => {
+  const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
+  return `${action.target.pageKey}|${action.target.path}|${kind}|${action.payload?.property ?? ''}`;
+};
 
 function inverse(action) {
   let kind = action.kind;
@@ -9,7 +12,7 @@ function inverse(action) {
   if (kind === 'setStyle') payload = { property:action.payload.property, value:action.before };
   if (kind === 'translate' || kind === 'resize') payload = action.before;
   if (kind === 'hide') { kind = 'show'; payload = { display:action.before }; }
-  if (kind === 'show') { kind = 'hide'; payload = {}; }
+  else if (kind === 'show') { kind = 'hide'; payload = {}; }
   return { ...action, id:randomUUID(), kind, payload, before:action.after, after:action.before };
 }
 

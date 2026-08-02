@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { loadChromium } from '../../verify/load-playwright.mjs';
+import { PatchJournal } from '../patch-journal.mjs';
 
 test('公开动作登记后定位第二个同名页并在 DOM 重建后幂等重放', async t => {
   const chromium = await loadChromium();
@@ -83,6 +84,33 @@ test('hide 和 show 共享 display 状态并以最后一次公开动作为准', 
   }, target);
   await page.waitForTimeout(100);
   assert.equal(await page.locator('h2').nth(1).evaluate(el => el.style.display), '');
+});
+
+test('动作日志可见性编译和撤销重做在 DOM 重建后保持最终状态', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const target = await page.evaluate(() => window.HuaweiDeckPatchRuntime.makeLocator(document.querySelectorAll('h2')[1]));
+  const journal = new PatchJournal();
+  const group = journal.appendGroup('task-visibility', [
+    { id:'v1', taskId:'task-visibility', target, kind:'hide', payload:{}, before:'', after:'none', appliedAt:'t1' },
+    { id:'v2', taskId:'task-visibility', target, kind:'show', payload:{display:''}, before:'none', after:'', appliedAt:'t2' },
+    { id:'v3', taskId:'task-visibility', target, kind:'hide', payload:{}, before:'', after:'none', appliedAt:'t3' }
+  ]);
+  const applyAndRebuild = async actions => {
+    await page.evaluate(nextActions => {
+      window.HuaweiDeckPatchRuntime.applyAll(nextActions);
+      document.querySelectorAll('.slide-canvas')[1].innerHTML = '<section data-label="目录页"><h2>第二页标题</h2><div class="card" style="width:300px;height:100px;overflow:hidden">卡片 B</div></section>';
+    }, actions);
+    await page.waitForTimeout(100);
+    return page.locator('h2').nth(1).evaluate(el => el.style.display);
+  };
+
+  assert.equal(await applyAndRebuild(journal.compile()), 'none');
+  assert.equal(await applyAndRebuild(journal.undo(group.id)), '');
+  assert.equal(await applyAndRebuild(journal.redo(group.id)), 'none');
 });
 
 test('applyAll 失败后恢复旧 authoritative 集合且不产生异步 pageerror', async t => {

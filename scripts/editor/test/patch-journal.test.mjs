@@ -14,3 +14,14 @@ test('同一属性只编译最终值，整组可撤销重做', () => {
   assert.deepEqual(journal.undo(group.id).map(x => x.payload.text), ['新','旧']);
   assert.deepEqual(journal.redo(group.id).map(x => x.payload.text), ['新','更新']);
 });
+
+test('hide 和 show 共享可见性编译槽并保留最后一次公开动作', () => {
+  const journal = new PatchJournal();
+  journal.appendGroup('task-2', [
+    { id:'v1', taskId:'task-2', target, kind:'hide', payload:{}, before:'', after:'none', appliedAt:'t1' },
+    { id:'v2', taskId:'task-2', target, kind:'show', payload:{display:''}, before:'none', after:'', appliedAt:'t2' },
+    { id:'v3', taskId:'task-2', target, kind:'hide', payload:{}, before:'', after:'none', appliedAt:'t3' }
+  ]);
+
+  assert.deepEqual(journal.compile().map(action => action.kind), ['hide']);
+});
