@@ -53,6 +53,14 @@ function requireRevision(value) {
   return value;
 }
 
+function requireTaskId(value) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length === 0) {
+    throw httpError('INVALID_INPUT', 400, 'taskId 必须为 null 或非空字符串');
+  }
+  return value;
+}
+
 function json(response, statusCode, value) {
   const body = JSON.stringify(value);
   response.writeHead(statusCode, {
@@ -271,8 +279,9 @@ export async function startServer({
       if (request.method === 'POST' && pathname === '/api/actions') {
         const { expectedRevision, taskId, actions } = await readJson(request);
         requireRevision(expectedRevision);
-        if (!taskId || !Array.isArray(actions) || actions.length === 0) {
-          throw httpError('INVALID_INPUT', 400, '动作请求缺少 taskId 或 actions');
+        requireTaskId(taskId);
+        if (!Array.isArray(actions) || actions.length === 0) {
+          throw httpError('INVALID_INPUT', 400, 'actions 必须为非空数组');
         }
         actions.forEach(validateAction);
         const result = await bridge.applyActions({ taskId, actions, expectedRevision });
@@ -466,19 +475,19 @@ function parseServerArguments(argv) {
   return { help: false, deckPath, host, port, openBrowser };
 }
 
-function openEditor(editorUrl) {
-  let command;
-  let args;
-  if (process.platform === 'darwin') {
-    command = 'open';
-    args = [editorUrl];
-  } else if (process.platform === 'win32') {
-    command = 'cmd';
-    args = ['/c', 'start', '', editorUrl];
-  } else {
-    command = 'xdg-open';
-    args = [editorUrl];
+export function buildOpenCommand(platform, editorUrl) {
+  if (platform === 'darwin') return { command: 'open', args: [editorUrl] };
+  if (platform === 'win32') {
+    return {
+      command: 'rundll32.exe',
+      args: ['url.dll,FileProtocolHandler', editorUrl],
+    };
   }
+  return { command: 'xdg-open', args: [editorUrl] };
+}
+
+function openEditor(editorUrl) {
+  const { command, args } = buildOpenCommand(process.platform, editorUrl);
   const opener = spawn(command, args, { detached: true, stdio: 'ignore' });
   opener.once('error', () => {});
   opener.unref();

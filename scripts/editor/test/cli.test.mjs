@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -204,30 +203,69 @@ test('Agent CLI 经真实服务完成 status/tasks/task/apply/undo', async t => 
   assert.equal(parseJsonOutput(await undo.result).revision, 3);
 });
 
-test('apply 数组先取 revision，以 Bearer 包装提交且 token 不进入 URL', async t => {
-  const requests = [];
-  const server = createServer(async (request, response) => {
-    let body = '';
-    for await (const chunk of request) body += chunk;
-    requests.push({ url: request.url, authorization: request.headers.authorization, body });
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify(request.method === 'GET' ? { revision: 7 } : { ok: true }));
-  });
-  await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
-  t.after(() => new Promise(resolvePromise => server.close(resolvePromise)));
-  const address = server.address();
-  const url = `http://127.0.0.1:${address.port}`;
+test('apply 数组经真实服务以 taskId null 记录未关联动作组', async t => {
+  const { ready } = await startServerProcess(t);
+  const common = ['--url', ready.url, '--token', ready.token];
+  const editorUrl = new URL(ready.editorUrl);
+  const editorSocketUrl = new URL('/events', ready.url);
+  editorSocketUrl.protocol = 'ws:';
+  editorSocketUrl.searchParams.set('token', ready.token);
+  editorSocketUrl.searchParams.set('editorToken', editorUrl.searchParams.get('editorToken'));
+  const editor = await connect(editorSocketUrl);
+  t.after(() => editor.close());
+
   const root = await mkdtemp(join(tmpdir(), 'deck-editor-array-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const actionsPath = join(root, 'actions.json');
-  await writeFile(actionsPath, JSON.stringify([action]));
+  await writeFile(actionsPath, JSON.stringify([{ ...action, taskId: null }]));
 
-  const result = await runCli(['--url', url, '--token', 'local-secret', 'apply', actionsPath]);
-  assert.deepEqual(parseJsonOutput(result), { ok: true });
-  assert.deepEqual(requests.map(request => request.url), ['/api/session', '/api/actions']);
-  assert.ok(requests.every(request => request.authorization === 'Bearer local-secret'));
-  assert.deepEqual(JSON.parse(requests[1].body), {
-    expectedRevision: 7, taskId: null, actions: [action],
+  const commandPromise = nextMessage(editor).then(message => ({ type: 'command', message }));
+  const apply = spawnCli([...common, 'apply', actionsPath]);
+  const resultPromise = apply.result.then(result => ({ type: 'result', result }));
+  const first = await Promise.race([commandPromise, resultPromise]);
+  assert.equal(first.type, 'command', first.result?.stderr);
+  assert.equal(first.message.type, 'apply-actions');
+  editor.send(JSON.stringify({
+    type: 'actions-applied', commandId: first.message.commandId, applied: 1,
+  }));
+  const applied = parseJsonOutput((await resultPromise).result);
+  assert.equal(applied.revision, 1);
+  assert.equal(typeof applied.groupId, 'string');
+
+  const session = parseJsonOutput(await runCli([...common, 'status']));
+  assert.equal(session.revision, 1);
+  assert.equal(session.groups[0].id, applied.groupId);
+  assert.equal(session.groups[0].taskId, null);
+});
+
+test('actions API 拒绝缺失、空字符串或非字符串 taskId', async t => {
+  const { ready } = await startServerProcess(t);
+  const headers = {
+    authorization: `Bearer ${ready.token}`,
+    'content-type': 'application/json',
+  };
+  for (const taskId of [undefined, '', 0, false, {}, []]) {
+    const body = { expectedRevision: 0, actions: [action] };
+    if (taskId !== undefined) body.taskId = taskId;
+    const response = await fetch(`${ready.url}/api/actions`, {
+      method: 'POST', headers, body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 400, `taskId=${JSON.stringify(taskId)}`);
+    assert.equal((await response.json()).error, 'INVALID_INPUT');
+  }
+});
+
+test('浏览器打开命令始终使用参数数组且 win32 不经过命令解释器', async () => {
+  const { buildOpenCommand } = await import('../server.mjs');
+  const editorUrl = 'http://127.0.0.1:3210/editor/?token=a&editorToken=b';
+  assert.deepEqual(buildOpenCommand('darwin', editorUrl), {
+    command: 'open', args: [editorUrl],
+  });
+  assert.deepEqual(buildOpenCommand('linux', editorUrl), {
+    command: 'xdg-open', args: [editorUrl],
+  });
+  assert.deepEqual(buildOpenCommand('win32', editorUrl), {
+    command: 'rundll32.exe', args: ['url.dll,FileProtocolHandler', editorUrl],
   });
 });
 
