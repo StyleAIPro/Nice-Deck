@@ -88,6 +88,7 @@ test('Skill、README 与架构文档各自承担入口、仓库和开发者职�
     '写回组件': /bundle adapter[\s\S]{0,180}diagnostics[\s\S]{0,100}watch[\s\S]{0,100}write gate/i,
     '状态与动作模型': /session registry[\s\S]{0,120}transaction record[\s\S]{0,120}revision[\s\S]{0,120}mutation queue[\s\S]{0,120}canonical action[\s\S]{0,120}authoritative reload/i,
     '信任边界': /loopback[\s\S]{0,100}token[\s\S]{0,100}Origin[\s\S]{0,100}dirfd[\s\S]{0,100}fingerprint/i,
+    '任务接口同时列出 list detail create': /tasks[^。\n]{0,80}`GET \/api\/tasks`[^。\n]{0,80}`GET \/api\/tasks\/<TASK_ID>`[^。\n]{0,80}`POST \/api\/tasks`/,
   });
 });
 

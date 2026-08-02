@@ -326,7 +326,7 @@ flowchart TD
 
 #### 信任边界
 
-网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由 fingerprint、revision、locator 与 transaction 校验。服务没有任意路径读写 API。外部接口严格枚举为 session / status（`GET /api/session`）、tasks（`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`）、actions（`POST /api/actions`）、undo / redo（`POST /api/groups/<GROUP_ID>/undo|redo`）、write-deck（`POST /api/write-deck`）和 observer events（`GET /events` 升级 WebSocket）；唯一 editor capability 只为 frame 事务命令与 ACK 服务。
+网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由 fingerprint、revision、locator 与 transaction 校验。服务没有任意路径读写 API。外部 Agent 常用受控接口包括 session / status（`GET /api/session`）、tasks（列表 `GET /api/tasks`、详情 `GET /api/tasks/<TASK_ID>`、创建 `POST /api/tasks`）、actions（`POST /api/actions`）、undo / redo（`POST /api/groups/<GROUP_ID>/undo|redo`）、write-deck（`POST /api/write-deck`）和 observer events（`GET /events` 升级 WebSocket）；唯一 editor capability 只为 frame 事务命令与 ACK 服务。
 
 目标 locator 找不到返回 `TARGET_NOT_FOUND`，不能唯一匹配返回 `TARGET_AMBIGUOUS`；frame 未就绪返回 `EDITOR_OFFLINE`。所有错误都保留稳定 code 与恢复提示，浏览器 tentative 状态和 durable session 不会分叉。
 
