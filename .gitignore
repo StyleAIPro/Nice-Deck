@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.tmp-applybg
 node_modules/
+.huawei-deck-editor/
+.superpowers/
 .worktrees/
 # 工作产物（转换 / 截图输出）
 *.pptx
