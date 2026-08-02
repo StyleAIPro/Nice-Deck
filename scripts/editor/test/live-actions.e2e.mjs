@@ -275,6 +275,61 @@ test('移动和普通块缩放按画布坐标提交且控制点保持可点尺�
   assert.deepEqual(resourceProblems, []);
 });
 
+for (const scenario of [
+  { mode:'move', target:'h2', kind:'translate', handle:false },
+  { mode:'resize', target:'.card', kind:'resize', handle:true },
+]) {
+  test(`${scenario.mode} 静态点选遇到 canvas rehydrate 会清理旧 selection 并可在新节点执行动作`, async t => {
+    const app = await startFixtureServer();
+    t.after(() => app.close());
+    const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+    t.after(() => browser.close());
+    page.setDefaultTimeout(3_000);
+    const frame = page.frameLocator('#deck-frame');
+
+    await page.locator('[data-page-index="1"]').evaluate(button => {
+      window.__navBeforeSelectionRehydrate = button;
+    });
+    await page.click(`[data-mode="${scenario.mode}"]`);
+    await frame.locator(scenario.target).first().click();
+    assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
+    assert.equal(await frame.locator('[data-resize-handle]').count(), scenario.handle ? 1 : 0);
+
+    await page.waitForTimeout(900);
+    await page.locator('#deck-frame').evaluate(frameElement => {
+      const stage = frameElement.contentDocument.querySelector('.stage');
+      stage.replaceChildren(...[...stage.children].map(canvas => canvas.cloneNode(true)));
+    });
+    await page.waitForFunction(() => (
+      document.querySelector('[data-page-index="1"]') !== window.__navBeforeSelectionRehydrate
+    ));
+    assert.equal(await frame.locator('[data-transform-selection]').count(), 0);
+    assert.equal(await frame.locator('[data-resize-handle]').count(), 0);
+    assert.equal((await session(app)).revision, 0, '断开的旧 selection 不得提交动作');
+
+    const nextTarget = frame.locator(scenario.target).first();
+    if (scenario.mode === 'move') {
+      const box = await nextTarget.boundingBox();
+      await page.mouse.move(box.x + 10, box.y + 10);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 42, box.y + 26);
+      await page.mouse.up();
+    } else {
+      await nextTarget.click();
+      const handleBox = await frame.locator('[data-resize-handle]').boundingBox();
+      await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(handleBox.x + handleBox.width / 2 + 28, handleBox.y + handleBox.height / 2 + 18);
+      await page.mouse.up();
+    }
+    await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+    const state = await session(app);
+    assert.equal(state.groups[0].actions[0].kind, scenario.kind);
+    assert.deepEqual(browserProblems, []);
+    assert.deepEqual(resourceProblems, []);
+  });
+}
+
 test('复杂 SVG 使用 scale 且模式切换与 pagehide 清理预览和覆盖 UI', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());

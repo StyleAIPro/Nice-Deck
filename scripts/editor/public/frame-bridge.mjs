@@ -712,6 +712,22 @@ function removeTransformSelection() {
   transformSelection = null;
 }
 
+function interactionBelongsToSnapshot(element, nextCanvases) {
+  const canvas = element?.closest?.('.slide-canvas');
+  return Boolean(element?.isConnected && canvas && nextCanvases.includes(canvas));
+}
+
+function pruneDisconnectedInteractionState(nextCanvases) {
+  if (directEdit && !interactionBelongsToSnapshot(directEdit.element, nextCanvases)) {
+    finishDirectEdit();
+    showStatus('页面已更新，未提交的文字修改已取消');
+  }
+  if (transformSelection && !transformDrag
+    && !interactionBelongsToSnapshot(transformSelection.element, nextCanvases)) {
+    removeTransformSelection();
+  }
+}
+
 function positionTransformSelection() {
   if (!transformSelection?.element.isConnected) return removeTransformSelection();
   const rect = transformSelection.element.getBoundingClientRect();
@@ -1176,7 +1192,8 @@ if (parent !== window) {
   window.addEventListener('pointercancel', cancelPointer, true);
   window.addEventListener('pagehide', teardown);
   canvasMonitor = createCanvasMonitor(nextCanvases => {
-    if (dragging || directEdit || transformDrag || transformSelection
+    pruneDisconnectedInteractionState(nextCanvases);
+    if (dragging || directEdit || transformDrag
       || activePopover || pendingManual.size > 0 || tentativeCommands.size > 0) return false;
     finishDirectEdit();
     cancelTransformDrag();
