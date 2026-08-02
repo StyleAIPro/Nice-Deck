@@ -1,5 +1,6 @@
 import { normalizeRect } from '/editor/protocol.mjs';
 
+const FRAME_INSTANCE_ID = crypto.randomUUID();
 const RUNTIME_CONTRACT = Object.freeze({
   brand:'com.huawei.deck.visual-editor.patch-runtime',
   schema:1,
@@ -96,6 +97,9 @@ const pendingManual = new Map();
 const tentativeCommands = new Map();
 let statusTimer;
 let canvasMonitor;
+let requiresAuthoritativeReload = false;
+let authoritativeReloadRequested = false;
+let authoritativeReloadRequestSequence = 0;
 const INTERACTIVE_TRANSFORM_SELECTOR = 'svg,a,button,input,select,textarea,iframe,[role="button"],.layer-panel';
 
 function structuralSignature(canvas) {
@@ -106,7 +110,7 @@ function structuralSignature(canvas) {
   return `${runtime.pageKey(canvas)}\0${structure}`;
 }
 
-function createCanvasMonitor(onPublish, signal) {
+function createCanvasMonitor(onPublish, signal, onObserved = () => {}) {
   const QUIET_MS = 100;
   const MAX_WAIT_MS = 1_200;
   const capture = () => {
@@ -124,6 +128,9 @@ function createCanvasMonitor(onPublish, signal) {
       && canvas.isConnected
       && left.signatures[index] === right.signatures[index]
     ));
+  const sameReferences = (left, right) => Boolean(left && right)
+    && left.canvases.length === right.canvases.length
+    && left.canvases.every((canvas, index) => canvas === right.canvases[index]);
   const mutationTouchesStage = record => record.target?.closest?.('.stage')
     || [...record.addedNodes, ...record.removedNodes].some(node => (
       node.nodeType === Node.ELEMENT_NODE
@@ -159,6 +166,7 @@ function createCanvasMonitor(onPublish, signal) {
     maxTimer = undefined;
     const latest = capture();
     bindStage(latest.stage);
+    if (published && !sameReferences(published, latest)) onObserved(latest.canvases);
     candidate = latest;
     if (!latest.canvases.length || same(published, latest)) return;
     if (onPublish(latest.canvases) === false) {
@@ -172,6 +180,7 @@ function createCanvasMonitor(onPublish, signal) {
     if (stopped) return;
     const latest = capture();
     bindStage(latest.stage);
+    if (published && !sameReferences(published, latest)) onObserved(latest.canvases);
     if (!latest.canvases.length) {
       candidate = latest;
       clearTimeout(quietTimer);
@@ -199,6 +208,31 @@ function createCanvasMonitor(onPublish, signal) {
   signal.addEventListener('abort', stop, { once:true });
   consider();
   return { stop };
+}
+
+function hasTransientInteraction() {
+  return Boolean(directEdit || transformDrag || pendingManual.size > 0 || tentativeCommands.size > 0);
+}
+
+function noteCanvasReplacementDuringInteraction(nextCanvases) {
+  const referencesChanged = canvases.length > 0
+    && (canvases.length !== nextCanvases.length
+      || canvases.some((canvas, index) => canvas !== nextCanvases[index]));
+  if (referencesChanged && hasTransientInteraction()) requiresAuthoritativeReload = true;
+}
+
+function requestAuthoritativeReloadIfSettled() {
+  if (!requiresAuthoritativeReload || authoritativeReloadRequested || hasTransientInteraction()
+    || tornDown || startupController.signal.aborted) return false;
+  authoritativeReloadRequested = true;
+  canvasMonitor?.stop();
+  parent.postMessage({
+    type:'request-authoritative-reload',
+    frameInstanceId:FRAME_INSTANCE_ID,
+    requestSequence:++authoritativeReloadRequestSequence,
+    reason:'TRANSIENT_CANVAS_REPLACED',
+  }, location.origin);
+  return true;
 }
 
 const style = document.createElement('style');
@@ -279,11 +313,13 @@ function diagnosePages(pageKeys) {
 }
 
 function showPage(pageKey) {
+  const canvas = canvases.find(candidate => runtime.pageKey(candidate) === pageKey);
+  const preserveSelection = interactionBelongsToSnapshot(transformSelection?.element, canvases)
+    && transformSelection.element.closest('.slide-canvas') === canvas;
   finishDirectEdit();
   cancelTransformDrag();
-  removeTransformSelection();
+  if (!preserveSelection) removeTransformSelection();
   removePopover();
-  const canvas = canvases.find(candidate => runtime.pageKey(candidate) === pageKey);
   if (!canvas) {
     parent.postMessage({ type: 'page-shown', pageKey, shown: false, reason: 'PAGE_NOT_FOUND' }, location.origin);
     return null;
@@ -640,6 +676,7 @@ function finishDirectEdit({ restore = true } = {}) {
   delete state.element.dataset.directEditing;
   state.element.spellcheck = state.originalSpellcheck;
   state.resumeReplay?.();
+  requestAuthoritativeReloadIfSettled();
 }
 
 function commitDirectEdit() {
@@ -648,6 +685,7 @@ function commitDirectEdit() {
   const state = directEdit;
   const nextText = state.element.textContent ?? '';
   finishDirectEdit({ restore: true });
+  if (requiresAuthoritativeReload) return;
   if (!nextText.trim() || nextText === state.originalText) return;
   const action = {
     id: crypto.randomUUID(), taskId: null, target: state.target,
@@ -786,6 +824,7 @@ function cancelTransformDrag() {
   transformDrag = null;
   state.capture?.releasePointerCapture?.(state.pointerId);
   restoreTransformPreview(state);
+  requestAuthoritativeReloadIfSettled();
 }
 
 function beginMove(event, element) {
@@ -863,6 +902,11 @@ function finishTransformPointer(event) {
   transformDrag = null;
   state.capture?.releasePointerCapture?.(state.pointerId);
   restoreTransformPreview(state);
+  if (requiresAuthoritativeReload) {
+    requestAuthoritativeReloadIfSettled();
+    event.preventDefault();
+    return true;
+  }
   if (!state.changed && state.kind === 'resize') return true;
   if (state.kind === 'translate'
     && state.current.x === state.base.x && state.current.y === state.base.y) return true;
@@ -1000,10 +1044,15 @@ function onKeyDown(event) {
 function rollbackAllTentative() {
   for (const pending of tentativeCommands.values()) pending.transaction.rollback();
   tentativeCommands.clear();
+  requestAuthoritativeReloadIfSettled();
 }
 
 function onParentMessage(event) {
   if (event.origin !== location.origin || event.source !== parent) return;
+  if (event.data?.type === 'show-authoritative-reload-notice') {
+    showStatus('页面重建，未提交编辑已取消');
+    return;
+  }
   if (event.data?.type === 'show-page' && typeof event.data.pageKey === 'string') {
     showPage(event.data.pageKey);
     return;
@@ -1061,6 +1110,7 @@ function onParentMessage(event) {
     const committed = pending?.transaction.commit() ?? false;
     tentativeCommands.delete(event.data.commandId);
     parent.postMessage({ type:'actions-committed', commandId:event.data.commandId, committed }, location.origin);
+    requestAuthoritativeReloadIfSettled();
     return;
   }
   if (event.data?.type === 'rollback-actions' && typeof event.data.commandId === 'string') {
@@ -1068,6 +1118,7 @@ function onParentMessage(event) {
     const rolledBack = pending?.transaction.rollback() ?? false;
     tentativeCommands.delete(event.data.commandId);
     parent.postMessage({ type:'actions-rolled-back', commandId:event.data.commandId, rolledBack }, location.origin);
+    requestAuthoritativeReloadIfSettled();
     return;
   }
   if (event.data?.type === 'rollback-all-tentative') {
@@ -1112,6 +1163,7 @@ function onParentMessage(event) {
     if (!callback) return;
     pendingManual.delete(event.data.requestId);
     callback(event.data);
+    requestAuthoritativeReloadIfSettled();
     return;
   }
   if (event.data?.type === 'locate-task' && typeof event.data.pageKey === 'string') {
@@ -1193,15 +1245,20 @@ if (parent !== window) {
   window.addEventListener('pagehide', teardown);
   canvasMonitor = createCanvasMonitor(nextCanvases => {
     pruneDisconnectedInteractionState(nextCanvases);
+    if (requiresAuthoritativeReload) {
+      requestAuthoritativeReloadIfSettled();
+      return false;
+    }
     if (dragging || directEdit || transformDrag
       || activePopover || pendingManual.size > 0 || tentativeCommands.size > 0) return false;
     finishDirectEdit();
     cancelTransformDrag();
-    removeTransformSelection();
     removePopover();
     canvases = nextCanvases;
+    if (transformSelection) positionTransformSelection();
     parent.postMessage({
       type: 'deck-ready',
+      frameInstanceId:FRAME_INSTANCE_ID,
       pages: canvases.map((canvas, index) => ({
         index: index + 1,
         label: canvas.querySelector('section[data-label]')?.dataset.label ?? `第 ${index + 1} 页`,
@@ -1210,6 +1267,6 @@ if (parent !== window) {
       diagnostics: diagnosePages(),
     }, location.origin);
     return true;
-  }, startupController.signal);
+  }, startupController.signal, noteCanvasReplacementDuringInteraction);
 }
 }

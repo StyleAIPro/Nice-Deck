@@ -29,6 +29,9 @@ let revision = 0;
 let editorMode = 'preview';
 let deckReady = false;
 let deckReadyPayload;
+let activeFrameInstanceId;
+let authoritativeReloadPending;
+const handledAuthoritativeReloads = new Set();
 let sessionGroups = [];
 let loadedSessionRevision = -1;
 let sessionRefreshTargetRevision = 0;
@@ -44,6 +47,7 @@ function onDeckFrameLoad() {
   // document load 早于 frame bridge 的稳定 canvas 发现；此窗口内的 Agent 命令必须排队。
   deckReady = false;
   deckReadyPayload = undefined;
+  activeFrameInstanceId = undefined;
 }
 
 deckFrame.addEventListener('load', onDeckFrameLoad);
@@ -210,7 +214,7 @@ function requestPage(button) {
   }, location.origin);
 }
 
-function renderPages(nextPages) {
+function renderPages(nextPages, preferredPageKey) {
   pages = nextPages;
   pageList.replaceChildren();
   for (const page of pages) {
@@ -231,8 +235,11 @@ function renderPages(nextPages) {
   }
   pageCount.textContent = `${pages.length} 页`;
   updatePageBadges();
-  const firstPage = pageList.querySelector('[data-page-key]');
-  if (firstPage) requestPage(firstPage);
+  const preferredPage = preferredPageKey
+    ? pageList.querySelector(`[data-page-key="${CSS.escape(preferredPageKey)}"]`)
+    : null;
+  const requestedPage = preferredPage ?? pageList.querySelector('[data-page-key]');
+  if (requestedPage) requestPage(requestedPage);
 }
 
 function postRegionResult(requestId, result) {
@@ -343,6 +350,26 @@ async function createRegionTask(message) {
 
 function onFrameMessage(event) {
   if (event.origin !== location.origin || event.source !== deckFrame.contentWindow) return;
+  if (tornDown) return;
+  if (event.data?.type === 'request-authoritative-reload'
+    && typeof event.data.frameInstanceId === 'string'
+    && Number.isSafeInteger(event.data.requestSequence)
+    && event.data.requestSequence > 0) {
+    if (event.data.frameInstanceId !== activeFrameInstanceId) return;
+    const requestKey = `${event.data.frameInstanceId}:${event.data.requestSequence}`;
+    if (handledAuthoritativeReloads.has(requestKey) || authoritativeReloadPending) return;
+    handledAuthoritativeReloads.add(requestKey);
+    authoritativeReloadPending = {
+      frameInstanceId:event.data.frameInstanceId,
+      requestSequence:event.data.requestSequence,
+      pageKey:pendingPageKey || currentKey.textContent,
+    };
+    deckReady = false;
+    deckReadyPayload = undefined;
+    pendingPageKey = undefined;
+    deckFrame.contentWindow?.location.reload();
+    return;
+  }
   if (event.data?.type === 'deck-error' && typeof event.data.code === 'string') {
     deckReady = false;
     deckReadyPayload = undefined;
@@ -360,6 +387,11 @@ function onFrameMessage(event) {
     return;
   }
   if (event.data?.type === 'deck-ready' && Array.isArray(event.data.pages)) {
+    if (authoritativeReloadPending
+      && event.data.frameInstanceId === authoritativeReloadPending.frameInstanceId) return;
+    const completedReload = authoritativeReloadPending;
+    activeFrameInstanceId = typeof event.data.frameInstanceId === 'string'
+      ? event.data.frameInstanceId : undefined;
     deckReady = true;
     deckReadyPayload = {
       type:'deck-ready',
@@ -367,7 +399,7 @@ function onFrameMessage(event) {
       diagnostics:Array.isArray(event.data.diagnostics) ? event.data.diagnostics : [],
     };
     announceDeckReady();
-    renderPages(event.data.pages);
+    renderPages(event.data.pages, completedReload?.pageKey);
     deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode: editorMode }, location.origin);
     if (loadedSessionRevision >= revision) syncSessionActions();
     else void ensureSessionRevision(revision).catch(() => {});
@@ -375,6 +407,10 @@ function onFrameMessage(event) {
       deckFrame.contentWindow?.postMessage(command, location.origin);
     }
     pendingFrameCommands.clear();
+    if (completedReload) {
+      authoritativeReloadPending = undefined;
+      deckFrame.contentWindow?.postMessage({ type:'show-authoritative-reload-notice' }, location.origin);
+    }
     return;
   }
   if (event.data?.type === 'create-region-task') {

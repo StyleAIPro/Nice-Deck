@@ -330,6 +330,229 @@ for (const scenario of [
   });
 }
 
+test('directEdit 未提交内容被 clone 后通过权威 reload 清除且仍可再次编辑', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const frame = page.frameLocator('#deck-frame');
+  const authoritativeBefore = await session(app);
+  await page.click('[data-page-index="2"]');
+  await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
+  let heading = frame.locator('h2').nth(1);
+  await page.click('[data-mode="text"]');
+  await heading.dblclick();
+  await heading.fill('未提交污染文字');
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    window.__documentBeforeTransientClone = frameElement.contentDocument;
+    window.__authoritativeReloadCount = 0;
+    frameElement.addEventListener('load', () => { window.__authoritativeReloadCount += 1; });
+    const stage = frameElement.contentDocument.querySelector('.stage');
+    stage.replaceChildren(...[...stage.children].map(canvas => canvas.cloneNode(true)));
+  });
+  assert.equal(await frame.locator('h2').nth(1).textContent(), '未提交污染文字');
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument !== window.__documentBeforeTransientClone
+  ));
+  await frame.locator('html[data-deck-editor-mode="text"]').waitFor();
+  await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
+  heading = frame.locator('h2').nth(1);
+  assert.equal(await heading.textContent(), '第二页标题');
+  assert.equal(await heading.getAttribute('contenteditable'), null);
+  const authoritativeAfter = await session(app);
+  assert.equal(authoritativeAfter.sessionId, authoritativeBefore.sessionId);
+  assert.deepEqual(authoritativeAfter.tasks, authoritativeBefore.tasks);
+  assert.deepEqual(authoritativeAfter.groups, []);
+  assert.equal(authoritativeAfter.revision, 0);
+  assert.equal(await page.locator('[data-current-page]').textContent(), '02 目录页');
+  assert.equal(await frame.locator('html').getAttribute('data-deck-editor-mode'), 'text');
+  await frame.locator('[data-direct-status]').waitFor();
+  assert.match(await frame.locator('[data-direct-status]').innerText(), /页面重建.*未提交编辑已取消/);
+  await page.waitForTimeout(250);
+  assert.equal(await page.evaluate(() => window.__authoritativeReloadCount), 1);
+
+  await heading.dblclick();
+  await heading.fill('重建后可编辑');
+  await heading.press('Meta+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  assert.equal((await session(app)).groups[0].actions[0].after, '重建后可编辑');
+});
+
+test('tentative prepared clone 污染在 rollback 后通过权威 reload 清除', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const frame = page.frameLocator('#deck-frame');
+  let heading = frame.locator('h2').first();
+  const target = await heading.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  await page.evaluate(actionTarget => {
+    const frameElement = document.querySelector('#deck-frame');
+    window.__tentativeMessages = [];
+    window.addEventListener('message', event => {
+      if (event.source === frameElement.contentWindow && event.data?.commandId === 'clone-tentative') {
+        window.__tentativeMessages.push(event.data.type);
+      }
+    });
+    frameElement.contentWindow.postMessage({
+      type:'apply-actions', commandId:'clone-tentative', tentative:true,
+      actions:[{ id:'clone-tentative-action', taskId:null, target:actionTarget,
+        kind:'translate', payload:{ x:70, y:35 } }],
+    }, location.origin);
+  }, target);
+  await page.waitForFunction(() => window.__tentativeMessages?.includes('actions-prepared'));
+  assert.equal(await heading.evaluate(element => element.style.translate), '70px 35px');
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    window.__documentBeforeTransientClone = frameElement.contentDocument;
+    const stage = frameElement.contentDocument.querySelector('.stage');
+    stage.replaceChildren(...[...stage.children].map(canvas => canvas.cloneNode(true)));
+  });
+  assert.equal(await frame.locator('h2').first().evaluate(element => element.style.translate), '70px 35px');
+  await page.evaluate(() => {
+    document.querySelector('#deck-frame').contentWindow.postMessage({
+      type:'rollback-actions', commandId:'clone-tentative',
+    }, location.origin);
+  });
+  await page.waitForFunction(() => window.__tentativeMessages?.includes('actions-rolled-back'));
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument !== window.__documentBeforeTransientClone
+  ));
+  heading = frame.locator('h2').first();
+  assert.equal(await heading.evaluate(element => element.style.translate), '');
+  assert.deepEqual((await session(app)).groups, []);
+  assert.equal((await session(app)).revision, 0);
+
+  const nextTarget = await heading.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  const applied = await postJson(app, '/api/actions', {
+    expectedRevision:0, taskId:null,
+    actions:[{ id:'after-tentative-reload', taskId:null, target:nextTarget,
+      kind:'translate', payload:{ x:20, y:10 } }],
+  });
+  assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  assert.equal((await session(app)).revision, 1);
+});
+
+test('transformDrag preview 被 clone 后安全取消并通过权威 reload 清除', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const frame = page.frameLocator('#deck-frame');
+  let heading = frame.locator('h2').first();
+  await page.click('[data-mode="move"]');
+  const box = await heading.boundingBox();
+  await page.mouse.move(box.x + 8, box.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 48, box.y + 28);
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    window.__documentBeforeTransientClone = frameElement.contentDocument;
+    const stage = frameElement.contentDocument.querySelector('.stage');
+    stage.replaceChildren(...[...stage.children].map(canvas => canvas.cloneNode(true)));
+  });
+  assert.notEqual(await frame.locator('h2').first().evaluate(element => element.style.translate), '');
+  await page.mouse.up();
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument !== window.__documentBeforeTransientClone
+  ));
+  heading = frame.locator('h2').first();
+  assert.equal(await heading.evaluate(element => element.style.translate), '');
+  assert.deepEqual((await session(app)).groups, []);
+  assert.equal((await session(app)).revision, 0);
+
+  await frame.locator('html[data-deck-editor-mode="move"]').waitFor();
+  const nextBox = await heading.boundingBox();
+  await page.mouse.move(nextBox.x + 8, nextBox.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(nextBox.x + 38, nextBox.y + 23);
+  await page.mouse.up();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  assert.equal((await session(app)).groups[0].actions[0].kind, 'translate');
+});
+
+for (const scenario of [
+  { mode:'move', target:'h2', kind:'translate', handle:false },
+  { mode:'resize', target:'.card', kind:'resize', handle:true },
+]) {
+  test(`${scenario.mode} connected selection 在 section 结构变化 rehydrate 后保留并可继续动作`, async t => {
+    const app = await startFixtureServer();
+    t.after(() => app.close());
+    const { browser, page } = await openEditor(app);
+    t.after(() => browser.close());
+    page.setDefaultTimeout(4_000);
+    const frame = page.frameLocator('#deck-frame');
+    await page.locator('[data-page-index="1"]').evaluate(button => {
+      window.__navBeforeConnectedSelection = button;
+    });
+    await page.click(`[data-mode="${scenario.mode}"]`);
+    const target = frame.locator(scenario.target).first();
+    await target.click();
+    assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
+    await page.locator('#deck-frame').evaluate(frameElement => {
+      const marker = frameElement.contentDocument.createElement('span');
+      marker.dataset.connectedStructureMarker = '';
+      frameElement.contentDocument.querySelector('section[data-label]').append(marker);
+    });
+    await page.waitForFunction(() => (
+      document.querySelector('[data-page-index="1"]') !== window.__navBeforeConnectedSelection
+    ));
+    assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
+    assert.equal(await frame.locator('[data-resize-handle]').count(), scenario.handle ? 1 : 0);
+    const alignment = await page.locator('#deck-frame').evaluate((frameElement, withHandle) => {
+      const document = frameElement.contentDocument;
+      const selected = document.querySelector('[data-transform-selection]').getBoundingClientRect();
+      const element = document.querySelector(withHandle ? '.card' : 'h2').getBoundingClientRect();
+      const handle = document.querySelector('[data-resize-handle]')?.getBoundingClientRect();
+      return {
+        overlayAligned:Math.abs(selected.left - element.left) < 1
+          && Math.abs(selected.top - element.top) < 1
+          && Math.abs(selected.width - element.width) < 1
+          && Math.abs(selected.height - element.height) < 1,
+        handleAligned:!withHandle || (Math.abs((handle.left + handle.width / 2) - element.right) < 1
+          && Math.abs((handle.top + handle.height / 2) - element.bottom) < 1),
+      };
+    }, scenario.handle);
+    assert.deepEqual(alignment, { overlayAligned:true, handleAligned:true });
+    const pageKey = await page.locator('[data-page-index="1"]').getAttribute('data-page-key');
+    await page.evaluate(key => {
+      const frameElement = document.querySelector('#deck-frame');
+      window.__connectedDiagnostics = null;
+      const listener = event => {
+        if (event.source === frameElement.contentWindow
+          && event.data?.commandId === 'connected-selection-diagnostics') {
+          window.__connectedDiagnostics = event.data;
+          window.removeEventListener('message', listener);
+        }
+      };
+      window.addEventListener('message', listener);
+      frameElement.contentWindow.postMessage({
+        type:'diagnose-pages', commandId:'connected-selection-diagnostics', revision:0,
+        pageKeys:[key],
+      }, location.origin);
+    }, pageKey);
+    await page.waitForFunction(() => window.__connectedDiagnostics !== null);
+    assert.equal(await page.evaluate(() => window.__connectedDiagnostics.type), 'diagnostics-result');
+
+    if (scenario.mode === 'move') {
+      const box = await target.boundingBox();
+      await page.mouse.move(box.x + 8, box.y + 8);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 38, box.y + 23);
+      await page.mouse.up();
+    } else {
+      const handleBox = await frame.locator('[data-resize-handle]').boundingBox();
+      await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(handleBox.x + handleBox.width / 2 + 28, handleBox.y + handleBox.height / 2 + 18);
+      await page.mouse.up();
+    }
+    await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+    assert.equal((await session(app)).groups[0].actions[0].kind, scenario.kind);
+  });
+}
+
 test('复杂 SVG 使用 scale 且模式切换与 pagehide 清理预览和覆盖 UI', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());
