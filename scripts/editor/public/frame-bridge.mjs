@@ -404,6 +404,12 @@ function manualFailureMessage(result, fallback) {
   return `${result.message || fallback}${suffix}`;
 }
 
+function manualSuccessMessage(result, fallback) {
+  if (result.syncPending) return result.message || '动作已保存、同步待确认';
+  if (result.commitConfirmed === false && result.recoveredBySync) return '动作已保存并恢复同步';
+  return fallback;
+}
+
 function textTargetFromEvent(event) {
   const semantic = event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,td,th');
   if (semantic) return semantic;
@@ -448,7 +454,7 @@ function commitDirectEdit() {
   };
   showStatus('正在应用文字修改…');
   submitManualActions([action], result => {
-    if (result.ok) showStatus('文字修改已记录');
+    if (result.ok) showStatus(manualSuccessMessage(result, '文字修改已记录'));
     else showStatus(manualFailureMessage(result, '文字修改失败，原文已恢复'), 'error');
   });
 }
@@ -648,7 +654,9 @@ function finishTransformPointer(event) {
     kind: state.kind, payload: state.current,
   };
   submitManualActions([action], result => {
-    if (!result.ok) showStatus(manualFailureMessage(result, '变换失败，已恢复原状态'), 'error');
+    if (result.ok && (result.syncPending || result.recoveredBySync)) {
+      showStatus(manualSuccessMessage(result, '变换已记录'));
+    } else if (!result.ok) showStatus(manualFailureMessage(result, '变换失败，已恢复原状态'), 'error');
     positionTransformSelection();
   });
   event.preventDefault();
@@ -805,7 +813,9 @@ function onParentMessage(event) {
     }
     try {
       if (event.data.tentative === true) {
-        const transaction = runtime.beginTransaction(event.data.actions);
+        const transaction = runtime.beginTransaction(event.data.actions, {
+          replace:event.data.replace === true,
+        });
         const reply = {
           type: 'actions-prepared', commandId: event.data.commandId,
           applied: transaction.results.length, results: transaction.results,

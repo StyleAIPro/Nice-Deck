@@ -22,6 +22,7 @@ export class BridgeService {
     this.timeoutMs = timeoutMs;
     this.editorSocket = null;
     this.pending = new Map();
+    this.socketWaiters = new Set();
     this.journal = new PatchJournal(sessionStore.state);
     this.closed = false;
     this.mutationQueue = Promise.resolve();
@@ -35,7 +36,14 @@ export class BridgeService {
     }
   }
 
-  setEditorSocket(socket) { this.editorSocket = socket; }
+  setEditorSocket(socket) {
+    this.editorSocket = socket;
+    for (const waiter of this.socketWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(socket);
+    }
+    this.socketWaiters.clear();
+  }
   hasEditorSocket() { return this.editorSocket?.readyState === 1; }
 
   clearEditorSocket(socket) {
@@ -125,8 +133,9 @@ export class BridgeService {
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
-      await this.#finalizeCommitted(prepared.commandId);
-      return { groupId: group.id, revision: this.sessionStore.state.revision, applied: prepared.applied };
+      const result = { groupId: group.id, revision: this.sessionStore.state.revision, applied: prepared.applied };
+      const confirmation = await this.#finalizeCommitted(prepared.commandId, result);
+      return { ...result, ...confirmation };
     });
   }
 
@@ -148,6 +157,11 @@ export class BridgeService {
     this.editorSocket = null;
     const error = serviceError('SERVICE_CLOSED', 503, '服务已关闭');
     for (const commandId of [...this.pending.keys()]) this.#settle(commandId, 'reject', error);
+    for (const waiter of this.socketWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.socketWaiters.clear();
   }
 
   #enqueue(operation) {
@@ -161,10 +175,10 @@ export class BridgeService {
       this.assertRevision(expectedRevision);
       const draftState = copyJournalState(this.sessionStore.state);
       const draft = new PatchJournal(draftState);
-      let actions;
-      try { actions = draft[method](groupId); }
+      try { draft[method](groupId); }
       catch { throw serviceError('GROUP_NOT_FOUND', 404, '找不到动作组'); }
-      const prepared = await this.#prepare(actions, expectedRevision);
+      const actions = draft.compile();
+      const prepared = await this.#prepare(actions, expectedRevision, { replace:true });
       try {
         await this.#commitJournal(() => {
           this.sessionStore.state.groups = draftState.groups;
@@ -175,18 +189,19 @@ export class BridgeService {
         await this.#rollbackOrSync(prepared.commandId);
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
-      await this.#finalizeCommitted(prepared.commandId);
-      return { groupId, revision: this.sessionStore.state.revision, applied: prepared.applied };
+      const result = { groupId, revision: this.sessionStore.state.revision, applied: prepared.applied };
+      const confirmation = await this.#finalizeCommitted(prepared.commandId, result);
+      return { ...result, ...confirmation };
     });
   }
 
-  async #prepare(actions, expectedRevision) {
+  async #prepare(actions, expectedRevision, { replace=false } = {}) {
     if (this.closed) throw serviceError('SERVICE_CLOSED', 503, '服务已关闭');
     this.assertRevision(expectedRevision);
     const commandId = randomUUID();
     try {
       return await this.#send(
-        commandId, { type:'apply-actions', commandId, actions, tentative:true },
+        commandId, { type:'apply-actions', commandId, actions, tentative:true, replace },
         { expectedType:'actions-prepared', actions },
       );
     } catch (error) {
@@ -198,19 +213,23 @@ export class BridgeService {
     }
   }
 
-  async #finalizeCommitted(commandId) {
+  async #finalizeCommitted(commandId, committedResult) {
     try {
       const result = await this.#send(
         commandId, { type:'commit-actions', commandId },
         { expectedType:'actions-committed' },
       );
       if (result.committed !== true) throw serviceError('INVALID_ACTION_ACK', 502);
+      return { commitConfirmed:true, recoveredBySync:false };
     } catch {
       try { await this.#forceSync(); }
       catch {
-        throw serviceError('EDITOR_SYNC_REQUIRED', 503, '日志已保存，但编辑器需重连后按 sidecar 恢复');
+        throw serviceError(
+          'EDITOR_SYNC_REQUIRED', 503, '动作已保存，编辑器同步待确认',
+          { committed:true, commitConfirmed:false, recoveredBySync:false, ...committedResult },
+        );
       }
-      throw serviceError('EDITOR_COMMIT_UNCONFIRMED', 502, '日志已保存，编辑器已按 sidecar 权威状态同步');
+      return { commitConfirmed:false, recoveredBySync:true };
     }
   }
 
@@ -231,12 +250,27 @@ export class BridgeService {
   }
 
   async #forceSync() {
+    await this.#waitForEditorSocket();
     const commandId = randomUUID();
     await this.#send(
       commandId,
       { type:'sync-actions', commandId, actions:this.compiledActions() },
       { expectedType:'actions-synced' },
     );
+  }
+
+  #waitForEditorSocket() {
+    if (this.closed) return Promise.reject(serviceError('SERVICE_CLOSED', 503, '服务已关闭'));
+    if (this.hasEditorSocket()) return Promise.resolve(this.editorSocket);
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer:null };
+      waiter.timer = setTimeout(() => {
+        this.socketWaiters.delete(waiter);
+        reject(serviceError('EDITOR_OFFLINE', 409, '等待编辑器重连超时'));
+      }, this.timeoutMs);
+      waiter.timer.unref?.();
+      this.socketWaiters.add(waiter);
+    });
   }
 
   #send(commandId, message, { expectedType, actions = [] }) {

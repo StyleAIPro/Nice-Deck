@@ -51,6 +51,11 @@ async function requestJson(pathname, options) {
     error.code = body.error;
     error.failedActionId = body.failedActionId;
     error.candidates = body.candidates;
+    error.committed = body.committed;
+    error.commitConfirmed = body.commitConfirmed;
+    error.recoveredBySync = body.recoveredBySync;
+    error.revision = body.revision;
+    error.groupId = body.groupId;
     throw error;
   }
   return body;
@@ -71,14 +76,17 @@ function updateRevision(value) {
 
 function actionKey(action) {
   const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
-  return `${action.target.pageKey}|${action.target.path}|${kind}|${action.payload?.property ?? ''}`;
+  return `${action.target.pageKey}|${action.target.path}|${action.target.tag ?? ''}|${kind}|${action.payload?.property ?? ''}`;
 }
 
 function compiledSessionActions() {
   const final = new Map();
   for (const group of sessionGroups) {
     if (!group.active) continue;
-    for (const action of group.actions ?? []) final.set(actionKey(action), action);
+    for (const action of group.actions ?? []) {
+      const key=actionKey(action), previous=final.get(key);
+      final.set(key,previous ? { ...action,target:previous.target } : action);
+    }
   }
   return [...final.values()];
 }
@@ -234,6 +242,16 @@ async function submitManualActions(message) {
     updateRevision(result.revision);
     postManualResult(requestId, { ok: true, ...result });
   } catch (error) {
+    if (error.committed === true) {
+      updateRevision(error.revision);
+      await loadSession().catch(() => {});
+      postManualResult(requestId, {
+        ok: true, committed:true, commitConfirmed:false, recoveredBySync:false,
+        syncPending:true, revision:error.revision, groupId:error.groupId,
+        message:'动作已保存、同步待确认',
+      });
+      return;
+    }
     postManualResult(requestId, {
       ok: false, code: error.code, message: error.message || '动作提交失败',
       failedActionId: error.failedActionId, candidates: error.candidates,

@@ -165,10 +165,16 @@ function errorResponse(response, error) {
   }
   statusCode ??= 500;
   code ??= 'INTERNAL_ERROR';
-  const message = statusCode === 500 ? '服务内部错误' : error.message;
+  const safeMessages = new Set(['JOURNAL_PERSIST_FAILED', 'EDITOR_SYNC_REQUIRED']);
+  const message = statusCode === 500 && !safeMessages.has(code) ? '服务内部错误' : error.message;
   const details = {};
   if (typeof error?.failedActionId === 'string') details.failedActionId = error.failedActionId;
   if (Array.isArray(error?.candidates)) details.candidates = error.candidates.slice(0, 5);
+  if (typeof error?.committed === 'boolean') details.committed = error.committed;
+  if (typeof error?.commitConfirmed === 'boolean') details.commitConfirmed = error.commitConfirmed;
+  if (typeof error?.recoveredBySync === 'boolean') details.recoveredBySync = error.recoveredBySync;
+  if (Number.isSafeInteger(error?.revision)) details.revision = error.revision;
+  if (typeof error?.groupId === 'string') details.groupId = error.groupId;
   json(response, statusCode, { error: code, message, ...details });
 }
 

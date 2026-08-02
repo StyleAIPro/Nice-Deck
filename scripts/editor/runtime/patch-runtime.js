@@ -23,9 +23,10 @@
   };
   const fingerprint = el => fnv1a(`${el.tagName}\0${el.className}\0${(el.textContent ?? '').trim().slice(0,120)}\0${el.getAttribute('style') ?? ''}`);
   const locatorKey = locator => `${locator.pageKey}|${locator.path}|${locator.tag}|${locator.fingerprint}`;
+  const stableTargetKey = locator => `${locator.pageKey}|${locator.path}|${locator.tag}`;
   const actionKey = action => {
     const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
-    return `${locatorKey(action.target)}|${kind}|${action.kind === 'setStyle' ? action.payload.property : ''}`;
+    return `${stableTargetKey(action.target)}|${kind}|${action.kind === 'setStyle' ? action.payload.property : ''}`;
   };
   function runtimeError(code, candidates = []) {
     return Object.assign(new Error(code), { code, candidates });
@@ -198,16 +199,84 @@
     const el=resolve(action.target), baseline={ ...captureBaseline(action,el),el };
     const applied=applyOne(action,el); recordActive(applied,baseline); return applied;
   }
-  function beginTransaction(actions) {
-    if (!Array.isArray(actions) || !actions.length) throw runtimeError('INVALID_ACTION');
+  const snapshotElement = el => ({ html:el.innerHTML,style:el.getAttribute('style') });
+  const restoreElementSnapshot = (el,snapshot) => {
+    if (!el.isConnected) return;
+    el.innerHTML=snapshot.html;
+    if (snapshot.style===null) el.removeAttribute('style'); else el.setAttribute('style',snapshot.style);
+  };
+  function prepareActions(actions,{allowEmpty=false}={}) {
+    if (!Array.isArray(actions) || (!allowEmpty && !actions.length)) throw runtimeError('INVALID_ACTION');
     const prepared=[];
     for (const action of actions) {
-      try { validatePayload(action); prepared.push({ action, el:resolve(action.target) }); }
+      try { validatePayload(action); prepared.push({action,el:resolve(action.target)}); }
       catch (error) { error.failedActionId=action?.id; throw error; }
     }
+    return prepared;
+  }
+  function beginReplaceTransaction(actions) {
+    const prepared=prepareActions(actions,{allowEmpty:true});
+    const oldActions=[...activeActions], oldBaselines=new Map(activeBaselines);
+    const touched=new Set(prepared.map(item => item.el));
+    for (const action of oldActions) {
+      const baseline=oldBaselines.get(actionKey(action));
+      const el=baseline?.el?.isConnected ? baseline.el : resolve(action.target);
+      touched.add(el);
+    }
+    const snapshots=new Map([...touched].map(el => [el,snapshotElement(el)]));
+    const results=[], nextBaselines=new Map(), currentByKey=new Map();
+    let settled=false;
+    tentativeCount+=1;
+    try {
+      for (const action of [...oldActions].reverse()) {
+        const baseline=oldBaselines.get(actionKey(action));
+        if (baseline) restoreBaseline(action,baseline);
+      }
+      for (const {action,el} of prepared) {
+        const key=actionKey(action);
+        const baseline=nextBaselines.get(key) ?? { ...captureBaseline(action,el),el };
+        const current=currentByKey.get(key);
+        if (resizeBranch(current) && resizeBranch(current)!==resizeBranch(action)) {
+          restoreBaseline(current,baseline);
+        }
+        const result=applyOne(action,el);
+        results.push(result);
+        nextBaselines.set(key,baseline);
+        currentByKey.set(key,result);
+      }
+    } catch (error) {
+      for (const [el,snapshot] of snapshots) restoreElementSnapshot(el,snapshot);
+      activeActions=oldActions;
+      activeBaselines=oldBaselines;
+      tentativeCount-=1;
+      throw error;
+    }
+    const finish=method => {
+      if (settled) return false;
+      settled=true;
+      tentativeCount-=1;
+      clearTimeout(replayTimer);
+      if (method==='commit') {
+        activeActions=[];
+        activeBaselines=new Map();
+        for (const [index,result] of results.entries()) {
+          recordActive(result,nextBaselines.get(actionKey(actions[index])));
+        }
+      } else {
+        for (const [el,snapshot] of snapshots) restoreElementSnapshot(el,snapshot);
+        activeActions=oldActions;
+        activeBaselines=oldBaselines;
+      }
+      return true;
+    };
+    return {results,commit:() => finish('commit'),rollback:() => finish('rollback')};
+  }
+  function beginTransaction(actions,{replace=false}={}) {
+    if (replace) return beginReplaceTransaction(actions);
+    const prepared=prepareActions(actions);
     const oldActions=[...activeActions];
     const oldBaselines=new Map(activeBaselines);
-    const snapshots=new Map(prepared.map(({el}) => [el,{ html:el.innerHTML, style:el.getAttribute('style') }]));
+    const snapshots=new Map(prepared.map(({el}) => [el,snapshotElement(el)]));
     const results=[];
     const transactionBaselines=new Map();
     const currentByKey=new Map(activeActions.map(active => [actionKey(active),active]));
@@ -229,8 +298,7 @@
       }
     } catch (error) {
       for (const [el,snapshot] of snapshots) {
-        el.innerHTML=snapshot.html;
-        if (snapshot.style === null) el.removeAttribute('style'); else el.setAttribute('style',snapshot.style);
+        restoreElementSnapshot(el,snapshot);
       }
       activeActions=oldActions;
       activeBaselines=oldBaselines;
@@ -248,9 +316,7 @@
         }
       } else {
         for (const [el,snapshot] of snapshots) {
-          if (!el.isConnected) continue;
-          el.innerHTML=snapshot.html;
-          if (snapshot.style===null) el.removeAttribute('style'); else el.setAttribute('style',snapshot.style);
+          restoreElementSnapshot(el,snapshot);
         }
         activeActions=oldActions;
         activeBaselines=oldBaselines;
@@ -296,7 +362,7 @@
     }
   }
   function suspendTarget(locator) {
-    const key=locatorKey(locator);
+    const key=stableTargetKey(locator);
     suspendedTargets.add(key);
     let resumed=false;
     return () => {
@@ -308,7 +374,7 @@
   function replayActive() {
     if (tentativeCount>0) return;
     for (const action of activeActions) {
-      if (suspendedTargets.has(locatorKey(action.target))) continue;
+      if (suspendedTargets.has(stableTargetKey(action.target))) continue;
       try { applyOne(action); } catch { /* Deck 可能仍在重建。 */ }
     }
   }
@@ -319,5 +385,7 @@
   window.HuaweiDeckPatchRuntime={
     pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,
     pendingTransactionCount:() => tentativeCount,
+    activeActionCount:() => activeActions.length,
+    suspendedTargetCount:() => suspendedTargets.size,
   };
 })();

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rename } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import WebSocket from 'ws';
 import { startFixtureServer, openEditor } from './test-helpers.mjs';
 
 async function session(app) {
@@ -15,6 +16,29 @@ async function postJson(app, pathname, body) {
     body: JSON.stringify(body),
   });
   return { response, body: await response.json() };
+}
+
+function connectObserver(app) {
+  const socket = new WebSocket(`${app.wsUrl}?token=${encodeURIComponent(app.token)}`);
+  return new Promise((resolvePromise, reject) => {
+    socket.once('open', () => resolvePromise(socket));
+    socket.once('error', reject);
+  });
+}
+
+function nextSocketMessage(socket) {
+  return new Promise((resolvePromise, reject) => {
+    const onMessage = data => {
+      socket.off('error', onError);
+      resolvePromise(JSON.parse(data));
+    };
+    const onError = error => {
+      socket.off('message', onMessage);
+      reject(error);
+    };
+    socket.once('message', onMessage);
+    socket.once('error', onError);
+  });
 }
 
 test('人工改字与 Agent 位移共享 canonical 日志并实时撤销重做', async t => {
@@ -325,6 +349,7 @@ test('Journal 持久化失败时 apply/undo/redo 均回滚浏览器 tentative �
   }
   assert.equal(failed.response.status, 500, JSON.stringify(failed.body));
   assert.equal(failed.body.error, 'JOURNAL_PERSIST_FAILED');
+  assert.match(failed.body.message,/已回滚/);
   assert.equal(await heading.evaluate(element => element.style.translate), '');
   assert.equal(await heading.evaluate(() => window.HuaweiDeckPatchRuntime.pendingTransactionCount()), 0);
   assert.deepEqual((await session(app)).groups, []);
@@ -389,6 +414,94 @@ test('同一文字连续编辑两次并按组逐次撤销', async t => {
   result = await postJson(app, `/api/groups/${state.groups[0].id}/undo`, { expectedRevision:3 });
   assert.equal(result.response.status, 200);
   assert.equal(await heading.textContent(), '第一页标题');
+});
+
+test('刷新恢复后同一文字仍可暂停 replay 并形成第二组', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  let heading = page.frameLocator('#deck-frame').locator('h2').first();
+  await page.click('[data-mode="text"]');
+  await heading.dblclick(); await heading.fill('刷新前第一次'); await heading.press('Meta+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent === '刷新前第一次');
+  heading = page.frameLocator('#deck-frame').locator('h2').first();
+  await page.click('[data-mode="text"]');
+  await heading.dblclick();
+  await heading.fill('刷新后第二次');
+  await page.waitForTimeout(240);
+  assert.equal(await heading.textContent(), '刷新后第二次');
+  assert.deepEqual(await heading.evaluate(() => ({
+    active:window.HuaweiDeckPatchRuntime.activeActionCount?.(),
+    suspended:window.HuaweiDeckPatchRuntime.suspendedTargetCount?.(),
+    pending:window.HuaweiDeckPatchRuntime.pendingTransactionCount(),
+  })), { active:1,suspended:1,pending:0 });
+  await heading.press('Meta+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+  let state=await session(app);
+  assert.deepEqual(state.groups.map(group => group.actions[0].after), ['刷新前第一次','刷新后第二次']);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent === '刷新后第二次');
+  heading=page.frameLocator('#deck-frame').locator('h2').first();
+  let result=await postJson(app,`/api/groups/${state.groups[1].id}/undo`,{expectedRevision:2});
+  assert.equal(result.response.status,200,JSON.stringify(result.body));
+  assert.equal(await heading.textContent(),'刷新前第一次');
+  result=await postJson(app,`/api/groups/${state.groups[0].id}/undo`,{expectedRevision:3});
+  assert.equal(result.response.status,200,JSON.stringify(result.body));
+  assert.equal(await heading.textContent(),'第一页标题');
+  assert.deepEqual(await heading.evaluate(() => ({
+    active:window.HuaweiDeckPatchRuntime.activeActionCount?.(),
+    suspended:window.HuaweiDeckPatchRuntime.suspendedTargetCount?.(),
+    pending:window.HuaweiDeckPatchRuntime.pendingTransactionCount(),
+  })), { active:0,suspended:0,pending:0 });
+});
+
+test('undo/redo 以完整 authoritative compiled 集合替换浏览器状态', async t => {
+  const app=await startFixtureServer();
+  t.after(() => app.close());
+  const {browser,page}=await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const frame=page.frameLocator('#deck-frame');
+  const heading=frame.locator('h2').first();
+  const card=frame.locator('.card').first();
+  const [headingTarget,cardTarget]=await Promise.all([
+    heading.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element)),
+    card.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element)),
+  ]);
+  const apply = (expectedRevision,id,target,kind,payload) => postJson(app,'/api/actions',{
+    expectedRevision,taskId:null,actions:[{id,taskId:null,target,kind,payload}],
+  });
+  const first=await apply(0,'older-move',headingTarget,'translate',{x:20,y:10});
+  const second=await apply(1,'newer-move',headingTarget,'translate',{x:40,y:20});
+  assert.equal(first.response.status,200,JSON.stringify(first.body));
+  assert.equal(second.response.status,200,JSON.stringify(second.body));
+  let changed=await postJson(app,`/api/groups/${first.body.groupId}/undo`,{expectedRevision:2});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.equal(await heading.evaluate(element => element.style.translate),'40px 20px');
+  changed=await postJson(app,`/api/groups/${first.body.groupId}/redo`,{expectedRevision:3});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.equal(await heading.evaluate(element => element.style.translate),'40px 20px');
+
+  const size=await apply(4,'older-size',cardTarget,'resize',{width:500,height:200});
+  const scale=await apply(5,'newer-scale',cardTarget,'resize',{scale:1.5});
+  assert.equal(size.response.status,200,JSON.stringify(size.body));
+  assert.equal(scale.response.status,200,JSON.stringify(scale.body));
+  changed=await postJson(app,`/api/groups/${scale.body.groupId}/undo`,{expectedRevision:6});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.deepEqual(await card.evaluate(element => ({
+    width:element.style.width,height:element.style.height,scale:element.style.scale,
+  })),{width:'500px',height:'200px',scale:''});
+  changed=await postJson(app,`/api/groups/${scale.body.groupId}/redo`,{expectedRevision:7});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.deepEqual(await card.evaluate(element => ({
+    width:element.style.width,height:element.style.height,scale:element.style.scale,
+  })),{width:'300px',height:'100px',scale:'1.5'});
 });
 
 test('复杂富文本的叶 span 仍拒绝直接编辑', async t => {
@@ -480,8 +593,8 @@ test('CSS translate/scale 是移动与交互组件缩放的真实基值', async 
   assert.equal(await link.evaluate(element => element.style.width),'180px');
 });
 
-test('prepared 后连接断开会撤销 tentative，并在重连后按 sidecar 收敛', async t => {
-  const app = await startFixtureServer({ bridgeTimeoutMs: 100 });
+test('prepared 后连接断开会重连同步并返回已提交成功语义', async t => {
+  const app = await startFixtureServer({ bridgeTimeoutMs: 600 });
   t.after(() => app.close());
   const { browser, page } = await openEditor(app);
   t.after(() => browser.close());
@@ -506,8 +619,9 @@ test('prepared 后连接断开会撤销 tentative，并在重连后按 sidecar �
     expectedRevision: 0, taskId: null,
     actions: [{ id:'disconnect-prepared', taskId:null, target, kind:'translate', payload:{x:55,y:25} }],
   });
-  assert.equal(result.response.status, 503, JSON.stringify(result.body));
-  assert.equal(result.body.error, 'EDITOR_SYNC_REQUIRED');
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.commitConfirmed, false);
+  assert.equal(result.body.recoveredBySync, true);
   assert.equal((await session(app)).revision, 1);
   await page.waitForFunction(() => document.querySelector('[data-ws-state]')?.dataset.wsState === 'online');
   await page.waitForFunction(() => {
@@ -519,7 +633,7 @@ test('prepared 后连接断开会撤销 tentative，并在重连后按 sidecar �
 });
 
 test('undo prepared 后断线重连会移除 sidecar 已撤销的旧 DOM 效果', async t => {
-  const app = await startFixtureServer({ bridgeTimeoutMs: 100 });
+  const app = await startFixtureServer({ bridgeTimeoutMs: 600 });
   t.after(() => app.close());
   const { browser, page } = await openEditor(app);
   t.after(() => browser.close());
@@ -548,8 +662,9 @@ test('undo prepared 后断线重连会移除 sidecar 已撤销的旧 DOM 效果'
   const undone = await postJson(app, `/api/groups/${applied.body.groupId}/undo`, {
     expectedRevision: 1,
   });
-  assert.equal(undone.response.status, 503, JSON.stringify(undone.body));
-  assert.equal(undone.body.error, 'EDITOR_SYNC_REQUIRED');
+  assert.equal(undone.response.status, 200, JSON.stringify(undone.body));
+  assert.equal(undone.body.commitConfirmed, false);
+  assert.equal(undone.body.recoveredBySync, true);
   const state = await session(app);
   assert.equal(state.revision, 2);
   assert.equal(state.groups[0].active, false);
@@ -562,7 +677,7 @@ test('undo prepared 后断线重连会移除 sidecar 已撤销的旧 DOM 效果'
   });
 });
 
-test('commit ACK 丢失返回稳定错误并以 sidecar 权威状态收敛', async t => {
+test('commit ACK 丢失经 sidecar 恢复后返回成功并广播 revision', async t => {
   const app = await startFixtureServer({ bridgeTimeoutMs: 100 });
   t.after(() => app.close());
   const { browser, page } = await openEditor(app);
@@ -570,6 +685,9 @@ test('commit ACK 丢失返回稳定错误并以 sidecar 权威状态收敛', asy
   page.setDefaultTimeout(4_000);
   const heading = page.frameLocator('#deck-frame').locator('h2').first();
   const target = await heading.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  const observer=await connectObserver(app);
+  t.after(() => observer.close());
+  const recorded=nextSocketMessage(observer);
 
   await page.evaluate(() => {
     const originalSend = WebSocket.prototype.send;
@@ -588,11 +706,75 @@ test('commit ACK 丢失返回稳定错误并以 sidecar 权威状态收敛', asy
     expectedRevision: 0, taskId: null,
     actions: [{ id:'lost-commit-ack', taskId:null, target, kind:'translate', payload:{x:65,y:35} }],
   });
-  assert.equal(result.response.status, 502, JSON.stringify(result.body));
-  assert.equal(result.body.error, 'EDITOR_COMMIT_UNCONFIRMED');
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.commitConfirmed, false);
+  assert.equal(result.body.recoveredBySync, true);
   const state = await session(app);
   assert.equal(state.revision, 1);
   assert.equal(state.groups.length, 1);
   assert.equal(await heading.evaluate(element => element.style.translate), '65px 35px');
   assert.equal(await heading.evaluate(() => window.HuaweiDeckPatchRuntime.pendingTransactionCount()), 0);
+  assert.equal(await page.locator('[data-revision]').textContent(),'1');
+  const event=await recorded;
+  assert.equal(event.type,'actions-recorded');
+  assert.equal(event.revision,1);
+});
+
+test('人工动作 commit ACK 丢失恢复后显示非错误成功提示', async t => {
+  const app=await startFixtureServer({bridgeTimeoutMs:100});
+  t.after(() => app.close());
+  const {browser,page}=await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const heading=page.frameLocator('#deck-frame').locator('h2').first();
+  await page.evaluate(() => {
+    const originalSend=WebSocket.prototype.send;
+    WebSocket.prototype.send=function patchedSend(data) {
+      let message;
+      try { message=JSON.parse(String(data)); } catch { return originalSend.call(this,data); }
+      if (message.type==='actions-committed' && !window.__droppedManualCommitAck) {
+        window.__droppedManualCommitAck=true;
+        return;
+      }
+      return originalSend.call(this,data);
+    };
+  });
+  await page.click('[data-mode="text"]');
+  await heading.dblclick(); await heading.fill('恢复后成功'); await heading.press('Meta+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent==='1');
+  const status=page.frameLocator('#deck-frame').locator('[data-direct-status]');
+  await status.waitFor();
+  assert.notEqual(await status.getAttribute('data-state'),'error');
+  assert.match(await status.innerText(),/已保存并恢复同步/);
+  assert.equal((await session(app)).groups.length,1);
+});
+
+test('sidecar 已提交但 sync ACK 也丢失时 UI 视为已保存待同步', async t => {
+  const app=await startFixtureServer({bridgeTimeoutMs:100});
+  t.after(() => app.close());
+  const {browser,page}=await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const heading=page.frameLocator('#deck-frame').locator('h2').first();
+  await page.evaluate(() => {
+    const originalSend=WebSocket.prototype.send;
+    WebSocket.prototype.send=function patchedSend(data) {
+      let message;
+      try { message=JSON.parse(String(data)); } catch { return originalSend.call(this,data); }
+      if (message.type==='actions-committed' || message.type==='actions-synced') return;
+      return originalSend.call(this,data);
+    };
+  });
+  await page.click('[data-mode="text"]');
+  await heading.dblclick(); await heading.fill('已保存但待确认同步'); await heading.press('Meta+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent==='1');
+  const status=page.frameLocator('#deck-frame').locator('[data-direct-status]');
+  await status.waitFor();
+  assert.notEqual(await status.getAttribute('data-state'),'error');
+  assert.match(await status.innerText(),/已保存.*同步待确认/);
+  const state=await session(app);
+  assert.equal(state.revision,1);
+  assert.equal(state.groups.length,1);
+  assert.equal(await heading.textContent(),'已保存但待确认同步');
+  assert.equal(await heading.evaluate(() => window.HuaweiDeckPatchRuntime.pendingTransactionCount()),0);
 });
