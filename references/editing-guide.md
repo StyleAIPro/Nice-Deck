@@ -1,6 +1,95 @@
 # editing-guide.md — 独立版结构、edit-bundle.py 用法与验证工作流
 
-deck 是一个「独立版」单文件 HTML：React 运行时、字体、全部图片都内联在文件里，真离线可用。代价是**不能用编辑器直接改内容**——本文讲清结构、安全编辑方法、踩坑与验证。所有命令均在 skill 根目录（`huawei-deck/`）执行，示例均假设你已 `cp assets/template-deck.html my-deck.html`（**改前先备份**）。
+deck 是一个「独立版」单文件 HTML：React 运行时、字体、全部图片都内联在文件里，真离线可用。代价是**不能用普通文本编辑器直接改 bundle 那两行超长 JSON**——结构编辑要经 `scripts/edit-bundle.py`，结构稳定后的细节修改也可以使用本文的后期可视化编辑器。所有命令均在 skill 根目录（`huawei-deck/`）执行，示例均假设你在工作副本上操作（**改前先备份**）。
+
+## 0. 后期可视化微调
+
+### 0.1 什么时候使用
+
+可视化编辑器用于制作后期：页面结构和顺序已经确认，只剩精确位置、字号观感、短文案与跨页修改清单。新建 deck、批量替换、增删页或大范围结构重构仍由外部 Agent 经 `scripts/edit-bundle.py` 完成。
+
+先体检依赖，再启动浏览器工作台：
+
+```bash
+python3 scripts/check_deps.py
+python3 scripts/deck-editor.py <deck.html>
+
+# 真实项目示例
+python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
+```
+
+启动器只接受 `deck`、`--host`、`--port`、`--no-open`；不要把测试内部的 `--keep-temp` 当作用户参数。默认监听 `127.0.0.1` 并自动打开浏览器。服务终端会输出一行 JSON，其中的 `url` 与 `token` 供外部 Agent 连接。
+
+### 0.2 五种模式
+
+五种模式依次为：预览、区域标记、文字、移动、缩放。
+
+| 模式 | 使用方式 | 结果 |
+|---|---|---|
+| 预览 | 浏览、切页，不拦截 deck 原有交互 | 不产生动作 |
+| 区域标记 | 在 1920×1080 页面上区域拉框，在选区旁侧输入修改说明 | 创建带归一化区域、候选 locator 和可选 PNG 快照的任务 |
+| 文字 | 双击简单叶子文字，`Cmd/Ctrl+Enter` 提交，`Escape` 取消 | 创建 `setText` 动作组；复杂富文本会提示改用区域标记 |
+| 移动 | 拖动可定位元素 | 创建 `translate` 动作组 |
+| 缩放 | 选择元素并拖动右下控制点 | 普通元素记录宽高，SVG / 交互组件等记录 scale |
+
+区域任务可以跨页连续添加；左侧页缩略图显示任务数，右下角 Agent 任务 drawer 汇总全部任务，可定位回原页和原区域。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
+
+### 0.3 外部 Agent 协作与撤销 / 重做
+
+外部 Codex / Claude Code / Agent 通过本地 CLI、HTTP 或 capability WebSocket 读取任务并提交动作；这不是内置聊天机器人。drawer 的“交给 Agent 处理全部”只显示命令提示，不会假装已调用外部系统。
+
+```bash
+# 用启动器输出的真实值替换下面两项
+EDITOR_URL=http://127.0.0.1:12345
+EDITOR_TOKEN=启动器输出的token
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" status
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" tasks
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" task TASK_ID
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" apply actions.json
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" undo GROUP_ID
+```
+
+`apply` 的动作类型限于 `setText`、`setStyle`、`translate`、`resize`、`hide`、`show`，并必须带当前 `expectedRevision`（传数组时 CLI 会先读取 revision）。drawer 在任务已有动作组时提供“撤销”；CLI 第一版也只暴露 `undo`。完整重做由本地接口 `POST /api/groups/<GROUP_ID>/redo` 执行，仍要携带当前 `expectedRevision`。撤销 / 重做都会让浏览器按权威动作集合重放，不是单纯反改 DOM。
+
+### 0.4 保存会话不等于正式写回
+
+预览、区域标记和自动会话保存不触碰原始 source deck。浏览器中的直接编辑先作用于运行时，并把任务和动作自动持久化到 deck 同目录的 `.huawei-deck-editor/`：其中保存会话、任务、快照、动作、诊断与备份。该目录不进入最终交付 deck；本仓库已在 `.gitignore` 忽略提交，若 deck 位于其他仓库，也应加入同名规则。
+
+保存会话不同于正式写回：关闭服务后 session 可以重开，预览与自动保存期间正式 HTML 字节保持不变。推荐策略是始终选工作副本启动编辑器；模板与唯一原稿保持只读，验收后再交付写回后的工作副本。
+
+正式写回只能由用户明确触发。当前第一版没有内置写回按钮或 CLI `write` 子命令；用户确认后，外部 Agent 读取 `/api/session` 的 revision，再调用本地 `POST /api/write-deck`。三重闸门依次检查：
+
+1. **editor online**：浏览器 frame 与协作桥在线且诊断已就绪，否则 `EDITOR_OFFLINE`；
+2. **文件指纹**：磁盘 deck 仍与 session 基线一致，否则 `DECK_CHANGED`；
+3. **验证闸门**：修改页相对基线无新增溢出，随后候选 bundle 通过 `eb.verify`。
+
+通过闸门后，writer 才调用 `scripts/edit-bundle.py` 在系统临时目录生成候选内容：先保留原文件备份，再写同目录临时文件，复查文件指纹，落盘 transaction record，最后用 `os.replace` 原子替换。会话基线更新失败时会尝试从备份恢复；冲突或验证失败不静默覆盖。
+
+### 0.5 写回后的验证
+
+```bash
+python3 scripts/edit-bundle.py <deck.html>                         # bundle 结构；等价 eb.verify
+node scripts/verify/measure_overflow.mjs <deck.html> --all        # 全页溢出
+node scripts/verify/shot.mjs <deck.html> <页label> /tmp/page.jpg  # 改动页 1920×1080 截图
+node scripts/verify/steps.mjs <deck.html> <页label> /tmp/steps    # 仅修改动画页时逐拍核对
+```
+
+`shot.mjs` 会让 build 全显并输出 1920×1080 逻辑画布截图；`steps.mjs` 按放映规则逐拍输出同尺寸截图。没有 build / layer 的页面运行 `steps.mjs` 也会生成起始帧和结束帧，但通常只需在修改动画页时使用。
+
+### 0.6 错误恢复与第一版边界
+
+| 错误 | 含义 | 处理 |
+|---|---|---|
+| `DECK_CHANGED` | source deck 被外部进程改动，文件指纹不再匹配 | 停止写回，重载外部版本并重放动作，或另存副本 |
+| `NEW_OVERFLOW` | 当前动作相对启动诊断基线引入新 section / nested clip | 撤销或调整对应动作，再次写回 |
+| `EDITOR_OFFLINE` | frame 未连接、未 ready，或诊断超时 | 保持 session，重开 / 重连浏览器后重试 |
+| `RECOVERY_REQUIRED` | durable transaction 处于未决恢复状态 | 立即停止修改；重启服务，让磁盘与 session 收敛后再写回 |
+| `TARGET_NOT_FOUND` | 目标缺失，页面或 DOM 路径已变化 | 重载页面，重新选择目标并生成 locator |
+| `TARGET_AMBIGUOUS` | 目标歧义，路径与指纹无法唯一匹配 | 缩小区域或由 Agent 选择更稳定的候选 locator |
+
+所有 Agent 动作都受 token、revision、locator 与事务校验；frame 返回的 canonical action 还会与请求逐字段核对。冲突、目标缺失 / 歧义或验证失败都不会留下“看似成功”的静默覆盖。
+
+第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。需要这些结构能力时，回到本文第 3 节的 `scripts/edit-bundle.py` 工作流；可视化编辑器只保留已实现的细节编辑与任务桥能力。
 
 ## 1. 独立版结构：两行超长 JSON
 

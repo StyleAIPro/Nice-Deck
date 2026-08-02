@@ -16,7 +16,7 @@ huawei-deck 是一个 **Claude Code skill**，不是普通应用代码库。它�
 | `SKILL.md` | 触发描述 + 5 步快速上手 + 9 条设计铁律 + 文件导航 | skill 入口，Claude 触发后最先读取的文件 |
 | `assets/` | 三套模板 deck（授课 34 页 / 技术分享 36 页 / 汇报 41 页，各 ~12MB）+ 华为官方素材库 `huawei-refs/` | 起点资产：复制后再改，绝不直接改模板 |
 | `references/` | 9 份使用文档（流程 / 页型索引 / 设计系统 / 动画 / 片段 / 编辑 / 配图 / 品牌 / 官方风格） | 按需加载的知识库，SKILL.md 每条铁律指向对应 reference |
-| `scripts/` | edit-bundle.py（编辑）、verify 三件套（验证）、html2pptx（导出）、apply_bg.py（品牌图替换）、check_deps.py（依赖检查） | 工具链：编辑、验证、导出均由脚本完成结构同步与检查 |
+| `scripts/` | edit-bundle.py（编辑）、deck-editor.py + editor/（后期微调）、verify 三件套（验证）、html2pptx（导出）、apply_bg.py（品牌图替换）、check_deps.py（依赖检查） | 工具链：编辑、微调、验证、导出均由脚本完成结构同步与检查 |
 
 一个关键的产品决策（见 `docs/design/design-spec.md`）：模板不是「最小空壳」也不是「生成器」，而是**页型画廊**——从一份 77 页真实课件**做减法**产出。每一页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」，即「**画廊即文档**」；另保留 10 页真实课件成品作对照。
 
@@ -150,7 +150,24 @@ flowchart LR
 
 ### 3.7 环境体检
 
-动手前 `python3 scripts/check_deps.py`：探测 10 项依赖（pdf skill、pypdf、pdfplumber、Node≥18、playwright-core、Chrome、python-pptx、pymupdf、soffice、可选 reportlab），能自动装的（pip/npm/npx）先打印命令再装并复检，装不了的给安装提示；`--check-only` 只报告。
+动手前 `python3 scripts/check_deps.py`：探测 12 项依赖（pdf skill、pypdf、pdfplumber、Node≥18、ws、html2canvas、playwright-core、Chrome、python-pptx、pymupdf、soffice、可选 reportlab），能自动装的（pip/npm/npx）先打印命令再装并复检，装不了的给安装提示；`--check-only` 只报告。
+
+### 3.8 后期可视化微调工作流
+
+新建 deck、批量重构、增删移页仍由 Agent 和 `scripts/edit-bundle.py` 完成；当页面结构已经稳定，可启动后期编辑器：
+
+```bash
+python3 scripts/deck-editor.py <deck.html>
+python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
+```
+
+浏览器提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 经本地 CLI、HTTP、WebSocket 读取任务并提交动作；这不是内置聊天机器人，drawer 不承担真实对话或模型调用。
+
+预览、区域标记和自动会话保存不触碰原始 source deck。`.huawei-deck-editor/` 自动保存会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。正式写回由用户明确触发，三重闸门依次检查 editor online、文件指纹、无新增溢出并执行 bundle verify，随后由 `scripts/edit-bundle.py` 处理临时文件、备份和原子替换；冲突或验证失败拒绝覆盖。
+
+第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。Agent 动作受 token、revision、locator 与事务校验。session 可重开；`RECOVERY_REQUIRED` 会让未决恢复状态阻断继续写回，外部文件变化必须重载，或另存副本。
+
+写回后运行 `python3 scripts/edit-bundle.py <deck.html>`（`eb.verify`）、`measure_overflow.mjs` 和改动页 `shot.mjs`；只有修改动画页才运行 `steps.mjs`。`shot.mjs` / `steps.mjs` 固定按 1920×1080 逻辑画布截图，无动画页执行 `steps.mjs` 仍输出起始与结束两帧。
 
 ---
 
@@ -263,7 +280,56 @@ flowchart TD
     PPTXDEP -.-> BP
 ```
 
-### 4.6 文档架构与一致性维护
+### 4.6 后期编辑器组件与运行时契约
+
+后期编辑器由 browser parent 和 preview frame 两层组成：parent 的 `public/editor.mjs` 管模式、页列表、task drawer、session 拉取与外部事件；frame 中注入 `frame-bridge.mjs` 和 `runtime/patch-runtime.js`，负责坐标换算、locator、区域快照、直接操作与 tentative DOM 变更。两层通过同源 `postMessage` 协作，frame 不获得通用文件系统能力。
+
+核心组件职责如下：
+
+| 组件 | 职责 |
+|---|---|
+| capability WS | `/events` WebSocket；普通客户端可订阅事件，带独立 `editorToken` 的唯一 editor socket 才能执行页面命令 |
+| `BridgeService` | mutation queue 串行化任务、动作、undo / redo、诊断和写回；执行页面事务与 durable session 的两阶段收敛 |
+| `SessionStore` + `PatchJournal` | session revision、跨页任务、PNG 快照路径、动作组、redo 集与 diagnostics；编译当前权威动作集合 |
+| persistent dirfd helper | Python JSONL 长驻进程；绑定 project / root / session / snapshots / backups / transactions / write-errors 的目录 fd，执行原子持久化 |
+| bundle adapter | Python `bundle_adapter.py`；只在可信临时副本上调用 `scripts/edit-bundle.py`，构造离线补丁块并做 bundle verify |
+| diagnostics / watch / write gate | frame 诊断 1920×1080 溢出，watch 监测外部 deck 指纹，write gate 聚合 online、fingerprint、overflow 与 bundle 校验 |
+
+状态模型可以概括为一条链：session registry 绑定稳定 sessionId，transaction record 记录可恢复写回事务，revision 守住并发前提，mutation queue 串行化变更，canonical action 固化 frame 实际接受的动作，authoritative reload 用完整编译集合替换浏览器状态。
+
+#### 动作事务
+
+1. 外部 Agent 或 parent 带 `expectedRevision` 与 locator 提交 action；`BridgeService` 经 capability WS 发给唯一 editor client，再由 parent 转交 preview frame。
+2. frame 定位目标并做 tentative 应用，返回逐字段完整的 canonical action；服务端校验 id / kind / target / payload / after 与重复 id。
+3. `PatchJournal` 把动作组写入候选 session，`SessionStore` durable 落盘并增加 revision；成功后才向 frame 发 commit。持久化失败则发 rollback，DOM 与 runtime 基线恢复。
+4. commit ACK 丢失时以 durable session 为准同步；重连或 iframe-only reload 都用 authoritative compiled 集合重放。undo / redo 也走同一队列和完整集合，而不是只发送单条反向动作。
+
+#### sidecar、恢复与持久化
+
+`.huawei-deck-editor/` 根下的 `sessions.json` 是 session registry；每个注册 session 包含 `session.json`、`snapshots/`、`backups/`、`transactions/`、`write-errors/`。目录保存会话、任务、快照、动作、诊断与备份，不进入最终交付 deck；仓库 `.gitignore` 忽略提交它。helper 启动后持有根目录锁，所有实际读取与写入都相对已绑定 dirfd 完成，并拒绝符号链接替换、未注册 session 和不可信 record。
+
+关闭再启动同一 deck 时，registry 与文件指纹选择唯一可恢复 session。若发现 durable transaction，服务按磁盘 fingerprint、session fingerprint 与备份三方收敛；无法证明唯一安全结果时进入 `RECOVERY_REQUIRED` 只读状态，阻断动作和继续写回，要求重启恢复。外部 deck 变化记录为 `DECK_CHANGED`，只能重载新基线或另存副本，不会猜测覆盖。
+
+#### 写回顺序与失败原子性
+
+正式写回仅接受用户明确授权后的 `POST /api/write-deck`，顺序固定：
+
+1. mutation queue 检查 revision、editor online 和诊断 ready；
+2. 读取磁盘 fingerprint，与 session 基线及 watch conflict 比较；
+3. frame 针对修改页返回 diagnostics，与启动基线比较，新增 section overflow 或 nested clip 以 `NEW_OVERFLOW` 阻断；
+4. bundle adapter 读取 deck → 创建内容寻址备份 → 在系统临时目录经 `scripts/edit-bundle.py` 注入权威动作 → `eb.verify`；
+5. 把候选写成 deck 同目录的独占临时文件，再次核对源文件，durable 写入 transaction record；
+6. `os.replace` 原子替换，持久化新的 session fingerprint / diagnostics，最后删除 transaction。
+
+若替换前失败，正式 deck 字节不变；替换后 session 持久化失败会尝试从可信备份恢复。恢复或 transaction 清理无法安全完成时进入 `RECOVERY_REQUIRED`，保留诊断和备份，绝不静默声称成功。
+
+#### 信任边界
+
+网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由 fingerprint、revision、locator 与 transaction 校验。服务没有任意路径读写 API，外部 Agent 只能使用枚举的 task / action / undo / write-deck 接口。
+
+目标 locator 找不到返回 `TARGET_NOT_FOUND`，不能唯一匹配返回 `TARGET_AMBIGUOUS`；frame 未就绪返回 `EDITOR_OFFLINE`。所有错误都保留稳定 code 与恢复提示，浏览器 tentative 状态和 durable session 不会分叉。
+
+### 4.7 文档架构与一致性维护
 
 `SKILL.md` 是唯一入口：description 负责触发，正文给 5 步 + 9 铁律，**每条铁律指向一个 reference**。references 分工不重叠：
 

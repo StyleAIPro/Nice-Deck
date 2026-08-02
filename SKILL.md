@@ -11,7 +11,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 从零做一份 PPT？先走流程
 
-用户要**从零做一份新 PPT** 时——授课、汇报、学习材料都算——不要直接开搭页：先走 `references/workflow.md` 的七阶段协作流程（主题讨论 → 大纲规划 → 选择模板 → 初版制定 → 讨论修改 → 终版制作 → 讨论修改），其中三个「讨论」阶段是硬闸门；流程开头的**场景适配表**定授课 / 汇报 / 自读的基调差异（骨架、页数、页型、动画量）。下面的 5 步是该流程中「初版 / 终版制作」阶段的机械操作；用户只是改一份已有 deck 时直接用 5 步即可。
+用户要**从零做一份新 PPT** 时——授课、汇报、学习材料都算——不要直接开搭页：先走 `references/workflow.md` 的七阶段协作流程（主题讨论 → 大纲规划 → 选择模板 → 初版制定 → 讨论修改 → 终版制作 → 讨论修改），其中三个「讨论」阶段是硬闸门；流程开头的**场景适配表**定授课 / 汇报 / 自读的基调差异（骨架、页数、页型、动画量）。下面的 5 步是该流程中「初版 / 终版制作」阶段的机械操作。新建 deck 或批量重构仍由 Agent 经 `scripts/edit-bundle.py` 完成；结构稳定后的后期精细调整可启动可视化编辑器，详见 `references/editing-guide.md` 的「后期可视化微调」章节。
 
 ## 快速上手（5 步）
 
@@ -27,6 +27,25 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
    ```
 
 5. **需要 PPT 交付时**：`bash scripts/html2pptx/convert.sh my-deck.html`——逐页截图组装 PPTX，layer 多标签页自动逐标签展开。
+
+## 后期可视化微调
+
+这条路径只处理结构已稳定 deck 的收尾调整。先跑依赖体检，再启动浏览器工作台：
+
+```bash
+python3 scripts/check_deps.py
+python3 scripts/deck-editor.py <deck.html>
+# 真实项目示例
+python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
+```
+
+在工作台里可用预览、区域标记、文字、移动、缩放五种模式：区域拉框后在旁侧输入修改说明，任务会跨页累积到 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 通过本地 CLI、HTTP、WebSocket 读取任务并提交动作；这不是内置聊天机器人，drawer 只记录任务并给出外部 CLI 提示。
+
+预览、区域标记和自动会话保存不触碰原始 source deck。会话自动保存在 deck 同目录的 `.huawei-deck-editor/`，包含会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，且已由 `.gitignore` 忽略提交。正式写回必须由用户明确触发：三重闸门依次确认 editor online、文件指纹未变、无新增溢出，并在候选文件上通过 bundle verify；随后由 `scripts/edit-bundle.py` 处理临时文件、备份与原子替换。冲突或验证失败一律拒绝覆盖，不会静默改写源文件。
+
+第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。所有 Agent 动作都要经过 token、revision、locator 与事务校验。session 可在关闭后重开；若出现 `RECOVERY_REQUIRED`，未决恢复状态会阻断继续写回，外部文件变化则应重载，或另存副本后再继续。
+
+写回后仍按完整工具链验证：`python3 scripts/edit-bundle.py <deck.html>`（等价调用 `eb.verify`）、`node scripts/verify/measure_overflow.mjs <deck.html> --all`、改动页 `shot.mjs`；只有修改了动画页才需要运行 `steps.mjs`。`shot.mjs` 与 `steps.mjs` 均按 1920×1080 逻辑画布截图；无动画页运行 `steps.mjs` 仍会得到起始与结束两帧。详细操作、错误恢复和外部 Agent 命令见 `references/editing-guide.md`，组件与信任边界见 `docs/architecture.md`。
 
 ## 设计铁律（细则见对应 reference）
 
@@ -52,12 +71,14 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 | `references/design-system.md` | 颜色、字体、字号刻度、排版结构、审美硬要求 |
 | `references/animation.md` | build / layer / SMIL 三机制写法、节拍设计与验证 |
 | `references/page-snippets.md` | 可直接粘贴的页面骨架与构件（每段注明模板活例） |
-| `references/editing-guide.md` | 独立版结构、edit-bundle 用法、踩坑表、验证与 PPTX 导出 |
+| `references/editing-guide.md` | 后期可视化微调入口、独立版结构、edit-bundle 用法、错误恢复、验证与 PPTX 导出 |
 | `references/artwork.md` | 配图工作流：初版类型化占位 → 终版 PDF 抽原图（PyMuPDF）/ 自绘流程架构图 / 表格 |
 | `references/branding.md` | 品牌替换：背景画 / 黑板 / 人像 / logo / 口号 / 品牌色 |
 | `references/huawei-style.md` | 华为官方胶片风格分析：两套配色公式、页型清单、标题句式、数字用法、高复用组件 |
 | `assets/huawei-refs/` | 官方 PPT 提取素材库：封面 KV / logo / 图标 / 装饰组件 + 官方空白模板 pptx（内附 README 索引） |
 | `scripts/edit-bundle.py` | 安全编辑工具函数库（load / get·set_template / insert·delete·move_page / embed_image / verify） |
+| `scripts/deck-editor.py` | 后期可视化微调启动器（默认只监听 127.0.0.1，并自动打开浏览器工作台） |
+| `scripts/editor/` | 浏览器 parent/frame、外部 Agent 桥、sidecar、动作日志与安全写回实现 |
 | `scripts/apply_bg.py` | 品牌图一键替换（默认预览模式，`--yes` 落盘） |
 | `scripts/verify/*.mjs` | verify 三件套（measure_overflow / shot / steps） |
 | `scripts/html2pptx/convert.sh` | HTML → PPTX 一键转换 |

@@ -16,6 +16,7 @@
 - 保留整套设计系统：三色体系（品牌红 `#b5333b`）、Noto Sans SC + JetBrains Mono、统一字号刻度、玻璃组件、放映 / 滚动双模式、三种手动推进的动画机制（build 逐步揭示 / layer 标签切换 / SMIL 连续运动）
 - 品牌可替换：换 logo / 金色背景画 / 口号 / 品牌色（`references/branding.md` + `scripts/apply_bg.py`）
 - 配图有工作流：初版类型化占位标注，终版从素材 PDF 抽原图（PyMuPDF）、自绘流程 / 架构图、制表落地（`references/artwork.md`）
+- 后期可视化微调：区域拉框批注、跨页 Agent 任务、直接文字 / 移动 / 缩放、统一动作日志与安全写回（`references/editing-guide.md`）
 - 一键 `scripts/html2pptx/convert.sh` 导出 PPTX，页内多标签（layer）自动逐标签展开成多页
 
 ## 安装
@@ -41,6 +42,7 @@ cp -R "$(pwd)" ~/.claude/skills/huawei-deck
 | 验证脚本 / html2pptx 截图 | 本机 Google Chrome + `playwright-core` | `npm i -g playwright-core`（或设环境变量 `PLAYWRIGHT_CORE` 指向已装路径） |
 | html2pptx 组装 | `python-pptx` | `python3 -m pip install python-pptx` |
 | 编辑模板 deck | Python 3（标准库即可） | 系统自带 |
+| 后期可视化编辑器 | Node ≥ 18 + `ws` + `html2canvas` | `python3 scripts/check_deps.py` 会检查并按需执行项目内 `npm i` |
 | 解析外部参考材料：pptx → 逐页图 | 本机 LibreOffice（`soffice`） | `brew install --cask libreoffice` |
 | 解析外部参考材料：pdf 渲染 / 抽图 | `pymupdf` | `python3 -m pip install pymupdf` |
 
@@ -70,6 +72,8 @@ huawei-deck/
 │   └── huawei-style.md      # 华为官方胶片风格分析：配色公式 / 页型 / 标题句式 / 数字用法
 ├── scripts/
 │   ├── edit-bundle.py       # 独立版编辑工具函数（增删移页自动同步 nav/chapters）
+│   ├── deck-editor.py       # 后期可视化微调启动器
+│   ├── editor/              # 浏览器工作台、Agent 桥、sidecar、动作与写回模块
 │   ├── apply_bg.py          # 品牌图替换
 │   ├── verify/              # measure_overflow / shot / steps —— 溢出检测·单页截图·放映逐拍
 │   └── html2pptx/           # convert.sh + shoot.mjs + build_pptx.py
@@ -85,6 +89,53 @@ huawei-deck/
 ## 快速上手
 
 见 `SKILL.md`。一句话：`cp assets/template-deck.html 我的演示.html` → 照 `references/template-pages.md` 挑页改占位 → 增删页用 `scripts/edit-bundle.py`（自动记账）→ 跑 `scripts/verify/` 验证 → `scripts/html2pptx/convert.sh` 出 PPTX。
+
+## 后期可视化微调
+
+结构、大纲和页序已经稳定后，可以在浏览器工作台做最后一轮细节修改。新建 deck、批量替换或结构性重构仍交给 Agent 和 `scripts/edit-bundle.py`；可视化编辑器专注于那些“手改一下更快”的收尾动作。
+
+```bash
+# 先检查 Python、Node、ws、html2canvas、Chrome 等依赖
+python3 scripts/check_deps.py
+
+# 通用启动命令；默认回环地址 127.0.0.1，并自动打开浏览器工作台
+python3 scripts/deck-editor.py <deck.html>
+
+# 仓库里的真实示例
+python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
+```
+
+工作台提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务会跨页累积到右下角 Agent 任务 drawer；简单修改可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 使用启动终端输出的 URL 和 token，经本地 CLI、HTTP 或 WebSocket 读取任务并提交动作；这不是内置聊天机器人，点击 drawer 的“交给 Agent”只显示可复制的 CLI 提示，不会伪装已经调用 Agent。
+
+常用的外部 Agent CLI 是：
+
+```bash
+# 用启动器输出的真实值替换下面两项
+EDITOR_URL=http://127.0.0.1:12345
+EDITOR_TOKEN=启动器输出的token
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" status
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" tasks
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" task TASK_ID
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" apply actions.json
+node scripts/editor/cli.mjs --url "$EDITOR_URL" --token "$EDITOR_TOKEN" undo GROUP_ID
+```
+
+预览、区域标记和自动会话保存不触碰原始 source deck。任务和直接编辑会自动写入 deck 同目录的 `.huawei-deck-editor/`：其中保存会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck。本仓库 `.gitignore` 已忽略提交该目录，把 deck 放到其他仓库时也应加入相同规则。
+
+自动保存 session 不等于修改正式文件。正式写回必须由用户明确触发；当前第一版没有内置聊天，也没有 CLI `write` 子命令，由外部 Agent 在确认后调用本地 `POST /api/write-deck`。三重闸门依次检查 editor online、文件指纹未变、无新增溢出，并在候选文件上执行 bundle verify；通过后才由 `scripts/edit-bundle.py` 生成临时文件、创建备份并原子替换。冲突或验证失败会拒绝覆盖，不会静默修改 deck。
+
+第一版不增删页、不调整页序、不重构复杂动画、不内置聊天。Agent 动作受 token、revision、locator 与事务校验。关闭服务后可重开同一 session；若出现 `RECOVERY_REQUIRED`，未决恢复状态会阻断继续写回；若 source deck 被外部修改，应重载，或另存副本后再继续。
+
+写回后运行完整验证：
+
+```bash
+python3 scripts/edit-bundle.py <deck.html>                         # eb.verify
+node scripts/verify/measure_overflow.mjs <deck.html> --all        # 全页无新增溢出
+node scripts/verify/shot.mjs <deck.html> <页label> /tmp/page.jpg  # 1920×1080 目检
+node scripts/verify/steps.mjs <deck.html> <页label> /tmp/steps    # 仅修改动画页时逐拍核对
+```
+
+`shot.mjs` 和 `steps.mjs` 使用 1920×1080 逻辑画布；无动画页运行 `steps.mjs` 仍会生成起始与结束两帧。操作细节与错误恢复见 [`references/editing-guide.md`](references/editing-guide.md)，开发者架构与信任边界见 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 许可证
 
