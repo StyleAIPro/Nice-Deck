@@ -60,6 +60,8 @@ edit-bundle 的不变量（改该脚本时必须保持）：
 
 动画引擎规则（steps.mjs 与 deck 运行时保持一致，改一处须同步另一处）：`build` 元素按 `data-step` 与点击计数 level 显隐；`layer` 按钮/面板同 key 同 group 联动 `data-active`；总拍数 = 页内最大 `data-step` + 2。
 
+缩放运行时三套模板保持一致：`Ctrl/Cmd + 滚轮` / `+/-` 只缩放 slide canvas，倍率写入 `deck-template-zoom-v1` 并在刷新后恢复；非 100% 时 navbar 用 `data-zoomed` 液态展开无底色四角百分比复位控件。用户点击右上角播放 / 滚动按钮时复位 100%，但初始化 `setMode()` 不得清倍率。滚动态必须锚定当前页，缩放与 `scrollTop` 校正在同一帧完成，连续输入每帧最多应用一次。`ResizeObserver` 只缓存 `contentRect`，再经 `requestAnimationFrame(fit)` 写样式；外层 bundle error sink 仅忽略两种已知的 ResizeObserver loop 无害告警，不能吞掉其他错误。
+
 ## 文档一致性
 
 `SKILL.md` 与 `references/*.md` 互相交叉引用（每条设计铁律指向对应 reference，README 复述了目录结构与快速上手）。改脚本行为、命令用法、页数（授课 34 / 技术分享 36 / 汇报 41）或铁律时，检查并同步 `SKILL.md`、`README.md` 与相关 reference。各 reference 分工见 `SKILL.md` 的「文件导航」表。

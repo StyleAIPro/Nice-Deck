@@ -128,6 +128,9 @@ eb.set_template(lines, s); eb.save('my-deck.html', lines); eb.verify('my-deck.ht
 | 改完后整个文件打不开 / JSON 报错 | 没走 `set_template` 的编码铁律（第 2 节），`</script>` 提前闭合或转义损坏。从备份恢复，重做并只经 edit-bundle。 |
 | 加页后导航乱 / 某页掉出章节 | 三处同步没做全。用 `insert_page` / `delete_page` / `move_page`，并用 `verify` 检查 `nav` 连续、`chapters.start` 正确。手插 HTML 块时还要注意 `</div>` 配平。 |
 | 改了章数后，目录页选中某章左侧空白 / 动画内容跑题 | 目录页左侧动画按章节索引取自 `const builders = [...]` 数组，且各动画文案是模板课程主题。增删章后同步 builders 数组并替换动画内文字，见 `template-pages.md` 目录页一节。 |
+| 浏览器缩放时报 `ResizeObserver loop...` / 页面缩放被自动适配抵消 | 不要在 `ResizeObserver` 回调里同步读取尺寸并写缩放 CSS；缓存 `contentRect` 后用 `requestAnimationFrame(fit)`。内容缩放复用模板内置的 `Ctrl/Cmd + 滚轮` / `+/-`，外层 bundle 错误面板只忽略两种已知的 ResizeObserver 无害告警，其他错误必须保留。 |
+| 缩放时当前页跳走或画面闪烁 | 滚动态缩放会改变前面所有页面的高度。缩放前后用当前 `.slide-fit` 的 `getBoundingClientRect().top` 校正 `stage.scrollTop`；缩放与校正必须在同一动画帧完成，并把连续输入合并为每帧最多一次。 |
+| 刷新后倍率丢失 / 点模式按钮仍保持放大 | 倍率统一写入 `deck-template-zoom-v1`；初始化时读取，但只在用户点击 `#seg button` 时调用 `_setUserZoom(1)`。不要把复位写进 `setMode()`，否则刷新初始化滚动模式会立即覆盖已保存倍率。非 100% 时同步 navbar 的 `data-zoomed` 与四角百分比控件，复位后移出 tab 顺序。 |
 
 放映态动画的坑（`:has()`、SVG transform、外层框漏挂 build）见 `animation.md` 第 5 节。
 
