@@ -331,6 +331,12 @@ async function readJson(request) {
   }
 }
 
+function requestMediaType(value) {
+  if (typeof value !== 'string') return '';
+  const separator = value.indexOf(';');
+  return value.slice(0, separator < 0 ? value.length : separator).trim().toLowerCase();
+}
+
 function requireRevision(value) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw httpError('INVALID_INPUT', 400, 'expectedRevision 必须为非负整数');
@@ -1134,13 +1140,14 @@ export async function startServer({
         let primaryError = null;
         try {
           const contentType = request.headers['content-type'] ?? '';
+          const mediaType = requestMediaType(contentType);
           let body;
-          if (contentType.toLowerCase().startsWith('multipart/form-data')) {
+          if (mediaType === 'multipart/form-data') {
             await attachmentStore.guard();
             const parsed = await parseTaskMultipart(request, { attachmentStore });
             attachmentsLifecycle = parsed.upload;
             body = { ...parsed.input, snapshot:parsed.snapshot };
-          } else if (contentType.toLowerCase().startsWith('application/json')) {
+          } else if (mediaType === 'application/json') {
             body = await readJson(request);
           } else {
             throw httpError(

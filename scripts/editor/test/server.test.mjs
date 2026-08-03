@@ -572,15 +572,29 @@ test('真实 multipart 创建附件任务，并仅在 API 与广播中派生绝�
 
 test('任务路由拒绝未知媒体类型，multipart 限额错误不创建 task', async t => {
   const app = await makeApp(t);
-  const unsupported = await fetch(`${app.url}/api/tasks?token=secret`, {
-    method:'POST', headers:{ 'content-type':'text/plain' }, body:'task',
+  for (const contentType of [
+    'text/plain',
+    'application/jsonp',
+    'application/json-evil; charset=utf-8',
+    'multipart/form-datax; boundary=forged',
+  ]) {
+    const unsupported = await fetch(`${app.url}/api/tasks?token=secret`, {
+      method:'POST', headers:{ 'content-type':contentType }, body:'task',
+    });
+    assert.equal(unsupported.status, 415, contentType);
+    assert.equal((await unsupported.json()).code, 'UNSUPPORTED_MEDIA_TYPE');
+  }
+
+  const parameterizedJson = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST',
+    headers:{ 'content-type':' Application/JSON ; charset=utf-8' },
+    body:JSON.stringify(taskInput),
   });
-  assert.equal(unsupported.status, 415);
-  assert.equal((await unsupported.json()).code, 'UNSUPPORTED_MEDIA_TYPE');
+  assert.equal(parameterizedJson.status, 201);
 
   const empty = new FormData();
   empty.append('task', new Blob([JSON.stringify({
-    ...taskInput, attachmentSources:['selected'],
+    ...taskInput, expectedRevision:1, attachmentSources:['selected'],
   })], { type:'application/json' }), 'task.json');
   empty.append('attachment', new Blob([Buffer.alloc(0)], {
     type:'application/octet-stream',
@@ -593,7 +607,7 @@ test('任务路由拒绝未知媒体类型，multipart 限额错误不创建 tas
 
   const tooMany = new FormData();
   tooMany.append('task', new Blob([JSON.stringify({
-    ...taskInput, attachmentSources:Array(9).fill('selected'),
+    ...taskInput, expectedRevision:1, attachmentSources:Array(9).fill('selected'),
   })], { type:'application/json' }), 'task.json');
   for (let index = 0; index < 9; index += 1) {
     tooMany.append('attachment', new Blob([Buffer.from('x')]), `${index}.txt`);
@@ -606,7 +620,7 @@ test('任务路由拒绝未知媒体类型，multipart 限额错误不创建 tas
 
   const oversized = new FormData();
   oversized.append('task', new Blob([JSON.stringify({
-    ...taskInput, attachmentSources:['selected'],
+    ...taskInput, expectedRevision:1, attachmentSources:['selected'],
   })], { type:'application/json' }), 'task.json');
   oversized.append('attachment', new Blob([Buffer.alloc((25 * 1024 * 1024) + 1)]), 'large.bin');
   const oversizedResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
@@ -622,13 +636,13 @@ test('任务路由拒绝未知媒体类型，multipart 限额错误不创建 tas
     body:Buffer.from(
       `--${boundary}\r\nContent-Disposition: form-data; name="task"; filename="task.json"\r\n`
       + 'Content-Type: application/json\r\n\r\n'
-      + JSON.stringify({ ...taskInput, attachmentSources:[] }),
+      + JSON.stringify({ ...taskInput, expectedRevision:1, attachmentSources:[] }),
     ),
   });
   assert.equal(truncatedResponse.status, 400);
   assert.equal((await truncatedResponse.json()).code, 'INVALID_MULTIPART');
-  assert.equal(app.session.revision, 0);
-  assert.deepEqual(app.session.tasks, []);
+  assert.equal(app.session.revision, 1);
+  assert.equal(app.session.tasks.length, 1);
 });
 
 test('附件 writer 使用独立注入点，失败保留稳定事务错误字段', async t => {
