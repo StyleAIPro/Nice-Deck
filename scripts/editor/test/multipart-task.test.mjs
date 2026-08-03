@@ -36,10 +36,10 @@ function taskPart(value, overrides = {}) {
   };
 }
 
-function partHeader(boundary, part) {
+function partHeader(boundary, part, padding = '') {
   const disposition = [`form-data`, `name="${part.name}"`];
   if (Object.hasOwn(part, 'filename')) disposition.push(`filename="${part.filename}"`);
-  const headers = [`--${boundary}`];
+  const headers = [`--${boundary}${padding}`];
   if (part.disposition !== false) headers.push(
     `Content-Disposition: ${part.dispositionValue ?? disposition.join('; ')}`,
   );
@@ -48,12 +48,22 @@ function partHeader(boundary, part) {
   return Buffer.from(`${headers.join('\r\n')}\r\n\r\n`);
 }
 
-function multipartBytes(parts, { boundary=`deck-boundary-${++boundarySequence}`, close=true } = {}) {
-  const chunks = [];
+function multipartBytes(parts, {
+  boundary=`deck-boundary-${++boundarySequence}`,
+  boundaryPadding='', close=true, closingPadding='', closingCrLf=true,
+  preamble='', epilogue='',
+} = {}) {
+  const chunks = [Buffer.from(preamble)];
   for (const part of parts) {
-    chunks.push(partHeader(boundary, part), Buffer.from(part.body ?? ''), Buffer.from('\r\n'));
+    chunks.push(
+      partHeader(boundary, part, boundaryPadding),
+      Buffer.from(part.body ?? ''),
+      Buffer.from('\r\n'),
+    );
   }
-  if (close) chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  if (close) chunks.push(Buffer.from(
+    `--${boundary}--${closingPadding}${closingCrLf ? '\r\n' : ''}${epilogue}`,
+  ));
   return { boundary, bytes:Buffer.concat(chunks) };
 }
 
@@ -79,7 +89,22 @@ function controlledRequest(boundary=`deck-boundary-${++boundarySequence}`) {
   return { request, boundary };
 }
 
-function uploadFixture({ stageFailure, discardFailure, discardResult, stageGate } = {}) {
+async function waitForRequestDrain(request) {
+  if (request.readableEnded || request.closed) return;
+  await new Promise(resolve => {
+    const done = () => {
+      request.removeListener('end', done);
+      request.removeListener('close', done);
+      resolve();
+    };
+    request.once('end', done);
+    request.once('close', done);
+  });
+}
+
+function uploadFixture({
+  stageFailure, stageImmediateFailure, discardFailure, discardResult, stageGate,
+} = {}) {
   const calls = { begin:0, discard:0, stage:[] };
   const active = new Set();
   const upload = {
@@ -93,6 +118,7 @@ function uploadFixture({ stageFailure, discardFailure, discardResult, stageGate 
       const operation = (async () => {
         try {
           if (stageGate) await stageGate;
+          if (stageImmediateFailure) throw stageImmediateFailure;
           for await (const chunk of input.stream) {
             const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             call.chunks.push(bytes);
@@ -170,6 +196,7 @@ async function rejectsMultipart(request, fx, code = 'INVALID_MULTIPART') {
   );
   assert.equal(fx.calls.discard, 1);
   assert.ok(fx.calls.stage.every(call => call.settled));
+  await waitForRequestDrain(request);
   for (const event of ['aborted', 'error', 'data', 'end']) {
     assert.equal(request.listenerCount(event), 0, `request 残留 ${event} listener`);
   }
@@ -333,12 +360,13 @@ test('attachment 只允许 0–8 个非目录非空文件并严格匹配 sources
     assert.equal(parsed.staged.length, MAX_ATTACHMENTS);
     assert.equal(fx.calls.discard, 0);
   });
-  await t.test('九个附件触发 files/parts 上限', async () => {
-    const sources = Array(MAX_ATTACHMENTS + 1).fill('selected');
+  await t.test('合法八个 source 后的第九附件构成第十一物理 part 并触发上限', async () => {
+    const sources = Array(MAX_ATTACHMENTS).fill('selected');
     const fx = uploadFixture();
     await rejectsMultipart(multipartRequest([
       taskPart(task(sources)),
-      ...sources.map((_, index) => ({
+      { name:'snapshot', filename:'region.png', mime:'image/png', body:PNG },
+      ...Array.from({ length:MAX_ATTACHMENTS + 1 }, (_, index) => ({
         name:'attachment', filename:`${index}.bin`, mime:'application/octet-stream', body:'x',
       })),
     ]), fx, 'TOO_MANY_ATTACHMENTS');
@@ -354,7 +382,7 @@ test('attachment 只允许 0–8 个非目录非空文件并严格匹配 sources
   });
 });
 
-test('attachment 25 MiB 精确成功，25 MiB + 1 的 busboy limit 绝不接受截断记录', async t => {
+test('attachment 25 MiB 精确成功，25 MiB + 1 的 framer limit 绝不接受截断记录', async t => {
   await t.test('精确边界', async () => {
     const fx = uploadFixture();
     const parsed = await parseTaskMultipart(multipartRequest([
@@ -392,7 +420,7 @@ test('未知 part、普通 field 与 parts/fields limit 全部 fail-closed', asy
 });
 
 test('超量或畸形 part headers 与缺失结束 boundary 触发 parser fail-closed', async t => {
-  await t.test('header block 超过 busboy 上限', async () => {
+  await t.test('header block 超过 framing 上限', async () => {
     const fx = uploadFixture();
     const request = multipartRequest([
       taskPart(task(), { headers:[['X-Fill', 'a'.repeat(20 * 1024)]] }),
@@ -411,6 +439,40 @@ test('超量或畸形 part headers 与缺失结束 boundary 触发 parser fail-c
     const request = multipartRequest([taskPart(task(), { headers })], { chunkSize:37 });
     const fx = uploadFixture();
     await rejectsMultipart(request, fx);
+  });
+  await t.test('1999 个 header pair 成功，2000 个严格拒绝', async () => {
+    const acceptedHeaders = Array.from({ length:1997 }, () => ['X', 'a']);
+    const accepted = multipartBytes([taskPart(task(), { headers:acceptedHeaders })]);
+    assert.ok(accepted.bytes.length < 16 * 1024);
+    const acceptedFx = uploadFixture();
+    const parsed = await parseTaskMultipart(multipartRequest([
+      taskPart(task(), { headers:acceptedHeaders }),
+    ], { chunkSize:19 }), { attachmentStore:acceptedFx.store });
+    assert.equal(parsed.input.expectedRevision, 3);
+
+    const rejectedHeaders = Array.from({ length:1998 }, () => ['X', 'a']);
+    const rejected = multipartBytes([taskPart(task(), { headers:rejectedHeaders })]);
+    assert.ok(rejected.bytes.length < 16 * 1024);
+    const rejectedFx = uploadFixture();
+    await rejectsMultipart(multipartRequest([
+      taskPart(task(), { headers:rejectedHeaders }),
+    ], { chunkSize:23 }), rejectedFx);
+  });
+  await t.test('header block 精确 16 KiB 成功', async () => {
+    const boundary = 'deck-exact-header-bytes';
+    const probe = taskPart(task(), { headers:[['X-Fill', '']] });
+    const probeHeader = partHeader(boundary, probe);
+    const start = probeHeader.indexOf('\r\n') + 2;
+    const end = probeHeader.indexOf('\r\n\r\n');
+    const fill = 'a'.repeat(16 * 1024 - (end - start));
+    const exact = taskPart(task(), { headers:[['X-Fill', fill]] });
+    const exactHeader = partHeader(boundary, exact);
+    assert.equal(exactHeader.indexOf('\r\n\r\n') - (exactHeader.indexOf('\r\n') + 2), 16 * 1024);
+    const fx = uploadFixture();
+    const parsed = await parseTaskMultipart(multipartRequest([exact], {
+      boundary, chunkSize:257,
+    }), { attachmentStore:fx.store });
+    assert.equal(parsed.input.expectedRevision, 3);
   });
   await t.test('Busboy 静默跳过的物理首 part 仍会被拒绝', async () => {
     const fx = uploadFixture();
@@ -437,7 +499,7 @@ test('超量或畸形 part headers 与缺失结束 boundary 触发 parser fail-c
       taskPart(task(), { headers:[['Content-Disposition', 'form-data; name="task"; filename="other.json"']] }),
     ]), fx);
   });
-  await t.test('boundary 截断', async () => {
+  await t.test('boundary 截断', { timeout:2000 }, async () => {
     const fx = uploadFixture();
     await rejectsMultipart(multipartRequest([
       taskPart(task(['selected'])),
@@ -446,17 +508,67 @@ test('超量或畸形 part headers 与缺失结束 boundary 触发 parser fail-c
   });
 });
 
-test('附件正文中的 boundary 行前缀跨 chunk 时 fail-closed，绝不返回截断记录', async () => {
+test('自有 framing 对非法 boundary 后缀无损回退，chunk size 1–29 均保持正文', {
+  timeout:10_000,
+}, async () => {
   const boundary = 'deck-near-boundary';
-  const body = Buffer.from(`prefix\r\n--${boundary}X-not-a-delimiter\r\nsuffix`);
-  const fx = uploadFixture();
-  await rejectsMultipart(multipartRequest([
-    taskPart(task(['selected'])),
-    { name:'attachment', filename:'near.bin', mime:'application/octet-stream', body },
-  ], { boundary, chunkSize:3 }), fx);
+  const body = Buffer.from([
+    'prefix',
+    `\r\n--${boundary}X-not-a-delimiter`,
+    `\r\n--${boundary}-single-dash`,
+    `\r\n--${boundary.slice(0, -3)}-partial-prefix`,
+    '\r\nsuffix',
+  ].join(''));
+  for (let chunkSize = 1; chunkSize <= 29; chunkSize += 1) {
+    const fx = uploadFixture();
+    const parsed = await parseTaskMultipart(multipartRequest([
+      taskPart(task(['selected'])),
+      { name:'attachment', filename:'near.bin', mime:'application/octet-stream', body },
+    ], { boundary, chunkSize }), { attachmentStore:fx.store });
+    assert.equal(parsed.staged.length, 1, `chunk size ${chunkSize}`);
+    assert.deepEqual(
+      Buffer.concat(fx.calls.stage[0].chunks), body, `chunk size ${chunkSize}`,
+    );
+    assert.equal(fx.calls.discard, 0, `chunk size ${chunkSize}`);
+  }
 });
 
-test('stage 失败会取消部分 writer、等待 drain，并且只 discard 一次', async () => {
+test('framing 接受有界 preamble、epilogue、transport padding 与 quoted boundary', async () => {
+  const boundary = 'deck-padded-boundary';
+  const fx = uploadFixture();
+  const request = multipartRequest([
+    taskPart(task(['pasted'])),
+    { name:'attachment', filename:'padded.bin', mime:'application/octet-stream', body:'bytes' },
+  ], {
+    boundary, boundaryPadding:' \t', closingPadding:'\t ', chunkSize:1,
+    preamble:'RFC preamble is discarded\r\n',
+    epilogue:'RFC epilogue is also discarded',
+    headers:{ 'content-type':`multipart/form-data; boundary="${boundary}"` },
+  });
+  const parsed = await parseTaskMultipart(request, { attachmentStore:fx.store });
+  assert.equal(parsed.staged.length, 1);
+  assert.deepEqual(Buffer.concat(fx.calls.stage[0].chunks), Buffer.from('bytes'));
+  assert.equal(fx.calls.discard, 0);
+
+  const eofFx = uploadFixture();
+  const eofParsed = await parseTaskMultipart(multipartRequest([
+    taskPart(task()),
+  ], { boundary:'deck-closing-at-eof', closingPadding:' \t', closingCrLf:false, chunkSize:1 }), {
+    attachmentStore:eofFx.store,
+  });
+  assert.equal(eofParsed.input.expectedRevision, 3);
+});
+
+test('boundary transport padding 超过有界策略时 fail-closed', async () => {
+  const fx = uploadFixture();
+  await rejectsMultipart(multipartRequest([
+    taskPart(task()),
+  ], { boundaryPadding:' '.repeat(1025), chunkSize:31 }), fx);
+});
+
+test('stage 失败会取消部分 writer、等待 drain，并且只 discard 一次', {
+  timeout:2000,
+}, async () => {
   const stageError = Object.assign(new Error('disk full'), {
     code:'ATTACHMENT_WRITE_FAILED', statusCode:500, stage:'attachment-write',
   });
@@ -475,10 +587,48 @@ test('stage 失败会取消部分 writer、等待 drain，并且只 discard 一�
   );
   assert.equal(fx.calls.discard, 1);
   assert.ok(fx.calls.stage.every(call => call.settled));
+  if (!request.readableEnded && !request.closed) {
+    assert.equal(request.listenerCount('error'), 1, '失败返回后保留临时 drain listener');
+  }
+  await waitForRequestDrain(request);
   for (const event of ['aborted', 'error', 'data', 'end']) {
     assert.equal(request.listenerCount(event), 0, `request 残留 ${event} listener`);
   }
   assert.ok(fx.calls.stage.every(call => call.sourceStream.listenerCount('limit') === 0));
+});
+
+test('stage 在正文前立即失败也会主动中止开放 request，不等待下一字节', {
+  timeout:2000,
+}, async () => {
+  const stageError = Object.assign(new Error('writer spawn failed'), {
+    code:'ATTACHMENT_WRITE_FAILED', statusCode:500, stage:'attachment-write',
+  });
+  const fx = uploadFixture({ stageImmediateFailure:stageError });
+  const { request, boundary } = controlledRequest();
+  const parsing = parseTaskMultipart(request, { attachmentStore:fx.store });
+  request.write(partHeader(boundary, taskPart(task(['selected']))));
+  request.write(Buffer.from(JSON.stringify(task(['selected']))));
+  request.write(Buffer.from(`\r\n${partHeader(boundary, {
+    name:'attachment', filename:'pending.bin', mime:'application/octet-stream',
+  }).toString()}`));
+
+  let outcome;
+  try {
+    outcome = await Promise.race([
+      parsing.then(value => ({ value }), error => ({ error })),
+      new Promise(resolve => setTimeout(() => resolve({ timeout:true }), 50)),
+    ]);
+    assert.equal(outcome.timeout, undefined, 'stage 立即失败不得等待 request 后续字节');
+    assert.equal(outcome.error, stageError);
+  } finally {
+    if (!request.destroyed) request.destroy();
+    await Promise.race([
+      parsing.catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 100)),
+    ]);
+  }
+  assert.equal(fx.calls.discard, 1);
+  assert.ok(fx.calls.stage.every(call => call.settled));
 });
 
 test('committed cleanup 错误优先传播，未提交 cleanup 错误不隐藏首个解析错误', async t => {
@@ -545,14 +695,77 @@ test('慢 stage/backpressure 未 settle 前解析不会返回，成功后无残�
   assert.ok(fx.calls.stage.every(call => call.settled));
 });
 
-test('request aborted/error 会取消活跃 stage、等待 drain 并移除自身监听器', async t => {
-  await t.test('调用前已 aborted', async () => {
+test('真实 destroy/close-only 的 task 与 attachment 截断都在短时限内结算', {
+  timeout:2000,
+}, async t => {
+  await t.test('task 截断', async () => {
+    const fx = uploadFixture();
+    const { request, boundary } = controlledRequest();
+    const parsing = parseTaskMultipart(request, { attachmentStore:fx.store });
+    request.write(partHeader(boundary, taskPart(task())));
+    request.write('{"expectedRevision":3');
+    await new Promise(resolve => setImmediate(resolve));
+    request.destroy();
+    await assert.rejects(parsing, error => error.code === 'INVALID_MULTIPART');
+    assert.equal(fx.calls.discard, 1);
+  });
+
+  await t.test('attachment 截断', async () => {
+    const fx = uploadFixture();
+    const { request, boundary } = controlledRequest();
+    const parsing = parseTaskMultipart(request, { attachmentStore:fx.store });
+    request.write(partHeader(boundary, taskPart(task(['selected']))));
+    request.write(Buffer.from(JSON.stringify(task(['selected']))));
+    request.write(Buffer.from(`\r\n${partHeader(boundary, {
+      name:'attachment', filename:'partial.bin', mime:'application/octet-stream',
+    }).toString()}`));
+    request.write('partial attachment bytes');
+    await new Promise(resolve => setImmediate(resolve));
+    request.destroy();
+    await assert.rejects(parsing, error => error.code === 'INVALID_MULTIPART');
+    assert.equal(fx.calls.discard, 1);
+    assert.ok(fx.calls.stage.every(call => call.settled));
+  });
+});
+
+test('业务失败返回后由临时 drain error listener 吸收迟到错误并在 end/close 清理', {
+  timeout:2000,
+}, async () => {
+  const fx = uploadFixture();
+  const { request, boundary } = controlledRequest();
+  const parsing = parseTaskMultipart(request, { attachmentStore:fx.store });
+  request.write(partHeader(boundary, taskPart(task())));
+  request.write(Buffer.from(JSON.stringify(task())));
+  request.write(Buffer.from(`\r\n${partHeader(boundary, {
+    name:'unknown', filename:'unknown.bin', mime:'application/octet-stream',
+  }).toString()}`));
+
+  await assert.rejects(parsing, error => error.code === 'INVALID_MULTIPART');
+  assert.equal(fx.calls.discard, 1);
+  assert.equal(request.listenerCount('aborted'), 0, '业务 aborted listener 已移除');
+  assert.equal(request.listenerCount('data'), 0, '业务 data listener 已移除');
+  assert.equal(request.listenerCount('error'), 1, '只保留临时 drain error listener');
+  assert.equal(request.listenerCount('end'), 1, '临时 drain 等待 end');
+  assert.equal(request.listenerCount('close'), 1, '临时 drain 等待 close');
+
+  request.emit('error', Object.assign(new Error('late socket error'), { code:'ECONNRESET' }));
+  request.end();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(request.listenerCount('error'), 0);
+  assert.equal(request.listenerCount('end'), 0);
+  assert.equal(request.listenerCount('close'), 0);
+});
+
+test('request aborted/error 会取消活跃 stage、等待 drain 并移除自身监听器', {
+  timeout:7000,
+}, async t => {
+  await t.test('调用前已 aborted', { timeout:2000 }, async () => {
     const fx = uploadFixture();
     const request = multipartRequest([taskPart(task())]);
     request.aborted = true;
     await rejectsMultipart(request, fx);
   });
-  for (const event of ['aborted', 'error']) await t.test(event, async () => {
+  for (const event of ['aborted', 'error']) await t.test(event, { timeout:2000 }, async () => {
     const fx = uploadFixture();
     const { request, boundary } = controlledRequest();
     const parsing = parseTaskMultipart(request, { attachmentStore:fx.store });
@@ -576,7 +789,7 @@ test('request aborted/error 会取消活跃 stage、等待 drain 并移除自身
   });
 });
 
-test('Busboy 构造错误也由 parser 单一所有权 discard', async () => {
+test('multipart Content-Type 构造错误也由 parser 单一所有权 discard', async () => {
   const fx = uploadFixture();
   const request = Readable.from([]);
   request.headers = { 'content-type':'text/plain' };

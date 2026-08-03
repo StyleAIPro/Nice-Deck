@@ -1,4 +1,5 @@
 import { TextDecoder } from 'node:util';
+import { PassThrough } from 'node:stream';
 import Busboy from 'busboy';
 import {
   MAX_ATTACHMENTS,
@@ -17,9 +18,10 @@ const TASK_OPTIONAL_KEYS = ['candidates'];
 const TASK_KEYS = new Set([...TASK_REQUIRED_KEYS, ...TASK_OPTIONAL_KEYS]);
 const RECT_KEYS = ['h', 'w', 'x', 'y'];
 const UTF8 = new TextDecoder('utf-8', { fatal:true });
-const MAX_PART_HEADER_BYTES = 16 * 1024 - 1;
+const MAX_PART_HEADER_BYTES = 16 * 1024;
 // Busboy 1.6.0 以 `++pairCount < 2000` 保存 header；第 2000 对起会静默丢弃。
 const MAX_PART_HEADER_PAIRS = 1999;
+const MAX_TRANSPORT_PADDING_BYTES = 1024;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const MIME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
@@ -129,7 +131,7 @@ function parseRawHeaders(bytes) {
   return headers;
 }
 
-function validateRawPartHeaders(bytes, state) {
+function validateRawPartHeaders(bytes) {
   const headers = parseRawHeaders(bytes);
   const dispositions = headers.get('content-disposition') ?? [];
   const contentTypes = headers.get('content-type') ?? [];
@@ -142,175 +144,83 @@ function validateRawPartHeaders(bytes, state) {
     || disposition.parameters.get('name').length === 0) {
     throw invalid('multipart part 必须是带 name 的 form-data');
   }
-  const fieldName = disposition.parameters.get('name');
-  if (!['task', 'snapshot', 'attachment'].includes(fieldName)) {
-    throw invalid(`不支持的 multipart part：${fieldName}`);
-  }
   const filenameKeys = ['filename', 'filename*']
     .filter(key => disposition.parameters.has(key));
   if (filenameKeys.length !== 1
     || disposition.parameters.get(filenameKeys[0]).length === 0) {
     throw invalid('multipart file part 必须提供唯一非空 filename');
   }
-  let mime = null;
+  let mimeType = null;
   if (contentTypes.length === 1) {
     const contentType = parseParameterizedValue(contentTypes[0], 'Content-Type');
     if (!MIME.test(contentType.main)) throw invalid('multipart part Content-Type 无效');
-    mime = contentType.main;
+    mimeType = contentType.main;
   }
-
-  state.parts += 1;
-  if (state.parts === 1 && fieldName !== 'task') {
-    throw invalid('task 必须是物理首个 multipart part');
-  }
-  if (fieldName === 'task') {
-    if (state.taskSeen || state.parts !== 1 || mime !== 'application/json') {
-      throw invalid('task 必须是首个且唯一的 application/json file part');
-    }
-    state.taskSeen = true;
-  } else if (fieldName === 'snapshot') {
-    if (state.snapshotSeen || mime !== 'image/png') {
-      throw invalid('snapshot 必须是唯一的 image/png file part');
-    }
-    state.snapshotSeen = true;
-  } else {
-    state.attachments += 1;
-    if (state.attachments > MAX_ATTACHMENTS) {
-      throw multipartError(
-        'TOO_MANY_ATTACHMENTS', 413, `每个任务最多 ${MAX_ATTACHMENTS} 个附件`,
-      );
-    }
-  }
-  if (state.parts > MAX_ATTACHMENTS + 2) {
-    throw invalid('multipart part 数量超限');
-  }
+  return {
+    contentDisposition:dispositions[0],
+    contentType:contentTypes[0] ?? null,
+    declaredFieldName:disposition.parameters.get('name'),
+    declaredMimeType:mimeType,
+  };
 }
 
-function createMultipartAudit(boundary) {
-  const initial = Buffer.from(`--${boundary}`);
-  const delimiter = Buffer.from(`\r\n--${boundary}`);
-  const headerEnd = Buffer.from('\r\n\r\n');
-  const state = {
-    mode:'initial', initialOffset:0, post:Buffer.alloc(0), header:Buffer.alloc(0),
-    tail:Buffer.alloc(0), epilogue:Buffer.alloc(0), parts:0, attachments:0,
-    taskSeen:false, snapshotSeen:false, finished:false,
-  };
-
-  const fail = message => { throw invalid(message); };
-  const feedData = chunk => {
-    if (chunk.length === 0) return;
-    if (state.tail.length) {
-      const prefix = chunk.subarray(0, Math.min(chunk.length, delimiter.length));
-      const bridge = Buffer.concat([state.tail, prefix]);
-      const match = bridge.indexOf(delimiter);
-      if (match >= 0 && match < state.tail.length) {
-        const consumed = Math.max(0, match + delimiter.length - state.tail.length);
-        state.tail = Buffer.alloc(0);
-        state.mode = 'post-boundary';
-        feed(chunk.subarray(consumed));
-        return;
-      }
-    }
-    const match = chunk.indexOf(delimiter);
-    if (match >= 0) {
-      state.tail = Buffer.alloc(0);
-      state.mode = 'post-boundary';
-      feed(chunk.subarray(match + delimiter.length));
+function parseMetadataWithBusboy(raw) {
+  return new Promise((resolve, reject) => {
+    const boundary = 'deck-header-metadata-boundary';
+    let metadata = null;
+    let failed = false;
+    const fail = error => {
+      if (failed) return;
+      failed = true;
+      reject(normalizeParserError(error));
+    };
+    let parser;
+    try {
+      parser = Busboy({
+        headers:{ 'content-type':`multipart/form-data; boundary=${boundary}` },
+        defParamCharset:'utf8',
+        preservePath:true,
+      });
+    } catch (error) {
+      fail(error);
       return;
     }
-    const tailLength = delimiter.length - 1;
-    if (chunk.length >= tailLength) {
-      state.tail = Buffer.from(chunk.subarray(chunk.length - tailLength));
-    } else {
-      const combinedTail = Buffer.concat([state.tail, chunk]);
-      state.tail = Buffer.from(combinedTail.subarray(
-        Math.max(0, combinedTail.length - tailLength),
-      ));
+    parser.on('file', (fieldName, stream, info) => {
+      if (metadata !== null) fail(invalid('multipart header metadata 不唯一'));
+      metadata = {
+        fieldName,
+        filename:info.filename,
+        mimeType:info.mimeType,
+      };
+      stream.resume();
+    });
+    parser.on('field', () => fail(invalid('multipart file part 缺少 filename')));
+    parser.once('error', fail);
+    parser.once('close', () => {
+      if (failed) return;
+      if (metadata === null) fail(invalid('Busboy 无法解析 multipart header metadata'));
+      else resolve(metadata);
+    });
+    const lines = [
+      Buffer.from(`--${boundary}\r\n`),
+      Buffer.from(`Content-Disposition: ${raw.contentDisposition}\r\n`, 'latin1'),
+    ];
+    if (raw.contentType !== null) {
+      lines.push(Buffer.from(`Content-Type: ${raw.contentType}\r\n`, 'latin1'));
     }
-  };
+    lines.push(Buffer.from(`\r\n\r\n--${boundary}--\r\n`));
+    parser.end(Buffer.concat(lines));
+  });
+}
 
-  const feed = input => {
-    let chunk = Buffer.isBuffer(input) ? input : Buffer.from(input);
-    while (chunk.length) {
-      if (state.mode === 'initial') {
-        const needed = initial.length - state.initialOffset;
-        const take = Math.min(needed, chunk.length);
-        if (!chunk.subarray(0, take).equals(
-          initial.subarray(state.initialOffset, state.initialOffset + take),
-        )) fail('multipart body 必须以 boundary 开始');
-        state.initialOffset += take;
-        chunk = chunk.subarray(take);
-        if (state.initialOffset === initial.length) state.mode = 'post-boundary';
-        continue;
-      }
-      if (state.mode === 'post-boundary') {
-        const needed = 2 - state.post.length;
-        const take = Math.min(needed, chunk.length);
-        state.post = Buffer.concat([state.post, chunk.subarray(0, take)]);
-        chunk = chunk.subarray(take);
-        if (state.post.length < 2) continue;
-        if (state.post.equals(Buffer.from('\r\n'))) {
-          state.post = Buffer.alloc(0);
-          state.header = Buffer.alloc(0);
-          state.mode = 'headers';
-        } else if (state.post.equals(Buffer.from('--'))) {
-          state.post = Buffer.alloc(0);
-          state.mode = 'end';
-        } else {
-          fail('multipart part 正文包含 boundary 行前缀');
-        }
-        continue;
-      }
-      if (state.mode === 'headers') {
-        const capacity = MAX_PART_HEADER_BYTES + headerEnd.length - state.header.length;
-        const take = Math.min(capacity, chunk.length);
-        const previous = state.header.length;
-        const candidate = Buffer.concat([state.header, chunk.subarray(0, take)]);
-        const end = candidate.indexOf(headerEnd);
-        if (end >= 0) {
-          const consumed = Math.max(0, end + headerEnd.length - previous);
-          validateRawPartHeaders(candidate.subarray(0, end), state);
-          state.header = Buffer.alloc(0);
-          state.tail = Buffer.alloc(0);
-          state.mode = 'data';
-          chunk = chunk.subarray(consumed);
-          continue;
-        }
-        if (candidate.length >= MAX_PART_HEADER_BYTES + headerEnd.length) {
-          fail('multipart part header block 超过 16 KiB');
-        }
-        state.header = candidate;
-        chunk = chunk.subarray(take);
-        continue;
-      }
-      if (state.mode === 'data') {
-        feedData(chunk);
-        return;
-      }
-      if (state.mode === 'end') {
-        if (state.epilogue.length + chunk.length > 2) {
-          fail('multipart closing boundary 后含多余数据');
-        }
-        state.epilogue = Buffer.concat([state.epilogue, chunk]);
-        return;
-      }
-      fail('multipart 原始结构状态无效');
-    }
-  };
-
-  return {
-    get parts() { return state.parts; },
-    push:feed,
-    finish() {
-      if (state.finished) return;
-      state.finished = true;
-      if (state.mode !== 'end'
-        || (state.epilogue.length !== 0 && !state.epilogue.equals(Buffer.from('\r\n')))
-        || !state.taskSeen) {
-        fail('multipart 请求缺少完整 closing boundary 或 task');
-      }
-    },
-  };
+async function parsePartMetadata(bytes) {
+  const raw = validateRawPartHeaders(bytes);
+  const metadata = await parseMetadataWithBusboy(raw);
+  if (metadata.fieldName !== raw.declaredFieldName
+    || (raw.declaredMimeType !== null && metadata.mimeType !== raw.declaredMimeType)) {
+    throw invalid('Busboy header metadata 与原始 header 不一致');
+  }
+  return metadata;
 }
 
 function isPlainObject(value) {
@@ -421,53 +331,403 @@ function fileNameIsValid(filename) {
     && filename !== '.' && filename !== '..';
 }
 
-function collectPart(stream, maximum, tooLargeCode, tooLargeMessage) {
+function writeStreamChunk(stream, bytes) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let outcome = null;
-    const settleError = error => {
-      if (outcome !== null) return;
-      outcome = { error };
-      chunks.length = 0;
-    };
-    const onData = chunk => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += bytes.length;
-      if (size > maximum) {
-        settleError(multipartError(tooLargeCode, 413, tooLargeMessage));
-        return;
-      }
-      if (outcome === null) chunks.push(bytes);
-    };
-    const onLimit = () => settleError(multipartError(
-      tooLargeCode, 413, tooLargeMessage,
-    ));
-    const onError = cause => settleError(invalid('multipart 文件 part 在完成前截断', { cause }));
-    const onEnd = () => {
+    let settled = false;
+    const cleanup = () => stream.removeListener('error', onError);
+    const finish = error => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      if (stream.truncated && outcome === null) onLimit();
-      if (outcome?.error) reject(outcome.error);
-      else resolve(Buffer.concat(chunks, size));
+      if (error) reject(error);
+      else resolve();
     };
-    const onClose = () => {
-      if (stream.readableEnded) return;
-      cleanup();
-      reject(outcome?.error ?? invalid('multipart 文件 part 在完成前关闭'));
-    };
-    const cleanup = () => {
-      stream.removeListener('data', onData);
-      stream.removeListener('limit', onLimit);
-      stream.removeListener('error', onError);
-      stream.removeListener('end', onEnd);
-      stream.removeListener('close', onClose);
-    };
-    stream.on('data', onData);
-    stream.once('limit', onLimit);
+    const onError = error => finish(error);
     stream.once('error', onError);
-    stream.once('end', onEnd);
-    stream.once('close', onClose);
+    stream.write(bytes, finish);
   });
+}
+
+function endStream(stream) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => stream.removeListener('error', onError);
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onError = error => finish(error);
+    stream.once('error', onError);
+    stream.end(finish);
+  });
+}
+
+function candidateStatus(suffix, { eof=false } = {}) {
+  if (suffix.length === 0) return { type:eof ? 'invalid' : 'incomplete' };
+  let closing = false;
+  let index = 0;
+  if (suffix[0] === 0x2d) {
+    if (suffix.length === 1) return { type:eof ? 'invalid' : 'incomplete' };
+    if (suffix[1] !== 0x2d) return { type:'invalid' };
+    closing = true;
+    index = 2;
+  }
+  let padding = 0;
+  while (index < suffix.length && (suffix[index] === 0x20 || suffix[index] === 0x09)) {
+    padding += 1;
+    if (padding > MAX_TRANSPORT_PADDING_BYTES) return { type:'padding-overflow' };
+    index += 1;
+  }
+  if (index === suffix.length) {
+    return { type:eof && closing ? 'closing' : 'incomplete' };
+  }
+  if (suffix[index] !== 0x0d) return { type:'invalid' };
+  if (index + 1 === suffix.length) return { type:eof ? 'invalid' : 'incomplete' };
+  if (suffix[index + 1] !== 0x0a || index + 2 !== suffix.length) {
+    return { type:'invalid' };
+  }
+  return { type:closing ? 'closing' : 'regular' };
+}
+
+function createMultipartFramer(boundary, upload) {
+  const initialBoundary = Buffer.from(`--${boundary}`);
+  const bodyBoundary = Buffer.from(`\r\n--${boundary}`);
+  const headerEnd = Buffer.from('\r\n\r\n');
+  let mode = 'initial';
+  let initialProbe = Buffer.alloc(0);
+  let searchTail = Buffer.alloc(0);
+  let candidate = null;
+  let header = Buffer.alloc(0);
+  let currentPart = null;
+  let partCount = 0;
+  let attachmentCount = 0;
+  let taskSeen = false;
+  let snapshotSeen = false;
+  let parsedTask = null;
+  let snapshot = null;
+  let aborted = false;
+  let abortReason = null;
+  let completed = false;
+  let failureHandler = null;
+  let pendingAsyncFailure = null;
+  const staged = [];
+  const stagePromises = [];
+
+  const ensureActive = () => {
+    if (aborted) throw abortReason ?? invalid('multipart framing 已取消');
+    if (completed) throw invalid('multipart framing 已结束');
+  };
+
+  const writeBody = async bytes => {
+    if (bytes.length === 0) return;
+    if (!currentPart) throw invalid('multipart 正文缺少对应 part header');
+    currentPart.size += bytes.length;
+    if (currentPart.kind === 'task' && currentPart.size > MAX_TASK_METADATA_BYTES) {
+      throw invalid('task 元数据超过 64 KiB');
+    }
+    if (currentPart.kind === 'snapshot' && currentPart.size > MAX_SNAPSHOT_BYTES) {
+      throw multipartError('SNAPSHOT_TOO_LARGE', 413, 'snapshot 超过 512 KiB');
+    }
+    if (currentPart.kind === 'attachment' && currentPart.size > MAX_ATTACHMENT_BYTES) {
+      throw multipartError('ATTACHMENT_TOO_LARGE', 413, '单个附件不得超过 25 MiB');
+    }
+    if (currentPart.kind === 'attachment') {
+      const part = currentPart;
+      try {
+        await writeStreamChunk(part.stream, bytes);
+      } catch (cause) {
+        // destroy(error) 可能先让 write callback 得到通用 ERR_STREAM_DESTROYED，
+        // 随后一拍才结算 stage；保留 writer 的稳定业务错误为首错。
+        await new Promise(resolve => setImmediate(resolve));
+        throw part.stageError ?? part.streamError ?? cause;
+      }
+    } else {
+      currentPart.chunks.push(Buffer.from(bytes));
+    }
+  };
+
+  const finishPart = async () => {
+    if (!currentPart) throw invalid('multipart delimiter 前缺少 part');
+    const part = currentPart;
+    if (part.kind === 'task') {
+      parsedTask = parseTaskBytes(Buffer.concat(part.chunks, part.size));
+    } else if (part.kind === 'snapshot') {
+      snapshot = Buffer.concat(part.chunks, part.size);
+    } else {
+      await endStream(part.stream);
+      try {
+        staged.push(await part.stagePromise);
+        await part.closePromise;
+      }
+      finally { part.stream.removeListener('error', part.rememberStreamError); }
+    }
+    currentPart = null;
+  };
+
+  const startPart = async bytes => {
+    const metadata = await parsePartMetadata(bytes);
+    partCount += 1;
+    if (!fileNameIsValid(metadata.filename)) {
+      throw invalid('multipart file part 必须提供非目录 filename');
+    }
+    if (!['task', 'snapshot', 'attachment'].includes(metadata.fieldName)) {
+      throw invalid(`不支持的 multipart part：${metadata.fieldName}`);
+    }
+    if (partCount === 1 && metadata.fieldName !== 'task') {
+      throw invalid('task 必须是物理首个 multipart part');
+    }
+    if (metadata.fieldName === 'task') {
+      if (partCount !== 1 || taskSeen || metadata.mimeType !== 'application/json') {
+        throw invalid('task 必须是首个且唯一的 application/json file part');
+      }
+      taskSeen = true;
+      currentPart = { kind:'task', chunks:[], size:0 };
+      return;
+    }
+    if (!taskSeen || parsedTask === null) {
+      throw invalid('所有文件 part 之前必须先完成 task');
+    }
+    if (metadata.fieldName === 'snapshot') {
+      if (snapshotSeen || metadata.mimeType !== 'image/png') {
+        throw invalid('snapshot 必须是唯一的 image/png file part');
+      }
+      snapshotSeen = true;
+      currentPart = { kind:'snapshot', chunks:[], size:0 };
+      return;
+    }
+    if (attachmentCount >= MAX_ATTACHMENTS) {
+      throw multipartError(
+        'TOO_MANY_ATTACHMENTS', 413, `每个任务最多 ${MAX_ATTACHMENTS} 个附件`,
+      );
+    }
+    if (partCount > MAX_ATTACHMENTS + 2) {
+      throw invalid('multipart part 数量超限');
+    }
+    const source = parsedTask.attachmentSources[attachmentCount];
+    if (source !== 'selected' && source !== 'pasted') {
+      throw invalid('attachmentSources 与附件 part 顺序不一致');
+    }
+    attachmentCount += 1;
+    const stream = new PassThrough({ highWaterMark:64 * 1024 });
+    const part = {
+      kind:'attachment', stream, stagePromise:null, stageError:null, streamError:null, size:0,
+      rememberStreamError:null, closePromise:null,
+    };
+    part.rememberStreamError = error => {
+      part.streamError ??= error;
+    };
+    stream.once('error', part.rememberStreamError);
+    part.closePromise = new Promise(resolve => stream.once('close', resolve));
+    const stagePromise = Promise.resolve().then(() => upload.stage({
+      stream,
+      name:metadata.filename,
+      mime:metadata.mimeType || 'application/octet-stream',
+      source,
+    }));
+    part.stagePromise = stagePromise;
+    stagePromise.catch(error => {
+      part.stageError ??= error;
+      if (!stream.destroyed) stream.destroy(error);
+      pendingAsyncFailure ??= error;
+      failureHandler?.(error);
+    });
+    stagePromises.push(stagePromise);
+    currentPart = part;
+  };
+
+  const emitSearchBytes = async (origin, bytes) => {
+    if (origin === 'body') await writeBody(bytes);
+  };
+
+  const startCandidate = (origin, prefix) => {
+    candidate = { origin, prefix, suffix:[] };
+    mode = 'candidate';
+  };
+
+  const searchChunk = async (chunk, offset, origin) => {
+    const available = chunk.length - offset;
+    if (searchTail.length) {
+      const take = Math.min(available, bodyBoundary.length - 1);
+      const bridge = Buffer.concat([
+        searchTail,
+        chunk.subarray(offset, offset + take),
+      ]);
+      const match = bridge.indexOf(bodyBoundary);
+      if (match >= 0 && match < searchTail.length) {
+        await emitSearchBytes(origin, searchTail.subarray(0, match));
+        const consumed = match + bodyBoundary.length - searchTail.length;
+        searchTail = Buffer.alloc(0);
+        startCandidate(origin, bodyBoundary);
+        return offset + consumed;
+      }
+      if (available < bodyBoundary.length - 1) {
+        const safeLength = Math.max(0, bridge.length - (bodyBoundary.length - 1));
+        await emitSearchBytes(origin, bridge.subarray(0, safeLength));
+        searchTail = Buffer.from(bridge.subarray(safeLength));
+        return chunk.length;
+      }
+      await emitSearchBytes(origin, searchTail);
+      searchTail = Buffer.alloc(0);
+    }
+    const match = chunk.indexOf(bodyBoundary, offset);
+    if (match >= 0) {
+      await emitSearchBytes(origin, chunk.subarray(offset, match));
+      startCandidate(origin, bodyBoundary);
+      return match + bodyBoundary.length;
+    }
+    const keep = Math.min(bodyBoundary.length - 1, chunk.length - offset);
+    const safeEnd = chunk.length - keep;
+    await emitSearchBytes(origin, chunk.subarray(offset, safeEnd));
+    searchTail = Buffer.from(chunk.subarray(safeEnd));
+    return chunk.length;
+  };
+
+  const resolveCandidate = async status => {
+    const resolved = candidate;
+    candidate = null;
+    searchTail = Buffer.alloc(0);
+    if (status === 'invalid') {
+      mode = resolved.origin;
+      if (resolved.origin === 'body') {
+        await writeBody(Buffer.concat([resolved.prefix, Buffer.from(resolved.suffix)]));
+      }
+      return;
+    }
+    if (resolved.origin === 'body') await finishPart();
+    if (status === 'regular') {
+      header = Buffer.alloc(0);
+      mode = 'headers';
+    } else {
+      mode = 'epilogue';
+    }
+  };
+
+  const push = async input => {
+    ensureActive();
+    const chunk = Buffer.isBuffer(input) ? input : Buffer.from(input);
+    let offset = 0;
+    while (offset < chunk.length) {
+      ensureActive();
+      if (mode === 'epilogue') return;
+      if (mode === 'initial') {
+        const take = Math.min(initialBoundary.length - initialProbe.length, chunk.length - offset);
+        initialProbe = Buffer.concat([initialProbe, chunk.subarray(offset, offset + take)]);
+        offset += take;
+        if (!initialProbe.equals(initialBoundary.subarray(0, initialProbe.length))) {
+          const replay = initialProbe;
+          initialProbe = Buffer.alloc(0);
+          mode = 'preamble';
+          await push(replay);
+        } else if (initialProbe.length === initialBoundary.length) {
+          initialProbe = Buffer.alloc(0);
+          startCandidate('preamble', initialBoundary);
+        }
+        continue;
+      }
+      if (mode === 'preamble' || mode === 'body') {
+        offset = await searchChunk(chunk, offset, mode);
+        continue;
+      }
+      if (mode === 'candidate') {
+        candidate.suffix.push(chunk[offset]);
+        offset += 1;
+        const status = candidateStatus(candidate.suffix);
+        if (status.type === 'padding-overflow') {
+          throw invalid('multipart boundary transport padding 超限');
+        }
+        if (status.type === 'invalid') await resolveCandidate('invalid');
+        else if (status.type === 'regular' || status.type === 'closing') {
+          await resolveCandidate(status.type);
+        }
+        continue;
+      }
+      if (mode === 'headers') {
+        const capacity = MAX_PART_HEADER_BYTES + headerEnd.length - header.length;
+        const take = Math.min(capacity, chunk.length - offset);
+        const previousLength = header.length;
+        const candidateHeader = Buffer.concat([
+          header,
+          chunk.subarray(offset, offset + take),
+        ]);
+        const end = candidateHeader.indexOf(headerEnd);
+        if (end >= 0) {
+          if (end > MAX_PART_HEADER_BYTES) {
+            throw invalid('multipart part header block 超过 16 KiB');
+          }
+          const consumed = Math.max(0, end + headerEnd.length - previousLength);
+          const bytes = candidateHeader.subarray(0, end);
+          header = Buffer.alloc(0);
+          await startPart(bytes);
+          mode = 'body';
+          searchTail = Buffer.alloc(0);
+          offset += consumed;
+          continue;
+        }
+        if (candidateHeader.length >= MAX_PART_HEADER_BYTES + headerEnd.length) {
+          throw invalid('multipart part header block 超过 16 KiB');
+        }
+        header = candidateHeader;
+        offset += take;
+        continue;
+      }
+      throw invalid('multipart framing 状态无效');
+    }
+  };
+
+  const finish = async () => {
+    ensureActive();
+    if (mode === 'candidate') {
+      const status = candidateStatus(candidate.suffix, { eof:true });
+      if (status.type === 'closing') await resolveCandidate('closing');
+      else await resolveCandidate('invalid');
+    }
+    if (mode === 'body') {
+      await writeBody(searchTail);
+      searchTail = Buffer.alloc(0);
+    }
+    if (mode !== 'epilogue') {
+      throw invalid('multipart 请求缺少完整 closing boundary');
+    }
+    if (!taskSeen || parsedTask === null) throw invalid('缺少 task part');
+    if (parsedTask.attachmentSources.length !== attachmentCount) {
+      throw invalid('attachmentSources 数量与 attachment part 不匹配');
+    }
+    completed = true;
+    return Object.freeze({
+      input:Object.freeze(parsedTask.input),
+      snapshot,
+      upload,
+      staged:Object.freeze(staged.map(record => Object.freeze({ ...record }))),
+    });
+  };
+
+  const abort = async reason => {
+    if (aborted) {
+      await Promise.allSettled(stagePromises);
+      return;
+    }
+    aborted = true;
+    abortReason = normalizeParserError(reason);
+    const closingPart = currentPart?.kind === 'attachment' ? currentPart : null;
+    if (closingPart && !closingPart.stream.destroyed) {
+      closingPart.stream.destroy(abortReason);
+    }
+    await Promise.allSettled(stagePromises);
+    if (closingPart) {
+      await closingPart.closePromise;
+      closingPart.stream.removeListener('error', closingPart.rememberStreamError);
+    }
+  };
+
+  const setFailureHandler = handler => {
+    failureHandler = typeof handler === 'function' ? handler : null;
+    if (failureHandler && pendingAsyncFailure) failureHandler(pendingAsyncFailure);
+  };
+
+  return { push, finish, abort, setFailureHandler };
 }
 
 function normalizeParserError(error) {
@@ -490,6 +750,7 @@ function prioritizeCleanupError(primaryError, cleanupError) {
   return primaryError;
 }
 
+
 export async function parseTaskMultipart(request, { attachmentStore } = {}) {
   if (!request || typeof request.pipe !== 'function' || !request.headers) {
     throw new TypeError('multipart request 必须是带 headers 的 Node Readable');
@@ -511,26 +772,33 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
     return discardPromise;
   };
 
-  let parser;
-  let audit;
+  let drainCleanup = null;
+  const drainRequestInBackground = () => {
+    if (drainCleanup || request.readableEnded === true || request.closed === true) return;
+    let cleaned = false;
+    const absorbLateError = () => {};
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      request.removeListener('error', absorbLateError);
+      request.removeListener('end', cleanup);
+      request.removeListener('close', cleanup);
+      drainCleanup = null;
+    };
+    drainCleanup = cleanup;
+    request.on('error', absorbLateError);
+    request.once('end', cleanup);
+    request.once('close', cleanup);
+    try { request.resume(); } catch { cleanup(); }
+    if (request.readableEnded === true || request.closed === true) cleanup();
+  };
+
+  let framer;
   try {
-    audit = createMultipartAudit(multipartBoundary(request.headers));
-    parser = Busboy({
-      headers:request.headers,
-      defParamCharset:'utf8',
-      preservePath:true,
-      limits:{
-        fields:0,
-        files:MAX_ATTACHMENTS + 2,
-        // Busboy 在“达到” partsLimit 时发事件并停止下一 part；11 才能允许合法的 10。
-        parts:MAX_ATTACHMENTS + 3,
-        // Busboy 在“恰好达到 fileSize”时也发 limit；多留一字节才能接受精确 25 MiB，
-        // 同时仍让第 25 MiB + 1 字节触发 fail-closed，writer 自身也独立执行 25 MiB 上限。
-        fileSize:MAX_ATTACHMENT_BYTES + 1,
-      },
-    });
+    framer = createMultipartFramer(multipartBoundary(request.headers), upload);
   } catch (cause) {
     const primary = normalizeParserError(cause);
+    drainRequestInBackground();
     try { await discardOnce(); } catch (cleanupError) {
       throw prioritizeCleanupError(primary, cleanupError);
     }
@@ -539,291 +807,82 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
 
   try {
     return await new Promise((resolve, reject) => {
+      let processing = Promise.resolve();
       let firstError = null;
-      let partIndex = 0;
-      let attachmentCount = 0;
-      let taskSeen = false;
-      let snapshotSeen = false;
-      let taskPromise = null;
-      let snapshotPromise = Promise.resolve(null);
-      let finalized = false;
-      const stagedPromises = [];
-      const fileStreams = new Set();
+      let failing = false;
+      let settled = false;
 
-      const record = error => {
-        firstError ??= normalizeParserError(error);
-        return firstError;
-      };
-
-      const trackFile = stream => {
-        fileStreams.add(stream);
-        const onError = cause => record(
-          cause?.code && Number.isInteger(cause?.statusCode)
-            ? cause
-            : invalid('multipart 文件 part 在完成前失败', { cause }),
-        );
-        const cleanup = () => {
-          stream.removeListener('error', onError);
-          stream.removeListener('end', cleanup);
-          stream.removeListener('close', cleanup);
-          fileStreams.delete(stream);
-        };
-        stream.once('error', onError);
-        stream.once('end', cleanup);
-        stream.once('close', cleanup);
-      };
-
-      const drainFile = stream => {
-        const absorbError = () => {};
-        const cleanup = () => {
-          stream.removeListener('error', absorbError);
-          stream.removeListener('end', cleanup);
-          stream.removeListener('close', cleanup);
-        };
-        stream.on('error', absorbError);
-        stream.once('end', cleanup);
-        stream.once('close', cleanup);
-        stream.resume();
-      };
-
-      const finalize = async () => {
-        if (finalized) return;
-        finalized = true;
-        request.removeListener('aborted', onRequestAborted);
+      const removeBusinessListeners = () => {
+        request.removeListener('data', onData);
+        request.removeListener('end', onEnd);
+        request.removeListener('aborted', onAborted);
         request.removeListener('error', onRequestError);
-        request.removeListener('data', onAuditData);
-        request.removeListener('end', onAuditEnd);
-        request.unpipe(parser);
-        parser.removeListener('error', onParserError);
+        request.removeListener('close', onClose);
+      };
 
-        let parsedTask;
-        let snapshot = null;
-        let staged = [];
-        let cleanupError = null;
-        const cleanupFailedUpload = async () => {
-          if (!firstError || discardPromise && cleanupError) return;
-          try { await discardOnce(); } catch (error) { cleanupError ??= error; }
-        };
-        if (!firstError && audit.parts !== partIndex) {
-          record(invalid('multipart 原始 part 与 Busboy 事件数量不一致'));
-        }
-        const taskOutcome = taskPromise
-          ? await Promise.resolve(taskPromise).then(
-            value => ({ value }), error => ({ error }),
-          )
-          : { error:invalid('缺少 task part') };
-        if (taskOutcome.error) record(taskOutcome.error);
-        else parsedTask = taskOutcome.value;
+      const succeed = result => {
+        if (settled || failing) return;
+        settled = true;
+        framer.setFailureHandler(null);
+        removeBusinessListeners();
+        resolve(result);
+      };
 
-        const snapshotOutcome = await Promise.resolve(snapshotPromise).then(
-          value => ({ value }), error => ({ error }),
-        );
-        if (snapshotOutcome.error) record(snapshotOutcome.error);
-        else snapshot = snapshotOutcome.value;
-
-        // parser/request/task/snapshot 失败时必须先取消 writer，随后才能等待 stage 收敛。
-        await cleanupFailedUpload();
-
-        const stageOutcomes = await Promise.all(stagedPromises.map(promise => Promise.resolve(promise).then(
-          value => ({ value }), error => ({ error }),
-        )));
-        for (const outcome of stageOutcomes) {
-          if (outcome.error) record(outcome.error);
-          else staged.push(outcome.value);
-        }
-        if (parsedTask
-          && parsedTask.attachmentSources.length !== attachmentCount) {
-          record(invalid('attachmentSources 数量与 attachment part 不匹配'));
-        }
-
-        if (firstError) {
-          await cleanupFailedUpload();
-          await Promise.allSettled(stagedPromises);
-          await Promise.all([...fileStreams].map(stream => new Promise(resolveStream => {
-            const absorbError = () => {};
-            const finishStream = () => {
-              stream.removeListener('error', absorbError);
-              stream.removeListener('end', finishStream);
-              stream.removeListener('close', finishStream);
-              resolveStream();
-            };
-            stream.on('error', absorbError);
-            stream.once('end', finishStream);
-            stream.once('close', finishStream);
-            if (stream.readableEnded || stream.closed) finishStream();
-            else stream.destroy(firstError);
-          })));
-          parser.removeAllListeners();
+      const fail = error => {
+        firstError ??= normalizeParserError(error);
+        if (failing || settled) return;
+        failing = true;
+        framer.setFailureHandler(null);
+        removeBusinessListeners();
+        drainRequestInBackground();
+        const processingAtFailure = processing;
+        const discardAtFailure = discardOnce();
+        const abortAtFailure = framer.abort(firstError);
+        void (async () => {
+          await Promise.allSettled([processingAtFailure, abortAtFailure]);
+          let cleanupError = null;
+          try { await discardAtFailure; } catch (cause) { cleanupError = cause; }
+          settled = true;
           reject(cleanupError
             ? prioritizeCleanupError(firstError, cleanupError)
             : firstError);
-          return;
-        }
-        parser.removeAllListeners();
-        resolve(Object.freeze({
-          input:Object.freeze(parsedTask.input),
-          snapshot,
-          upload,
-          staged:Object.freeze(staged.map(record => Object.freeze({ ...record }))),
-        }));
+        })();
       };
 
-      const abortParser = error => {
-        record(error);
-        void discardOnce();
-        request.unpipe(parser);
-        request.resume();
-        if (!parser.destroyed) parser.destroy(firstError);
+      const onData = chunk => {
+        if (failing || settled) return;
+        request.pause();
+        processing = processing.then(() => framer.push(chunk));
+        processing.then(
+          () => {
+            if (!failing && !settled) request.resume();
+          },
+          fail,
+        );
       };
-      const onRequestAborted = () => abortParser(invalid('multipart 请求在完成前中断'));
-      const onRequestError = cause => abortParser(invalid('multipart 请求流失败', { cause }));
-      const onAuditData = chunk => {
-        try { audit.push(chunk); }
-        catch (error) { abortParser(error); }
+      const onEnd = () => {
+        if (failing || settled) return;
+        processing = processing.then(() => framer.finish());
+        processing.then(succeed, fail);
       };
-      const onAuditEnd = () => {
-        try { audit.finish(); }
-        catch (error) { abortParser(error); }
-      };
-      const onParserError = error => {
-        record(normalizeParserError(error));
-        void discardOnce();
-        request.unpipe(parser);
-        request.resume();
-        if (!parser.destroyed) parser.destroy();
+      const onAborted = () => fail(invalid('multipart 请求在完成前中断'));
+      const onRequestError = cause => fail(invalid('multipart 请求流失败', { cause }));
+      const onClose = () => {
+        if (request.readableEnded === true || request.complete === true) return;
+        fail(invalid('multipart 请求在完成前关闭'));
       };
 
-      parser.on('field', () => {
-        partIndex += 1;
-        record(invalid('multipart 不接受普通 field'));
-      });
-      parser.on('file', (fieldName, stream, info) => {
-        const currentPart = partIndex;
-        partIndex += 1;
-        trackFile(stream);
-
-        if (!fileNameIsValid(info.filename)) {
-          record(invalid('multipart file part 必须提供非目录 filename'));
-          drainFile(stream);
-          return;
-        }
-        if (fieldName === 'task') {
-          if (currentPart !== 0 || taskSeen || info.mimeType !== 'application/json') {
-            record(invalid('task 必须是首个且唯一的 application/json file part'));
-            drainFile(stream);
-            return;
-          }
-          taskSeen = true;
-          taskPromise = collectPart(
-            stream,
-            MAX_TASK_METADATA_BYTES,
-            'INVALID_MULTIPART',
-            'task 元数据超过 64 KiB',
-          ).then(parseTaskBytes);
-          taskPromise.catch(record);
-          return;
-        }
-        if (!taskSeen) {
-          record(invalid('所有文件 part 之前必须先提供 task'));
-          drainFile(stream);
-          return;
-        }
-        if (fieldName === 'snapshot') {
-          if (snapshotSeen || info.mimeType !== 'image/png') {
-            record(invalid('snapshot 必须是唯一的 image/png file part'));
-            drainFile(stream);
-            return;
-          }
-          snapshotSeen = true;
-          snapshotPromise = collectPart(
-            stream,
-            MAX_SNAPSHOT_BYTES,
-            'SNAPSHOT_TOO_LARGE',
-            'snapshot 超过 512 KiB',
-          );
-          snapshotPromise.catch(record);
-          return;
-        }
-        if (fieldName !== 'attachment') {
-          record(invalid(`不支持的 multipart part：${fieldName}`));
-          drainFile(stream);
-          return;
-        }
-        if (attachmentCount >= MAX_ATTACHMENTS) {
-          record(multipartError(
-            'TOO_MANY_ATTACHMENTS', 413, `每个任务最多 ${MAX_ATTACHMENTS} 个附件`,
-          ));
-          drainFile(stream);
-          return;
-        }
-
-        const attachmentIndex = attachmentCount;
-        attachmentCount += 1;
-        let limitError = null;
-        const onAttachmentLimit = () => {
-          limitError = multipartError(
-            'ATTACHMENT_TOO_LARGE', 413, '单个附件不得超过 25 MiB',
-          );
-          abortParser(limitError);
-        };
-        const removeAttachmentLimit = () => {
-          stream.removeListener('limit', onAttachmentLimit);
-          stream.removeListener('end', removeAttachmentLimit);
-          stream.removeListener('close', removeAttachmentLimit);
-        };
-        stream.once('limit', onAttachmentLimit);
-        stream.once('end', removeAttachmentLimit);
-        stream.once('close', removeAttachmentLimit);
-        stream.pause();
-        const stagedPromise = Promise.resolve(taskPromise).then(parsed => {
-          if (firstError && firstError !== limitError) {
-            drainFile(stream);
-            throw firstError;
-          }
-          const source = parsed.attachmentSources[attachmentIndex];
-          if (source !== 'selected' && source !== 'pasted') {
-            drainFile(stream);
-            throw invalid('attachmentSources 与附件 part 顺序不一致');
-          }
-          return upload.stage({
-            stream,
-            name:info.filename,
-            mime:info.mimeType || 'application/octet-stream',
-            source,
-          });
-        }).then(record => {
-          if (limitError || stream.truncated) {
-            throw limitError ?? multipartError(
-              'ATTACHMENT_TOO_LARGE', 413, '单个附件不得超过 25 MiB',
-            );
-          }
-          return record;
-        });
-        stagedPromise.catch(error => {
-          abortParser(error);
-          if (!stream.destroyed && !stream.readableEnded) drainFile(stream);
-        });
-        stagedPromises.push(stagedPromise);
-      });
-      parser.once('fieldsLimit', () => record(invalid('multipart field 数量超限')));
-      parser.once('filesLimit', () => record(multipartError(
-        'TOO_MANY_ATTACHMENTS', 413, 'multipart 文件 part 数量超限',
-      )));
-      parser.once('partsLimit', () => record(multipartError(
-        'INVALID_MULTIPART', 400, 'multipart part 数量超限',
-      )));
-      parser.on('error', onParserError);
-      parser.once('close', () => { void finalize(); });
-      request.once('aborted', onRequestAborted);
+      framer.setFailureHandler(fail);
+      request.on('data', onData);
+      request.once('end', onEnd);
+      request.once('aborted', onAborted);
       request.once('error', onRequestError);
-      request.on('data', onAuditData);
-      request.once('end', onAuditEnd);
+      request.once('close', onClose);
       if (request.aborted === true || request.readableAborted === true
         || (request.destroyed === true && request.readableEnded !== true)) {
-        abortParser(invalid('multipart 请求在解析前已经中断'));
+        fail(invalid('multipart 请求在解析前已经中断'));
       } else {
-        try { request.pipe(parser); }
-        catch (cause) { abortParser(normalizeParserError(cause)); }
+        request.resume();
       }
     });
   } catch (primaryError) {
