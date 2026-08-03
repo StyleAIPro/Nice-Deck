@@ -1,6 +1,7 @@
 import { renderTaskDrawer } from './task-drawer.mjs';
 import { connectEvents } from './ws-client.mjs';
 import { compileActionGroups } from './action-compiler.mjs';
+import { historyCandidates, historyLabel } from '/editor/history-state.mjs';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -19,6 +20,9 @@ const revisionValue = document.querySelector('[data-revision]');
 const modeButtons = [...document.querySelectorAll('[data-mode]')];
 const modeBadge = document.querySelector('.mode-badge');
 const taskDrawer = document.querySelector('[data-task-drawer]');
+const historyControls = document.querySelector('.history-controls');
+const undoButton = document.querySelector('[data-history-undo]');
+const redoButton = document.querySelector('[data-history-redo]');
 let pendingPageKey;
 let tornDown = false;
 let fitFrameRequest;
@@ -33,7 +37,10 @@ let activeFrameInstanceId;
 let authoritativeReloadPending;
 const handledAuthoritativeReloads = new Set();
 let sessionGroups = [];
+let sessionRedo = [];
+let historyBusy = false;
 let loadedSessionRevision = -1;
+let historyRefreshTargetRevision = 0;
 let sessionRefreshTargetRevision = 0;
 let sessionRefreshPromise;
 let seenOnline = false;
@@ -150,6 +157,77 @@ function showTaskNotice(message) {
   if (note) note.textContent = message;
 }
 
+function renderHistory() {
+  const { undoGroup, redoGroup } = historyCandidates(sessionGroups, sessionRedo);
+  const refreshPending = loadedSessionRevision < historyRefreshTargetRevision;
+  const controlsBusy = historyBusy || refreshPending;
+  historyControls.dataset.busy = String(controlsBusy);
+  historyControls.setAttribute('aria-busy', String(controlsBusy));
+  undoButton.disabled = controlsBusy || !undoGroup;
+  redoButton.disabled = controlsBusy || !redoGroup;
+  undoButton.title = historyLabel(undoGroup, tasks, 'undo');
+  redoButton.title = historyLabel(redoGroup, tasks, 'redo');
+  undoButton.setAttribute('aria-label', undoButton.title);
+  redoButton.setAttribute('aria-label', redoButton.title);
+  undoButton.dataset.groupId = controlsBusy ? '' : (undoGroup?.id ?? '');
+  redoButton.dataset.groupId = controlsBusy ? '' : (redoGroup?.id ?? '');
+}
+
+function expectHistoryRevision(targetRevision) {
+  if (Number.isSafeInteger(targetRevision)) {
+    historyRefreshTargetRevision = Math.max(historyRefreshTargetRevision, targetRevision);
+  }
+  renderHistory();
+}
+
+async function changeHistory(method, button) {
+  if (historyBusy || !button.dataset.groupId) return;
+  const groupId = button.dataset.groupId;
+  historyBusy = true;
+  renderHistory();
+  try {
+    let result;
+    try {
+      result = await requestJson(
+        `/api/groups/${encodeURIComponent(groupId)}/${method}`,
+        {
+          method:'POST',
+          headers:{ 'content-type':'application/json' },
+          body:JSON.stringify({ expectedRevision:revision }),
+        },
+      );
+    } catch (error) {
+      if (error.committed === true) {
+        updateRevision(error.revision);
+        expectHistoryRevision(error.revision);
+        await loadSession(error.revision).catch(() => {});
+        showTaskNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、同步待确认`);
+        return;
+      }
+      expectHistoryRevision(error.revision);
+      await loadSession(error.revision).catch(() => {});
+      showTaskNotice(error.code === 'REVISION_CONFLICT'
+        ? '历史已更新，请重试'
+        : `${method === 'undo' ? '撤销' : '重做'}失败：${error.message}`);
+      return;
+    }
+    updateRevision(result.revision);
+    expectHistoryRevision(result.revision);
+    try {
+      await ensureSessionRevision(result.revision);
+    } catch {
+      showTaskNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、会话同步待重试`);
+      return;
+    }
+    if (result.syncPending) {
+      showTaskNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、浏览器同步待重试`);
+    }
+  } finally {
+    historyBusy = false;
+    renderHistory();
+  }
+}
+
 async function undoTask(task) {
   if (!task?.groupId) return;
   let retried = false;
@@ -197,6 +275,7 @@ function renderTasks() {
     onUndo: task => { void undoTask(task); },
   });
   updatePageBadges();
+  renderHistory();
 }
 
 function upsertTask(task) {
@@ -223,6 +302,7 @@ function loadSession(targetRevision = revision) {
       if (sessionRevision >= loadedSessionRevision) {
         loadedSessionRevision = sessionRevision;
         sessionGroups = Array.isArray(session.groups) ? session.groups : [];
+        sessionRedo = Array.isArray(session.redo) ? session.redo : [];
         tasks = uniqueTasks([...tasks, ...(Array.isArray(persistedTasks) ? persistedTasks : [])]);
         renderTasks();
       }
@@ -525,6 +605,10 @@ function setEditorMode(mode) {
 
 const onModeClick = event => setEditorMode(event.currentTarget.dataset.mode);
 for (const button of modeButtons) button.addEventListener('click', onModeClick);
+const onUndoClick = () => { void changeHistory('undo', undoButton); };
+const onRedoClick = () => { void changeHistory('redo', redoButton); };
+undoButton.addEventListener('click', onUndoClick);
+redoButton.addEventListener('click', onRedoClick);
 
 function fitFrame() {
   const availableWidth = Math.max(frameViewport.clientWidth - 56, 1);
@@ -565,9 +649,12 @@ eventsClient = connectEvents({
       else pendingFrameCommands.set(event.commandId, event);
       return;
     }
-    updateRevision(event?.revision);
     if (['actions-recorded','group-undone','group-redone'].includes(event?.type)) {
+      expectHistoryRevision(event.revision);
+      updateRevision(event.revision);
       void ensureSessionRevision(event.revision).catch(() => {});
+    } else {
+      updateRevision(event?.revision);
     }
     if (['task-created','task-updated'].includes(event?.type) && event.payload?.id) {
       upsertTask(event.payload);
@@ -601,6 +688,8 @@ function teardown() {
   pendingFrameCommands.clear();
   deckFrame.removeEventListener('load', onDeckFrameLoad);
   for (const button of modeButtons) button.removeEventListener('click', onModeClick);
+  undoButton.removeEventListener('click', onUndoClick);
+  redoButton.removeEventListener('click', onRedoClick);
   window.removeEventListener('message', onFrameMessage);
   window.removeEventListener('pagehide', teardown);
   window.removeEventListener('unload', teardown);

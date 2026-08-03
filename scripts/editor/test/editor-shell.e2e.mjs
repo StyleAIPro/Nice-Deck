@@ -297,6 +297,7 @@ test('preview 仅在内存注入一次且静态资源保持受保护', async t =
   for (const path of [
     '/preview',
     '/editor/editor.mjs',
+    '/editor/history-state.mjs',
     '/editor/task-drawer.mjs',
     '/editor/protocol.mjs',
     '/editor/editor.css',
@@ -308,6 +309,7 @@ test('preview 仅在内存注入一次且静态资源保持受保护', async t =
   }
   for (const path of [
     `/editor/editor.mjs?token=${app.token}`,
+    `/editor/history-state.mjs?token=${app.token}`,
     `/editor/task-drawer.mjs?token=${app.token}`,
     `/editor/protocol.mjs?token=${app.token}`,
     `/editor/huawei-logo.png?token=${app.token}`,

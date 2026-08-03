@@ -111,6 +111,58 @@ p {
   font-size: 12px;
 }
 
+.history-controls {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+}
+
+.history-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  height: 100%;
+  gap: 4px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  transition: background var(--motion), color var(--motion), opacity var(--motion);
+}
+
+.history-button + .history-button {
+  border-left: 1px solid var(--line);
+}
+
+.history-button:hover:not(:disabled) {
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
+
+.history-button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--brand-red);
+  outline-offset: -2px;
+}
+
+.history-button:disabled {
+  color: var(--ink-muted);
+  cursor: not-allowed;
+  opacity: .48;
+}
+
+.history-controls[data-busy="true"] .history-button {
+  cursor: wait;
+  opacity: .58;
+}
+
 .ws-status {
   gap: 7px;
   min-width: 64px;

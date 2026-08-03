@@ -19,6 +19,14 @@
         </div>
       </div>
       <div class="topbar-actions">
+        <div class="history-controls" role="group" aria-label="修改历史" data-busy="false">
+          <button class="history-button" type="button" data-history-undo disabled title="撤销">
+            <span aria-hidden="true">↶</span><span>撤销</span>
+          </button>
+          <button class="history-button" type="button" data-history-redo disabled title="重做">
+            <span aria-hidden="true">↷</span><span>重做</span>
+          </button>
+        </div>
         <span class="ws-status" data-ws-state="connecting" role="status" aria-live="polite">
           <span class="status-dot" aria-hidden="true"></span>
           <span data-ws-label>正在连接</span>
