@@ -144,3 +144,30 @@ test('四份入口文档与 steps 无动画页行为一致', async () => {
     });
   }
 });
+
+test('四份入口文档完整说明全局历史与任务附件边界', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '顶栏全局撤销重做': /顶栏[\s\S]{0,120}撤销[\s\S]{0,40}重做/,
+      '人工与 Agent 共用权威历史': /人工文字[\s\S]{0,80}移动[\s\S]{0,80}缩放[\s\S]{0,120}Agent[^。\n]{0,80}(?:动作组|group)/i,
+      '任务行定点撤销': /任务行[\s\S]{0,80}定点撤销/,
+      '文件与粘贴入口': /选择文件[\s\S]{0,100}粘贴图片/,
+      '附件数量与大小限制': /最多 8 个[\s\S]{0,100}25 MiB/,
+      '粘贴图片转 PNG': /粘贴图片[\s\S]{0,80}(?:转为|转换为|转成) PNG/,
+      'sidecar 附件目录': /sidecar[\s\S]{0,160}attachments\//,
+      '浏览器不提供原绝对路径': /浏览器[\s\S]{0,100}(?:无法|不能)[^。\n]{0,50}原文件[^。\n]{0,30}绝对路径/,
+      'API CLI 返回副本绝对路径': /API\s*\/\s*CLI[\s\S]{0,120}副本[^。\n]{0,40}绝对 (?:path|路径)/i,
+      '附件不进入成品': /附件[^。\n]{0,100}不进入最终 deck/i,
+      '附件随 sidecar 生命周期管理': /附件[^。\n]{0,120}sidecar[^。\n]{0,80}生命周期/,
+    });
+  }
+});
+
+test('浏览器 E2E 使用单并发串行执行', async () => {
+  const packageJson = JSON.parse(await readFile(new URL('../../../package.json', import.meta.url), 'utf8'));
+  assert.equal(
+    packageJson.scripts['test:editor:e2e'],
+    'node --test --test-concurrency=1 scripts/editor/test/*.e2e.mjs',
+  );
+});

@@ -21,6 +21,12 @@ async function waitForRevision(page, revision) {
   ), revision);
 }
 
+async function waitForHistoryReady(page) {
+  await page.waitForFunction(() => (
+    document.querySelector('.history-controls')?.dataset.busy === 'false'
+  ));
+}
+
 async function createManualTextAction(page, text) {
   const heading = page.frameLocator('#deck-frame').locator('h2').first();
   await page.locator('[data-mode="text"]').click();
@@ -85,10 +91,12 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
 
   await createManualTextAction(page, '人工新标题');
   await waitForRevision(page, 1);
+  await waitForHistoryReady(page);
   assert.equal(await undo.isEnabled(), true);
   assert.match(await undo.getAttribute('title'), /撤销文字修改/);
   await undo.click();
   await waitForRevision(page, 2);
+  await waitForHistoryReady(page);
   assert.equal(await heading.textContent(), '第一页标题');
   assert.equal(await redo.isEnabled(), true);
   assert.match(await redo.getAttribute('title'), /重做文字修改/);
@@ -98,6 +106,7 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
 
   await createManualMoveAction(page);
   await waitForRevision(page, 4);
+  await waitForHistoryReady(page);
   assert.match(await undo.getAttribute('title'), /撤销移动/);
   assert.notEqual(await heading.evaluate(element => element.style.translate), '');
   await undo.click();
@@ -110,6 +119,7 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
   }));
   await createManualResizeAction(page);
   await waitForRevision(page, 6);
+  await waitForHistoryReady(page);
   assert.match(await undo.getAttribute('title'), /撤销缩放/);
   assert.ok(await card.evaluate((element, original) => (
     Number.parseFloat(element.style.width) > original.width
@@ -151,6 +161,7 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
   });
   assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
   await waitForRevision(page, 9);
+  await waitForHistoryReady(page);
   await page.waitForFunction(() => {
     const deckDocument = document.querySelector('#deck-frame').contentDocument;
     return deckDocument.querySelector('h2').textContent === 'Agent 批次标题'
@@ -159,6 +170,7 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
   assert.match(await undo.getAttribute('title'), /撤销 Agent 任务：整体替换标题并移动卡片/);
   await undo.click();
   await waitForRevision(page, 10);
+  await waitForHistoryReady(page);
   assert.equal(await heading.textContent(), '人工新标题');
   assert.equal(await card.evaluate(element => element.style.translate), '');
   assert.equal(await redo.getAttribute('data-group-id'), applied.body.groupId);
@@ -169,6 +181,7 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
 
   await page.locator(`[data-task-undo="${taskId}"]`).click();
   await waitForRevision(page, 12);
+  await waitForHistoryReady(page);
   assert.equal(await heading.textContent(), '人工新标题');
   assert.equal(await redo.getAttribute('data-group-id'), applied.body.groupId);
   assert.match(await redo.getAttribute('title'), /重做 Agent 任务：整体替换标题并移动卡片/);
@@ -180,12 +193,14 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
   await page.reload();
   await waitForRevision(page, 13);
   await page.waitForSelector('[data-page-key]');
+  await waitForHistoryReady(page);
   assert.equal(await undo.getAttribute('data-group-id'), applied.body.groupId);
   assert.match(await undo.getAttribute('title'), /撤销 Agent 任务：整体替换标题并移动卡片/);
   assert.equal(await redo.isDisabled(), true);
 
   await createManualTextAction(page, '冲突前标题');
   await waitForRevision(page, 14);
+  await waitForHistoryReady(page);
   const staleGroupId = await undo.getAttribute('data-group-id');
   let interceptedUndoRequests = 0;
   let releaseUndo;

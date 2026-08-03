@@ -34,6 +34,8 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 
 区域任务可以跨页连续添加；左侧文字页序列表用 badge 显示任务数。右下角 Agent 任务 drawer 负责任务记录、定位和状态展示，可定位回原页和原区域；任务已完成并关联动作组后，drawer 会显示撤销按钮。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
 
+顶栏的“撤销 / 重做”按时间顺序操作这份权威历史，覆盖人工文字、移动、缩放和 Agent 动作组；任务行仍保留定点撤销，定点撤销后也可从顶栏重做。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`；API / CLI 返回副本绝对 path，供外部 Agent 读取。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
+
 ### 0.3 外部 Agent 协作与撤销 / 重做
 
 已完成任务可直接从 drawer 撤销；`undo` 也可通过 CLI 或 HTTP 执行，`redo` 通过 HTTP 执行。

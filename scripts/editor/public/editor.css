@@ -588,6 +588,7 @@ p {
 
 .task-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   margin-bottom: 6px;
   overflow: hidden;
@@ -680,6 +681,100 @@ p {
   background: transparent;
   color: var(--ink-secondary);
   cursor: pointer;
+}
+
+.task-attachments-toggle {
+  flex: 1 0 100%;
+  padding: 7px 11px;
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-attachments-toggle::after {
+  float: right;
+  content: '展开';
+  color: var(--ink-muted);
+  font-weight: 400;
+}
+
+.task-attachments-toggle[aria-expanded="true"]::after {
+  content: '收起';
+}
+
+.task-attachments-toggle:focus-visible,
+.task-copy-attachment:focus-visible {
+  outline: 2px solid var(--brand-red);
+  outline-offset: -2px;
+}
+
+.task-attachments {
+  min-width: 0;
+  flex: 1 0 100%;
+  padding: 0 9px 9px;
+  background: var(--surface-subtle);
+}
+
+.task-attachment {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 8px;
+  margin-top: 7px;
+  padding: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.task-attachment-summary {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.task-attachment-summary strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-attachment-summary span {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.task-attachment-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-secondary);
+  font: 9px/24px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-copy-attachment {
+  min-width: 58px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--ink-secondary);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.task-copy-attachment:disabled {
+  cursor: default;
 }
 
 .task-drawer-footer {

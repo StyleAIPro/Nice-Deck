@@ -66,6 +66,42 @@ test('区域任务可连续选择、删除并粘贴 PNG 附件后提交真实 mu
   assert.equal(await readFile(task.attachments[0].path, 'utf8'), 'reference');
   assert.equal(await readFile(task.attachments[1].path, 'utf8'), '# extra');
   assert.deepEqual([...await readFile(task.attachments[2].path)].slice(0, 8), [137, 80, 78, 71, 13, 10, 26, 10]);
+
+  await page.waitForSelector('[data-task-attachments-toggle]');
+  const attachmentsToggle = page.locator('[data-task-attachments-toggle]');
+  assert.equal(await attachmentsToggle.getAttribute('aria-expanded'), 'false');
+  await attachmentsToggle.click();
+  assert.equal(await attachmentsToggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(await page.locator('[data-task-attachment]').count(), 3);
+  assert.deepEqual(
+    await page.locator('[data-task-attachment] strong').allTextContents(),
+    task.attachments.map(item => item.name),
+  );
+  assert.equal(await page.locator('[data-attachment-size]').first().textContent(), '9 B');
+  assert.equal(await page.locator('[data-attachment-path]').first().textContent(), task.attachments[0].path);
+
+  await page.evaluate(() => {
+    window.__copiedAttachmentPaths = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable:true,
+      value:{
+        writeText:async path => { window.__copiedAttachmentPaths.push(path); },
+      },
+    });
+  });
+  const copyButtons = page.locator('[data-copy-attachment-path]');
+  await copyButtons.first().click();
+  assert.deepEqual(
+    await page.evaluate(() => window.__copiedAttachmentPaths),
+    [task.attachments[0].path],
+  );
+  assert.equal(await copyButtons.first().textContent(), '已复制');
+
+  await page.evaluate(() => {
+    navigator.clipboard.writeText = async () => { throw new Error('clipboard denied'); };
+  });
+  await copyButtons.nth(1).click();
+  assert.equal(await copyButtons.nth(1).textContent(), '复制失败，请手动选择路径');
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
