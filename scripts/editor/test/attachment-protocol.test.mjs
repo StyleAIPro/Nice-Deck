@@ -25,9 +25,38 @@ const metadata = {
 test('附件元数据严格接受 session 相对路径', () => {
   const value = validateAttachmentMetadata(metadata, taskId);
   assert.equal(value.name, '新版架构.png');
+  assert.notEqual(value, metadata);
   assert.deepEqual(Object.keys(value).sort(), [
     'createdAt', 'id', 'mime', 'name', 'relativePath', 'size', 'source',
   ]);
+});
+
+test('附件元数据 fail-closed 拒绝隐藏键、Symbol 与访问器', () => {
+  const hiddenPath = { ...metadata };
+  Object.defineProperty(hiddenPath, 'path', { value: '/tmp/secret', enumerable: false });
+  const symbolPath = { ...metadata, [Symbol('path')]: '/tmp/secret' };
+  const accessor = { ...metadata };
+  let getterCalls = 0;
+  Object.defineProperty(accessor, 'name', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'getter.png'; },
+  });
+  for (const value of [hiddenPath, symbolPath, accessor]) {
+    assert.throws(() => validateAttachmentMetadata(value, taskId), /字段/);
+  }
+  assert.equal(getterCalls, 0);
+});
+
+test('附件 name 和 MIME 拒绝控制、格式、双向和无效 Unicode', () => {
+  for (const unsafe of [
+    'normal\u0000.png', 'report\u202Egnp.exe', 'scope\u2066name', 'scope\u2069name',
+    'zero\u200Bwidth.png', 'surrogate\uD800.png',
+  ]) {
+    assert.throws(() => validateAttachmentMetadata({ ...metadata, name: unsafe }, taskId));
+  }
+  for (const unsafe of ['text/\u202Eplain', 'text/\u2066plain', 'text/\u200Bplain', 'text/\uD800plain']) {
+    assert.throws(() => validateAttachmentMetadata({ ...metadata, mime: unsafe }, taskId));
+  }
 });
 
 test('附件元数据拒绝伪造 ID、非法显示名、时间、来源和路径', () => {

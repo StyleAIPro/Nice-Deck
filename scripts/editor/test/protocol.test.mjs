@@ -86,6 +86,10 @@ test('请求任务不得自行携带附件持久化元数据', () => {
   assert.throws(() => validateTask({
     pageKey: 'p', rect: { x: 1, y: 2, w: 3, h: 4 }, instruction: '改', attachments: [],
   }), /attachments/);
+  const inheritedAttachments = Object.assign(Object.create({ attachments: [] }), {
+    pageKey: 'p', rect: { x: 1, y: 2, w: 3, h: 4 }, instruction: '改',
+  });
+  assert.throws(() => validateTask(inheritedAttachments), /普通对象/);
 });
 
 test('持久化任务严格校验附件且兼容旧任务', () => {

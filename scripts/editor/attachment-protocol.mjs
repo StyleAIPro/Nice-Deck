@@ -17,21 +17,34 @@ function isCanonicalUuidV4(value) {
   return typeof value === 'string' && UUID_V4.test(value);
 }
 
-function hasExactKeys(value, keys) {
-  const actual = Object.keys(value).sort();
-  return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+function readStrictMetadata(value) {
+  if (!isPlainObject(value)) throw new TypeError('附件元数据字段无效');
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== ATTACHMENT_METADATA_KEYS.length
+    || ownKeys.some(key => typeof key !== 'string' || !ATTACHMENT_METADATA_KEYS.includes(key))) {
+    throw new TypeError('附件元数据字段无效');
+  }
+  const metadata = {};
+  for (const key of ATTACHMENT_METADATA_KEYS) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      throw new TypeError('附件元数据字段无效');
+    }
+    metadata[key] = descriptor.value;
+  }
+  return metadata;
 }
 
 function validateAttachmentName(name) {
   if (typeof name !== 'string' || Array.from(name).length === 0 || Array.from(name).length > 240
-    || /\p{Cc}/u.test(name)) {
-    throw new TypeError('附件名称必须是不含控制字符的 1–240 个字符');
+    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(name)) {
+    throw new TypeError('附件名称必须是不含控制或格式字符的 1–240 个字符');
   }
   return name;
 }
 
 function validateAttachmentMime(mime) {
-  if (typeof mime !== 'string' || mime.length > 255 || /\p{Cc}/u.test(mime)) {
+  if (typeof mime !== 'string' || mime.length > 255 || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(mime)) {
     throw new TypeError('附件 MIME 类型无效');
   }
   return mime;
@@ -64,25 +77,32 @@ export function validateFileLike(file) {
   if (!file || typeof file.name !== 'string' || !Number.isSafeInteger(file.size)) {
     throw new TypeError('附件不是有效文件');
   }
+  validateAttachmentName(file.name);
   validateAttachmentSize(file.size);
   return file;
 }
 
 export function validateAttachmentMetadata(value, taskId) {
-  if (!isPlainObject(value) || !hasExactKeys(value, ATTACHMENT_METADATA_KEYS)) {
-    throw new TypeError('附件元数据字段无效');
-  }
-  if (!isCanonicalUuidV4(taskId) || !isCanonicalUuidV4(value.id)) {
+  const metadata = readStrictMetadata(value);
+  if (!isCanonicalUuidV4(taskId) || !isCanonicalUuidV4(metadata.id)) {
     throw new TypeError('附件和任务 ID 必须是规范 UUID v4');
   }
-  validateAttachmentName(value.name);
-  validateAttachmentMime(value.mime);
-  validateAttachmentSize(value.size);
-  if (!ATTACHMENT_SOURCES.has(value.source)) throw new TypeError('附件来源无效');
-  const parsedPath = parseAttachmentRelativePath(value.relativePath);
-  if (parsedPath.taskId !== taskId || parsedPath.attachmentId !== value.id) {
+  validateAttachmentName(metadata.name);
+  validateAttachmentMime(metadata.mime);
+  validateAttachmentSize(metadata.size);
+  if (!ATTACHMENT_SOURCES.has(metadata.source)) throw new TypeError('附件来源无效');
+  const parsedPath = parseAttachmentRelativePath(metadata.relativePath);
+  if (parsedPath.taskId !== taskId || parsedPath.attachmentId !== metadata.id) {
     throw new TypeError('附件相对路径与任务或附件 ID 不匹配');
   }
-  validateCreatedAt(value.createdAt);
-  return value;
+  validateCreatedAt(metadata.createdAt);
+  return {
+    id:metadata.id,
+    name:metadata.name,
+    mime:metadata.mime,
+    size:metadata.size,
+    source:metadata.source,
+    relativePath:metadata.relativePath,
+    createdAt:metadata.createdAt,
+  };
 }

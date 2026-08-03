@@ -117,6 +117,10 @@ export function normalizeRect(rect, canvas) {
 }
 
 export function validateTask(task, { persisted=false } = {}) {
+  if (!task || typeof task !== 'object' || Array.isArray(task)
+    || Object.getPrototypeOf(task) !== Object.prototype) {
+    throw new TypeError('任务必须为普通对象');
+  }
   if (!task.pageKey || !task.instruction?.trim()) {
     throw new TypeError('任务缺少页面或修改说明');
   }
@@ -124,7 +128,7 @@ export function validateTask(task, { persisted=false } = {}) {
   if (![x, y, w, h].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1920 || y + h > 1080) {
     throw new RangeError('区域必须位于 1920×1080 画布内');
   }
-  if (!persisted && Object.hasOwn(task, 'attachments')) {
+  if (!persisted && 'attachments' in task) {
     throw new TypeError('请求任务不得直接提供 attachments');
   }
   if (persisted && Object.hasOwn(task, 'attachments')) {
@@ -134,14 +138,15 @@ export function validateTask(task, { persisted=false } = {}) {
     }
     const ids = new Set();
     const paths = new Set();
-    for (const attachment of task.attachments) {
-      validateAttachmentMetadata(attachment, task.id);
+    const attachments = task.attachments.map(attachment => validateAttachmentMetadata(attachment, task.id));
+    for (const attachment of attachments) {
       if (ids.has(attachment.id) || paths.has(attachment.relativePath)) {
         throw new TypeError('持久化 attachments 不得重复');
       }
       ids.add(attachment.id);
       paths.add(attachment.relativePath);
     }
+    task.attachments = attachments;
   }
   return task;
 }
