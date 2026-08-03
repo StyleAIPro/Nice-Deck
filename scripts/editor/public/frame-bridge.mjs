@@ -1,4 +1,8 @@
 import { normalizeRect } from '/editor/protocol.mjs';
+import {
+  MAX_ATTACHMENTS,
+  validateFileLike,
+} from '/editor/attachment-protocol.mjs';
 
 const FRAME_INSTANCE_ID = crypto.randomUUID();
 const RUNTIME_CONTRACT = Object.freeze({
@@ -244,6 +248,18 @@ style.textContent = `
   [data-region-popover] label{display:block;margin-bottom:8px;font-size:12px;font-weight:700;color:#5f6268}
   [data-region-popover] textarea{display:block;width:100%;min-height:88px;resize:vertical;padding:10px 11px;border:1px solid #c9cbd0;border-radius:8px;outline:none;color:#191919;background:#fff;font:inherit;font-size:14px;line-height:1.5;box-sizing:border-box}
   [data-region-popover] textarea:focus{border-color:#c7000b;box-shadow:0 0 0 3px rgba(199,0,11,.10)}
+  [data-attachment-controls]{display:flex;align-items:center;gap:8px;margin-top:10px}
+  [data-attachment-choose]{min-height:32px;padding:0 11px;border:1px solid #c9cbd0;border-radius:7px;background:#fff;color:#34363a;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+  [data-attachment-hint]{color:#777b82;font-size:12px}
+  [data-attachment-list]{display:grid;gap:6px;max-height:156px;margin:8px 0 0;padding:0;overflow:auto;list-style:none}
+  [data-attachment-item]{display:grid;grid-template-columns:22px minmax(0,1fr) auto;align-items:center;gap:7px;padding:7px 8px;border:1px solid #e1e2e5;border-radius:7px;background:#f8f8f9}
+  [data-attachment-icon]{color:#777b82;text-align:center}
+  [data-attachment-detail]{min-width:0}
+  [data-attachment-name]{display:block;overflow:hidden;color:#34363a;font-size:12px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+  [data-attachment-size]{display:block;color:#777b82;font-size:11px}
+  [data-attachment-remove]{width:26px;height:26px;padding:0;border:0;border-radius:5px;background:transparent;color:#777b82;font:700 16px/1 sans-serif;cursor:pointer}
+  [data-attachment-remove]:hover{background:#ececef;color:#b42318}
+  [data-attachment-choose]:disabled,[data-attachment-remove]:disabled{cursor:wait;opacity:.55}
   [data-region-actions]{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:12px}
   [data-region-actions] button{min-height:34px;padding:0 14px;border-radius:7px;border:1px solid #d7d8dc;background:#fff;color:#34363a;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
   [data-region-actions] [data-region-submit]{border-color:#c7000b;background:#c7000b;color:#fff}
@@ -528,6 +544,45 @@ async function captureSnapshot(canvas, rect) {
   }
 }
 
+function formatAttachmentSize(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KiB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function setRegionStatus(status, message, state = 'info') {
+  status.dataset.state = state;
+  status.textContent = message;
+}
+
+function pastedImageName(sequence, date = new Date()) {
+  const pad = value => String(value).padStart(2, '0');
+  const day = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
+  const time = `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  return `pasted-image-${day}-${time}-${String(sequence).padStart(3, '0')}.png`;
+}
+
+async function normalizePastedImage(file, name) {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('浏览器无法处理剪贴板图片');
+    context.drawImage(bitmap, 0, 0);
+    const blob = await new Promise((resolvePromise, reject) => {
+      canvas.toBlob(value => {
+        if (value) resolvePromise(value);
+        else reject(new Error('浏览器无法重新编码剪贴板图片'));
+      }, 'image/png');
+    });
+    return new File([blob], name, { type:'image/png', lastModified:Date.now() });
+  } finally {
+    bitmap.close();
+  }
+}
+
 function openPopover(canvas, screenRect, candidates) {
   removePopover();
   const selection = document.createElement('div');
@@ -544,6 +599,23 @@ function openPopover(canvas, screenRect, candidates) {
   textarea.placeholder = '例如：把标题缩短，并将数据卡片改成红色强调';
   textarea.required = true;
   label.append(textarea);
+  const attachmentInput = document.createElement('input');
+  attachmentInput.type = 'file';
+  attachmentInput.multiple = true;
+  attachmentInput.hidden = true;
+  attachmentInput.dataset.attachmentInput = '';
+  const attachmentControls = document.createElement('div');
+  attachmentControls.dataset.attachmentControls = '';
+  const attachmentChoose = document.createElement('button');
+  attachmentChoose.type = 'button';
+  attachmentChoose.dataset.attachmentChoose = '';
+  attachmentChoose.textContent = '选择文件';
+  const attachmentHint = document.createElement('span');
+  attachmentHint.dataset.attachmentHint = '';
+  attachmentHint.textContent = '也可直接粘贴图片';
+  attachmentControls.append(attachmentChoose, attachmentHint);
+  const attachmentList = document.createElement('ul');
+  attachmentList.dataset.attachmentList = '';
   const status = document.createElement('p');
   status.dataset.regionStatus = '';
   status.setAttribute('role', 'status');
@@ -558,14 +630,147 @@ function openPopover(canvas, screenRect, candidates) {
   submit.dataset.regionSubmit = '';
   submit.textContent = '添加任务';
   actions.append(cancel, submit);
-  popover.append(label, status, actions);
+  popover.append(label, attachmentInput, attachmentControls, attachmentList, status, actions);
   document.body.append(selection, popover);
   positionPopover(popover, screenRect);
   textarea.focus({ preventScroll: true });
 
   const normalized = normalizeRect(screenRect, canvas.getBoundingClientRect());
   const requestId = crypto.randomUUID();
-  activePopover = { canvas, selection, popover, requestId, submitting: false };
+  activePopover = {
+    canvas, selection, popover, requestId, submitting:false, processing:0,
+    attachments:[], pasteSequence:0,
+  };
+
+  const updateAttachmentControls = () => {
+    if (!activePopover || activePopover.popover !== popover) return;
+    const disabled = activePopover.submitting;
+    attachmentInput.disabled = disabled;
+    attachmentChoose.disabled = disabled;
+    submit.disabled = disabled || activePopover.processing > 0;
+    for (const button of attachmentList.querySelectorAll('[data-attachment-remove]')) {
+      button.disabled = disabled;
+    }
+  };
+
+  const renderAttachments = () => {
+    attachmentList.replaceChildren();
+    for (const item of activePopover?.attachments ?? []) {
+      const row = document.createElement('li');
+      row.dataset.attachmentItem = '';
+      row.dataset.attachmentClientId = item.clientId;
+      const icon = document.createElement('span');
+      icon.dataset.attachmentIcon = '';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = item.file.type.startsWith('image/') ? '▧' : '▤';
+      const detail = document.createElement('span');
+      detail.dataset.attachmentDetail = '';
+      const name = document.createElement('span');
+      name.dataset.attachmentName = '';
+      name.title = item.file.name;
+      name.textContent = item.file.name;
+      const size = document.createElement('span');
+      size.dataset.attachmentSize = '';
+      size.textContent = formatAttachmentSize(item.file.size);
+      detail.append(name, size);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.dataset.attachmentRemove = '';
+      remove.setAttribute('aria-label', `删除附件 ${item.file.name}`);
+      remove.textContent = '×';
+      remove.addEventListener('click', () => {
+        if (!activePopover || activePopover.submitting) return;
+        activePopover.attachments = activePopover.attachments
+          .filter(candidate => candidate.clientId !== item.clientId);
+        renderAttachments();
+        setRegionStatus(status, `已删除附件 ${item.file.name}`);
+      });
+      row.append(icon, detail, remove);
+      attachmentList.append(row);
+    }
+    updateAttachmentControls();
+    positionPopover(popover, screenRect);
+  };
+
+  const appendFiles = (files, source) => {
+    if (!activePopover || activePopover.submitting) return 0;
+    let added = 0;
+    let errorMessage = '';
+    for (const file of files) {
+      if (activePopover.attachments.length >= MAX_ATTACHMENTS) {
+        errorMessage = `每个任务最多 ${MAX_ATTACHMENTS} 个附件`;
+        break;
+      }
+      try {
+        validateFileLike(file);
+        activePopover.attachments.push({ clientId:crypto.randomUUID(), file, source });
+        added += 1;
+      } catch (error) {
+        errorMessage = error.message || '附件无效';
+      }
+    }
+    renderAttachments();
+    if (errorMessage) setRegionStatus(status, errorMessage, 'error');
+    else if (added > 0) setRegionStatus(status, `已添加 ${added} 个附件`);
+    return added;
+  };
+
+  attachmentChoose.addEventListener('click', () => {
+    if (!activePopover?.submitting) attachmentInput.click();
+  });
+  attachmentInput.addEventListener('change', () => {
+    appendFiles([...attachmentInput.files], 'selected');
+    attachmentInput.value = '';
+  });
+  textarea.addEventListener('paste', event => {
+    if (!activePopover || activePopover.submitting) return;
+    const images = [...(event.clipboardData?.items ?? [])]
+      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .map(item => item.getAsFile())
+      .filter(Boolean);
+    if (images.length === 0) return;
+    event.preventDefault();
+    const popoverState = activePopover;
+    popoverState.processing += 1;
+    updateAttachmentControls();
+    void (async () => {
+      try {
+        setRegionStatus(status, '正在处理粘贴图片…', 'pending');
+        let added = 0;
+        let pasteError = false;
+        for (const image of images) {
+          if (activePopover !== popoverState || popoverState.submitting) return;
+          if (popoverState.attachments.length >= MAX_ATTACHMENTS) {
+            setRegionStatus(status, `每个任务最多 ${MAX_ATTACHMENTS} 个附件`, 'error');
+            pasteError = true;
+            break;
+          }
+          try {
+            popoverState.pasteSequence += 1;
+            const file = await normalizePastedImage(
+              image,
+              pastedImageName(popoverState.pasteSequence),
+            );
+            if (activePopover !== popoverState || popoverState.submitting) return;
+            const appended = appendFiles([file], 'pasted');
+            added += appended;
+            if (appended === 0) pasteError = true;
+          } catch (error) {
+            if (activePopover === popoverState) {
+              setRegionStatus(status, error.message || '粘贴图片处理失败', 'error');
+            }
+            pasteError = true;
+          }
+        }
+        if (added > 0 && !pasteError && activePopover === popoverState) {
+          setRegionStatus(status, `已添加 ${added} 张粘贴图片`);
+        }
+      } finally {
+        popoverState.processing -= 1;
+        if (activePopover === popoverState) updateAttachmentControls();
+      }
+    })();
+  });
 
   const cancelPopover = () => {
     if (!activePopover?.submitting) removePopover();
@@ -588,13 +793,16 @@ function openPopover(canvas, screenRect, candidates) {
       return;
     }
     activePopover.submitting = true;
+    const submittingPopover = activePopover;
     textarea.disabled = true;
     cancel.disabled = true;
     submit.disabled = true;
+    updateAttachmentControls();
     submit.textContent = '正在提交…';
     status.dataset.state = 'pending';
     status.textContent = '正在生成区域快照…';
     const snapshot = await captureSnapshot(canvas, normalized);
+    if (activePopover !== submittingPopover) return;
     if (!snapshot) status.textContent = '区域截图失败，将继续提交无快照任务。';
     else status.textContent = '正在记录任务…';
     parent.postMessage({
@@ -607,6 +815,11 @@ function openPopover(canvas, screenRect, candidates) {
         candidates,
       },
       snapshot,
+      attachments:submittingPopover.attachments.map(item => ({
+        clientId:item.clientId,
+        source:item.source,
+        file:item.file,
+      })),
     }, location.origin);
   });
 }
@@ -1177,6 +1390,8 @@ function onParentMessage(event) {
     const submit = popover.querySelector('[data-region-submit]');
     const textarea = popover.querySelector('textarea');
     const cancel = popover.querySelector('[data-region-cancel]');
+    const attachmentInput = popover.querySelector('[data-attachment-input]');
+    const attachmentChoose = popover.querySelector('[data-attachment-choose]');
     if (event.data.ok) {
       const completedPopover = activePopover;
       activePopover.submitting = false;
@@ -1193,6 +1408,11 @@ function onParentMessage(event) {
       textarea.disabled = false;
       cancel.disabled = false;
       submit.disabled = false;
+      attachmentInput.disabled = false;
+      attachmentChoose.disabled = false;
+      for (const button of popover.querySelectorAll('[data-attachment-remove]')) {
+        button.disabled = false;
+      }
       submit.textContent = '重试';
       textarea.focus({ preventScroll: true });
     }

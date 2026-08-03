@@ -124,6 +124,29 @@ function snapshotByteLength(snapshot) {
   return Math.floor(match[1].length * 3 / 4) - padding;
 }
 
+function dataUrlToBlob(snapshot) {
+  if (snapshot === null) return null;
+  if (typeof snapshot !== 'string') throw new TypeError('区域快照格式无效');
+  const match = snapshot.match(/^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/);
+  if (!match) throw new TypeError('区域快照格式无效');
+  const binary = atob(match[1]);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type:'image/png' });
+}
+
+function taskFormData(payload, snapshot, attachments, expectedRevision) {
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...payload,
+    expectedRevision,
+    attachmentSources:attachments.map(item => item.source),
+  })], { type:'application/json' }), 'task.json');
+  if (snapshot !== null) form.append('snapshot', dataUrlToBlob(snapshot), 'region.png');
+  for (const item of attachments) form.append('attachment', item.file, item.file.name);
+  return form;
+}
+
 function updatePageBadges() {
   const counts = new Map();
   for (const task of tasks) counts.set(task.pageKey, (counts.get(task.pageKey) ?? 0) + 1);
@@ -484,10 +507,15 @@ async function submitManualActions(message) {
 }
 
 async function createRegionTask(message) {
-  const { requestId, payload, snapshot = null } = message;
+  const { requestId, payload, snapshot = null, attachments = [] } = message;
   if (typeof requestId !== 'string' || createRequests.has(requestId)) return;
   createRequests.add(requestId);
   try {
+    if (!Array.isArray(attachments) || attachments.length > 8
+      || attachments.some(item => !item || !['selected', 'pasted'].includes(item.source)
+        || !(item.file instanceof File))) {
+      throw new TypeError('附件提交数据无效');
+    }
     let result;
     let submittedSnapshot = snapshot;
     let revisionRetried = false;
@@ -497,8 +525,7 @@ async function createRegionTask(message) {
       try {
         result = await requestJson('/api/tasks', {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ expectedRevision: revision, ...payload, snapshot: submittedSnapshot }),
+          body: taskFormData(payload, submittedSnapshot, attachments, revision),
         });
       } catch (error) {
         if (error.code === 'SNAPSHOT_TOO_LARGE' && submittedSnapshot !== null && !snapshotDropped) {
@@ -506,7 +533,7 @@ async function createRegionTask(message) {
           snapshotDropped = true;
           continue;
         }
-        if (error.status === 409 && !revisionRetried) {
+        if (error.status === 409 && error.code === 'REVISION_CONFLICT' && !revisionRetried) {
           revisionRetried = true;
           await loadSession();
           continue;
@@ -518,7 +545,11 @@ async function createRegionTask(message) {
     upsertTask(result.task);
     postRegionResult(requestId, { ok: true, taskId: result.task.id, snapshotDropped });
   } catch (error) {
-    postRegionResult(requestId, { ok: false, message: error.message || '任务提交失败' });
+    postRegionResult(requestId, {
+      ok:false,
+      code:error.code,
+      message:error.message || '任务提交失败',
+    });
   } finally {
     createRequests.delete(requestId);
   }
