@@ -151,6 +151,7 @@ test('Node helper wrapper 精确透传四个附件事务命令', async () => {
   const taskId = '423e4567-e89b-42d3-a456-426614174000';
   const files = [{
     id:'623e4567-e89b-42d3-a456-426614174000', suffix:'.png', size:8,
+    sha256:sha256('png-data'),
   }];
   try {
     await io.publishAttachments({ uploadId, taskId, files });
@@ -492,6 +493,7 @@ test('附件 publish 使用专用有界超时且未知 ACK 一律保守标记已
   const taskId = '423e4567-e89b-42d3-a456-426614174000';
   const files = [{
     id:'623e4567-e89b-42d3-a456-426614174000', suffix:'.png', size:8,
+    sha256:sha256('png-data'),
   }];
   const payload = { uploadId, taskId, files };
 
@@ -641,6 +643,7 @@ test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', 
   const taskId = '423e4567-e89b-42d3-a456-426614174000';
   const files = [{
     id:'623e4567-e89b-42d3-a456-426614174000', suffix:'.png', size:8,
+    sha256:sha256('png-data'),
   }];
   const publishPayload = { uploadId, taskId, files };
 

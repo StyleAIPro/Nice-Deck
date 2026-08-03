@@ -152,8 +152,14 @@ class SidecarAttachmentIOTest(unittest.TestCase):
         (upload / f"{ATTACHMENT_ID}.png").write_bytes(first)
         (upload / f"{SECOND_ATTACHMENT_ID}.txt").write_bytes(second)
         return upload, [
-            {"id": ATTACHMENT_ID, "suffix": ".png", "size": len(first)},
-            {"id": SECOND_ATTACHMENT_ID, "suffix": ".txt", "size": len(second)},
+            {
+                "id": ATTACHMENT_ID, "suffix": ".png", "size": len(first),
+                "sha256": hashlib.sha256(first).hexdigest(),
+            },
+            {
+                "id": SECOND_ATTACHMENT_ID, "suffix": ".txt", "size": len(second),
+                "sha256": hashlib.sha256(second).hexdigest(),
+            },
         ]
 
     def test_legacy_bind_creates_and_binds_real_attachment_directories(self):
@@ -270,6 +276,7 @@ class SidecarAttachmentIOTest(unittest.TestCase):
                 "taskId": TASK_ID,
                 "files": [{
                     "id": ATTACHMENT_ID, "suffix": ".png", "size": 1,
+                    "sha256": hashlib.sha256(b"x").hexdigest(),
                 }],
             }),
             lambda: helper.discard_attachment_upload({"uploadId": UPLOAD_ID}),
@@ -317,6 +324,20 @@ class SidecarAttachmentIOTest(unittest.TestCase):
             b"png-data",
         )
 
+    def test_publish_rejects_same_size_rewrite_after_writer_receipt(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        target = upload / f"{ATTACHMENT_ID}.png"
+        target.write_bytes(b"forged!!")
+
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.publish_attachments({
+                "uploadId": UPLOAD_ID,
+                "taskId": TASK_ID,
+                "files": files,
+            })
+        self.assertTrue(upload.is_dir())
+
     def test_publish_refuses_existing_task_or_unverified_receipt_without_mutation(self):
         helper, session, _ = self.make_bound_helper()
         upload, files = self.stage_files(session)
@@ -344,6 +365,12 @@ class SidecarAttachmentIOTest(unittest.TestCase):
                 "uploadId": UPLOAD_ID,
                 "taskId": TASK_ID,
                 "files": [{**files[0], "path": "/tmp/forged"}, files[1]],
+            })
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.publish_attachments({
+                "uploadId": UPLOAD_ID,
+                "taskId": TASK_ID,
+                "files": [{**files[0], "sha256": "0" * 64}, files[1]],
             })
         self.assertTrue(upload.is_dir())
 
@@ -679,6 +706,7 @@ class SidecarAttachmentIOTest(unittest.TestCase):
                         "uploadId": UPLOAD_ID, "taskId": TASK_ID,
                         "files": [{
                             "id": ATTACHMENT_ID, "suffix": ".png", "size": 1,
+                            "sha256": hashlib.sha256(b"x").hexdigest(),
                         }],
                     }),
                     lambda: helper.discard_attachment_upload({"uploadId": UPLOAD_ID}),
@@ -747,8 +775,14 @@ class SidecarAttachmentIOTest(unittest.TestCase):
                     "uploadId": UPLOAD_ID,
                     "taskId": TASK_ID,
                     "files": [
-                        {"id": ATTACHMENT_ID, "suffix": ".png", "size": 8},
-                        {"id": SECOND_ATTACHMENT_ID, "suffix": ".txt", "size": 5},
+                        {
+                            "id": ATTACHMENT_ID, "suffix": ".png", "size": 8,
+                            "sha256": hashlib.sha256(b"png-data").hexdigest(),
+                        },
+                        {
+                            "id": SECOND_ATTACHMENT_ID, "suffix": ".txt", "size": 5,
+                            "sha256": hashlib.sha256(b"notes").hexdigest(),
+                        },
                     ],
                 })
 

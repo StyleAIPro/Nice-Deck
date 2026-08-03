@@ -84,11 +84,15 @@ def _validate_publish_files(value):
     normalized = []
     ids = set()
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"id", "suffix", "size"}:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"id", "suffix", "size", "sha256"}
+        ):
             raise SidecarIOError("附件回执格式无效")
         attachment_id = _require_uuid(item["id"], "attachmentId")
         suffix = item["suffix"]
         size = item["size"]
+        digest = item["sha256"]
         if not isinstance(suffix, str) or not re.fullmatch(r"\.[a-z0-9]{1,16}", suffix):
             raise SidecarIOError("附件扩展名无效")
         if (
@@ -97,10 +101,15 @@ def _validate_publish_files(value):
             or not 0 < size <= MAX_ATTACHMENT_BYTES
         ):
             raise SidecarIOError("附件大小回执无效")
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise SidecarIOError("附件 SHA-256 回执无效")
         if attachment_id in ids:
             raise SidecarIOError("附件回执 ID 不得重复")
         ids.add(attachment_id)
-        normalized.append({"id": attachment_id, "suffix": suffix, "size": size})
+        normalized.append({
+            "id": attachment_id, "suffix": suffix, "size": size,
+            "sha256": digest,
+        })
     return normalized
 
 
@@ -383,6 +392,11 @@ def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
                     if receipt is None or held.st_size != receipt["size"]:
                         raise SidecarIOError("附件文件与可信 writer 回执不一致")
                 baseline = _capture_file_baseline(directory_fd, fd)
+                if (
+                    expected is not None
+                    and baseline["sha256"] != receipt["sha256"]
+                ):
+                    raise SidecarIOError("附件内容与可信 writer SHA-256 回执不一致")
             except Exception:
                 if fd is not None:
                     os.close(fd)
