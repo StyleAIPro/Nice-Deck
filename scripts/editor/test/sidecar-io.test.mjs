@@ -79,8 +79,14 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
     });
     const binding = await io.bindSession({ deckName:'deck.html', sessionId, sessionName, create:false });
     assert.deepEqual(Object.keys(binding.identities).sort(), [
-      'attachmentStaging', 'attachments', 'backups', 'session', 'snapshots',
-      'transactions', 'writeErrors',
+      'backups', 'session', 'snapshots', 'transactions', 'writeErrors',
+    ]);
+    assert.deepEqual((await readdir(session)).sort(), [
+      'backups', 'session.json', 'snapshots', 'transactions', 'write-errors',
+    ]);
+    const attachmentBinding = await io.bindAttachments();
+    assert.deepEqual(Object.keys(attachmentBinding.identities).sort(), [
+      'attachmentStaging', 'attachments',
     ]);
     assert.deepEqual(
       (await readdir(join(session, 'attachments'))).sort(),

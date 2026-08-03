@@ -754,6 +754,7 @@ function persistentBoundary(project, root, binding, io) {
       'project', 'root', 'session', 'snapshots', 'backups', 'transactions', 'writeErrors',
       'attachments', 'attachmentStaging',
     ]
+      .filter(name => boundary[name])
       .map(name => [name, Object.fromEntries(
         ['path', 'realPath', 'dev', 'ino'].map(key => [key, boundary[name][key]]),
       )]),
@@ -909,14 +910,21 @@ async function initializePersistentSidecar(deckPath) {
         persistedState = null;
       }
     }
-    const sidecarBoundary = persistentBoundary(project, root, binding, io);
-    sidecarBoundary.sessionId = entry.sessionId;
+    const recoveryBoundary = persistentBoundary(project, root, binding, io);
+    recoveryBoundary.sessionId = entry.sessionId;
     if (entry.status === 'active') {
       persistedState = await recoverRegisteredTransaction(
-        deckPath, persistedState, sidecarBoundary,
+        deckPath, persistedState, recoveryBoundary,
       );
       currentFingerprint = (await io.hashDeck()).fingerprint;
     }
+    const attachmentBinding = await io.bindAttachments();
+    binding = {
+      ...binding,
+      identities:{ ...binding.identities, ...attachmentBinding.identities },
+    };
+    const sidecarBoundary = persistentBoundary(project, root, binding, io);
+    sidecarBoundary.sessionId = entry.sessionId;
     return {
       sidecarBoundary,
       entry,

@@ -170,6 +170,7 @@ class PersistentSidecarIO {
   bindSession({ deckName, sessionId, sessionName, create=false }) {
     return this.#request('bind-session', { deckName, sessionId, sessionName, create });
   }
+  bindAttachments() { return this.#request('bind-attachments', {}); }
   readSession({ missingOk=false } = {}) {
     return this.#request('read-session', { missingOk });
   }

@@ -2097,6 +2097,17 @@ test('重启按 durable record 收敛 old、candidate 与 third 状态后才清�
         candidateBytes,
         sessionFingerprint:current.sessionFingerprint,
       });
+      if (process.platform === 'darwin') {
+        assert.notEqual(await realpath(root), root, 'macOS 临时目录应覆盖 /var 路径别名');
+        const registry = JSON.parse(await readFile(join(fixture.sidecarRoot, 'sessions.json')));
+        const record = JSON.parse(await readFile(fixture.transaction));
+        assert.equal(record.deckPath, fixture.deckPath, 'producer 保持项目词法路径');
+        assert.equal(
+          registry.sessions[fixture.sessionId].deckRealPath,
+          await realpath(fixture.deckPath),
+          'registry 独立保存 realpath 绑定',
+        );
+      }
       let app;
       try {
         app = await startServer({
@@ -2185,6 +2196,31 @@ test('启动拒绝 forged/stale transaction 且发现阶段保持 sidecar 只读
     await unlink(fixture.transaction);
     await symlink(outsideRecord, fixture.transaction);
     await runRejectedStartup(fixture);
+  });
+
+  await t.test('backup symlink 恢复验证失败前不得创建 attachments', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-backup-symlink-readonly-'));
+    const fixture = await createPendingTransactionFixture({
+      root, diskBytes:candidateBytes, oldBytes, candidateBytes,
+      sessionFingerprint:sha256(oldBytes),
+    });
+    const outsideBackup = join(root, 'outside-backup.html');
+    await writeFile(outsideBackup, oldBytes);
+    await unlink(fixture.backup);
+    await symlink(outsideBackup, fixture.backup);
+    const realDeckPath = await realpath(fixture.deckPath);
+    const realSessionDir = await realpath(fixture.sessionDir);
+    const realBackup = join(realSessionDir, 'backups', `deck-${fixture.oldFingerprint}.html`);
+    const statePath = join(fixture.sessionDir, 'session.json');
+    const state = JSON.parse(await readFile(statePath));
+    state.deckPath = realDeckPath;
+    await writeFile(statePath, JSON.stringify(state));
+    const record = JSON.parse(await readFile(fixture.transaction));
+    record.deckPath = realDeckPath;
+    record.sessionDir = realSessionDir;
+    record.backup = realBackup;
+    await writeFile(fixture.transaction, JSON.stringify(record));
+    await runRejectedStartup({ ...fixture, deckPath:realDeckPath });
   });
 
   await t.test('无效 record 验证前不得创建任何 session 子目录', async () => {

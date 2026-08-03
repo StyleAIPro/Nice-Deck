@@ -8,6 +8,7 @@ identity，再只使用单层文件名和 ``dir_fd`` 完成。这样即使路径
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import ctypes
 import errno
 import hashlib
@@ -18,6 +19,7 @@ import stat
 import sys
 import uuid
 import re
+import struct
 
 try:
     import fcntl
@@ -38,6 +40,9 @@ ATTACHMENT_FILE_RE = re.compile(
 )
 MAX_ATTACHMENTS = 8
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+STATX_MNT_ID = 0x00001000
+AT_EMPTY_PATH = 0x00001000
+AT_STATX_DONT_SYNC = 0x00004000
 
 
 class SidecarIOError(RuntimeError):
@@ -126,8 +131,53 @@ def _open_directory(identity: dict) -> int:
     return fd
 
 
+def _linux_mount_id(fd, *, statx_call=None):
+    """从 statx(AT_EMPTY_PATH) 读取 Linux mount ID，避免同设备 bind mount。"""
+    if statx_call is None:
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            statx_call = libc.statx
+        except AttributeError as error:  # pragma: no cover - 现代 glibc 都应提供
+            raise SidecarIOError("Linux 缺少 statx，无法验证 mount identity") from error
+        statx_call.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p,
+        ]
+        statx_call.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(256)
+    result = statx_call(
+        fd, b"", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_MNT_ID, buffer
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise SidecarIOError(
+            f"statx mount identity 失败：{os.strerror(error_number)}"
+        )
+    mask = struct.unpack_from("=I", buffer.raw, 0)[0]
+    if not mask & STATX_MNT_ID:
+        raise SidecarIOError("statx 未返回 mount identity")
+    return struct.unpack_from("=Q", buffer.raw, 144)[0]
+
+
+def _mount_identity(fd):
+    info = os.fstat(fd)
+    if sys.platform == "darwin":
+        mount_id = os.fstatvfs(fd).f_fsid
+    elif sys.platform.startswith("linux"):
+        mount_id = _linux_mount_id(fd)
+    else:  # pragma: no cover - 当前生产平台为 macOS/Linux
+        raise SidecarIOError("当前平台不支持可靠 mount identity")
+    return (str(info.st_dev), str(mount_id))
+
+
+def _require_same_mount(parent_fd, child_fd):
+    if _mount_identity(parent_fd) != _mount_identity(child_fd):
+        raise SidecarIOError("拒绝跨 mount 边界访问 sidecar 子路径")
+
+
 def _read_fd_file(directory_fd: int, name: str, *, max_bytes=None) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
     fd = os.open(_require_name(name), flags, dir_fd=directory_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -155,7 +205,10 @@ def _open_child_directory(parent_fd: int, name: str, *, create: bool) -> int:
             os.fsync(parent_fd)
         except FileExistsError:
             pass
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         fd = os.open(name, flags, dir_fd=parent_fd)
     except OSError as error:
@@ -163,6 +216,11 @@ def _open_child_directory(parent_fd: int, name: str, *, create: bool) -> int:
     if not stat.S_ISDIR(os.fstat(fd).st_mode):
         os.close(fd)
         raise SidecarIOError("sidecar 子路径不是常规目录")
+    try:
+        _require_same_mount(parent_fd, fd)
+    except Exception:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -229,6 +287,47 @@ def _open_managed_attachment_directory(parent_fd, name):
         raise SidecarIOError(f"无法安全打开附件目录：{error}") from error
 
 
+def _file_stat_signature(info):
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_nlink,
+        info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def _hash_open_file(fd):
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(fd, 1024 * 1024, offset)
+        if not chunk:
+            return digest.hexdigest()
+        digest.update(chunk)
+        offset += len(chunk)
+
+
+def _capture_file_baseline(directory_fd, fd):
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise SidecarIOError("附件必须是 link count 为 1 的常规文件")
+    if not 1 <= before.st_size <= MAX_ATTACHMENT_BYTES:
+        raise SidecarIOError("附件文件大小超出允许范围")
+    _require_same_mount(directory_fd, fd)
+    mount_identity = _mount_identity(fd)
+    digest = _hash_open_file(fd)
+    after = os.fstat(fd)
+    if (
+        _file_stat_signature(before) != _file_stat_signature(after)
+        or mount_identity != _mount_identity(fd)
+    ):
+        raise SidecarIOError("附件文件在读取 baseline 期间变化")
+    return {
+        "signature": _file_stat_signature(after),
+        "mountIdentity": mount_identity,
+        "sha256": digest,
+        "size": after.st_size,
+    }
+
+
 def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
     """只接受 UUID+短扩展名的常规文件；可保持 fd 供发布后复核。"""
     expected = None if expected is None else {
@@ -246,7 +345,10 @@ def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
             before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             if not stat.S_ISREG(before.st_mode):
                 raise SidecarIOError("附件目录只允许非符号链接的常规文件")
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            flags = (
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
             fd = os.open(name, flags, dir_fd=directory_fd)
             try:
                 held = os.fstat(fd)
@@ -260,6 +362,7 @@ def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
                     receipt = expected.get(name)
                     if receipt is None or held.st_size != receipt["size"]:
                         raise SidecarIOError("附件文件与可信 writer 回执不一致")
+                baseline = _capture_file_baseline(directory_fd, fd)
             except Exception:
                 if fd is not None:
                     os.close(fd)
@@ -267,50 +370,135 @@ def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
                 raise
             names.append(name)
             if keep_open:
-                opened[name] = fd
+                opened[name] = {"fd": fd, "baseline": baseline}
             else:
                 os.close(fd)
         if expected is not None and set(names) != set(expected):
             raise SidecarIOError("staging 文件集合与可信 writer 回执不一致")
         return names, opened
     except Exception:
-        for fd in opened.values():
-            os.close(fd)
+        for record in opened.values():
+            os.close(record["fd"])
         raise
 
 
 def _verify_open_attachment_files(directory_fd, opened):
     if set(os.listdir(directory_fd)) != set(opened):
         raise SidecarIOError("附件目录在发布期间发生变化")
-    for name, fd in opened.items():
-        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        held = os.fstat(fd)
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_dev != held.st_dev
-            or current.st_ino != held.st_ino
-            or current.st_size != held.st_size
-        ):
-            raise SidecarIOError("附件文件 identity 在发布期间变化")
+    for name, record in opened.items():
+        fd = record["fd"]
+        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        flags = (
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        current_fd = os.open(name, flags, dir_fd=directory_fd)
+        try:
+            current = os.fstat(current_fd)
+            held = os.fstat(fd)
+            if (
+                not stat.S_ISREG(entry.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or entry.st_dev != current.st_dev
+                or entry.st_ino != current.st_ino
+                or current.st_dev != held.st_dev
+                or current.st_ino != held.st_ino
+                or current.st_size != held.st_size
+            ):
+                raise SidecarIOError("附件文件 identity 在发布期间变化")
+            _require_same_mount(directory_fd, current_fd)
+            if _mount_identity(current_fd) != record["baseline"]["mountIdentity"]:
+                raise SidecarIOError("附件文件 mount identity 在发布期间变化")
+        finally:
+            os.close(current_fd)
+        if _capture_file_baseline(directory_fd, fd) != record["baseline"]:
+            raise SidecarIOError("附件文件内容或元数据在发布期间变化")
 
 
-def _remove_managed_attachment_directory(parent_fd, name):
+def _fsync_attachment_publish_parents(staging_fd, attachments_fd):
+    errors = []
+    for label, fd in (("staging", staging_fd), ("attachments", attachments_fd)):
+        try:
+            os.fsync(fd)
+        except OSError as error:
+            errors.append(f"{label}: {error}")
+    if errors:
+        raise SidecarIOError(
+            "附件已发布但父目录 fsync 失败：" + "; ".join(errors),
+            stage="attachment-directory-fsync", committed=True,
+            commit_scope="attachments", code="ATTACHMENT_PUBLISH_FAILED",
+        )
+
+
+def _directory_stat_signature(info):
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+        info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def _capture_managed_attachment_directory(parent_fd, name):
     try:
         directory_fd = _open_managed_attachment_directory(parent_fd, name)
     except FileNotFoundError:
-        return {"removed": False}
+        return None
+    files = {}
     try:
-        names, _ = _scan_attachment_files(directory_fd)
-        if not PersistentHelper._same_directory_entry(parent_fd, name, directory_fd):
-            raise SidecarIOError("待删除附件目录 identity 已变化")
-        for child in names:
+        names, files = _scan_attachment_files(directory_fd, keep_open=True)
+        info = os.fstat(directory_fd)
+        return {
+            "name": name,
+            "fd": directory_fd,
+            "signature": _directory_stat_signature(info),
+            "mountIdentity": _mount_identity(directory_fd),
+            "names": names,
+            "files": files,
+        }
+    except Exception:
+        for file_record in files.values():
+            os.close(file_record["fd"])
+        os.close(directory_fd)
+        raise
+
+
+def _close_managed_attachment_record(record):
+    if record is None:
+        return
+    for file_record in record["files"].values():
+        os.close(file_record["fd"])
+    os.close(record["fd"])
+
+
+def _verify_managed_attachment_record(parent_fd, record):
+    directory_fd = record["fd"]
+    if not PersistentHelper._same_directory_entry(
+        parent_fd, record["name"], directory_fd
+    ):
+        raise SidecarIOError("附件目录 identity 在预检后变化")
+    current = os.fstat(directory_fd)
+    if (
+        _directory_stat_signature(current) != record["signature"]
+        or _mount_identity(directory_fd) != record["mountIdentity"]
+        or set(os.listdir(directory_fd)) != set(record["names"])
+    ):
+        raise SidecarIOError("附件目录树在预检后变化")
+    _verify_open_attachment_files(directory_fd, record["files"])
+
+
+def _remove_preflighted_attachment_directory(parent_fd, record):
+    _verify_managed_attachment_record(parent_fd, record)
+    directory_fd = record["fd"]
+    try:
+        for child in record["names"]:
             os.unlink(child, dir_fd=directory_fd)
         os.fsync(directory_fd)
-        if not PersistentHelper._same_directory_entry(parent_fd, name, directory_fd):
+        if not PersistentHelper._same_directory_entry(
+            parent_fd, record["name"], directory_fd
+        ):
             raise SidecarIOError("待删除附件目录 identity 已变化")
-        os.rmdir(name, dir_fd=parent_fd)
+        os.rmdir(record["name"], dir_fd=parent_fd)
         try:
-            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            os.stat(record["name"], dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
@@ -321,8 +509,47 @@ def _remove_managed_attachment_directory(parent_fd, name):
         raise
     except OSError as error:
         raise SidecarIOError(f"无法安全删除附件目录：{error}", stage="unlink") from error
+
+
+def _remove_managed_attachment_directory(parent_fd, name):
+    record = _capture_managed_attachment_directory(parent_fd, name)
+    if record is None:
+        return {"removed": False}
+    try:
+        os.fsync(parent_fd)
+        _verify_managed_attachment_record(parent_fd, record)
+        return _remove_preflighted_attachment_directory(parent_fd, record)
     finally:
-        os.close(directory_fd)
+        _close_managed_attachment_record(record)
+
+
+@contextmanager
+def _attachment_lifecycle_lock(attachments_fd):
+    if fcntl is None:
+        raise SidecarIOError(
+            "当前平台不支持附件生命周期锁",
+            code="SIDECAR_LOCK_UNSUPPORTED", status_code=500,
+        )
+    try:
+        fcntl.flock(attachments_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        raise SidecarIOError(
+            "附件 writer 或生命周期命令正在运行",
+            stage="attachment-lock", code="ATTACHMENT_BUSY", status_code=409,
+        ) from error
+    try:
+        yield
+    finally:
+        fcntl.flock(attachments_fd, fcntl.LOCK_UN)
+
+
+def _with_attachment_lifecycle_lock(method):
+    def locked(self, payload):
+        if self.attachments_fd is None or self.attachment_staging_fd is None:
+            raise SidecarIOError("尚未绑定可信 attachments")
+        with _attachment_lifecycle_lock(self.attachments_fd):
+            return method(self, payload)
+    return locked
 
 
 def _decode_json_file(directory_fd: int, name: str, *, max_bytes=None):
@@ -447,59 +674,6 @@ class PersistentHelper:
         if self.session_fd is None:
             raise SidecarIOError("尚未绑定可信 session")
 
-    def _preflight_active_session(self, entry, deck_name, session_id, session_name):
-        """active session 完成只读结构校验后才允许升级附件目录。"""
-        try:
-            state = _decode_json_file(
-                self.session_fd, "session.json", max_bytes=MAX_SESSION_BYTES
-            )
-            if (
-                not isinstance(state, dict)
-                or state.get("sessionId") != session_id
-                or os.path.realpath(str(state.get("deckPath", ""))) != entry["deckRealPath"]
-                or not isinstance(state.get("deckFingerprint"), str)
-                or not re.fullmatch(r"[a-f0-9]{64}", state["deckFingerprint"])
-            ):
-                raise SidecarIOError("active session.json 未绑定 registry/Deck")
-            session_path = str(Path(self.root_identity["path"]) / session_name)
-            for name in sorted(os.listdir(self.transactions_fd)):
-                if not name.endswith(".json"):
-                    continue
-                transaction_id = name[:-5]
-                _require_uuid(transaction_id, "transactionId")
-                info = os.stat(
-                    name, dir_fd=self.transactions_fd, follow_symlinks=False
-                )
-                if not stat.S_ISREG(info.st_mode):
-                    raise SidecarIOError("transaction record 必须是非符号链接的常规文件")
-                record = _decode_json_file(self.transactions_fd, name)
-                expected_keys = {
-                    "backup", "candidateFingerprint", "deckPath", "oldFingerprint",
-                    "sessionDir", "sessionId", "transactionId", "version",
-                }
-                if (
-                    not isinstance(record, dict)
-                    or set(record) != expected_keys
-                    or record.get("version") != 1
-                    or record.get("sessionId") != session_id
-                    or record.get("transactionId") != transaction_id
-                    or record.get("deckPath") != entry["deckRealPath"]
-                    or record.get("sessionDir") != session_path
-                    or not isinstance(record.get("oldFingerprint"), str)
-                    or not re.fullmatch(r"[a-f0-9]{64}", record["oldFingerprint"])
-                    or not isinstance(record.get("candidateFingerprint"), str)
-                    or not re.fullmatch(r"[a-f0-9]{64}", record["candidateFingerprint"])
-                    or record.get("backup") != str(
-                        Path(session_path) / "backups"
-                        / f"{Path(deck_name).stem}-{record.get('oldFingerprint')}.html"
-                    )
-                ):
-                    raise SidecarIOError("transaction record 未严格绑定当前 session/Deck")
-        except SidecarIOError:
-            raise
-        except (OSError, json.JSONDecodeError) as error:
-            raise SidecarIOError(f"无法安全预检 active session：{error}") from error
-
     def bind_session(self, payload):
         if not isinstance(payload, dict) or set(payload) != {
             "deckName", "sessionId", "sessionName", "create"
@@ -565,15 +739,6 @@ class PersistentHelper:
             self.write_errors_fd = _open_child_directory(
                 self.session_fd, "write-errors", create=payload["create"]
             )
-            if entry["status"] == "active":
-                self._preflight_active_session(entry, deck_name, session_id, session_name)
-            # 旧 session 也在完成 registry/session 验证后升级出真实附件目录。
-            self.attachments_fd = _open_child_directory(
-                self.session_fd, "attachments", create=True
-            )
-            self.attachment_staging_fd = _open_child_directory(
-                self.attachments_fd, ".staging", create=True
-            )
         except Exception:
             for name in (
                 "attachment_staging_fd", "attachments_fd", "write_errors_fd",
@@ -594,11 +759,6 @@ class PersistentHelper:
             ("backups", self.backups_fd, f"{session_name}/backups"),
             ("transactions", self.transactions_fd, f"{session_name}/transactions"),
             ("writeErrors", self.write_errors_fd, f"{session_name}/write-errors"),
-            ("attachments", self.attachments_fd, f"{session_name}/attachments"),
-            (
-                "attachmentStaging", self.attachment_staging_fd,
-                f"{session_name}/attachments/.staging",
-            ),
         ):
             identities[key] = self._identity_for_fd(
                 fd,
@@ -606,6 +766,47 @@ class PersistentHelper:
                 str(Path(self.root_identity["realPath"]) / child),
             )
         return {"sessionName": session_name, "identities": identities}
+
+    def bind_attachments(self, payload):
+        if payload != {}:
+            raise SidecarIOError("bind-attachments payload 格式无效")
+        self._require_bound_session()
+        self._assert_bound_directories(include_attachments=False)
+        for name in ("attachment_staging_fd", "attachments_fd"):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+        try:
+            self.attachments_fd = _open_child_directory(
+                self.session_fd, "attachments", create=True
+            )
+            # 任务 5 writer 必须打开同一 attachments identity 并持有同一 flock。
+            with _attachment_lifecycle_lock(self.attachments_fd):
+                self.attachment_staging_fd = _open_child_directory(
+                    self.attachments_fd, ".staging", create=True
+                )
+        except Exception:
+            for name in ("attachment_staging_fd", "attachments_fd"):
+                fd = getattr(self, name)
+                if fd is not None:
+                    os.close(fd)
+                    setattr(self, name, None)
+            raise
+        identities = {}
+        for key, fd, child in (
+            ("attachments", self.attachments_fd, f"{self.session_name}/attachments"),
+            (
+                "attachmentStaging", self.attachment_staging_fd,
+                f"{self.session_name}/attachments/.staging",
+            ),
+        ):
+            identities[key] = self._identity_for_fd(
+                fd,
+                str(Path(self.root_identity["path"]) / child),
+                str(Path(self.root_identity["realPath"]) / child),
+            )
+        return {"identities": identities}
 
     def read_session(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"missingOk"}:
@@ -622,35 +823,52 @@ class PersistentHelper:
 
     @staticmethod
     def _same_directory_entry(parent_fd, name, expected_fd):
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        held = os.fstat(expected_fd)
-        return (
-            stat.S_ISDIR(current.st_mode)
-            and current.st_dev == held.st_dev
-            and current.st_ino == held.st_ino
-        )
+        current_fd = _open_child_directory(parent_fd, name, create=False)
+        try:
+            current = os.fstat(current_fd)
+            held = os.fstat(expected_fd)
+            return (
+                stat.S_ISDIR(current.st_mode)
+                and current.st_dev == held.st_dev
+                and current.st_ino == held.st_ino
+                and _mount_identity(current_fd) == _mount_identity(expected_fd)
+            )
+        finally:
+            os.close(current_fd)
 
-    def assert_bound(self, payload):
-        if payload != {}:
-            raise SidecarIOError("assert-bound payload 格式无效")
-        self._require_bound_session()
-        checks = (
+    def _assert_bound_directories(self, *, include_attachments):
+        checks = [
             (self.project_fd, ".huawei-deck-editor", self.root_fd),
             (self.root_fd, self.session_name, self.session_fd),
             (self.session_fd, "snapshots", self.snapshots_fd),
             (self.session_fd, "backups", self.backups_fd),
             (self.session_fd, "transactions", self.transactions_fd),
             (self.session_fd, "write-errors", self.write_errors_fd),
-            (self.session_fd, "attachments", self.attachments_fd),
-            (self.attachments_fd, ".staging", self.attachment_staging_fd),
-        )
+        ]
+        if include_attachments:
+            if self.attachments_fd is None or self.attachment_staging_fd is None:
+                raise SidecarIOError("尚未绑定可信 attachments")
+            checks.extend((
+                (self.session_fd, "attachments", self.attachments_fd),
+                (self.attachments_fd, ".staging", self.attachment_staging_fd),
+            ))
         try:
             if not all(self._same_directory_entry(*check) for check in checks):
                 raise SidecarIOError("sidecar 目录身份已变化")
         except OSError as error:
             raise SidecarIOError("sidecar 目录身份已变化") from error
+
+    def assert_bound(self, payload):
+        if payload != {}:
+            raise SidecarIOError("assert-bound payload 格式无效")
+        self._require_bound_session()
+        self._assert_bound_directories(
+            include_attachments=self.attachments_fd is not None
+            or self.attachment_staging_fd is not None
+        )
         return {"safe": True}
 
+    @_with_attachment_lifecycle_lock
     def publish_attachments(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"uploadId", "taskId", "files"}:
             raise SidecarIOError("publish-attachments payload 格式无效")
@@ -672,8 +890,8 @@ class PersistentHelper:
                 self.attachment_staging_fd, upload_id, upload_fd
             ):
                 raise SidecarIOError("staging upload identity 已变化")
-            for fd in opened.values():
-                os.fsync(fd)
+            for record in opened.values():
+                os.fsync(record["fd"])
             os.fsync(upload_fd)
             _rename_directory_no_replace(
                 self.attachment_staging_fd, upload_id,
@@ -683,8 +901,9 @@ class PersistentHelper:
             if not self._same_directory_entry(self.attachments_fd, task_id, upload_fd):
                 raise SidecarIOError("原子发布后的 task 附件目录 identity 不一致")
             _verify_open_attachment_files(upload_fd, opened)
-            os.fsync(self.attachment_staging_fd)
-            os.fsync(self.attachments_fd)
+            _fsync_attachment_publish_parents(
+                self.attachment_staging_fd, self.attachments_fd
+            )
             return [{
                 "id": item["id"],
                 "relativePath": f"attachments/{task_id}/{item['id']}{item['suffix']}",
@@ -711,11 +930,12 @@ class PersistentHelper:
                 code="ATTACHMENT_PUBLISH_FAILED" if renamed else "UNSAFE_SIDECAR_IO",
             ) from error
         finally:
-            for fd in opened.values():
-                os.close(fd)
+            for record in opened.values():
+                os.close(record["fd"])
             if upload_fd is not None:
                 os.close(upload_fd)
 
+    @_with_attachment_lifecycle_lock
     def discard_attachment_upload(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"uploadId"}:
             raise SidecarIOError("discard-attachment-upload payload 格式无效")
@@ -725,6 +945,7 @@ class PersistentHelper:
             _require_uuid(payload["uploadId"], "uploadId"),
         )
 
+    @_with_attachment_lifecycle_lock
     def delete_task_attachments(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"taskId"}:
             raise SidecarIOError("delete-task-attachments payload 格式无效")
@@ -736,17 +957,21 @@ class PersistentHelper:
 
     @staticmethod
     def _preflight_managed_directories(parent_fd):
-        directory_ids = []
-        for name in sorted(os.listdir(parent_fd)):
-            _require_uuid(name)
-            directory_fd = _open_managed_attachment_directory(parent_fd, name)
-            try:
-                _scan_attachment_files(directory_fd)
-            finally:
-                os.close(directory_fd)
-            directory_ids.append(name)
-        return directory_ids
+        records = []
+        try:
+            for name in sorted(os.listdir(parent_fd)):
+                _require_uuid(name)
+                record = _capture_managed_attachment_directory(parent_fd, name)
+                if record is None:
+                    raise SidecarIOError("附件目录在预检期间消失")
+                records.append(record)
+            return records
+        except Exception:
+            for record in records:
+                _close_managed_attachment_record(record)
+            raise
 
+    @_with_attachment_lifecycle_lock
     def reconcile_attachments(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"referencedTaskIds"}:
             raise SidecarIOError("reconcile-attachments payload 格式无效")
@@ -767,32 +992,55 @@ class PersistentHelper:
             self.attachments_fd, ".staging", self.attachment_staging_fd
         ):
             raise SidecarIOError("attachment staging identity 已变化")
-        task_ids = []
-        for name in sorted(attachment_entries - {".staging"}):
-            _require_uuid(name, "task attachment directory")
-            directory_fd = _open_managed_attachment_directory(self.attachments_fd, name)
-            try:
-                _scan_attachment_files(directory_fd)
-            finally:
-                os.close(directory_fd)
-            task_ids.append(name)
-        upload_ids = self._preflight_managed_directories(self.attachment_staging_fd)
+        task_records = []
+        upload_records = []
+        try:
+            for name in sorted(attachment_entries - {".staging"}):
+                _require_uuid(name, "task attachment directory")
+                record = _capture_managed_attachment_directory(self.attachments_fd, name)
+                if record is None:
+                    raise SidecarIOError("task 附件目录在预检期间消失")
+                task_records.append(record)
+            upload_records = self._preflight_managed_directories(
+                self.attachment_staging_fd
+            )
 
-        discarded = 0
-        for upload_id in upload_ids:
-            if _remove_managed_attachment_directory(
-                self.attachment_staging_fd, upload_id
-            )["removed"]:
+            # 在任何破坏前持久化观察点并整体复核；测试可在此之前注入竞态。
+            os.fsync(self.attachments_fd)
+            expected_attachment_entries = {".staging"} | {
+                record["name"] for record in task_records
+            }
+            if set(os.listdir(self.attachments_fd)) != expected_attachment_entries:
+                raise SidecarIOError("attachments 根在完整预检后变化")
+            if set(os.listdir(self.attachment_staging_fd)) != {
+                record["name"] for record in upload_records
+            }:
+                raise SidecarIOError("staging 根在完整预检后变化")
+            for record in task_records:
+                _verify_managed_attachment_record(self.attachments_fd, record)
+            for record in upload_records:
+                _verify_managed_attachment_record(
+                    self.attachment_staging_fd, record
+                )
+
+            discarded = 0
+            for record in upload_records:
+                _remove_preflighted_attachment_directory(
+                    self.attachment_staging_fd, record
+                )
                 discarded += 1
-        deleted = 0
-        for task_id in task_ids:
-            if task_id in referenced_ids:
-                continue
-            if _remove_managed_attachment_directory(
-                self.attachments_fd, task_id
-            )["removed"]:
+            deleted = 0
+            for record in task_records:
+                if record["name"] in referenced_ids:
+                    continue
+                _remove_preflighted_attachment_directory(
+                    self.attachments_fd, record
+                )
                 deleted += 1
-        return {"discardedUploads": discarded, "deletedTasks": deleted}
+            return {"discardedUploads": discarded, "deletedTasks": deleted}
+        finally:
+            for record in [*upload_records, *task_records]:
+                _close_managed_attachment_record(record)
 
     def read_transaction(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"transactionId"}:
@@ -1010,6 +1258,7 @@ class PersistentHelper:
         if "root" in payload:
             self.root_identity = _require_identity(payload["root"])
             self.root_fd = _open_directory(self.root_identity)
+            _require_same_mount(self.project_fd, self.root_fd)
         else:
             root_name = ".huawei-deck-editor"
             try:
@@ -1279,6 +1528,8 @@ class PersistentHelper:
             return self.activate_session(request["payload"])
         if command == "bind-session":
             return self.bind_session(request["payload"])
+        if command == "bind-attachments":
+            return self.bind_attachments(request["payload"])
         if command == "read-session":
             return self.read_session(request["payload"])
         if command == "assert-bound":

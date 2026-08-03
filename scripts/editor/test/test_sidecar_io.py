@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,9 +63,28 @@ class SidecarAtomicWriteTest(unittest.TestCase):
             self.assertEqual(error.code, "SNAPSHOT_WRITE_FAILED")
             self.assertEqual((Path(directory) / "snapshot.png").read_bytes(), b"png")
 
+    def test_linux_statx_mount_id_boundary_requires_reported_mount_id(self):
+        def fake_statx(_fd, _path, _flags, _mask, buffer):
+            raw = bytearray(256)
+            struct.pack_into("=I", raw, 0, 0x00001000)
+            struct.pack_into("=Q", raw, 144, 987654321)
+            sidecar_io.ctypes.memmove(sidecar_io.ctypes.addressof(buffer), bytes(raw), len(raw))
+            return 0
+
+        self.assertEqual(
+            sidecar_io._linux_mount_id(42, statx_call=fake_statx), 987654321
+        )
+
+        def missing_mount_id(_fd, _path, _flags, _mask, buffer):
+            sidecar_io.ctypes.memset(sidecar_io.ctypes.addressof(buffer), 0, 256)
+            return 0
+
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            sidecar_io._linux_mount_id(42, statx_call=missing_mount_id)
+
 
 class SidecarAttachmentIOTest(unittest.TestCase):
-    def make_bound_helper(self):
+    def make_bound_helper(self, *, bind_attachments=True):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         project = Path(temporary.name)
@@ -106,12 +126,21 @@ class SidecarAttachmentIOTest(unittest.TestCase):
             "root": directory_identity(root),
         })
         self.addCleanup(helper.close)
-        binding = helper.bind_session({
+        core_binding = helper.bind_session({
             "deckName": "deck.html",
             "sessionId": SESSION_ID,
             "sessionName": session_name,
             "create": False,
         })
+        if not bind_attachments:
+            return helper, session, core_binding
+        attachment_binding = helper.bind_attachments({})
+        binding = {
+            "sessionName": core_binding["sessionName"],
+            "identities": {
+                **core_binding["identities"], **attachment_binding["identities"]
+            },
+        }
         return helper, session, binding
 
     @staticmethod
@@ -195,6 +224,26 @@ class SidecarAttachmentIOTest(unittest.TestCase):
                 "files": [{**files[0], "path": "/tmp/forged"}, files[1]],
             })
         self.assertTrue(upload.is_dir())
+
+    def test_receipt_size_mismatch_is_rejected_before_hashing_file(self):
+        _, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        directory_fd = os.open(
+            upload, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        forged = [{**files[0], "size": files[0]["size"] + 1}, files[1]]
+        try:
+            with mock.patch.object(
+                sidecar_io,
+                "_hash_open_file",
+                side_effect=AssertionError("不应读取 size 已不匹配的文件"),
+            ):
+                with self.assertRaises(sidecar_io.SidecarIOError):
+                    sidecar_io._scan_attachment_files(
+                        directory_fd, expected=forged, keep_open=True
+                    )
+        finally:
+            os.close(directory_fd)
 
     def test_discard_upload_and_delete_task_only_remove_verified_uuid_directory(self):
         helper, session, _ = self.make_bound_helper()
@@ -296,6 +345,284 @@ class SidecarAttachmentIOTest(unittest.TestCase):
                         operation()
                     self.assertEqual(caught.exception.code, "UNSAFE_SIDECAR_IO")
                 self.assertEqual(list(outside.iterdir()), [])
+
+    def test_publish_rejects_hardlinked_staged_file(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        outside_link = session.parent / "outside-hardlink.png"
+        os.link(upload / f"{ATTACHMENT_ID}.png", outside_link)
+
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.publish_attachments({
+                "uploadId": UPLOAD_ID, "taskId": TASK_ID, "files": files,
+            })
+
+        self.assertTrue(upload.is_dir())
+        self.assertEqual(outside_link.read_bytes(), b"png-data")
+
+    def test_publish_detects_equal_size_rewrite_during_atomic_rename(self):
+        helper, session, _ = self.make_bound_helper()
+        _, files = self.stage_files(session)
+        real_rename = sidecar_io._rename_directory_no_replace
+
+        def rename_then_rewrite(*args):
+            real_rename(*args)
+            target = session / "attachments" / TASK_ID / f"{ATTACHMENT_ID}.png"
+            target.write_bytes(b"PNG-DATA")
+
+        with mock.patch.object(
+            sidecar_io, "_rename_directory_no_replace", side_effect=rename_then_rewrite
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.publish_attachments({
+                    "uploadId": UPLOAD_ID, "taskId": TASK_ID, "files": files,
+                })
+
+        self.assertTrue(caught.exception.committed)
+        self.assertEqual(caught.exception.commit_scope, "attachments")
+
+    def test_publish_attempts_both_parent_fsyncs_and_aggregates_failures(self):
+        helper, session, _ = self.make_bound_helper()
+        self.stage_files(session)
+        real_fsync = sidecar_io.os.fsync
+        parent_calls = []
+
+        def fail_both_parents(fd):
+            if fd == helper.attachment_staging_fd:
+                parent_calls.append("staging")
+                raise OSError("injected staging parent fsync failure")
+            if fd == helper.attachments_fd:
+                parent_calls.append("attachments")
+                raise OSError("injected attachments parent fsync failure")
+            return real_fsync(fd)
+
+        with mock.patch.object(sidecar_io.os, "fsync", side_effect=fail_both_parents):
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.publish_attachments({
+                    "uploadId": UPLOAD_ID,
+                    "taskId": TASK_ID,
+                    "files": [
+                        {"id": ATTACHMENT_ID, "suffix": ".png", "size": 8},
+                        {"id": SECOND_ATTACHMENT_ID, "suffix": ".txt", "size": 5},
+                    ],
+                })
+
+        self.assertEqual(parent_calls, ["staging", "attachments"])
+        self.assertTrue(caught.exception.committed)
+        self.assertEqual(caught.exception.commit_scope, "attachments")
+        self.assertIn("staging", str(caught.exception))
+        self.assertIn("attachments", str(caught.exception))
+        self.assertTrue((session / "attachments" / TASK_ID).is_dir())
+
+    def test_reconcile_race_after_preflight_fails_before_any_partial_delete(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, _ = self.stage_files(session)
+        orphan = session / "attachments" / ORPHAN_TASK_ID
+        orphan.mkdir()
+        (orphan / f"{ATTACHMENT_ID}.png").write_bytes(b"orphan")
+        original_preflight = helper._preflight_managed_directories
+
+        def inject_after_preflight(parent_fd):
+            result = original_preflight(parent_fd)
+            (orphan / "unexpected-entry").write_bytes(b"race")
+            return result
+
+        with mock.patch.object(
+            helper, "_preflight_managed_directories", side_effect=inject_after_preflight
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError):
+                helper.reconcile_attachments({"referencedTaskIds": []})
+
+        self.assertTrue(upload.is_dir(), "全树复核失败前不得先清理 staging")
+        self.assertTrue(orphan.is_dir())
+
+    @unittest.skipIf(sidecar_io.fcntl is None, "当前平台不支持 flock")
+    def test_attachment_lifecycle_lock_blocks_destructive_command(self):
+        helper, session, _ = self.make_bound_helper()
+        task = session / "attachments" / TASK_ID
+        task.mkdir()
+        (task / f"{ATTACHMENT_ID}.png").write_bytes(b"keep")
+        competing_fd = os.open(
+            session / "attachments", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        sidecar_io.fcntl.flock(
+            competing_fd, sidecar_io.fcntl.LOCK_EX | sidecar_io.fcntl.LOCK_NB
+        )
+        try:
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.delete_task_attachments({"taskId": TASK_ID})
+        finally:
+            sidecar_io.fcntl.flock(competing_fd, sidecar_io.fcntl.LOCK_UN)
+            os.close(competing_fd)
+
+        self.assertEqual(caught.exception.code, "ATTACHMENT_BUSY")
+        self.assertTrue(task.is_dir())
+
+    def test_managed_directory_rejects_injected_mount_identity_mismatch(self):
+        helper, session, _ = self.make_bound_helper()
+        task = session / "attachments" / TASK_ID
+        task.mkdir()
+        (task / f"{ATTACHMENT_ID}.png").write_bytes(b"keep")
+        task_info = task.stat()
+        real_mount_identity = sidecar_io._mount_identity
+
+        def forged_mount_identity(fd):
+            identity = real_mount_identity(fd)
+            info = os.fstat(fd)
+            if info.st_dev == task_info.st_dev and info.st_ino == task_info.st_ino:
+                return (*identity, "injected-other-mount")
+            return identity
+
+        with mock.patch.object(
+            sidecar_io, "_mount_identity", side_effect=forged_mount_identity
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError):
+                helper.delete_task_attachments({"taskId": TASK_ID})
+
+        self.assertTrue(task.is_dir())
+
+    def test_bind_attachments_rejects_existing_mount_identity_mismatch(self):
+        for level in ("attachments", "staging"):
+            with self.subTest(level=level):
+                helper, session, _ = self.make_bound_helper(bind_attachments=False)
+                attachments = session / "attachments"
+                attachments.mkdir()
+                target = attachments
+                if level == "staging":
+                    target = attachments / ".staging"
+                    target.mkdir()
+                target_info = target.stat()
+                real_mount_identity = sidecar_io._mount_identity
+
+                def forged_mount_identity(fd):
+                    identity = real_mount_identity(fd)
+                    info = os.fstat(fd)
+                    if (
+                        info.st_dev == target_info.st_dev
+                        and info.st_ino == target_info.st_ino
+                    ):
+                        return (*identity, "injected-other-mount")
+                    return identity
+
+                with mock.patch.object(
+                    sidecar_io, "_mount_identity", side_effect=forged_mount_identity
+                ):
+                    with self.assertRaises(sidecar_io.SidecarIOError):
+                        helper.bind_attachments({})
+
+                self.assertTrue(target.is_dir())
+                if level == "attachments":
+                    self.assertFalse((attachments / ".staging").exists())
+
+    def test_staged_upload_rejects_injected_mount_identity_mismatch(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, _ = self.stage_files(session)
+        upload_info = upload.stat()
+        real_mount_identity = sidecar_io._mount_identity
+
+        def forged_mount_identity(fd):
+            identity = real_mount_identity(fd)
+            info = os.fstat(fd)
+            if info.st_dev == upload_info.st_dev and info.st_ino == upload_info.st_ino:
+                return (*identity, "injected-other-mount")
+            return identity
+
+        with mock.patch.object(
+            sidecar_io, "_mount_identity", side_effect=forged_mount_identity
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError):
+                helper.discard_attachment_upload({"uploadId": UPLOAD_ID})
+
+        self.assertTrue(upload.is_dir())
+
+    def test_capture_directory_closes_file_fds_when_final_mount_check_fails(self):
+        helper, session, _ = self.make_bound_helper()
+        task = session / "attachments" / TASK_ID
+        task.mkdir()
+        (task / f"{ATTACHMENT_ID}.png").write_bytes(b"keep")
+        task_info = task.stat()
+        real_mount_identity = sidecar_io._mount_identity
+        task_mount_calls = 0
+
+        def fail_final_directory_mount_check(fd):
+            nonlocal task_mount_calls
+            info = os.fstat(fd)
+            if info.st_dev == task_info.st_dev and info.st_ino == task_info.st_ino:
+                task_mount_calls += 1
+                if task_mount_calls == 3:
+                    raise sidecar_io.SidecarIOError("injected mount identity failure")
+            return real_mount_identity(fd)
+
+        before = len(os.listdir("/dev/fd"))
+        with mock.patch.object(
+            sidecar_io,
+            "_mount_identity",
+            side_effect=fail_final_directory_mount_check,
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError):
+                sidecar_io._capture_managed_attachment_directory(
+                    helper.attachments_fd, TASK_ID
+                )
+
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+    def test_verify_files_rejects_same_inode_entry_on_other_mount(self):
+        helper, session, _ = self.make_bound_helper()
+        task = session / "attachments" / TASK_ID
+        task.mkdir()
+        name = f"{ATTACHMENT_ID}.png"
+        target = task / name
+        target.write_bytes(b"keep")
+        target_info = target.stat()
+        directory_fd = os.open(task, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        _, opened = sidecar_io._scan_attachment_files(
+            directory_fd, keep_open=True
+        )
+        held_fd = opened[name]["fd"]
+        real_mount_identity = sidecar_io._mount_identity
+
+        def forged_reopened_mount_identity(fd):
+            identity = real_mount_identity(fd)
+            info = os.fstat(fd)
+            if (
+                fd != held_fd
+                and info.st_dev == target_info.st_dev
+                and info.st_ino == target_info.st_ino
+            ):
+                return (*identity, "injected-bind-mount")
+            return identity
+
+        try:
+            with mock.patch.object(
+                sidecar_io,
+                "_mount_identity",
+                side_effect=forged_reopened_mount_identity,
+            ):
+                with self.assertRaises(sidecar_io.SidecarIOError):
+                    sidecar_io._verify_open_attachment_files(directory_fd, opened)
+        finally:
+            os.close(held_fd)
+            os.close(directory_fd)
+
+    def test_unknown_file_open_uses_nonblock_before_fstat(self):
+        helper, session, _ = self.make_bound_helper()
+        task = session / "attachments" / TASK_ID
+        task.mkdir()
+        name = f"{ATTACHMENT_ID}.png"
+        (task / name).write_bytes(b"file")
+        directory_fd = os.open(task, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        real_open = sidecar_io.os.open
+
+        def require_nonblock(path, flags, *args, **kwargs):
+            if path == name and kwargs.get("dir_fd") == directory_fd:
+                self.assertTrue(flags & getattr(os, "O_NONBLOCK", 0))
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(sidecar_io.os, "open", side_effect=require_nonblock):
+                sidecar_io._scan_attachment_files(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 if __name__ == "__main__":
