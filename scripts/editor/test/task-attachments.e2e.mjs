@@ -190,3 +190,93 @@ test('提交锁定控件，服务失败后保留说明、选区与 File，重试
   ]);
   assert.deepEqual(resourceProblems, []);
 });
+
+test('粘贴图片转码期间快捷键不得提前提交，转码完成后才允许 POST', async t => {
+  const app = await startFixtureServer();
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(async () => {
+    await browser.close();
+    await app.close();
+  });
+  let taskPosts = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks') {
+      taskPosts += 1;
+    }
+  });
+  const popover = await openRegionPopover(page);
+  await popover.locator('textarea').fill('等待图片转码');
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    const frameWindow = frameElement.contentWindow;
+    const original = frameWindow.createImageBitmap.bind(frameWindow);
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    frameWindow.__releaseAttachmentBitmap = release;
+    frameWindow.createImageBitmap = async file => {
+      const bitmap = await original(file);
+      await gate;
+      return bitmap;
+    };
+  });
+  await popover.locator('textarea').evaluate(async textarea => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([blob], 'delayed.png', { type:'image/png' }));
+    textarea.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles:true, cancelable:true, clipboardData:transfer,
+    }));
+  });
+  await popover.locator('[data-region-submit]:disabled').waitFor({ state:'attached' });
+  await popover.locator('textarea').press('Control+Enter');
+  await page.waitForTimeout(150);
+  assert.equal(taskPosts, 0);
+  assert.match(await popover.locator('[data-region-status]').textContent(), /正在处理粘贴图片/);
+
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    frameElement.contentWindow.__releaseAttachmentBitmap();
+  });
+  await popover.locator('[data-attachment-item]').waitFor();
+  await popover.locator('[data-region-submit]').evaluate(button => button.click());
+  await popover.waitFor({ state:'detached', timeout:5_000 });
+  assert.equal(taskPosts, 1);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('旧弹窗迟到的 change 与 cancel 事件不得写入或关闭新弹窗', async t => {
+  const app = await startFixtureServer();
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(async () => {
+    await browser.close();
+    await app.close();
+  });
+  let popover = await openRegionPopover(page);
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    const document = frameElement.contentDocument;
+    const frameWindow = frameElement.contentWindow;
+    frameWindow.__staleAttachmentInput = document.querySelector('[data-attachment-input]');
+    frameWindow.__staleRegionCancel = document.querySelector('[data-region-cancel]');
+  });
+  await popover.locator('[data-region-cancel]').click();
+
+  await dragInFrame(page, { x:380, y:120 }, { x:560, y:260 });
+  popover = page.frameLocator('#deck-frame').locator('[data-region-popover]');
+  await popover.waitFor({ state:'visible' });
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    const frameWindow = frameElement.contentWindow;
+    const transfer = new frameWindow.DataTransfer();
+    transfer.items.add(new frameWindow.File(['stale'], 'stale.txt', { type:'text/plain' }));
+    Object.defineProperty(frameWindow.__staleAttachmentInput, 'files', {
+      value:transfer.files, configurable:true,
+    });
+    frameWindow.__staleAttachmentInput.dispatchEvent(new frameWindow.Event('change'));
+    frameWindow.__staleRegionCancel.click();
+  });
+  assert.equal(await popover.count(), 1);
+  assert.equal(await popover.locator('[data-attachment-item]').count(), 0);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});

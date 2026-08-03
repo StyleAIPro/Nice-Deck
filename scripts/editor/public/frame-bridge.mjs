@@ -641,21 +641,23 @@ function openPopover(canvas, screenRect, candidates) {
     canvas, selection, popover, requestId, submitting:false, processing:0,
     attachments:[], pasteSequence:0,
   };
+  const popoverState = activePopover;
 
   const updateAttachmentControls = () => {
-    if (!activePopover || activePopover.popover !== popover) return;
-    const disabled = activePopover.submitting;
+    if (activePopover !== popoverState) return;
+    const disabled = popoverState.submitting;
     attachmentInput.disabled = disabled;
     attachmentChoose.disabled = disabled;
-    submit.disabled = disabled || activePopover.processing > 0;
+    submit.disabled = disabled || popoverState.processing > 0;
     for (const button of attachmentList.querySelectorAll('[data-attachment-remove]')) {
       button.disabled = disabled;
     }
   };
 
   const renderAttachments = () => {
+    if (activePopover !== popoverState) return;
     attachmentList.replaceChildren();
-    for (const item of activePopover?.attachments ?? []) {
+    for (const item of popoverState.attachments) {
       const row = document.createElement('li');
       row.dataset.attachmentItem = '';
       row.dataset.attachmentClientId = item.clientId;
@@ -679,8 +681,8 @@ function openPopover(canvas, screenRect, candidates) {
       remove.setAttribute('aria-label', `删除附件 ${item.file.name}`);
       remove.textContent = '×';
       remove.addEventListener('click', () => {
-        if (!activePopover || activePopover.submitting) return;
-        activePopover.attachments = activePopover.attachments
+        if (activePopover !== popoverState || popoverState.submitting) return;
+        popoverState.attachments = popoverState.attachments
           .filter(candidate => candidate.clientId !== item.clientId);
         renderAttachments();
         setRegionStatus(status, `已删除附件 ${item.file.name}`);
@@ -693,17 +695,17 @@ function openPopover(canvas, screenRect, candidates) {
   };
 
   const appendFiles = (files, source) => {
-    if (!activePopover || activePopover.submitting) return 0;
+    if (activePopover !== popoverState || popoverState.submitting) return 0;
     let added = 0;
     let errorMessage = '';
     for (const file of files) {
-      if (activePopover.attachments.length >= MAX_ATTACHMENTS) {
+      if (popoverState.attachments.length >= MAX_ATTACHMENTS) {
         errorMessage = `每个任务最多 ${MAX_ATTACHMENTS} 个附件`;
         break;
       }
       try {
         validateFileLike(file);
-        activePopover.attachments.push({ clientId:crypto.randomUUID(), file, source });
+        popoverState.attachments.push({ clientId:crypto.randomUUID(), file, source });
         added += 1;
       } catch (error) {
         errorMessage = error.message || '附件无效';
@@ -716,21 +718,21 @@ function openPopover(canvas, screenRect, candidates) {
   };
 
   attachmentChoose.addEventListener('click', () => {
-    if (!activePopover?.submitting) attachmentInput.click();
+    if (activePopover === popoverState && !popoverState.submitting) attachmentInput.click();
   });
   attachmentInput.addEventListener('change', () => {
+    if (activePopover !== popoverState) return;
     appendFiles([...attachmentInput.files], 'selected');
     attachmentInput.value = '';
   });
   textarea.addEventListener('paste', event => {
-    if (!activePopover || activePopover.submitting) return;
+    if (activePopover !== popoverState || popoverState.submitting) return;
     const images = [...(event.clipboardData?.items ?? [])]
       .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
       .map(item => item.getAsFile())
       .filter(Boolean);
     if (images.length === 0) return;
     event.preventDefault();
-    const popoverState = activePopover;
     popoverState.processing += 1;
     updateAttachmentControls();
     void (async () => {
@@ -773,27 +775,36 @@ function openPopover(canvas, screenRect, candidates) {
   });
 
   const cancelPopover = () => {
-    if (!activePopover?.submitting) removePopover();
+    if (activePopover === popoverState && !popoverState.submitting) removePopover();
   };
   cancel.addEventListener('click', cancelPopover);
   popover.addEventListener('keydown', event => {
+    if (activePopover !== popoverState) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       cancelPopover();
     } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
+      if (popoverState.processing > 0) {
+        setRegionStatus(status, '正在处理粘贴图片，请稍候', 'pending');
+        return;
+      }
       popover.requestSubmit();
     }
   });
   popover.addEventListener('submit', async event => {
     event.preventDefault();
+    if (activePopover !== popoverState) return;
+    if (popoverState.processing > 0) {
+      setRegionStatus(status, '正在处理粘贴图片，请稍候', 'pending');
+      return;
+    }
     const instruction = textarea.value.trim();
-    if (!instruction || activePopover?.submitting) {
+    if (!instruction || popoverState.submitting) {
       if (!instruction) textarea.focus();
       return;
     }
-    activePopover.submitting = true;
-    const submittingPopover = activePopover;
+    popoverState.submitting = true;
     textarea.disabled = true;
     cancel.disabled = true;
     submit.disabled = true;
@@ -802,7 +813,7 @@ function openPopover(canvas, screenRect, candidates) {
     status.dataset.state = 'pending';
     status.textContent = '正在生成区域快照…';
     const snapshot = await captureSnapshot(canvas, normalized);
-    if (activePopover !== submittingPopover) return;
+    if (activePopover !== popoverState) return;
     if (!snapshot) status.textContent = '区域截图失败，将继续提交无快照任务。';
     else status.textContent = '正在记录任务…';
     parent.postMessage({
@@ -815,7 +826,7 @@ function openPopover(canvas, screenRect, candidates) {
         candidates,
       },
       snapshot,
-      attachments:submittingPopover.attachments.map(item => ({
+      attachments:popoverState.attachments.map(item => ({
         clientId:item.clientId,
         source:item.source,
         file:item.file,
