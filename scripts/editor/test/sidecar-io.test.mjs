@@ -123,7 +123,7 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
   }
 });
 
-test('Node helper wrapper 精确透传四个附件事务命令', async () => {
+test('Node helper wrapper 精确透传附件事务与只读验证命令', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -157,11 +157,17 @@ test('Node helper wrapper 精确透传四个附件事务命令', async () => {
   const discardFiles = files.map(file => ({
     ...file, identity:{ dev:'1', ino:'11', mountDev:'1', mountId:'10' },
   }));
+  const metadata = files.map(file => ({
+    id:file.id,
+    relativePath:`attachments/${taskId}/${file.id}${file.suffix}`,
+    size:file.size,
+  }));
   try {
     await io.publishAttachments({ uploadId, taskId, files });
     await io.discardAttachmentUpload({ uploadId, uploadIdentity, files:discardFiles });
     await io.deleteTaskAttachments({ taskId });
     await io.reconcileAttachments({ referencedTaskIds:[taskId] });
+    await io.verifyTaskAttachments({ taskId, files:metadata });
     assert.deepEqual(requests, [
       { command:'publish-attachments', payload:{ uploadId, taskId, files } },
       {
@@ -170,6 +176,7 @@ test('Node helper wrapper 精确透传四个附件事务命令', async () => {
       },
       { command:'delete-task-attachments', payload:{ taskId } },
       { command:'reconcile-attachments', payload:{ referencedTaskIds:[taskId] } },
+      { command:'verify-task-attachments', payload:{ taskId, files:metadata } },
     ]);
   } finally {
     await io.close();
@@ -653,6 +660,14 @@ test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', 
     sha256:sha256('png-data'),
   }];
   const publishPayload = { uploadId, taskId, files };
+  const verifyPayload = {
+    taskId,
+    files:files.map(file => ({
+      id:file.id,
+      relativePath:`attachments/${taskId}/${file.id}${file.suffix}`,
+      size:file.size,
+    })),
+  };
   const discardPayload = {
     uploadId,
     uploadIdentity:{ dev:'1', ino:'9', mountDev:'1', mountId:'10' },
@@ -836,6 +851,43 @@ test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', 
     await Promise.all([activeResult, queuedResult]);
     assert.equal(closedQuickly, true);
     assert.deepEqual(child.requestsWritten, ['assert-bound']);
+  });
+
+  await t.test('只读附件验证遇 helper death 保持未提交语义', async () => {
+    const child = fakeChild((current, request, callback) => callback?.());
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:50, attachmentTimeoutMs:100, skipReadyHandshake:true,
+    });
+    const active = io.verifyTaskAttachments(verifyPayload);
+    queueMicrotask(() => child.emit('close', 7));
+    await assert.rejects(active, error => (
+      error.code === 'SIDECAR_HELPER_CLOSED'
+        && error.committed === false
+        && error.commitScope === undefined
+    ));
+    await io.close();
+  });
+
+  await t.test('close 快速中止只读附件验证且返回未提交', async () => {
+    const child = fakeChild((current, request, callback) => callback?.());
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:100, attachmentTimeoutMs:100, skipReadyHandshake:true,
+    });
+    const active = io.verifyTaskAttachments(verifyPayload);
+    const activeResult = assert.rejects(active, error => (
+      error.code === 'SIDECAR_HELPER_CLOSED'
+        && error.committed === false
+        && error.commitScope === undefined
+    ));
+    const closedQuickly = await Promise.race([
+      io.close().then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 40)),
+    ]);
+    await activeResult;
+    assert.equal(closedQuickly, true);
+    assert.deepEqual(child.requestsWritten, ['verify-task-attachments']);
   });
 
   await t.test('child death 只把 active 附件标为未知提交，queued 附件保持未提交', async () => {

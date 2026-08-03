@@ -11,7 +11,7 @@ import {
   mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, unlink, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import WebSocket from 'ws';
 import { BridgeService } from '../bridge-service.mjs';
 import { startServer } from '../server.mjs';
@@ -180,6 +180,20 @@ async function createTask(app, overrides = {}) {
   });
   assert.equal(response.status, 201);
   return response.json();
+}
+
+async function createAttachedTask(app, contents = 'trusted attachment') {
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from(contents)]), 'reference.txt');
+  const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:form,
+  });
+  const result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  return result;
 }
 
 function validBundle() {
@@ -568,6 +582,126 @@ test('真实 multipart 创建附件任务，并仅在 API 与广播中派生绝�
   assert.match(persisted.tasks[0].attachments[0].relativePath, /^attachments\//);
   const session = await fetch(`${app.url}/api/session?token=secret`).then(value => value.json());
   assert.equal(Object.hasOwn(session.tasks[0].attachments[0], 'path'), false);
+});
+
+test('任务附件输出拒绝 task 目录、文件、集合或 size 被替换', async t => {
+  for (const target of ['task-directory', 'file', 'file-set', 'size']) {
+    await t.test(target, async t => {
+      const app = await makeApp(t);
+      const created = await createAttachedTask(app);
+      const attachment = created.task.attachments[0];
+      const taskDirectory = dirname(attachment.path);
+      const outside = join(app.sessionDir, '..', `outside-${target}`);
+      await mkdir(outside);
+
+      if (target === 'task-directory') {
+        await rename(taskDirectory, `${taskDirectory}.trusted`);
+        await writeFile(join(outside, basename(attachment.path)), 'outside directory target');
+        await symlink(outside, taskDirectory, 'dir');
+      } else if (target === 'file') {
+        await rename(attachment.path, `${attachment.path}.trusted`);
+        const outsideFile = join(outside, 'outside.txt');
+        await writeFile(outsideFile, 'outside file target');
+        await symlink(outsideFile, attachment.path);
+      } else if (target === 'file-set') {
+        await writeFile(
+          join(taskDirectory, '33333333-3333-4333-8333-333333333333.txt'),
+          'extra',
+        );
+      } else {
+        await writeFile(attachment.path, 'wrong-size');
+      }
+
+      for (const endpoint of [
+        '/api/tasks',
+        `/api/tasks/${created.task.id}`,
+      ]) {
+        const response = await fetch(`${app.url}${endpoint}?token=secret`);
+        const body = await response.json();
+        assert.equal(response.status, 500, `${target} ${endpoint}: ${JSON.stringify(body)}`);
+        assert.equal(body.code, 'UNSAFE_SIDECAR_IO');
+        assert.equal(body.committed, false);
+      }
+      if (target === 'task-directory' || target === 'file') {
+        assert.equal(
+          await readFile(join(outside, target === 'task-directory'
+            ? basename(attachment.path) : 'outside.txt'), 'utf8'),
+          target === 'task-directory' ? 'outside directory target' : 'outside file target',
+        );
+      }
+    });
+  }
+});
+
+test('已耐久的 action、task-updated 与 group 仅在可信附件验证后输出', async t => {
+  const app = await makeApp(t);
+  const created = await createAttachedTask(app);
+  const taskId = created.task.id;
+  const attachmentPath = created.task.attachments[0].path;
+  const outside = join(app.sessionDir, '..', 'outside-task-bearing-output.txt');
+  await rename(attachmentPath, `${attachmentPath}.trusted`);
+  await writeFile(outside, 'outside task-bearing output');
+  await symlink(outside, attachmentPath);
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  const requested = { ...action, taskId };
+
+  let commandPromise = nextMessage(editor);
+  let responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:1, taskId, actions:[requested] }),
+  });
+  let command = await commandPromise;
+  await prepareAndCommit(editor, command);
+  let response = await responsePromise;
+  let body = await response.json();
+  assert.equal(response.status, 500, JSON.stringify(body));
+  assert.equal(body.code, 'UNSAFE_SIDECAR_IO');
+  assert.equal(body.committed, true);
+  assert.equal(body.commitScope, 'session');
+  assert.equal(body.revision, 2);
+  assert.equal(app.session.revision, 2);
+  assert.equal(app.session.tasks[0].status, 'completed');
+  const groupId = app.session.groups[0].id;
+
+  commandPromise = nextMessage(editor);
+  responsePromise = fetch(`${app.url}/api/groups/${groupId}/undo?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:2 }),
+  });
+  command = await commandPromise;
+  await prepareAndCommit(editor, command);
+  response = await responsePromise;
+  body = await response.json();
+  assert.equal(response.status, 500, JSON.stringify(body));
+  assert.equal(body.code, 'UNSAFE_SIDECAR_IO');
+  assert.equal(body.committed, true);
+  assert.equal(body.commitScope, 'session');
+  assert.equal(body.revision, 3);
+  assert.equal(app.session.revision, 3);
+  assert.equal(app.session.groups[0].active, false);
+
+  commandPromise = nextMessage(editor);
+  responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:3, taskId, actions:[requested] }),
+  });
+  command = await commandPromise;
+  editor.send(JSON.stringify({
+    type:'actions-rejected', commandId:command.commandId,
+    code:'TARGET_AMBIGUOUS', failedActionId:requested.id,
+    candidates:[{ path:'0/1' }],
+  }));
+  response = await responsePromise;
+  body = await response.json();
+  assert.equal(response.status, 500, JSON.stringify(body));
+  assert.equal(body.code, 'UNSAFE_SIDECAR_IO');
+  assert.equal(body.committed, true);
+  assert.equal(body.commitScope, 'session');
+  assert.equal(body.revision, 4);
+  assert.equal(app.session.revision, 4);
+  assert.equal(app.session.tasks[0].status, 'needs-confirmation');
+  assert.equal(await readFile(outside, 'utf8'), 'outside task-bearing output');
 });
 
 test('任务路由拒绝未知媒体类型，multipart 限额错误不创建 task', async t => {

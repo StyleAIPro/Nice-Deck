@@ -35,7 +35,7 @@ async function fixture(options = {}) {
     attachments:await directoryIdentity(attachments),
     attachmentStaging:await directoryIdentity(staging),
   };
-  const calls = { publish:[], discard:[], delete:[] };
+  const calls = { publish:[], discard:[], delete:[], verify:[] };
   const sidecarIO = {
     async publishAttachments(payload) {
       calls.publish.push(payload);
@@ -83,6 +83,10 @@ async function fixture(options = {}) {
       calls.delete.push(taskId);
       await rm(join(attachments, taskId), { recursive:true, force:true });
       return { removed:true };
+    },
+    async verifyTaskAttachments(payload) {
+      calls.verify.push(payload);
+      return { safe:true };
     },
     ...options.sidecarIO,
   };
@@ -145,6 +149,7 @@ async function persistentFixture(randomUUID) {
       return io.discardAttachmentUpload(payload);
     },
     deleteTaskAttachments:payload => io.deleteTaskAttachments(payload),
+    verifyTaskAttachments:payload => io.verifyTaskAttachments(payload),
   };
   const store = new AttachmentStore({
     sidecarBoundary:{
@@ -233,6 +238,16 @@ test('真实 writer 流式 stage、publish 并仅在 serialize 派生绝对 path
     join(fx.attachments, TASK_ID, `${staged.id}.png`),
   );
   assert.equal(Object.hasOwn(task.attachments[0], 'path'), false);
+  const verified = await fx.store.serializeTaskVerified(task);
+  assert.equal(verified.attachments[0].path, serialized.attachments[0].path);
+  assert.deepEqual(fx.calls.verify, [{
+    taskId:TASK_ID,
+    files:[{
+      id:staged.id,
+      relativePath:descriptors[0].relativePath,
+      size:bytes.length,
+    }],
+  }]);
 });
 
 test('stage 调用独立 spawnAttachmentWriter 注入点并按序执行多文件', async t => {

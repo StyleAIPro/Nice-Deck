@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
@@ -93,7 +93,7 @@ async function startServerProcess(t) {
     await rm(root, { recursive: true, force: true });
   });
   const ready = JSON.parse(await firstLine(child.stdout, child));
-  return { child, ready };
+  return { child, ready, root };
 }
 
 function connect(url) {
@@ -229,6 +229,45 @@ test('Agent CLI 经真实服务完成 status/tasks/task/apply/undo', async t => 
   assert.equal(undoMessage.type, 'apply-actions');
   await prepareAndCommit(editor, undoMessage);
   assert.equal(parseJsonOutput(await undo.result).revision, 3);
+});
+
+test('Agent CLI 对被 outside symlink 替换的附件目标 fail-closed', async t => {
+  const { ready, root } = await startServerProcess(t);
+  const common = ['--url', ready.url, '--token', ready.token];
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    expectedRevision:0,
+    pageKey:'page-001-cli-symlink', pageIndex:1, pageLabel:'CLI',
+    rect:{ x:1, y:2, w:3, h:4 }, instruction:'安全验证',
+    attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from('trusted')]), 'trusted.txt');
+  const response = await fetch(`${ready.url}/api/tasks`, {
+    method:'POST', headers:{ authorization:`Bearer ${ready.token}` }, body:form,
+  });
+  assert.equal(response.status, 201);
+  const created = await response.json();
+  const taskDirectory = dirname(created.task.attachments[0].path);
+  const outside = join(root, 'outside-cli');
+  await rename(taskDirectory, `${taskDirectory}.trusted`);
+  await mkdir(outside);
+  await writeFile(join(outside, basename(created.task.attachments[0].path)), 'outside');
+  await symlink(outside, taskDirectory, 'dir');
+
+  for (const command of [
+    [...common, 'tasks'],
+    [...common, 'task', created.task.id],
+  ]) {
+    const result = await runCli(command);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, '');
+    const error = JSON.parse(result.stderr);
+    assert.equal(error.code, 'UNSAFE_SIDECAR_IO');
+  }
+  assert.equal(
+    await readFile(join(outside, basename(created.task.attachments[0].path)), 'utf8'),
+    'outside',
+  );
 });
 
 test('apply 数组经真实服务以 taskId null 记录未关联动作组', async t => {

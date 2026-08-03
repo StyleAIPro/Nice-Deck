@@ -338,6 +338,75 @@ class SidecarAttachmentIOTest(unittest.TestCase):
             b"png-data",
         )
 
+    def test_verify_task_attachments_accepts_exact_metadata_and_rejects_symlinks(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        helper.publish_attachments({
+            "uploadId": UPLOAD_ID,
+            "taskId": TASK_ID,
+            "files": files,
+        })
+        metadata = [{
+            "id": item["id"],
+            "relativePath": (
+                f"attachments/{TASK_ID}/{item['id']}{item['suffix']}"
+            ),
+            "size": item["size"],
+        } for item in files]
+
+        self.assertEqual(
+            helper.verify_task_attachments({"taskId": TASK_ID, "files": metadata}),
+            {"safe": True},
+        )
+
+        task = session / "attachments" / TASK_ID
+        trusted_task = task.with_name(f"{TASK_ID}.trusted")
+        outside = session.parent / "outside-task"
+        task.rename(trusted_task)
+        outside.mkdir()
+        task.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.verify_task_attachments({"taskId": TASK_ID, "files": metadata})
+        self.assertEqual(list(outside.iterdir()), [])
+
+        task.unlink()
+        trusted_task.rename(task)
+        target = task / f"{ATTACHMENT_ID}.png"
+        trusted_file = target.with_suffix(".trusted")
+        outside_file = session.parent / "outside-file.png"
+        outside_file.write_bytes(b"outside!")
+        target.rename(trusted_file)
+        target.symlink_to(outside_file)
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.verify_task_attachments({"taskId": TASK_ID, "files": metadata})
+        self.assertEqual(outside_file.read_bytes(), b"outside!")
+
+    def test_verify_task_attachments_rejects_file_set_and_size_replacement(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        helper.publish_attachments({
+            "uploadId": UPLOAD_ID,
+            "taskId": TASK_ID,
+            "files": files,
+        })
+        metadata = [{
+            "id": item["id"],
+            "relativePath": (
+                f"attachments/{TASK_ID}/{item['id']}{item['suffix']}"
+            ),
+            "size": item["size"],
+        } for item in files]
+        task = session / "attachments" / TASK_ID
+        extra = task / f"{SESSION_ID}.bin"
+        extra.write_bytes(b"extra")
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.verify_task_attachments({"taskId": TASK_ID, "files": metadata})
+
+        extra.unlink()
+        (task / f"{ATTACHMENT_ID}.png").write_bytes(b"wrong-size")
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.verify_task_attachments({"taskId": TASK_ID, "files": metadata})
+
     def test_publish_rejects_same_size_rewrite_after_writer_receipt(self):
         helper, session, _ = self.make_bound_helper()
         upload, files = self.stage_files(session)

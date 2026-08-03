@@ -113,6 +113,41 @@ def _validate_publish_files(value):
     return normalized
 
 
+def _validate_verify_files(task_id, value):
+    if not isinstance(value, list) or len(value) > MAX_ATTACHMENTS:
+        raise SidecarIOError(f"files 必须包含 0–{MAX_ATTACHMENTS} 个附件元数据")
+    normalized = []
+    names = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "id", "relativePath", "size"
+        }:
+            raise SidecarIOError("附件验证元数据格式无效")
+        attachment_id = _require_uuid(item["id"], "attachmentId")
+        relative_path = item["relativePath"]
+        size = item["size"]
+        if not isinstance(relative_path, str):
+            raise SidecarIOError("附件 relativePath 格式无效")
+        expected_prefix = f"attachments/{task_id}/{attachment_id}"
+        if not relative_path.startswith(expected_prefix):
+            raise SidecarIOError("附件 relativePath 与 taskId/attachmentId 不一致")
+        suffix = relative_path[len(expected_prefix):]
+        if not re.fullmatch(r"\.[a-z0-9]{1,16}", suffix):
+            raise SidecarIOError("附件 relativePath 扩展名无效")
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 0 < size <= MAX_ATTACHMENT_BYTES
+        ):
+            raise SidecarIOError("附件验证 size 无效")
+        name = f"{attachment_id}{suffix}"
+        if name in names:
+            raise SidecarIOError("附件验证文件名不得重复")
+        names.add(name)
+        normalized.append({"name": name, "size": size})
+    return normalized
+
+
 def _validate_attachment_object_identity(value, label):
     keys = {"dev", "ino", "mountDev", "mountId"}
     if not isinstance(value, dict) or set(value) != keys:
@@ -499,6 +534,100 @@ def _verify_open_attachment_files(directory_fd, opened):
             os.close(current_fd)
         if _capture_file_baseline(directory_fd, fd) != record["baseline"]:
             raise SidecarIOError("附件文件内容或元数据在发布期间变化")
+
+
+def _verify_task_attachment_directory(parent_fd, task_id, expected_files):
+    """只读验证已发布 task 目录；所有路径访问只基于可信 attachments dirfd。"""
+    directory_fd = None
+    opened = {}
+    try:
+        try:
+            directory_fd = _open_managed_attachment_directory(parent_fd, task_id)
+        except FileNotFoundError as error:
+            raise SidecarIOError("任务附件目录不存在") from error
+        directory_signature = _directory_stat_signature(os.fstat(directory_fd))
+        directory_mount = _mount_identity(directory_fd)
+        expected = {item["name"]: item for item in expected_files}
+        names = os.listdir(directory_fd)
+        if len(names) > MAX_ATTACHMENTS or set(names) != set(expected):
+            raise SidecarIOError("任务附件文件集合与持久化元数据不一致")
+
+        for name in names:
+            item = expected[name]
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode):
+                raise SidecarIOError("任务附件只允许非符号链接的常规文件")
+            flags = (
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                held = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(held.st_mode)
+                    or held.st_nlink != 1
+                    or held.st_dev != before.st_dev
+                    or held.st_ino != before.st_ino
+                    or held.st_size != item["size"]
+                ):
+                    raise SidecarIOError("任务附件 identity 或 size 与持久化元数据不一致")
+                _require_same_mount(directory_fd, fd)
+                opened[name] = {
+                    "fd": fd,
+                    "signature": _file_stat_signature(held),
+                    "mountIdentity": _mount_identity(fd),
+                }
+                fd = None
+            finally:
+                if fd is not None:
+                    os.close(fd)
+
+        if (
+            not PersistentHelper._same_directory_entry(parent_fd, task_id, directory_fd)
+            or _directory_stat_signature(os.fstat(directory_fd)) != directory_signature
+            or _mount_identity(directory_fd) != directory_mount
+            or set(os.listdir(directory_fd)) != set(expected)
+        ):
+            raise SidecarIOError("任务附件目录 identity 在验证期间变化")
+
+        for name, record in opened.items():
+            entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            flags = (
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            current_fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                held = os.fstat(record["fd"])
+                current = os.fstat(current_fd)
+                if (
+                    not stat.S_ISREG(entry.st_mode)
+                    or not stat.S_ISREG(current.st_mode)
+                    or current.st_nlink != 1
+                    or entry.st_dev != current.st_dev
+                    or entry.st_ino != current.st_ino
+                    or current.st_dev != held.st_dev
+                    or current.st_ino != held.st_ino
+                    or _file_stat_signature(held) != record["signature"]
+                    or _file_stat_signature(current) != record["signature"]
+                ):
+                    raise SidecarIOError("任务附件文件 identity 在验证期间变化")
+                _require_same_mount(directory_fd, current_fd)
+                if _mount_identity(current_fd) != record["mountIdentity"]:
+                    raise SidecarIOError("任务附件 mount identity 在验证期间变化")
+            finally:
+                os.close(current_fd)
+        return {"safe": True}
+    except SidecarIOError:
+        raise
+    except OSError as error:
+        raise SidecarIOError(f"无法安全验证任务附件：{error}") from error
+    finally:
+        for record in opened.values():
+            os.close(record["fd"])
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def _fsync_attachment_publish_parents(staging_fd, attachments_fd):
@@ -1121,6 +1250,17 @@ class PersistentHelper:
             _require_uuid(payload["taskId"], "taskId"),
         )
 
+    @_with_attachment_lifecycle_lock
+    def verify_task_attachments(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"taskId", "files"}:
+            raise SidecarIOError("verify-task-attachments payload 格式无效")
+        self.assert_bound({})
+        task_id = _require_uuid(payload["taskId"], "taskId")
+        files = _validate_verify_files(task_id, payload["files"])
+        if not files:
+            return {"safe": True}
+        return _verify_task_attachment_directory(self.attachments_fd, task_id, files)
+
     @staticmethod
     def _preflight_managed_directories(parent_fd):
         records = []
@@ -1730,6 +1870,8 @@ class PersistentHelper:
             return self.discard_attachment_upload(request["payload"])
         if command == "delete-task-attachments":
             return self.delete_task_attachments(request["payload"])
+        if command == "verify-task-attachments":
+            return self.verify_task_attachments(request["payload"])
         if command == "reconcile-attachments":
             return self.reconcile_attachments(request["payload"])
         if command == "read-transaction":

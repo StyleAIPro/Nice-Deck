@@ -12,6 +12,10 @@ const ATTACHMENT_MUTATION_COMMANDS = new Set([
   'delete-task-attachments',
   'reconcile-attachments',
 ]);
+const ATTACHMENT_LONG_COMMANDS = new Set([
+  ...ATTACHMENT_MUTATION_COMMANDS,
+  'verify-task-attachments',
+]);
 // 最坏 8×25MiB 需要前后两轮 SHA-256 和 fsync；90s 允许约 5MiB/s 的保守吞吐。
 const DEFAULT_ATTACHMENT_TIMEOUT_MS = 90_000;
 const MAX_ATTACHMENT_TIMEOUT_MS = 120_000;
@@ -233,7 +237,7 @@ class PersistentSidecarIO {
     if (request.settled || this.active !== request) return;
     request.dispatched = true;
     request.state = 'active';
-    const requestTimeoutMs = ATTACHMENT_MUTATION_COMMANDS.has(request.command)
+    const requestTimeoutMs = ATTACHMENT_LONG_COMMANDS.has(request.command)
       ? this.attachmentTimeoutMs : this.timeoutMs;
     request.timer = setTimeout(() => {
       if (this.active !== request || request.settled) return;
@@ -304,6 +308,9 @@ class PersistentSidecarIO {
   }
   deleteTaskAttachments({ taskId }) {
     return this.#request('delete-task-attachments', { taskId });
+  }
+  verifyTaskAttachments({ taskId, files }) {
+    return this.#request('verify-task-attachments', { taskId, files });
   }
   reconcileAttachments({ referencedTaskIds }) {
     return this.#request('reconcile-attachments', { referencedTaskIds });

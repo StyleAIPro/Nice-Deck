@@ -1077,8 +1077,7 @@ export async function startServer({
 
   const serializeTaskOutput = async (task, revision, { committed=false } = {}) => {
     try {
-      await attachmentStore.guard();
-      return attachmentStore.serializeTask(task);
+      return await attachmentStore.serializeTaskVerified(task);
     } catch (error) {
       if (committed && error && typeof error === 'object') {
         error.committed = true;
@@ -1130,8 +1129,10 @@ export async function startServer({
         return;
       }
       if (request.method === 'GET' && pathname === '/api/tasks') {
-        await attachmentStore.guard();
-        json(response, 200, sessionStore.state.tasks.map(task => attachmentStore.serializeTask(task)));
+        const tasks = await Promise.all(sessionStore.state.tasks.map(task => (
+          serializeTaskOutput(task, sessionStore.state.revision)
+        )));
+        json(response, 200, tasks);
         return;
       }
       if (request.method === 'POST' && pathname === '/api/tasks') {
@@ -1194,8 +1195,7 @@ export async function startServer({
         const id = decodeURIComponent(taskMatch[1]);
         const task = sessionStore.state.tasks.find(candidate => candidate.id === id);
         if (!task) throw httpError('TASK_NOT_FOUND', 404, '找不到任务');
-        await attachmentStore.guard();
-        json(response, 200, attachmentStore.serializeTask(task));
+        json(response, 200, await serializeTaskOutput(task, sessionStore.state.revision));
         return;
       }
       if (request.method === 'POST' && pathname === '/api/actions') {

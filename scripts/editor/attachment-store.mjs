@@ -805,7 +805,10 @@ export class AttachmentStore {
   } = {}) {
     this.identities = captureBoundIdentities(sidecarBoundary);
     if (!sidecarIO
-      || ['publishAttachments', 'discardAttachmentUpload', 'deleteTaskAttachments']
+      || [
+        'publishAttachments', 'discardAttachmentUpload', 'deleteTaskAttachments',
+        'verifyTaskAttachments',
+      ]
         .some(name => typeof sidecarIO[name] !== 'function')) {
       throw new TypeError('AttachmentStore 缺少 sidecarIO 附件生命周期接口');
     }
@@ -885,6 +888,20 @@ export class AttachmentStore {
       };
     });
     return { ...task, attachments:serialized };
+  }
+
+  async serializeTaskVerified(task) {
+    if (this.closed) throw abortError('ATTACHMENT_STORE_CLOSED', 'AttachmentStore 已关闭');
+    const serialized = this.serializeTask(task);
+    await this.sidecarIO.verifyTaskAttachments({
+      taskId:serialized.id,
+      files:serialized.attachments.map(attachment => ({
+        id:attachment.id,
+        relativePath:attachment.relativePath,
+        size:attachment.size,
+      })),
+    });
+    return serialized;
   }
 
   close() {
