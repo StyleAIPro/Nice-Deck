@@ -22,6 +22,27 @@ const MAX_PART_HEADER_BYTES = 16 * 1024;
 // Busboy 1.6.0 以 `++pairCount < 2000` 保存 header；第 2000 对起会静默丢弃。
 const MAX_PART_HEADER_PAIRS = 1999;
 const MAX_TRANSPORT_PADDING_BYTES = 1024;
+const MAX_BOUNDARY_BYTES = 200;
+const MAX_MULTIPART_PARTS = MAX_ATTACHMENTS + 2;
+export const MAX_PREAMBLE_BYTES = 64 * 1024;
+export const MAX_EPILOGUE_BYTES = 64 * 1024;
+export const DEFAULT_MULTIPART_IDLE_TIMEOUT_MS = 120_000;
+const MAX_INITIAL_DELIMITER_BYTES = 2 + MAX_BOUNDARY_BYTES
+  + MAX_TRANSPORT_PADDING_BYTES + 2;
+const MAX_REGULAR_DELIMITER_BYTES = 2 + 2 + MAX_BOUNDARY_BYTES
+  + MAX_TRANSPORT_PADDING_BYTES + 2;
+const MAX_CLOSING_DELIMITER_BYTES = 2 + 2 + MAX_BOUNDARY_BYTES + 2
+  + MAX_TRANSPORT_PADDING_BYTES + 2;
+const MAX_MULTIPART_FRAMING_BYTES = MAX_INITIAL_DELIMITER_BYTES
+  + ((MAX_MULTIPART_PARTS - 1) * MAX_REGULAR_DELIMITER_BYTES)
+  + MAX_CLOSING_DELIMITER_BYTES
+  + (MAX_MULTIPART_PARTS * (MAX_PART_HEADER_BYTES + 4));
+export const MAX_MULTIPART_WIRE_BYTES = MAX_PREAMBLE_BYTES
+  + MAX_TASK_METADATA_BYTES
+  + MAX_SNAPSHOT_BYTES
+  + (MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES)
+  + MAX_MULTIPART_FRAMING_BYTES
+  + MAX_EPILOGUE_BYTES;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const MIME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
@@ -33,6 +54,10 @@ function multipartError(code, statusCode, message, details = {}) {
 
 function invalid(message, details) {
   return multipartError('INVALID_MULTIPART', 400, message, details);
+}
+
+function multipartTooLarge(message) {
+  return multipartError('MULTIPART_TOO_LARGE', 413, message);
 }
 
 function parseParameterizedValue(value, label) {
@@ -98,7 +123,7 @@ function multipartBoundary(headers) {
     throw invalid('multipart Content-Type 必须唯一提供 boundary');
   }
   const boundary = parsed.parameters.get('boundary');
-  if (boundary.length === 0 || boundary.length > 200
+  if (boundary.length === 0 || boundary.length > MAX_BOUNDARY_BYTES
     || /[^\x20-\x7e]/.test(boundary) || /[ \t]$/.test(boundary)) {
     throw invalid('multipart boundary 无效');
   }
@@ -365,34 +390,7 @@ function endStream(stream) {
   });
 }
 
-function candidateStatus(suffix, { eof=false } = {}) {
-  if (suffix.length === 0) return { type:eof ? 'invalid' : 'incomplete' };
-  let closing = false;
-  let index = 0;
-  if (suffix[0] === 0x2d) {
-    if (suffix.length === 1) return { type:eof ? 'invalid' : 'incomplete' };
-    if (suffix[1] !== 0x2d) return { type:'invalid' };
-    closing = true;
-    index = 2;
-  }
-  let padding = 0;
-  while (index < suffix.length && (suffix[index] === 0x20 || suffix[index] === 0x09)) {
-    padding += 1;
-    if (padding > MAX_TRANSPORT_PADDING_BYTES) return { type:'padding-overflow' };
-    index += 1;
-  }
-  if (index === suffix.length) {
-    return { type:eof && closing ? 'closing' : 'incomplete' };
-  }
-  if (suffix[index] !== 0x0d) return { type:'invalid' };
-  if (index + 1 === suffix.length) return { type:eof ? 'invalid' : 'incomplete' };
-  if (suffix[index + 1] !== 0x0a || index + 2 !== suffix.length) {
-    return { type:'invalid' };
-  }
-  return { type:closing ? 'closing' : 'regular' };
-}
-
-function createMultipartFramer(boundary, upload) {
+function createMultipartFramer(boundary, upload, { debugCounters } = {}) {
   const initialBoundary = Buffer.from(`--${boundary}`);
   const bodyBoundary = Buffer.from(`\r\n--${boundary}`);
   const headerEnd = Buffer.from('\r\n\r\n');
@@ -406,6 +404,8 @@ function createMultipartFramer(boundary, upload) {
   let attachmentCount = 0;
   let taskSeen = false;
   let snapshotSeen = false;
+  let preambleBytes = 0;
+  let epilogueBytes = 0;
   let parsedTask = null;
   let snapshot = null;
   let aborted = false;
@@ -415,6 +415,7 @@ function createMultipartFramer(boundary, upload) {
   let pendingAsyncFailure = null;
   const staged = [];
   const stagePromises = [];
+  if (debugCounters) debugCounters.candidateSteps = 0;
 
   const ensureActive = () => {
     if (aborted) throw abortReason ?? invalid('multipart framing 已取消');
@@ -539,13 +540,93 @@ function createMultipartFramer(boundary, upload) {
   };
 
   const emitSearchBytes = async (origin, bytes) => {
-    if (origin === 'body') await writeBody(bytes);
+    if (bytes.length === 0) return;
+    if (origin === 'body') {
+      await writeBody(bytes);
+      return;
+    }
+    if (origin !== 'preamble') throw invalid('multipart ignored bytes 状态无效');
+    preambleBytes += bytes.length;
+    if (preambleBytes > MAX_PREAMBLE_BYTES) {
+      throw multipartTooLarge(`multipart preamble 不得超过 ${MAX_PREAMBLE_BYTES} 字节`);
+    }
   };
 
-  const startCandidate = (origin, prefix) => {
-    candidate = { origin, prefix, suffix:[] };
+  const startCandidate = (origin, prefix, leadingIgnoredBytes = 0) => {
+    candidate = {
+      origin,
+      prefix,
+      suffix:[],
+      leadingIgnoredBytes,
+      phase:'start',
+      closing:false,
+      paddingCount:0,
+    };
     mode = 'candidate';
   };
+
+  const advanceCandidate = byte => {
+    candidate.suffix.push(byte);
+    if (debugCounters) debugCounters.candidateSteps += 1;
+    if (candidate.phase === 'start') {
+      if (byte === 0x2d) {
+        candidate.phase = 'closing-dash';
+        return 'incomplete';
+      }
+      if (byte === 0x20 || byte === 0x09) {
+        candidate.phase = 'padding';
+        candidate.paddingCount = 1;
+        return 'incomplete';
+      }
+      if (byte === 0x0d) {
+        candidate.phase = 'line-feed';
+        return 'incomplete';
+      }
+      return 'invalid';
+    }
+    if (candidate.phase === 'closing-dash') {
+      if (byte !== 0x2d) return 'invalid';
+      candidate.closing = true;
+      candidate.phase = 'after-closing';
+      return 'incomplete';
+    }
+    if (candidate.phase === 'after-closing') {
+      if (byte === 0x20 || byte === 0x09) {
+        candidate.phase = 'padding';
+        candidate.paddingCount = 1;
+        return 'incomplete';
+      }
+      if (byte === 0x0d) {
+        candidate.phase = 'line-feed';
+        return 'incomplete';
+      }
+      return 'invalid';
+    }
+    if (candidate.phase === 'padding') {
+      if (byte === 0x20 || byte === 0x09) {
+        candidate.paddingCount += 1;
+        return candidate.paddingCount > MAX_TRANSPORT_PADDING_BYTES
+          ? 'invalid' : 'incomplete';
+      }
+      if (byte === 0x0d) {
+        candidate.phase = 'line-feed';
+        return 'incomplete';
+      }
+      return 'invalid';
+    }
+    if (candidate.phase === 'line-feed') {
+      if (byte !== 0x0a) return 'invalid';
+      return candidate.closing ? 'closing' : 'regular';
+    }
+    throw invalid('multipart candidate 状态无效');
+  };
+
+  const candidateStatusAtEof = () => (
+    candidate.closing
+      && (candidate.phase === 'after-closing' || candidate.phase === 'padding')
+      ? 'closing'
+      : 'invalid'
+  );
 
   const searchChunk = async (chunk, offset, origin) => {
     const available = chunk.length - offset;
@@ -560,7 +641,7 @@ function createMultipartFramer(boundary, upload) {
         await emitSearchBytes(origin, searchTail.subarray(0, match));
         const consumed = match + bodyBoundary.length - searchTail.length;
         searchTail = Buffer.alloc(0);
-        startCandidate(origin, bodyBoundary);
+        startCandidate(origin, bodyBoundary, origin === 'preamble' ? 2 : 0);
         return offset + consumed;
       }
       if (available < bodyBoundary.length - 1) {
@@ -575,7 +656,7 @@ function createMultipartFramer(boundary, upload) {
     const match = chunk.indexOf(bodyBoundary, offset);
     if (match >= 0) {
       await emitSearchBytes(origin, chunk.subarray(offset, match));
-      startCandidate(origin, bodyBoundary);
+      startCandidate(origin, bodyBoundary, origin === 'preamble' ? 2 : 0);
       return match + bodyBoundary.length;
     }
     const keep = Math.min(bodyBoundary.length - 1, chunk.length - offset);
@@ -591,10 +672,16 @@ function createMultipartFramer(boundary, upload) {
     searchTail = Buffer.alloc(0);
     if (status === 'invalid') {
       mode = resolved.origin;
-      if (resolved.origin === 'body') {
-        await writeBody(Buffer.concat([resolved.prefix, Buffer.from(resolved.suffix)]));
-      }
+      await emitSearchBytes(
+        resolved.origin,
+        Buffer.concat([resolved.prefix, Buffer.from(resolved.suffix)]),
+      );
       return;
+    }
+    if (resolved.leadingIgnoredBytes > 0) {
+      await emitSearchBytes(
+        'preamble', resolved.prefix.subarray(0, resolved.leadingIgnoredBytes),
+      );
     }
     if (resolved.origin === 'body') await finishPart();
     if (status === 'regular') {
@@ -611,7 +698,13 @@ function createMultipartFramer(boundary, upload) {
     let offset = 0;
     while (offset < chunk.length) {
       ensureActive();
-      if (mode === 'epilogue') return;
+      if (mode === 'epilogue') {
+        epilogueBytes += chunk.length - offset;
+        if (epilogueBytes > MAX_EPILOGUE_BYTES) {
+          throw multipartTooLarge(`multipart epilogue 不得超过 ${MAX_EPILOGUE_BYTES} 字节`);
+        }
+        return;
+      }
       if (mode === 'initial') {
         const take = Math.min(initialBoundary.length - initialProbe.length, chunk.length - offset);
         initialProbe = Buffer.concat([initialProbe, chunk.subarray(offset, offset + take)]);
@@ -632,15 +725,11 @@ function createMultipartFramer(boundary, upload) {
         continue;
       }
       if (mode === 'candidate') {
-        candidate.suffix.push(chunk[offset]);
+        const status = advanceCandidate(chunk[offset]);
         offset += 1;
-        const status = candidateStatus(candidate.suffix);
-        if (status.type === 'padding-overflow') {
-          throw invalid('multipart boundary transport padding 超限');
-        }
-        if (status.type === 'invalid') await resolveCandidate('invalid');
-        else if (status.type === 'regular' || status.type === 'closing') {
-          await resolveCandidate(status.type);
+        if (status === 'invalid') await resolveCandidate('invalid');
+        else if (status === 'regular' || status === 'closing') {
+          await resolveCandidate(status);
         }
         continue;
       }
@@ -680,8 +769,8 @@ function createMultipartFramer(boundary, upload) {
   const finish = async () => {
     ensureActive();
     if (mode === 'candidate') {
-      const status = candidateStatus(candidate.suffix, { eof:true });
-      if (status.type === 'closing') await resolveCandidate('closing');
+      const status = candidateStatusAtEof();
+      if (status === 'closing') await resolveCandidate('closing');
       else await resolveCandidate('invalid');
     }
     if (mode === 'body') {
@@ -751,12 +840,23 @@ function prioritizeCleanupError(primaryError, cleanupError) {
 }
 
 
-export async function parseTaskMultipart(request, { attachmentStore } = {}) {
+export async function parseTaskMultipart(request, {
+  attachmentStore,
+  debugCounters,
+  idleTimeoutMs=DEFAULT_MULTIPART_IDLE_TIMEOUT_MS,
+} = {}) {
   if (!request || typeof request.pipe !== 'function' || !request.headers) {
     throw new TypeError('multipart request 必须是带 headers 的 Node Readable');
   }
   if (!attachmentStore || typeof attachmentStore.beginUpload !== 'function') {
     throw new TypeError('parseTaskMultipart 缺少 AttachmentStore');
+  }
+  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs <= 0) {
+    throw new TypeError('multipart idleTimeoutMs 必须是正安全整数');
+  }
+  if (debugCounters !== undefined
+    && (debugCounters === null || typeof debugCounters !== 'object')) {
+    throw new TypeError('multipart debugCounters 必须是对象');
   }
 
   const upload = attachmentStore.beginUpload();
@@ -795,7 +895,7 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
 
   let framer;
   try {
-    framer = createMultipartFramer(multipartBoundary(request.headers), upload);
+    framer = createMultipartFramer(multipartBoundary(request.headers), upload, { debugCounters });
   } catch (cause) {
     const primary = normalizeParserError(cause);
     drainRequestInBackground();
@@ -811,6 +911,19 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
       let firstError = null;
       let failing = false;
       let settled = false;
+      let wireBytes = 0;
+      let idleTimer = null;
+
+      const clearIdleTimer = () => {
+        if (idleTimer !== null) clearTimeout(idleTimer);
+        idleTimer = null;
+      };
+      const armIdleTimer = () => {
+        clearIdleTimer();
+        idleTimer = setTimeout(() => {
+          fail(invalid(`multipart 请求空闲超时（${idleTimeoutMs}ms）`));
+        }, idleTimeoutMs);
+      };
 
       const removeBusinessListeners = () => {
         request.removeListener('data', onData);
@@ -823,6 +936,7 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
       const succeed = result => {
         if (settled || failing) return;
         settled = true;
+        clearIdleTimer();
         framer.setFailureHandler(null);
         removeBusinessListeners();
         resolve(result);
@@ -832,6 +946,7 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
         firstError ??= normalizeParserError(error);
         if (failing || settled) return;
         failing = true;
+        clearIdleTimer();
         framer.setFailureHandler(null);
         removeBusinessListeners();
         drainRequestInBackground();
@@ -851,17 +966,30 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
 
       const onData = chunk => {
         if (failing || settled) return;
+        clearIdleTimer();
         request.pause();
+        const chunkBytes = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+        if (chunkBytes > MAX_MULTIPART_WIRE_BYTES - wireBytes) {
+          fail(multipartTooLarge(
+            `multipart 请求总字节数不得超过 ${MAX_MULTIPART_WIRE_BYTES}`,
+          ));
+          return;
+        }
+        wireBytes += chunkBytes;
         processing = processing.then(() => framer.push(chunk));
         processing.then(
           () => {
-            if (!failing && !settled) request.resume();
+            if (!failing && !settled) {
+              armIdleTimer();
+              request.resume();
+            }
           },
           fail,
         );
       };
       const onEnd = () => {
         if (failing || settled) return;
+        clearIdleTimer();
         processing = processing.then(() => framer.finish());
         processing.then(succeed, fail);
       };
@@ -882,6 +1010,7 @@ export async function parseTaskMultipart(request, { attachmentStore } = {}) {
         || (request.destroyed === true && request.readableEnded !== true)) {
         fail(invalid('multipart 请求在解析前已经中断'));
       } else {
+        armIdleTimer();
         request.resume();
       }
     });

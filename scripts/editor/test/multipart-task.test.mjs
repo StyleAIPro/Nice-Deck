@@ -6,7 +6,16 @@ import {
   MAX_ATTACHMENTS,
 } from '../attachment-protocol.mjs';
 import { MAX_SNAPSHOT_BYTES } from '../session-store.mjs';
-import { parseTaskMultipart } from '../multipart-task.mjs';
+import * as multipartTaskModule from '../multipart-task.mjs';
+
+const {
+  DEFAULT_MULTIPART_IDLE_TIMEOUT_MS,
+  MAX_EPILOGUE_BYTES,
+  MAX_MULTIPART_WIRE_BYTES,
+  MAX_PREAMBLE_BYTES,
+  MAX_TASK_METADATA_BYTES,
+  parseTaskMultipart,
+} = multipartTaskModule;
 
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const TASK_LIMIT = 64 * 1024;
@@ -83,6 +92,56 @@ function multipartRequest(parts, options = {}) {
   return request;
 }
 
+function streamingMultipartRequest(parts, {
+  boundary=`deck-boundary-${++boundarySequence}`,
+  boundaryPadding='', closingPadding='', preamble=Buffer.alloc(0), epilogue=Buffer.alloc(0),
+  bodyChunkSize=128 * 1024,
+} = {}) {
+  const preambleBytes = Buffer.from(preamble);
+  const epilogueBytes = Buffer.from(epilogue);
+  const headers = parts.map(part => partHeader(boundary, part, boundaryPadding));
+  const bodies = parts.map(part => Buffer.from(part.body ?? ''));
+  const closing = Buffer.from(`--${boundary}--${closingPadding}\r\n`);
+  const wireBytes = preambleBytes.length
+    + epilogueBytes.length
+    + closing.length
+    + headers.reduce((total, bytes) => total + bytes.length, 0)
+    + bodies.reduce((total, bytes) => total + bytes.length + 2, 0);
+  const request = Readable.from((async function* chunks() {
+    if (preambleBytes.length) yield preambleBytes;
+    for (let index = 0; index < parts.length; index += 1) {
+      yield headers[index];
+      for (let offset = 0; offset < bodies[index].length; offset += bodyChunkSize) {
+        yield bodies[index].subarray(offset, offset + bodyChunkSize);
+      }
+      yield Buffer.from('\r\n');
+    }
+    yield closing;
+    if (epilogueBytes.length) yield epilogueBytes;
+  })());
+  request.headers = { 'content-type':`multipart/form-data; boundary=${boundary}` };
+  return { request, wireBytes };
+}
+
+function withExactHeaderBytes(boundary, part) {
+  const probe = { ...part, headers:[...(part.headers ?? []), ['X-Fill', '']] };
+  const probeHeader = partHeader(boundary, probe);
+  const rawStart = probeHeader.indexOf('\r\n') + 2;
+  const rawEnd = probeHeader.indexOf('\r\n\r\n');
+  const fillLength = (16 * 1024) - (rawEnd - rawStart);
+  assert.ok(fillLength >= 0);
+  const exact = {
+    ...part,
+    headers:[...(part.headers ?? []), ['X-Fill', 'a'.repeat(fillLength)]],
+  };
+  const exactHeader = partHeader(boundary, exact);
+  assert.equal(
+    exactHeader.indexOf('\r\n\r\n') - (exactHeader.indexOf('\r\n') + 2),
+    16 * 1024,
+  );
+  return exact;
+}
+
 function controlledRequest(boundary=`deck-boundary-${++boundarySequence}`) {
   const request = new PassThrough();
   request.headers = { 'content-type':`multipart/form-data; boundary=${boundary}` };
@@ -104,6 +163,7 @@ async function waitForRequestDrain(request) {
 
 function uploadFixture({
   stageFailure, stageImmediateFailure, discardFailure, discardResult, stageGate,
+  collectChunks=true,
 } = {}) {
   const calls = { begin:0, discard:0, stage:[] };
   const active = new Set();
@@ -121,7 +181,7 @@ function uploadFixture({
           if (stageImmediateFailure) throw stageImmediateFailure;
           for await (const chunk of input.stream) {
             const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            call.chunks.push(bytes);
+            if (collectChunks) call.chunks.push(bytes);
             call.size += bytes.length;
             if (stageFailure?.(call, calls.stage.length - 1)) {
               if (stageFailure.destroyStream) {
@@ -202,6 +262,122 @@ async function rejectsMultipart(request, fx, code = 'INVALID_MULTIPART') {
   }
   assert.ok(fx.calls.stage.every(call => call.sourceStream.listenerCount('limit') === 0));
 }
+
+test('multipart ignored bytes 与总 wire 上限由全部合法最大 part 和 framing 推导', () => {
+  const maximumParts = MAX_ATTACHMENTS + 2;
+  const maximumBoundaryBytes = 200;
+  const maximumPaddingBytes = 1024;
+  const initialDelimiter = 2 + maximumBoundaryBytes + maximumPaddingBytes + 2;
+  const regularDelimiter = 2 + 2 + maximumBoundaryBytes + maximumPaddingBytes + 2;
+  const closingDelimiter = 2 + 2 + maximumBoundaryBytes + 2 + maximumPaddingBytes + 2;
+  const maximumFramingBytes = initialDelimiter
+    + ((maximumParts - 1) * regularDelimiter)
+    + closingDelimiter
+    + (maximumParts * ((16 * 1024) + 4));
+
+  assert.equal(MAX_PREAMBLE_BYTES, 64 * 1024);
+  assert.equal(MAX_EPILOGUE_BYTES, 64 * 1024);
+  assert.equal(DEFAULT_MULTIPART_IDLE_TIMEOUT_MS, 120_000);
+  assert.equal(
+    MAX_MULTIPART_WIRE_BYTES,
+    MAX_PREAMBLE_BYTES
+      + MAX_TASK_METADATA_BYTES
+      + MAX_SNAPSHOT_BYTES
+      + (MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES)
+      + maximumFramingBytes
+      + MAX_EPILOGUE_BYTES,
+  );
+});
+
+test('preamble 与 epilogue 精确上限成功且多一个字节立即拒绝', {
+  timeout:5000,
+}, async t => {
+  const exactPreamble = Buffer.concat([
+    Buffer.alloc(MAX_PREAMBLE_BYTES - 2, 0x70), Buffer.from('\r\n'),
+  ]);
+  await t.test('preamble 精确上限', async () => {
+    const fx = uploadFixture();
+    const parsed = await parseTaskMultipart(multipartRequest([taskPart(task())], {
+      preamble:exactPreamble, chunkSize:257,
+    }), { attachmentStore:fx.store });
+    assert.equal(parsed.input.expectedRevision, 3);
+  });
+  await t.test('preamble 上限加一', async () => {
+    const fx = uploadFixture();
+    const oversized = Buffer.concat([
+      Buffer.alloc(MAX_PREAMBLE_BYTES - 1, 0x70), Buffer.from('\r\n'),
+    ]);
+    await rejectsMultipart(multipartRequest([taskPart(task())], {
+      preamble:oversized, chunkSize:263,
+    }), fx, 'MULTIPART_TOO_LARGE');
+  });
+  await t.test('epilogue 精确上限', async () => {
+    const fx = uploadFixture();
+    const parsed = await parseTaskMultipart(multipartRequest([taskPart(task())], {
+      epilogue:Buffer.alloc(MAX_EPILOGUE_BYTES, 0x65), chunkSize:269,
+    }), { attachmentStore:fx.store });
+    assert.equal(parsed.input.expectedRevision, 3);
+  });
+  await t.test('epilogue 上限加一', async () => {
+    const fx = uploadFixture();
+    await rejectsMultipart(multipartRequest([taskPart(task())], {
+      epilogue:Buffer.alloc(MAX_EPILOGUE_BYTES + 1, 0x65), chunkSize:271,
+    }), fx, 'MULTIPART_TOO_LARGE');
+  });
+});
+
+test('总 wire 精确容纳合法最大十 part，任一 chunk 推到上限加一则先拒绝', {
+  timeout:20_000,
+}, async t => {
+  await t.test('合法最大十 part 精确达到总 wire 上限', async () => {
+    const boundary = 'b'.repeat(200);
+    const sources = Array(MAX_ATTACHMENTS).fill('selected');
+    const maximumTask = task(sources);
+    const initialTaskBytes = Buffer.from(JSON.stringify(maximumTask));
+    maximumTask.instruction += 'x'.repeat(TASK_LIMIT - initialTaskBytes.length);
+    const taskBytes = Buffer.from(JSON.stringify(maximumTask));
+    assert.equal(taskBytes.length, TASK_LIMIT);
+    const attachmentBody = Buffer.alloc(MAX_ATTACHMENT_BYTES, 0x61);
+    const parts = [
+      taskPart(maximumTask, { body:taskBytes }),
+      {
+        name:'snapshot', filename:'maximum.png', mime:'image/png',
+        body:Buffer.alloc(MAX_SNAPSHOT_BYTES, 0x50),
+      },
+      ...Array.from({ length:MAX_ATTACHMENTS }, (_, index) => ({
+        name:'attachment', filename:`maximum-${index}.bin`,
+        mime:'application/octet-stream', body:attachmentBody,
+      })),
+    ].map(part => withExactHeaderBytes(boundary, part));
+    const encoded = streamingMultipartRequest(parts, {
+      boundary,
+      boundaryPadding:' '.repeat(1024),
+      closingPadding:' '.repeat(1024),
+      preamble:Buffer.concat([
+        Buffer.alloc(MAX_PREAMBLE_BYTES - 2, 0x70), Buffer.from('\r\n'),
+      ]),
+      epilogue:Buffer.alloc(MAX_EPILOGUE_BYTES, 0x65),
+    });
+    assert.equal(encoded.wireBytes, MAX_MULTIPART_WIRE_BYTES);
+    const fx = uploadFixture({ collectChunks:false });
+    const parsed = await parseTaskMultipart(encoded.request, { attachmentStore:fx.store });
+    assert.equal(parsed.snapshot.length, MAX_SNAPSHOT_BYTES);
+    assert.equal(parsed.staged.length, MAX_ATTACHMENTS);
+    assert.equal(fx.calls.discard, 0);
+  });
+
+  await t.test('总 wire 上限加一由 request 入口立即拒绝', async () => {
+    const fx = uploadFixture();
+    const { request } = controlledRequest();
+    const parsing = parseTaskMultipart(request, { attachmentStore:fx.store });
+    request.end(Buffer.allocUnsafe(MAX_MULTIPART_WIRE_BYTES + 1));
+    await assert.rejects(
+      parsing,
+      error => error.code === 'MULTIPART_TOO_LARGE' && error.statusCode === 413,
+    );
+    assert.equal(fx.calls.discard, 1);
+  });
+});
 
 test('真实 multipart 成功净化 task、收集 PNG，并按 part 顺序流式 stage', async () => {
   const fx = uploadFixture();
@@ -533,6 +709,46 @@ test('自有 framing 对非法 boundary 后缀无损回退，chunk size 1–29 �
   }
 });
 
+test('重复最大 padding false candidate 原样回送且候选状态转移保持 O(n)', {
+  timeout:5000,
+}, async () => {
+  const boundary = 'deck-linear-candidate';
+  const falseCandidate = Buffer.from(
+    `\r\n--${boundary}${' '.repeat(1025)}\r\nnot-a-delimiter`,
+  );
+  const body = Buffer.concat(Array.from({ length:64 }, () => falseCandidate));
+  const debugCounters = {};
+  const fx = uploadFixture();
+  const parsed = await parseTaskMultipart(multipartRequest([
+    taskPart(task(['selected'])),
+    { name:'attachment', filename:'linear.bin', mime:'application/octet-stream', body },
+  ], { boundary, chunkSize:17 }), {
+    attachmentStore:fx.store,
+    debugCounters,
+  });
+  assert.equal(parsed.staged.length, 1);
+  assert.deepEqual(Buffer.concat(fx.calls.stage[0].chunks), body);
+  assert.ok(Number.isSafeInteger(debugCounters.candidateSteps));
+  assert.ok(
+    debugCounters.candidateSteps <= body.length + 16,
+    `候选状态转移 ${debugCounters.candidateSteps} 不得超出输入字节常数倍`,
+  );
+});
+
+test('普通与 closing delimiter 的 1024 字节 padding 保持合法', {
+  timeout:5000,
+}, async () => {
+  const fx = uploadFixture();
+  const parsed = await parseTaskMultipart(multipartRequest([
+    taskPart(task(['selected'])),
+    { name:'attachment', filename:'padded.bin', mime:'application/octet-stream', body:'body' },
+  ], {
+    boundaryPadding:' '.repeat(1024), closingPadding:'\t'.repeat(1024), chunkSize:1,
+  }), { attachmentStore:fx.store });
+  assert.equal(parsed.staged.length, 1);
+  assert.deepEqual(Buffer.concat(fx.calls.stage[0].chunks), Buffer.from('body'));
+});
+
 test('framing 接受有界 preamble、epilogue、transport padding 与 quoted boundary', async () => {
   const boundary = 'deck-padded-boundary';
   const fx = uploadFixture();
@@ -559,7 +775,70 @@ test('framing 接受有界 preamble、epilogue、transport padding 与 quoted bo
   assert.equal(eofParsed.input.expectedRevision, 3);
 });
 
-test('boundary transport padding 超过有界策略时 fail-closed', async () => {
+test('开放 request 的超量 epilogue 无需等待 end 即提前拒绝', {
+  timeout:2000,
+}, async () => {
+  const fx = uploadFixture();
+  const { request, boundary } = controlledRequest();
+  const parsing = parseTaskMultipart(request, { attachmentStore:fx.store });
+  const encoded = multipartBytes([taskPart(task())], {
+    boundary, epilogue:Buffer.alloc(1024 * 1024, 0x65),
+  });
+  try {
+    request.write(encoded.bytes);
+    await assert.rejects(
+      parsing,
+      error => error.code === 'MULTIPART_TOO_LARGE' && error.statusCode === 413,
+    );
+    assert.equal(fx.calls.discard, 1);
+  } finally {
+    if (!request.destroyed) request.destroy();
+    await parsing.catch(() => {});
+  }
+});
+
+test('统一 idle timeout 覆盖首 boundary 前与 closing 后静默但不误杀持续上传', {
+  timeout:2000,
+}, async t => {
+  for (const phase of ['首 boundary 前', 'closing 后']) await t.test(phase, async () => {
+    const fx = uploadFixture();
+    const { request, boundary } = controlledRequest();
+    const parsing = parseTaskMultipart(request, {
+      attachmentStore:fx.store, idleTimeoutMs:20,
+    });
+    if (phase === 'closing 后') {
+      request.write(multipartBytes([taskPart(task())], { boundary }).bytes);
+    }
+    let outcome;
+    try {
+      outcome = await Promise.race([
+        parsing.then(value => ({ value }), error => ({ error })),
+        new Promise(resolve => setTimeout(() => resolve({ timeout:true }), 80)),
+      ]);
+      assert.equal(outcome.timeout, undefined, `${phase} 必须由 idle timeout 主动结算`);
+      assert.equal(outcome.error?.code, 'INVALID_MULTIPART');
+      assert.match(outcome.error?.message ?? '', /空闲超时/);
+      assert.equal(fx.calls.discard, 1);
+    } finally {
+      if (!request.destroyed) request.destroy();
+      await parsing.catch(() => {});
+    }
+  });
+
+  await t.test('持续上传每个 chunk 都重置 idle timeout', async () => {
+    const fx = uploadFixture();
+    const parsed = await parseTaskMultipart(multipartRequest([
+      taskPart(task(['selected'])),
+      { name:'attachment', filename:'active.bin', mime:'application/octet-stream', body:'active' },
+    ], { chunkSize:64, delayMs:8 }), {
+      attachmentStore:fx.store, idleTimeoutMs:20,
+    });
+    assert.equal(parsed.staged.length, 1);
+    assert.equal(fx.calls.discard, 0);
+  });
+});
+
+test('首 boundary 携带 1025 字节 padding 时不再被当作合法 delimiter', async () => {
   const fx = uploadFixture();
   await rejectsMultipart(multipartRequest([
     taskPart(task()),
