@@ -51,6 +51,21 @@ async function createManualResizeAction(page) {
   await page.mouse.up();
 }
 
+async function reloadWithoutHistoryEvents(page) {
+  await page.routeWebSocket(url => url.pathname === '/events', socket => {
+    const server = socket.connectToServer();
+    server.onMessage(message => {
+      let event;
+      try { event = JSON.parse(String(message)); } catch {}
+      if (['actions-recorded', 'group-undone', 'group-redone'].includes(event?.type)) return;
+      socket.send(message);
+    });
+  });
+  await page.reload();
+  await page.waitForSelector('[data-page-key]');
+  await page.waitForFunction(() => document.querySelector('[data-ws-state]')?.dataset.wsState === 'online');
+}
+
 test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动重试陈旧候选', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());
@@ -314,6 +329,373 @@ test('group API 已保存但 session 刷新失败时保持同步待确认语义'
   assert.deepEqual(browserProblems.splice(0), [
     'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
   ]);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('HTTP 先于 history WebSocket 时人工动作与任务行撤销都先锁定旧候选', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(6_000);
+  const undo = page.locator('[data-history-undo]');
+  const redo = page.locator('[data-history-redo]');
+
+  await createManualTextAction(page, '第一组人工标题');
+  await waitForRevision(page, 1);
+  await page.waitForFunction(() => document.querySelector('[data-history-undo]')?.disabled === false);
+  await reloadWithoutHistoryEvents(page);
+  await waitForRevision(page, 1);
+  const firstGroupId = await undo.getAttribute('data-group-id');
+
+  let releaseManualSession;
+  const manualSessionReleased = new Promise(resolve => { releaseManualSession = resolve; });
+  let markManualSession;
+  const manualSessionIntercepted = new Promise(resolve => { markManualSession = resolve; });
+  await page.route('**/api/session*', async route => {
+    markManualSession();
+    await manualSessionReleased;
+    await route.continue();
+  });
+  try {
+    await createManualTextAction(page, '第二组人工标题');
+    await manualSessionIntercepted;
+    await waitForRevision(page, 2);
+    assert.equal(await undo.isDisabled(), true, '人工动作 HTTP 成功后必须立刻锁定旧候选');
+    assert.equal(await undo.getAttribute('data-group-id'), '');
+    assert.notEqual(firstGroupId, '');
+  } finally {
+    releaseManualSession();
+  }
+  await page.waitForFunction(id => (
+    document.querySelector('[data-history-undo]')?.dataset.groupId !== ''
+      && document.querySelector('[data-history-undo]')?.dataset.groupId !== id
+  ), firstGroupId);
+  await page.unroute('**/api/session*');
+
+  const target = await page.locator('#deck-frame').evaluate(frameElement => (
+    frameElement.contentWindow.HuaweiDeckPatchRuntime.makeLocator(
+      frameElement.contentDocument.querySelector('h2'),
+    )
+  ));
+  const created = await postJson(app, '/api/tasks', {
+    expectedRevision:2,
+    pageKey:target.pageKey,
+    pageIndex:1,
+    pageLabel:'目录页',
+    rect:{ x:20, y:20, w:400, h:180 },
+    instruction:'定点撤销门控测试',
+  });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  const taskId = created.body.task.id;
+  const applied = await postJson(app, '/api/actions', {
+    expectedRevision:3,
+    taskId,
+    actions:[{
+      id:'history-task-gate', taskId, target, kind:'setText', payload:{ text:'任务完成标题' },
+    }],
+  });
+  assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  await page.reload();
+  await waitForRevision(page, 4);
+  await page.waitForSelector(`[data-task-undo="${taskId}"]`);
+  assert.equal(await undo.getAttribute('data-group-id'), applied.body.groupId);
+
+  let releaseUndoSession;
+  const undoSessionReleased = new Promise(resolve => { releaseUndoSession = resolve; });
+  let markUndoSession;
+  const undoSessionIntercepted = new Promise(resolve => { markUndoSession = resolve; });
+  await page.route('**/api/session*', async route => {
+    markUndoSession();
+    await undoSessionReleased;
+    await route.continue();
+  });
+  try {
+    await page.locator(`[data-task-undo="${taskId}"]`).click();
+    await undoSessionIntercepted;
+    await waitForRevision(page, 5);
+    assert.equal(await undo.isDisabled(), true, '任务行撤销 HTTP 成功后必须锁定旧候选');
+    assert.equal(await redo.isDisabled(), true);
+    assert.equal(await undo.getAttribute('data-group-id'), '');
+    assert.equal(await redo.getAttribute('data-group-id'), '');
+  } finally {
+    releaseUndoSession();
+  }
+  await page.waitForFunction(id => (
+    document.querySelector('[data-history-redo]')?.dataset.groupId === id
+  ), applied.body.groupId);
+  assert.equal(await redo.isEnabled(), true);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('409 无 revision 且 session 503 时持续锁定并在后续快照成功后恢复', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(6_000);
+  const undo = page.locator('[data-history-undo]');
+
+  await createManualTextAction(page, '冲突前已有标题');
+  await waitForRevision(page, 1);
+  await page.waitForFunction(() => document.querySelector('[data-history-undo]')?.disabled === false);
+  const secondHeadingTarget = await page.locator('#deck-frame').evaluate(frameElement => (
+    frameElement.contentWindow.HuaweiDeckPatchRuntime.makeLocator(
+      frameElement.contentDocument.querySelectorAll('h2')[1],
+    )
+  ));
+  let groupRequests = 0;
+  await page.route('**/api/groups/**/undo*', async route => {
+    groupRequests += 1;
+    await route.fulfill({
+      status:409,
+      contentType:'application/json',
+      body:JSON.stringify({ error:'REVISION_CONFLICT', message:'测试中的无 revision 冲突' }),
+    });
+  });
+  let allowSession = false;
+  await page.route('**/api/session*', async route => {
+    if (allowSession) return route.continue();
+    return route.fulfill({
+      status:503,
+      contentType:'application/json',
+      body:JSON.stringify({ error:'TEMPORARY_UNAVAILABLE', message:'测试中的 session 暂不可用' }),
+    });
+  });
+
+  await undo.click();
+  await page.waitForFunction(() => /历史已更新/.test(
+    document.querySelector('[data-process-note]')?.textContent ?? '',
+  ));
+  assert.equal(groupRequests, 1, '409 不得自动重发 group 请求');
+  assert.equal(await undo.isDisabled(), true);
+  assert.equal(await undo.getAttribute('data-group-id'), '');
+  assert.equal((await readSession(app)).revision, 1);
+
+  allowSession = true;
+  const concurrent = await postJson(app, '/api/actions', {
+    expectedRevision:1,
+    taskId:null,
+    actions:[{
+      id:'history-conflict-recovery', taskId:null, target:secondHeadingTarget,
+      kind:'setText', payload:{ text:'冲突后的权威候选' },
+    }],
+  });
+  assert.equal(concurrent.response.status, 200, JSON.stringify(concurrent.body));
+  await page.waitForFunction(id => (
+    document.querySelector('[data-history-undo]')?.dataset.groupId === id
+      && document.querySelector('[data-history-undo]')?.disabled === false
+  ), concurrent.body.groupId);
+  assert.equal(groupRequests, 1);
+  assert.ok(browserProblems.every(problem => /409 \(Conflict\)|503 \(Service Unavailable\)/.test(problem)),
+    JSON.stringify(browserProblems));
+  browserProblems.splice(0);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('committed 错误响应不重发 group 请求并等待后续权威快照恢复', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(6_000);
+  const undo = page.locator('[data-history-undo]');
+
+  await createManualTextAction(page, 'committed 分支标题');
+  await waitForRevision(page, 1);
+  const secondHeadingTarget = await page.locator('#deck-frame').evaluate(frameElement => (
+    frameElement.contentWindow.HuaweiDeckPatchRuntime.makeLocator(
+      frameElement.contentDocument.querySelectorAll('h2')[1],
+    )
+  ));
+  let groupRequests = 0;
+  await page.route('**/api/groups/**/undo*', async route => {
+    groupRequests += 1;
+    const response = await route.fetch();
+    const body = await response.json();
+    assert.equal(response.status(), 200, JSON.stringify(body));
+    await route.fulfill({
+      status:503,
+      contentType:'application/json',
+      body:JSON.stringify({
+        ...body,
+        error:'RECOVERY_REQUIRED',
+        message:'测试中的已提交回执异常',
+        committed:true,
+      }),
+    });
+  });
+  let allowSession = false;
+  await page.route('**/api/session*', async route => {
+    if (allowSession) return route.continue();
+    return route.fulfill({
+      status:503,
+      contentType:'application/json',
+      body:JSON.stringify({ error:'TEMPORARY_UNAVAILABLE', message:'测试中的 session 暂不可用' }),
+    });
+  });
+
+  await undo.click();
+  await waitForRevision(page, 2);
+  await page.waitForFunction(() => /撤销已保存.*同步待确认/.test(
+    document.querySelector('[data-process-note]')?.textContent ?? '',
+  ));
+  assert.equal(groupRequests, 1);
+  assert.equal(await undo.isDisabled(), true);
+  assert.equal(await undo.getAttribute('data-group-id'), '');
+  const committedState = await readSession(app);
+  assert.equal(committedState.revision, 2);
+  assert.equal(committedState.groups[0].active, false);
+
+  allowSession = true;
+  const concurrent = await postJson(app, '/api/actions', {
+    expectedRevision:2,
+    taskId:null,
+    actions:[{
+      id:'history-committed-recovery', taskId:null, target:secondHeadingTarget,
+      kind:'setText', payload:{ text:'committed 后权威候选' },
+    }],
+  });
+  assert.equal(concurrent.response.status, 200, JSON.stringify(concurrent.body));
+  await page.waitForFunction(id => (
+    document.querySelector('[data-history-undo]')?.dataset.groupId === id
+      && document.querySelector('[data-history-undo]')?.disabled === false
+  ), concurrent.body.groupId);
+  assert.equal(groupRequests, 1);
+  assert.ok(browserProblems.every(problem => /503 \(Service Unavailable\)/.test(problem)),
+    JSON.stringify(browserProblems));
+  browserProblems.splice(0);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('真实 syncPending 响应在权威 session 收敛前锁定且不重发 group 请求', async t => {
+  const app = await startFixtureServer({ bridgeTimeoutMs:100 });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(6_000);
+  const undo = page.locator('[data-history-undo]');
+  const redo = page.locator('[data-history-redo]');
+
+  await createManualTextAction(page, 'syncPending 分支标题');
+  await waitForRevision(page, 1);
+  const groupId = await undo.getAttribute('data-group-id');
+  await page.evaluate(() => {
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function patchedSend(data) {
+      let message;
+      try { message = JSON.parse(String(data)); } catch { return originalSend.call(this, data); }
+      if (message.type === 'actions-committed' || message.type === 'actions-synced') return;
+      return originalSend.call(this, data);
+    };
+  });
+  let releaseSession;
+  const sessionReleased = new Promise(resolve => { releaseSession = resolve; });
+  let markSession;
+  const sessionIntercepted = new Promise(resolve => { markSession = resolve; });
+  await page.route('**/api/session*', async route => {
+    markSession();
+    await sessionReleased;
+    await route.continue();
+  });
+  let groupRequests = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && /\/api\/groups\/[^/]+\/undo$/.test(new URL(request.url()).pathname)) {
+      groupRequests += 1;
+    }
+  });
+  const responsePromise = page.waitForResponse(response => (
+    response.request().method() === 'POST'
+      && /\/api\/groups\/[^/]+\/undo$/.test(new URL(response.url()).pathname)
+  ));
+
+  await undo.click();
+  const response = await responsePromise;
+  const body = await response.json();
+  assert.equal(response.status(), 200, JSON.stringify(body));
+  assert.equal(body.syncPending, true, JSON.stringify(body));
+  await sessionIntercepted;
+  assert.equal(await undo.isDisabled(), true);
+  assert.equal(await redo.isDisabled(), true);
+  assert.equal(await undo.getAttribute('data-group-id'), '');
+  assert.equal(await redo.getAttribute('data-group-id'), '');
+  assert.equal(groupRequests, 1);
+  releaseSession();
+
+  await page.waitForFunction(() => /撤销已保存.*浏览器同步待重试/.test(
+    document.querySelector('[data-process-note]')?.textContent ?? '',
+  ));
+  await page.waitForFunction(id => (
+    document.querySelector('[data-history-redo]')?.dataset.groupId === id
+      && document.querySelector('[data-history-redo]')?.disabled === false
+  ), groupId);
+  assert.equal(groupRequests, 1);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('任务行撤销已保存但 session 刷新失败时不误报未提交失败', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(6_000);
+  const undo = page.locator('[data-history-undo]');
+  const target = await page.locator('#deck-frame').evaluate(frameElement => (
+    frameElement.contentWindow.HuaweiDeckPatchRuntime.makeLocator(
+      frameElement.contentDocument.querySelector('h2'),
+    )
+  ));
+  const created = await postJson(app, '/api/tasks', {
+    expectedRevision:0,
+    pageKey:target.pageKey,
+    pageIndex:1,
+    pageLabel:'目录页',
+    rect:{ x:20, y:20, w:400, h:180 },
+    instruction:'任务行 durable 语义测试',
+  });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  const taskId = created.body.task.id;
+  const applied = await postJson(app, '/api/actions', {
+    expectedRevision:1,
+    taskId,
+    actions:[{
+      id:'history-task-durable', taskId, target, kind:'setText', payload:{ text:'任务 durable 标题' },
+    }],
+  });
+  assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  await waitForRevision(page, 2);
+  await page.waitForSelector(`[data-task-undo="${taskId}"]`);
+  let sessionRequests = 0;
+  await page.route('**/api/session*', async route => {
+    sessionRequests += 1;
+    await route.fulfill({
+      status:503,
+      contentType:'application/json',
+      body:JSON.stringify({ error:'TEMPORARY_UNAVAILABLE', message:'任务行测试中的 session 暂不可用' }),
+    });
+  });
+
+  await page.locator(`[data-task-undo="${taskId}"]`).click();
+  await waitForRevision(page, 3);
+  await page.waitForFunction(() => /撤销已保存/.test(
+    document.querySelector('[data-process-note]')?.textContent ?? '',
+  ));
+  assert.doesNotMatch(await page.locator('[data-process-note]').textContent(), /撤销失败/);
+  assert.match(await page.locator('[data-process-note]').textContent(), /会话同步待重试/);
+  assert.equal(sessionRequests, 1);
+  assert.equal(await undo.isDisabled(), true);
+  assert.equal(await undo.getAttribute('data-group-id'), '');
+  const state = await readSession(app);
+  assert.equal(state.revision, 3);
+  assert.equal(state.groups[0].active, false);
+  assert.ok(browserProblems.every(problem => /503 \(Service Unavailable\)/.test(problem)),
+    JSON.stringify(browserProblems));
+  browserProblems.splice(0);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });

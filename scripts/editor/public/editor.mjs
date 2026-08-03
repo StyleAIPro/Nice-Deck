@@ -41,6 +41,8 @@ let sessionRedo = [];
 let historyBusy = false;
 let loadedSessionRevision = -1;
 let historyRefreshTargetRevision = 0;
+let historySnapshotRequirement = 0;
+let historySnapshotFulfilled = 0;
 let sessionRefreshTargetRevision = 0;
 let sessionRefreshPromise;
 let seenOnline = false;
@@ -159,7 +161,8 @@ function showTaskNotice(message) {
 
 function renderHistory() {
   const { undoGroup, redoGroup } = historyCandidates(sessionGroups, sessionRedo);
-  const refreshPending = loadedSessionRevision < historyRefreshTargetRevision;
+  const refreshPending = loadedSessionRevision < historyRefreshTargetRevision
+    || historySnapshotFulfilled < historySnapshotRequirement;
   const controlsBusy = historyBusy || refreshPending;
   historyControls.dataset.busy = String(controlsBusy);
   historyControls.setAttribute('aria-busy', String(controlsBusy));
@@ -176,6 +179,15 @@ function renderHistory() {
 function expectHistoryRevision(targetRevision) {
   if (Number.isSafeInteger(targetRevision)) {
     historyRefreshTargetRevision = Math.max(historyRefreshTargetRevision, targetRevision);
+  }
+  renderHistory();
+}
+
+function requireHistoryRefresh(targetRevision) {
+  if (Number.isSafeInteger(targetRevision)) {
+    historyRefreshTargetRevision = Math.max(historyRefreshTargetRevision, targetRevision);
+  } else {
+    historySnapshotRequirement += 1;
   }
   renderHistory();
 }
@@ -199,12 +211,13 @@ async function changeHistory(method, button) {
     } catch (error) {
       if (error.committed === true) {
         updateRevision(error.revision);
-        expectHistoryRevision(error.revision);
+        requireHistoryRefresh(error.revision);
         await loadSession(error.revision).catch(() => {});
         showTaskNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、同步待确认`);
         return;
       }
-      expectHistoryRevision(error.revision);
+      if (error.code === 'REVISION_CONFLICT') requireHistoryRefresh(error.revision);
+      else expectHistoryRevision(error.revision);
       await loadSession(error.revision).catch(() => {});
       showTaskNotice(error.code === 'REVISION_CONFLICT'
         ? '历史已更新，请重试'
@@ -212,7 +225,7 @@ async function changeHistory(method, button) {
       return;
     }
     updateRevision(result.revision);
-    expectHistoryRevision(result.revision);
+    requireHistoryRefresh(result.revision);
     try {
       await ensureSessionRevision(result.revision);
     } catch {
@@ -243,6 +256,7 @@ async function undoTask(task) {
       } catch (error) {
         if (error.status === 409 && error.code === 'REVISION_CONFLICT' && !retried) {
           retried = true;
+          requireHistoryRefresh(error.revision);
           await loadSession();
           const refreshed = tasks.find(candidate => candidate.id === task.id);
           if (!refreshed?.groupId) return;
@@ -251,6 +265,7 @@ async function undoTask(task) {
         }
         if (error.committed === true) {
           updateRevision(error.revision);
+          requireHistoryRefresh(error.revision);
           await loadSession(error.revision).catch(() => {});
           showTaskNotice('撤销已保存、会话同步待确认');
           return;
@@ -259,7 +274,13 @@ async function undoTask(task) {
       }
     }
     updateRevision(result.revision);
-    await ensureSessionRevision(result.revision);
+    requireHistoryRefresh(result.revision);
+    try {
+      await ensureSessionRevision(result.revision);
+    } catch {
+      showTaskNotice('撤销已保存、会话同步待重试');
+      return;
+    }
     if (result.syncPending) showTaskNotice('撤销已保存、浏览器同步待重试');
   } catch (error) {
     await loadSession(error.revision).catch(() => {});
@@ -290,14 +311,20 @@ function loadSession(targetRevision = revision) {
   if (sessionRefreshPromise) return sessionRefreshPromise;
   const refresh = async () => {
     let firstRequest = true;
-    while (firstRequest || loadedSessionRevision < sessionRefreshTargetRevision) {
+    while (firstRequest || loadedSessionRevision < sessionRefreshTargetRevision
+      || historySnapshotFulfilled < historySnapshotRequirement) {
       firstRequest = false;
       const requestedRevision = sessionRefreshTargetRevision;
+      const requestedSnapshotRequirement = historySnapshotRequirement;
       const [session, persistedTasks] = await Promise.all([
         requestJson('/api/session'),
         requestJson('/api/tasks'),
       ]);
       const sessionRevision = Number.isSafeInteger(session.revision) ? session.revision : 0;
+      historySnapshotFulfilled = Math.max(
+        historySnapshotFulfilled,
+        requestedSnapshotRequirement,
+      );
       updateRevision(sessionRevision);
       if (sessionRevision >= loadedSessionRevision) {
         loadedSessionRevision = sessionRevision;
@@ -305,6 +332,8 @@ function loadSession(targetRevision = revision) {
         sessionRedo = Array.isArray(session.redo) ? session.redo : [];
         tasks = uniqueTasks([...tasks, ...(Array.isArray(persistedTasks) ? persistedTasks : [])]);
         renderTasks();
+      } else {
+        renderHistory();
       }
       if (loadedSessionRevision < requestedRevision) {
         throw new Error(`权威会话 revision ${loadedSessionRevision} 落后于 ${requestedRevision}`);
@@ -317,7 +346,8 @@ function loadSession(targetRevision = revision) {
 }
 
 function ensureSessionRevision(targetRevision) {
-  if (!Number.isSafeInteger(targetRevision) || loadedSessionRevision >= targetRevision) {
+  if ((!Number.isSafeInteger(targetRevision) || loadedSessionRevision >= targetRevision)
+    && historySnapshotFulfilled >= historySnapshotRequirement) {
     return Promise.resolve();
   }
   return loadSession(targetRevision);
@@ -416,6 +446,7 @@ async function submitManualActions(message) {
       } catch (error) {
         if (error.status === 409 && error.code === 'REVISION_CONFLICT' && !retried) {
           retried = true;
+          requireHistoryRefresh(error.revision);
           await loadSession();
           continue;
         }
@@ -423,6 +454,7 @@ async function submitManualActions(message) {
       }
     }
     updateRevision(result.revision);
+    requireHistoryRefresh(result.revision);
     let sessionRefreshPending = false;
     try { await ensureSessionRevision(result.revision); }
     catch { sessionRefreshPending = true; }
@@ -433,7 +465,8 @@ async function submitManualActions(message) {
   } catch (error) {
     if (error.committed === true) {
       updateRevision(error.revision);
-      await loadSession().catch(() => {});
+      requireHistoryRefresh(error.revision);
+      await loadSession(error.revision).catch(() => {});
       postManualResult(requestId, {
         ok: true, committed:true, commitConfirmed:false, recoveredBySync:false,
         syncPending:true, revision:error.revision, groupId:error.groupId,
