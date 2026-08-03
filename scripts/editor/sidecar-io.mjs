@@ -247,15 +247,22 @@ class PersistentSidecarIO {
       return Promise.reject(lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭'));
     }
     const id = randomUUID();
-    const line = `${JSON.stringify({ id, command, payload })}\n`;
+    let line;
+    try {
+      line = `${JSON.stringify({ id, command, payload })}\n`;
+    } catch (error) {
+      return Promise.reject(undispatchedLifecycleError(Object.assign(
+        lifecycleError('SIDECAR_HELPER_SERIALIZE', 'sidecar helper 请求序列化失败'),
+        { cause:error },
+      )));
+    }
     const inputLimit = command === 'write-session'
       ? this.maxSessionInputBytes : this.maxInputBytes;
     if (Buffer.byteLength(line) > inputLimit) {
       const error = lifecycleError(
         'SIDECAR_HELPER_INPUT_LIMIT', 'sidecar helper 输入超过上限',
       );
-      this.#abort(error);
-      return Promise.reject(error);
+      return Promise.reject(undispatchedLifecycleError(error));
     }
     return new Promise((resolve, reject) => {
       this.queue.push({

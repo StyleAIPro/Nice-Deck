@@ -434,7 +434,7 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
     await io.close();
   });
 
-  await t.test('oversized input 在写入 child 前拒绝并终止 helper', async () => {
+  await t.test('oversized input 在写入 child 前只拒绝本地调用', async () => {
     const child = fakeChild();
     const io = await createPersistentSidecarIO({
       project:baseIdentity,
@@ -450,7 +450,7 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
       }),
       error => error.code === 'SIDECAR_HELPER_INPUT_LIMIT',
     );
-    assert.equal(child.killed, true);
+    assert.equal(child.killed, false);
     await io.close();
   });
 
@@ -921,6 +921,83 @@ test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', 
     await assert.rejects(asserting, error => (
       error.code === 'SIDECAR_HELPER_PROTOCOL' && error.committed === false
     ));
+    await io.close();
+  });
+
+  await t.test('active publish 不受后续 oversized 普通请求影响且 helper 可继续服务', async () => {
+    const child = fakeChild((current, request, callback) => {
+      callback?.();
+      setTimeout(() => emitResponse(
+        current,
+        request,
+        request.command === 'publish-attachments' ? [] : { bound:true },
+      ), request.command === 'publish-attachments' ? 30 : 1);
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:20, attachmentTimeoutMs:80,
+      maxInputBytes:700, skipReadyHandshake:true,
+    });
+    const publishing = io.publishAttachments(publishPayload);
+    await assert.rejects(
+      () => io.bindSession({
+        deckName:'x'.repeat(2_000), sessionId:taskId,
+        sessionName:'deck-deadbeef', create:false,
+      }),
+      error => error.code === 'SIDECAR_HELPER_INPUT_LIMIT'
+        && error.committed === false
+        && error.commitScope === undefined,
+    );
+    assert.deepEqual(child.requestsWritten, ['publish-attachments']);
+    assert.deepEqual(await publishing, []);
+    assert.deepEqual(await io.assertBound(), { bound:true });
+    assert.equal(child.killed, false);
+    await io.close();
+  });
+
+  await t.test('oversized 附件自身未送达且不影响后续 helper 请求', async () => {
+    const child = fakeChild((current, request, callback) => {
+      callback?.();
+      queueMicrotask(() => emitResponse(current, request, { bound:true }));
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      maxInputBytes:300, skipReadyHandshake:true,
+    });
+    await assert.rejects(
+      () => io.publishAttachments({ ...publishPayload, padding:'x'.repeat(2_000) }),
+      error => error.code === 'SIDECAR_HELPER_INPUT_LIMIT'
+        && error.committed === false
+        && error.commitScope === undefined,
+    );
+    assert.deepEqual(child.requestsWritten, []);
+    assert.deepEqual(await io.assertBound(), { bound:true });
+    assert.equal(child.killed, false);
+    await io.close();
+  });
+
+  await t.test('本地 JSON 序列化失败返回未提交 Promise 且 helper 保持可用', async () => {
+    const child = fakeChild((current, request, callback) => {
+      callback?.();
+      queueMicrotask(() => emitResponse(current, request, { bound:true }));
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      skipReadyHandshake:true,
+    });
+    const circular = { ...publishPayload };
+    circular.self = circular;
+    let localFailure;
+    assert.doesNotThrow(() => { localFailure = io.publishAttachments(circular); });
+    await assert.rejects(
+      localFailure,
+      error => error.code === 'SIDECAR_HELPER_SERIALIZE'
+        && error.committed === false
+        && error.commitScope === undefined,
+    );
+    assert.deepEqual(child.requestsWritten, []);
+    assert.deepEqual(await io.assertBound(), { bound:true });
+    assert.equal(child.killed, false);
     await io.close();
   });
 });
