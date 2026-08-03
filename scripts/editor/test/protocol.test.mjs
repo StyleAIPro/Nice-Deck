@@ -82,6 +82,30 @@ test('拒绝越界任务和任意动作类型', () => {
   assert.throws(() => validateAction({ kind: 'replaceOuterHTML', payload: {} }));
 });
 
+test('请求任务不得自行携带附件持久化元数据', () => {
+  assert.throws(() => validateTask({
+    pageKey: 'p', rect: { x: 1, y: 2, w: 3, h: 4 }, instruction: '改', attachments: [],
+  }), /attachments/);
+});
+
+test('持久化任务严格校验附件且兼容旧任务', () => {
+  const taskId = '11111111-1111-4111-8111-111111111111';
+  const attachmentId = '22222222-2222-4222-8222-222222222222';
+  const base = { id: taskId, pageKey: 'p', rect: { x: 1, y: 2, w: 3, h: 4 }, instruction: '改' };
+  assert.equal(validateTask(base, { persisted: true }), base);
+  const persisted = {
+    ...base,
+    attachments: [{
+      id: attachmentId, name: '新版架构.png', mime: 'image/png', size: 8, source: 'pasted',
+      relativePath: `attachments/${taskId}/${attachmentId}.png`,
+      createdAt: '2026-08-02T12:00:00.000Z',
+    }],
+  };
+  assert.equal(validateTask(persisted, { persisted: true }), persisted);
+  assert.throws(() => validateTask({ ...persisted, attachments: {} }, { persisted: true }), /数组/);
+  assert.throws(() => validateTask({ ...persisted, attachments: Array(9).fill(persisted.attachments[0]) }, { persisted: true }), /8/);
+});
+
 test('动作 payload 严格拒绝非有限位移、非正缩放和对象污染字段', () => {
   const target = { pageKey: 'page-001-a', path: '0/1' };
   assert.throws(() => validateAction({

@@ -25,6 +25,7 @@ const EDITOR_ASSETS = new Map([
   ['/editor/task-drawer.mjs', { path: join(PUBLIC_DIR, 'task-drawer.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/ws-client.mjs', { path: join(PUBLIC_DIR, 'ws-client.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/protocol.mjs', { path: join(EDITOR_DIR, 'protocol.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/attachment-protocol.mjs', { path: join(EDITOR_DIR, 'attachment-protocol.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/html2canvas.min.js', {
     path: join(PROJECT_DIR, 'node_modules/html2canvas/dist/html2canvas.min.js'),
     type: 'text/javascript; charset=utf-8',

@@ -1,3 +1,5 @@
+import { MAX_ATTACHMENTS, validateAttachmentMetadata } from './attachment-protocol.mjs';
+
 export const ACTION_KINDS = new Set(['setText', 'setStyle', 'translate', 'resize', 'hide', 'show']);
 export const TASK_STATUSES = new Set(['pending', 'processing', 'needs-confirmation', 'completed', 'failed']);
 
@@ -114,13 +116,32 @@ export function normalizeRect(rect, canvas) {
   return { x, y, w, h };
 }
 
-export function validateTask(task) {
+export function validateTask(task, { persisted=false } = {}) {
   if (!task.pageKey || !task.instruction?.trim()) {
     throw new TypeError('任务缺少页面或修改说明');
   }
   const { x, y, w, h } = task.rect ?? {};
   if (![x, y, w, h].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1920 || y + h > 1080) {
     throw new RangeError('区域必须位于 1920×1080 画布内');
+  }
+  if (!persisted && Object.hasOwn(task, 'attachments')) {
+    throw new TypeError('请求任务不得直接提供 attachments');
+  }
+  if (persisted && Object.hasOwn(task, 'attachments')) {
+    if (!Array.isArray(task.attachments)) throw new TypeError('持久化 attachments 必须是数组');
+    if (task.attachments.length > MAX_ATTACHMENTS) {
+      throw new RangeError(`每个任务最多 ${MAX_ATTACHMENTS} 个附件`);
+    }
+    const ids = new Set();
+    const paths = new Set();
+    for (const attachment of task.attachments) {
+      validateAttachmentMetadata(attachment, task.id);
+      if (ids.has(attachment.id) || paths.has(attachment.relativePath)) {
+        throw new TypeError('持久化 attachments 不得重复');
+      }
+      ids.add(attachment.id);
+      paths.add(attachment.relativePath);
+    }
   }
   return task;
 }
