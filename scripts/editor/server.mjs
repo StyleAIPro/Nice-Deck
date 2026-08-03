@@ -750,7 +750,10 @@ function persistentBoundary(project, root, binding, io) {
     catch (error) { throw unsafeSidecarError('sidecar 身份已在服务运行期间变化，拒绝继续写入', error); }
   };
   boundary.pythonIdentity = Object.fromEntries(
-    ['project', 'root', 'session', 'snapshots', 'backups', 'transactions', 'writeErrors']
+    [
+      'project', 'root', 'session', 'snapshots', 'backups', 'transactions', 'writeErrors',
+      'attachments', 'attachmentStaging',
+    ]
       .map(name => [name, Object.fromEntries(
         ['path', 'realPath', 'dev', 'ino'].map(key => [key, boundary[name][key]]),
       )]),

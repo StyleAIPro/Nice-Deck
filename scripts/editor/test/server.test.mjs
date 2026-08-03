@@ -782,6 +782,41 @@ test('server guard 后项目根目录被替换时 adapter 以启动 identity 拒
   assert.deepEqual(await readdir(dirname(replacementDeck)), ['deck.html']);
 });
 
+test('sidecar writer identity 包含可信 attachments 与 staging 目录', async t => {
+  let writerIdentity;
+  const child = fakeWriterChild({
+    onEnd:current => queueMicrotask(() => {
+      current.stdout.emit('data', `${JSON.stringify({
+        ok:false, code:'WRITE_FAILED', stage:'write', message:'stop after identity capture',
+      })}\n`);
+      current.emit('close', 0);
+    }),
+  });
+  const app = await makeApp(t, {
+    deckContents:validBundle(),
+    spawnWriter:(_command, args) => {
+      writerIdentity = JSON.parse(args.at(-3));
+      return child;
+    },
+  });
+  await connectDiagnosticsEditor(t, app);
+
+  await fetch(`${app.url}/api/write-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+
+  assert.deepEqual(Object.keys(writerIdentity).sort(), [
+    'attachmentStaging', 'attachments', 'backups', 'project', 'root', 'session',
+    'snapshots', 'transactions', 'writeErrors',
+  ]);
+  assert.equal(writerIdentity.attachments.path, join(app.sessionDir, 'attachments'));
+  assert.equal(
+    writerIdentity.attachmentStaging.path,
+    join(app.sessionDir, 'attachments', '.staging'),
+  );
+});
+
 test('SessionStore 每次 persist 前复核启动时 sidecar 身份', async t => {
   for (const level of ['root', 'session']) {
     await t.test(level, async subtest => {

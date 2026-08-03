@@ -174,6 +174,16 @@ class PersistentSidecarIO {
     return this.#request('read-session', { missingOk });
   }
   assertBound() { return this.#request('assert-bound', {}); }
+  publishAttachments(payload) { return this.#request('publish-attachments', payload); }
+  discardAttachmentUpload({ uploadId }) {
+    return this.#request('discard-attachment-upload', { uploadId });
+  }
+  deleteTaskAttachments({ taskId }) {
+    return this.#request('delete-task-attachments', { taskId });
+  }
+  reconcileAttachments({ referencedTaskIds }) {
+    return this.#request('reconcile-attachments', { referencedTaskIds });
+  }
   readTransaction({ transactionId }) {
     return this.#request('read-transaction', { transactionId });
   }

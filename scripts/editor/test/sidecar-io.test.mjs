@@ -77,7 +77,15 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
       deckName:'deck.html', sessionId, initialFingerprint:fingerprint,
       sessionName, mode:'legacy',
     });
-    await io.bindSession({ deckName:'deck.html', sessionId, sessionName, create:false });
+    const binding = await io.bindSession({ deckName:'deck.html', sessionId, sessionName, create:false });
+    assert.deepEqual(Object.keys(binding.identities).sort(), [
+      'attachmentStaging', 'attachments', 'backups', 'session', 'snapshots',
+      'transactions', 'writeErrors',
+    ]);
+    assert.deepEqual(
+      (await readdir(join(session, 'attachments'))).sort(),
+      ['.staging'],
+    );
     assert.equal(io.atomicWrite, undefined);
     assert.equal(io.read, undefined);
     assert.equal(io.ensureBackup, undefined);
@@ -103,6 +111,51 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
       { fingerprint },
     );
     assert.deepEqual(await io.hashDeck(), { fingerprint });
+  } finally {
+    await io.close();
+  }
+});
+
+test('Node helper wrapper 精确透传四个附件事务命令', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stderr.setEncoding = () => {};
+  child.stdin = new EventEmitter();
+  child.stdin.end = () => {};
+  const requests = [];
+  child.stdin.write = data => {
+    const request = JSON.parse(String(data));
+    requests.push({ command:request.command, payload:request.payload });
+    queueMicrotask(() => child.stdout.emit('data', `${JSON.stringify({
+      id:request.id, ok:true, result:request.command === 'publish-attachments' ? [] : { removed:false },
+    })}\n`));
+    return true;
+  };
+  child.kill = () => queueMicrotask(() => child.emit('close', null));
+  const io = await createPersistentSidecarIO({
+    project:{ path:'/tmp/project', realPath:'/tmp/project', dev:'1', ino:'2' },
+    spawnHelper:() => child,
+    skipReadyHandshake:true,
+  });
+  const uploadId = '223e4567-e89b-42d3-a456-426614174000';
+  const taskId = '423e4567-e89b-42d3-a456-426614174000';
+  const files = [{
+    id:'623e4567-e89b-42d3-a456-426614174000', suffix:'.png', size:8,
+  }];
+  try {
+    await io.publishAttachments({ uploadId, taskId, files });
+    await io.discardAttachmentUpload({ uploadId });
+    await io.deleteTaskAttachments({ taskId });
+    await io.reconcileAttachments({ referencedTaskIds:[taskId] });
+    assert.deepEqual(requests, [
+      { command:'publish-attachments', payload:{ uploadId, taskId, files } },
+      { command:'discard-attachment-upload', payload:{ uploadId } },
+      { command:'delete-task-attachments', payload:{ taskId } },
+      { command:'reconcile-attachments', payload:{ referencedTaskIds:[taskId] } },
+    ]);
   } finally {
     await io.close();
   }

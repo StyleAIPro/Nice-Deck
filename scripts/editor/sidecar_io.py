@@ -8,6 +8,8 @@ identity，再只使用单层文件名和 ``dir_fd`` 完成。这样即使路径
 from __future__ import annotations
 
 import base64
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -30,6 +32,12 @@ MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 TRANSACTION_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+ATTACHMENT_FILE_RE = re.compile(
+    r"^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})"
+    r"(\.[a-z0-9]{1,16})$"
+)
+MAX_ATTACHMENTS = 8
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
 class SidecarIOError(RuntimeError):
@@ -55,6 +63,38 @@ def _require_name(name: str) -> str:
     ):
         raise SidecarIOError("I/O 文件名必须是单层相对名称")
     return name
+
+
+def _require_uuid(value, label="ID"):
+    if not isinstance(value, str) or not TRANSACTION_ID_RE.fullmatch(value):
+        raise SidecarIOError(f"{label} 不是规范小写 UUID v4")
+    return value
+
+
+def _validate_publish_files(value):
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_ATTACHMENTS:
+        raise SidecarIOError(f"files 必须包含 1–{MAX_ATTACHMENTS} 个附件回执")
+    normalized = []
+    ids = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "suffix", "size"}:
+            raise SidecarIOError("附件回执格式无效")
+        attachment_id = _require_uuid(item["id"], "attachmentId")
+        suffix = item["suffix"]
+        size = item["size"]
+        if not isinstance(suffix, str) or not re.fullmatch(r"\.[a-z0-9]{1,16}", suffix):
+            raise SidecarIOError("附件扩展名无效")
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 0 < size <= MAX_ATTACHMENT_BYTES
+        ):
+            raise SidecarIOError("附件大小回执无效")
+        if attachment_id in ids:
+            raise SidecarIOError("附件回执 ID 不得重复")
+        ids.add(attachment_id)
+        normalized.append({"id": attachment_id, "suffix": suffix, "size": size})
+    return normalized
 
 
 def _require_identity(identity: dict) -> dict:
@@ -116,11 +156,173 @@ def _open_child_directory(parent_fd: int, name: str, *, create: bool) -> int:
         except FileExistsError:
             pass
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as error:
+        raise SidecarIOError(f"无法打开可信 sidecar 子目录：{error}") from error
     if not stat.S_ISDIR(os.fstat(fd).st_mode):
         os.close(fd)
         raise SidecarIOError("sidecar 子路径不是常规目录")
     return fd
+
+
+def _rename_directory_no_replace(source_fd, source, target_fd, target):
+    """使用平台原生 no-replace rename 原子发布目录。"""
+    source = os.fsencode(_require_name(source))
+    target = os.fsencode(_require_name(target))
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                           ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source, target_fd, target, 0x00000004)
+    elif sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError as error:  # pragma: no cover - 现代 glibc 提供该入口
+            raise SidecarIOError("当前平台缺少原子 no-replace rename") from error
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                           ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source, target_fd, target, 0x00000001)
+    else:  # pragma: no cover - 当前生产平台为 macOS/Linux
+        raise SidecarIOError("当前平台不支持原子附件目录发布")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), os.fsdecode(target))
+
+
+def _open_managed_attachment_directory(parent_fd, name):
+    """打开单层 UUID 目录并确认打开前后的目录项 identity 一致。"""
+    name = _require_uuid(name)
+    fd = None
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(before.st_mode):
+            raise SidecarIOError("附件目录必须是真实目录")
+        fd = _open_child_directory(parent_fd, name, create=False)
+        held = os.fstat(fd)
+        after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(after.st_mode)
+            or before.st_dev != held.st_dev
+            or before.st_ino != held.st_ino
+            or after.st_dev != held.st_dev
+            or after.st_ino != held.st_ino
+        ):
+            os.close(fd)
+            fd = None
+            raise SidecarIOError("附件目录 identity 在打开期间变化")
+        return fd
+    except FileNotFoundError:
+        if fd is not None:
+            os.close(fd)
+        raise
+    except SidecarIOError:
+        if fd is not None:
+            os.close(fd)
+        raise
+    except OSError as error:
+        if fd is not None:
+            os.close(fd)
+        raise SidecarIOError(f"无法安全打开附件目录：{error}") from error
+
+
+def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
+    """只接受 UUID+短扩展名的常规文件；可保持 fd 供发布后复核。"""
+    expected = None if expected is None else {
+        f"{item['id']}{item['suffix']}": item for item in expected
+    }
+    opened = {}
+    names = []
+    ids = set()
+    try:
+        for name in sorted(os.listdir(directory_fd)):
+            match = ATTACHMENT_FILE_RE.fullmatch(name)
+            if match is None or match.group(1) in ids:
+                raise SidecarIOError("附件目录包含非规范文件名")
+            ids.add(match.group(1))
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode):
+                raise SidecarIOError("附件目录只允许非符号链接的常规文件")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                held = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(held.st_mode)
+                    or held.st_dev != before.st_dev
+                    or held.st_ino != before.st_ino
+                ):
+                    raise SidecarIOError("附件文件 identity 在打开期间变化")
+                if expected is not None:
+                    receipt = expected.get(name)
+                    if receipt is None or held.st_size != receipt["size"]:
+                        raise SidecarIOError("附件文件与可信 writer 回执不一致")
+            except Exception:
+                if fd is not None:
+                    os.close(fd)
+                    fd = None
+                raise
+            names.append(name)
+            if keep_open:
+                opened[name] = fd
+            else:
+                os.close(fd)
+        if expected is not None and set(names) != set(expected):
+            raise SidecarIOError("staging 文件集合与可信 writer 回执不一致")
+        return names, opened
+    except Exception:
+        for fd in opened.values():
+            os.close(fd)
+        raise
+
+
+def _verify_open_attachment_files(directory_fd, opened):
+    if set(os.listdir(directory_fd)) != set(opened):
+        raise SidecarIOError("附件目录在发布期间发生变化")
+    for name, fd in opened.items():
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        held = os.fstat(fd)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != held.st_dev
+            or current.st_ino != held.st_ino
+            or current.st_size != held.st_size
+        ):
+            raise SidecarIOError("附件文件 identity 在发布期间变化")
+
+
+def _remove_managed_attachment_directory(parent_fd, name):
+    try:
+        directory_fd = _open_managed_attachment_directory(parent_fd, name)
+    except FileNotFoundError:
+        return {"removed": False}
+    try:
+        names, _ = _scan_attachment_files(directory_fd)
+        if not PersistentHelper._same_directory_entry(parent_fd, name, directory_fd):
+            raise SidecarIOError("待删除附件目录 identity 已变化")
+        for child in names:
+            os.unlink(child, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        if not PersistentHelper._same_directory_entry(parent_fd, name, directory_fd):
+            raise SidecarIOError("待删除附件目录 identity 已变化")
+        os.rmdir(name, dir_fd=parent_fd)
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise SidecarIOError("附件目录删除后同名条目再次出现")
+        os.fsync(parent_fd)
+        return {"removed": True}
+    except SidecarIOError:
+        raise
+    except OSError as error:
+        raise SidecarIOError(f"无法安全删除附件目录：{error}", stage="unlink") from error
+    finally:
+        os.close(directory_fd)
 
 
 def _decode_json_file(directory_fd: int, name: str, *, max_bytes=None):
@@ -208,6 +410,8 @@ class PersistentHelper:
         self.backups_fd = None
         self.transactions_fd = None
         self.write_errors_fd = None
+        self.attachments_fd = None
+        self.attachment_staging_fd = None
 
     def close(self):
         if self.root_locked and self.root_fd is not None:
@@ -215,8 +419,9 @@ class PersistentHelper:
                 fcntl.flock(self.root_fd, fcntl.LOCK_UN)
             self.root_locked = False
         for name in (
-            "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd",
-            "session_fd", "root_fd", "project_fd",
+            "attachment_staging_fd", "attachments_fd", "write_errors_fd",
+            "transactions_fd", "backups_fd", "snapshots_fd", "session_fd", "root_fd",
+            "project_fd",
         ):
             fd = getattr(self, name)
             if fd is not None:
@@ -241,6 +446,59 @@ class PersistentHelper:
     def _require_bound_session(self):
         if self.session_fd is None:
             raise SidecarIOError("尚未绑定可信 session")
+
+    def _preflight_active_session(self, entry, deck_name, session_id, session_name):
+        """active session 完成只读结构校验后才允许升级附件目录。"""
+        try:
+            state = _decode_json_file(
+                self.session_fd, "session.json", max_bytes=MAX_SESSION_BYTES
+            )
+            if (
+                not isinstance(state, dict)
+                or state.get("sessionId") != session_id
+                or os.path.realpath(str(state.get("deckPath", ""))) != entry["deckRealPath"]
+                or not isinstance(state.get("deckFingerprint"), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", state["deckFingerprint"])
+            ):
+                raise SidecarIOError("active session.json 未绑定 registry/Deck")
+            session_path = str(Path(self.root_identity["path"]) / session_name)
+            for name in sorted(os.listdir(self.transactions_fd)):
+                if not name.endswith(".json"):
+                    continue
+                transaction_id = name[:-5]
+                _require_uuid(transaction_id, "transactionId")
+                info = os.stat(
+                    name, dir_fd=self.transactions_fd, follow_symlinks=False
+                )
+                if not stat.S_ISREG(info.st_mode):
+                    raise SidecarIOError("transaction record 必须是非符号链接的常规文件")
+                record = _decode_json_file(self.transactions_fd, name)
+                expected_keys = {
+                    "backup", "candidateFingerprint", "deckPath", "oldFingerprint",
+                    "sessionDir", "sessionId", "transactionId", "version",
+                }
+                if (
+                    not isinstance(record, dict)
+                    or set(record) != expected_keys
+                    or record.get("version") != 1
+                    or record.get("sessionId") != session_id
+                    or record.get("transactionId") != transaction_id
+                    or record.get("deckPath") != entry["deckRealPath"]
+                    or record.get("sessionDir") != session_path
+                    or not isinstance(record.get("oldFingerprint"), str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", record["oldFingerprint"])
+                    or not isinstance(record.get("candidateFingerprint"), str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", record["candidateFingerprint"])
+                    or record.get("backup") != str(
+                        Path(session_path) / "backups"
+                        / f"{Path(deck_name).stem}-{record.get('oldFingerprint')}.html"
+                    )
+                ):
+                    raise SidecarIOError("transaction record 未严格绑定当前 session/Deck")
+        except SidecarIOError:
+            raise
+        except (OSError, json.JSONDecodeError) as error:
+            raise SidecarIOError(f"无法安全预检 active session：{error}") from error
 
     def bind_session(self, payload):
         if not isinstance(payload, dict) or set(payload) != {
@@ -284,7 +542,8 @@ class PersistentHelper:
             raise SidecarIOError("bind-session 未绑定 registry 中的当前 sessionId")
 
         for name in (
-            "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd", "session_fd"
+            "attachment_staging_fd", "attachments_fd", "write_errors_fd",
+            "transactions_fd", "backups_fd", "snapshots_fd", "session_fd",
         ):
             fd = getattr(self, name)
             if fd is not None:
@@ -306,9 +565,19 @@ class PersistentHelper:
             self.write_errors_fd = _open_child_directory(
                 self.session_fd, "write-errors", create=payload["create"]
             )
+            if entry["status"] == "active":
+                self._preflight_active_session(entry, deck_name, session_id, session_name)
+            # 旧 session 也在完成 registry/session 验证后升级出真实附件目录。
+            self.attachments_fd = _open_child_directory(
+                self.session_fd, "attachments", create=True
+            )
+            self.attachment_staging_fd = _open_child_directory(
+                self.attachments_fd, ".staging", create=True
+            )
         except Exception:
             for name in (
-                "write_errors_fd", "transactions_fd", "backups_fd", "snapshots_fd", "session_fd"
+                "attachment_staging_fd", "attachments_fd", "write_errors_fd",
+                "transactions_fd", "backups_fd", "snapshots_fd", "session_fd",
             ):
                 fd = getattr(self, name)
                 if fd is not None:
@@ -325,6 +594,11 @@ class PersistentHelper:
             ("backups", self.backups_fd, f"{session_name}/backups"),
             ("transactions", self.transactions_fd, f"{session_name}/transactions"),
             ("writeErrors", self.write_errors_fd, f"{session_name}/write-errors"),
+            ("attachments", self.attachments_fd, f"{session_name}/attachments"),
+            (
+                "attachmentStaging", self.attachment_staging_fd,
+                f"{session_name}/attachments/.staging",
+            ),
         ):
             identities[key] = self._identity_for_fd(
                 fd,
@@ -367,6 +641,8 @@ class PersistentHelper:
             (self.session_fd, "backups", self.backups_fd),
             (self.session_fd, "transactions", self.transactions_fd),
             (self.session_fd, "write-errors", self.write_errors_fd),
+            (self.session_fd, "attachments", self.attachments_fd),
+            (self.attachments_fd, ".staging", self.attachment_staging_fd),
         )
         try:
             if not all(self._same_directory_entry(*check) for check in checks):
@@ -374,6 +650,149 @@ class PersistentHelper:
         except OSError as error:
             raise SidecarIOError("sidecar 目录身份已变化") from error
         return {"safe": True}
+
+    def publish_attachments(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"uploadId", "taskId", "files"}:
+            raise SidecarIOError("publish-attachments payload 格式无效")
+        self.assert_bound({})
+        upload_id = _require_uuid(payload["uploadId"], "uploadId")
+        task_id = _require_uuid(payload["taskId"], "taskId")
+        files = _validate_publish_files(payload["files"])
+        upload_fd = None
+        opened = {}
+        renamed = False
+        try:
+            upload_fd = _open_managed_attachment_directory(
+                self.attachment_staging_fd, upload_id
+            )
+            _, opened = _scan_attachment_files(
+                upload_fd, expected=files, keep_open=True
+            )
+            if not self._same_directory_entry(
+                self.attachment_staging_fd, upload_id, upload_fd
+            ):
+                raise SidecarIOError("staging upload identity 已变化")
+            for fd in opened.values():
+                os.fsync(fd)
+            os.fsync(upload_fd)
+            _rename_directory_no_replace(
+                self.attachment_staging_fd, upload_id,
+                self.attachments_fd, task_id,
+            )
+            renamed = True
+            if not self._same_directory_entry(self.attachments_fd, task_id, upload_fd):
+                raise SidecarIOError("原子发布后的 task 附件目录 identity 不一致")
+            _verify_open_attachment_files(upload_fd, opened)
+            os.fsync(self.attachment_staging_fd)
+            os.fsync(self.attachments_fd)
+            return [{
+                "id": item["id"],
+                "relativePath": f"attachments/{task_id}/{item['id']}{item['suffix']}",
+                "size": item["size"],
+            } for item in files]
+        except SidecarIOError as error:
+            if renamed and not error.committed:
+                raise SidecarIOError(
+                    str(error), stage="attachment-publish", committed=True,
+                    commit_scope="attachments", code=error.code,
+                ) from error
+            raise
+        except OSError as error:
+            message = (
+                "task 附件目录已存在，拒绝覆盖"
+                if error.errno in {errno.EEXIST, errno.ENOTEMPTY}
+                else f"附件目录发布失败：{error}"
+            )
+            raise SidecarIOError(
+                message,
+                stage=("attachment-directory-fsync" if renamed else "attachment-publish"),
+                committed=renamed,
+                commit_scope="attachments" if renamed else None,
+                code="ATTACHMENT_PUBLISH_FAILED" if renamed else "UNSAFE_SIDECAR_IO",
+            ) from error
+        finally:
+            for fd in opened.values():
+                os.close(fd)
+            if upload_fd is not None:
+                os.close(upload_fd)
+
+    def discard_attachment_upload(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"uploadId"}:
+            raise SidecarIOError("discard-attachment-upload payload 格式无效")
+        self.assert_bound({})
+        return _remove_managed_attachment_directory(
+            self.attachment_staging_fd,
+            _require_uuid(payload["uploadId"], "uploadId"),
+        )
+
+    def delete_task_attachments(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"taskId"}:
+            raise SidecarIOError("delete-task-attachments payload 格式无效")
+        self.assert_bound({})
+        return _remove_managed_attachment_directory(
+            self.attachments_fd,
+            _require_uuid(payload["taskId"], "taskId"),
+        )
+
+    @staticmethod
+    def _preflight_managed_directories(parent_fd):
+        directory_ids = []
+        for name in sorted(os.listdir(parent_fd)):
+            _require_uuid(name)
+            directory_fd = _open_managed_attachment_directory(parent_fd, name)
+            try:
+                _scan_attachment_files(directory_fd)
+            finally:
+                os.close(directory_fd)
+            directory_ids.append(name)
+        return directory_ids
+
+    def reconcile_attachments(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"referencedTaskIds"}:
+            raise SidecarIOError("reconcile-attachments payload 格式无效")
+        self.assert_bound({})
+        referenced = payload["referencedTaskIds"]
+        if not isinstance(referenced, list):
+            raise SidecarIOError("referencedTaskIds 必须是 UUID 数组")
+        normalized = [_require_uuid(value, "referencedTaskId") for value in referenced]
+        if len(set(normalized)) != len(normalized):
+            raise SidecarIOError("referencedTaskIds 不得重复")
+        referenced_ids = set(normalized)
+
+        # 先完整预检两棵受控树；发现未知条目时不先删除任何合法目录。
+        attachment_entries = set(os.listdir(self.attachments_fd))
+        if ".staging" not in attachment_entries:
+            raise SidecarIOError("attachments 缺少已绑定 staging 目录")
+        if not self._same_directory_entry(
+            self.attachments_fd, ".staging", self.attachment_staging_fd
+        ):
+            raise SidecarIOError("attachment staging identity 已变化")
+        task_ids = []
+        for name in sorted(attachment_entries - {".staging"}):
+            _require_uuid(name, "task attachment directory")
+            directory_fd = _open_managed_attachment_directory(self.attachments_fd, name)
+            try:
+                _scan_attachment_files(directory_fd)
+            finally:
+                os.close(directory_fd)
+            task_ids.append(name)
+        upload_ids = self._preflight_managed_directories(self.attachment_staging_fd)
+
+        discarded = 0
+        for upload_id in upload_ids:
+            if _remove_managed_attachment_directory(
+                self.attachment_staging_fd, upload_id
+            )["removed"]:
+                discarded += 1
+        deleted = 0
+        for task_id in task_ids:
+            if task_id in referenced_ids:
+                continue
+            if _remove_managed_attachment_directory(
+                self.attachments_fd, task_id
+            )["removed"]:
+                deleted += 1
+        return {"discardedUploads": discarded, "deletedTasks": deleted}
 
     def read_transaction(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"transactionId"}:
@@ -864,6 +1283,14 @@ class PersistentHelper:
             return self.read_session(request["payload"])
         if command == "assert-bound":
             return self.assert_bound(request["payload"])
+        if command == "publish-attachments":
+            return self.publish_attachments(request["payload"])
+        if command == "discard-attachment-upload":
+            return self.discard_attachment_upload(request["payload"])
+        if command == "delete-task-attachments":
+            return self.delete_task_attachments(request["payload"])
+        if command == "reconcile-attachments":
+            return self.reconcile_attachments(request["payload"])
         if command == "read-transaction":
             return self.read_transaction(request["payload"])
         if command == "list-transactions":
