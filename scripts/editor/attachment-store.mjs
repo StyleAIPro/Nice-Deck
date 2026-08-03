@@ -468,6 +468,7 @@ class AttachmentUpload {
     this.state = 'open';
     this.abortReason = null;
     this.active = new Set();
+    this.drainPromise = null;
     this.discardPromise = null;
     this.taskId = null;
     this.descriptors = null;
@@ -749,19 +750,27 @@ class AttachmentUpload {
     );
   }
 
-  #discardStaging() {
-    if (this.cleanupFrozen) {
-      return Promise.resolve({
-        removed:false, retained:true, reason:'untrusted-baseline',
-      });
-    }
-    if (this.discardPromise) return this.discardPromise;
-    this.discardPromise = (async () => {
+  #drainActive() {
+    if (this.drainPromise) return this.drainPromise;
+    this.drainPromise = (async () => {
       const reason = this.abortReason
         ?? abortError('ATTACHMENT_UPLOAD_ABORTED', '附件 upload 已放弃');
       const active = [...this.active];
       for (const record of active) record.cancel(reason);
       await Promise.allSettled(active.map(record => record.closed));
+    })();
+    return this.drainPromise;
+  }
+
+  #discardStaging() {
+    if (this.cleanupFrozen) {
+      return this.#drainActive().then(() => ({
+        removed:false, retained:true, reason:'untrusted-baseline',
+      }));
+    }
+    if (this.discardPromise) return this.discardPromise;
+    this.discardPromise = (async () => {
+      await this.#drainActive();
       if (this.cleanupFrozen || this.uploadIdentity === null) {
         return { removed:false, retained:true, reason:'untrusted-baseline' };
       }

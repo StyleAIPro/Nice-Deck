@@ -512,6 +512,47 @@ test('绝对终止超时只结算 stage，真实 close 前 discard/store.close �
   }
 });
 
+test('stage 已终止超时后并发 discard 共享 drain 并等待真实 close', async t => {
+  const child = hangingChild({ closeOnKill:false });
+  const fx = await fixture({
+    timeoutMs:5,
+    killGraceMs:5,
+    hardTerminationTimeoutMs:20,
+    spawnAttachmentWriter:() => child,
+  });
+  t.after(async () => {
+    child.emit('close', null, 'SIGKILL');
+    await fx.store.close().catch(() => {});
+    await rm(fx.root, { recursive:true, force:true });
+  });
+  const upload = fx.store.beginUpload();
+  await assert.rejects(
+    upload.stage({
+      stream:Readable.from(['data']), name:'pending.bin', mime:'', source:'selected',
+    }),
+    error => error.code === 'ATTACHMENT_WRITER_TERMINATION_TIMEOUT',
+  );
+  assert.equal(fx.store.activeWriters.size, 1);
+  const killsBeforeDiscard = child.kills.length;
+  let settled = 0;
+  const discards = [upload.discard(), upload.discard()].map(promise => promise.then(result => {
+    settled += 1;
+    return result;
+  }));
+  await new Promise(resolvePromise => setImmediate(resolvePromise));
+  assert.equal(settled, 0);
+  assert.equal(fx.store.activeWriters.size, 1);
+  assert.equal(child.kills.length, killsBeforeDiscard, '幂等 cancel 不得重复 kill');
+
+  child.emit('close', null, 'SIGKILL');
+  assert.deepEqual(await Promise.all(discards), [
+    { removed:false, retained:true, reason:'untrusted-baseline' },
+    { removed:false, retained:true, reason:'untrusted-baseline' },
+  ]);
+  assert.equal(fx.store.activeWriters.size, 0);
+  assert.equal(child.kills.length, killsBeforeDiscard);
+});
+
 test('discard 和 store.close 会中止 active writer 并等待资源收敛', async t => {
   const children = [];
   const fx = await fixture({
