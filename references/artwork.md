@@ -82,22 +82,41 @@ uid = eb.embed_image(lines, 'fig.png', mime='image/png', prefix='fig')
 
 **选型判别**：机制/流程/决策 → 自绘（读者要按中文标注顺着走）；实验证据/复杂官方架构 → 抽原图（重画会失真且费时）；两者可同页共存——自绘图讲「怎么转」，原图证明「真的行」。
 
-## 4. 终版落地 C：表格
+## 4. 终版落地 C：标准表格
 
-对比、枚举、速查用表格。分组表格式（分组徽标列 rowspan + mono 数字列）：
+对比、枚举、速查统一使用下面这套标准表格，不再自行发明配色与边框：
+
+- 表头：品牌红 `#b5333b`，白色 15px 粗体，水平 / 垂直居中，高度 46px，3px 黑色外框，列间 1px 黑线。
+- 表体：15px 黑字，内部网格全部 1px 黑线；不使用灰字、彩色底纹或彩色边框。
+- 分组：第一列用 `rowspan`，白底黑字居中；每个分组范围用 3px 黑色粗外框包住，组内仍保留 1px 黑线。
+- 列宽：三列默认 `15% / 19% / 66%`（分类 / 模块 / 说明）。**宽度同时写到表头和每个 `td`，不要只写 `colgroup`**，独立版运行时可能不采用 `colgroup` 宽度。
+- 文字：优先保持单行；确实放不下时自然换行，严禁 `white-space:nowrap` 导致裁切。说明列统一 `white-space:normal;overflow-wrap:break-word`。
+- 高度：表格放在纵向 flex 容器中，用 `flex:1;min-height:0` 吃满标题下的剩余空间；不要同时写 `height:100%`，否则标题高度会被重复计入并造成越界。
 
 ```html
-<table style="width:100%; border-collapse:collapse;">
-  <thead><tr><th style="text-align:left; padding:8px 12px; font-family:'JetBrains Mono',monospace; font-size:13px; letter-spacing:.12em; color:#8a8a92; border-bottom:2px solid #e0e0e4;">列名</th></tr></thead>
-  <tbody><tr>
-    <td rowspan="3" style="padding:8px 12px; border-bottom:1.5px solid #e0e0e4; vertical-align:middle;"><span style="font-family:'JetBrains Mono',monospace; font-size:14px; font-weight:700; color:#fff; background:#b5333b; border-radius:6px; padding:3px 10px; white-space:nowrap;">分组</span></td>
-    <td style="padding:8px 12px; border-bottom:1px solid #f0f0f2; font-size:16px; color:#585860;">内容列</td>
-    <td style="padding:8px 12px; border-bottom:1px solid #f0f0f2; font-family:'JetBrains Mono',monospace; font-size:15px; color:#b5333b; white-space:nowrap;">关键数字</td>
-  </tr></tbody>
+<table style="width:100%;flex:1;min-height:0;border-collapse:collapse;table-layout:fixed;font-size:15px;line-height:1.15;">
+  <thead><tr style="background:#b5333b;color:#fff;">
+    <th width="15%" style="width:15%;height:46px;padding:9px 8px;border-top:3px solid #000;border-bottom:3px solid #000;border-left:3px solid #000;border-right:1px solid #000;text-align:center;vertical-align:middle;font-size:15px;font-weight:900;">TRACK</th>
+    <th width="19%" style="width:19%;height:46px;padding:9px 8px;border-top:3px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:1px solid #000;text-align:center;vertical-align:middle;font-size:15px;font-weight:900;">MODULE</th>
+    <th width="66%" style="width:66%;height:46px;padding:9px 8px;border-top:3px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:3px solid #000;text-align:center;vertical-align:middle;font-size:15px;font-weight:900;">TECHNICAL PROBLEM</th>
+  </tr></thead>
+  <tbody>
+    <!-- 分组首行：三格都加 3px 顶边；rowspan 分类格同时承担分组左边与底边 -->
+    <tr>
+      <td rowspan="2" width="15%" style="width:15%;padding:8px;background:#fff;border-left:3px solid #000;border-top:3px solid #000;border-bottom:3px solid #000;border-right:1px solid #000;color:#000;font-size:15px;font-weight:900;line-height:1.28;vertical-align:middle;text-align:center;">GROUP A</td>
+      <td width="19%" style="width:19%;padding:6px 7px;border-top:3px solid #000;border-bottom:1px solid #000;border-left:1px solid #000;border-right:1px solid #000;font-weight:800;color:#000;vertical-align:middle;">Module A</td>
+      <td width="66%" style="width:66%;padding:6px 8px;border-top:3px solid #000;border-bottom:1px solid #000;border-left:1px solid #000;border-right:3px solid #000;color:#000;white-space:normal;overflow-wrap:break-word;vertical-align:middle;">One representative technical problem.</td>
+    </tr>
+    <!-- 分组末行：第二、三格加 3px 底边，闭合分组粗外框 -->
+    <tr>
+      <td width="19%" style="width:19%;padding:6px 7px;border-top:1px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:1px solid #000;font-weight:800;color:#000;vertical-align:middle;">Module B</td>
+      <td width="66%" style="width:66%;padding:6px 8px;border-top:1px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:3px solid #000;color:#000;white-space:normal;overflow-wrap:break-word;vertical-align:middle;">Another representative technical problem.</td>
+    </tr>
+  </tbody>
 </table>
 ```
 
-表格单元格文字是**图元**，15–17px 即可、不受 21px 散文地板约束（判别法见 `design-system.md` 第 3 节）。行数多的总表先估高度：行高约 44px，超过 ~18 行考虑拆列或拆页。
+表格单元格文字是**图元**，标准字号为 15px、不受 21px 散文地板约束；信息较少且空间充足时可升到 17px，但必须先保证不溢出、尽量少换行。行数多的总表先估高度：标准行高约 38–44px，超过 ~18 行考虑拆列或拆页。改完必须截图目检列宽、换行、分组外框和底部留白。
 
 ## 5. 落地后的验证与踩坑
 

@@ -52,6 +52,8 @@
 
 全 deck 用同一套构件说话：**圆角卡片（radius 10–18）+ 细边 `#e7e7e7`/`#ececec` + mono 小标签 + 强烈的 1–2 级字号对比**。页型清单与活例见 `template-pages.md`，可粘贴骨架见 `page-snippets.md`。
 
+**标准表格是独立语汇，不沿用卡片的浅灰边框**：表头统一品牌红 `#b5333b` + 白色居中粗体，表格全部边框为黑色，普通网格 1px、分组范围外框 3px；表体文字统一 15px 黑色。默认三列宽度为 `15% / 19% / 66%`（分类 / 模块 / 说明），必须直接写到 `th` / `td`，不要只依赖 `colgroup`。表格用 `flex:1;min-height:0` 占满主体剩余高度；文字优先单行，空间不足时用 `white-space:normal;overflow-wrap:break-word` 自然换行，禁止用 `nowrap` 裁切。完整骨架见 `artwork.md` 第 4 节。
+
 ## 6. 审美硬要求（4 条）
 
 1. **不留大块空白**——框内用 `flex:1` + `justify-content:space-between / center` 把内容撑开或居中成「宽松卡片」，别让内容堆在顶部、下面空一截。
