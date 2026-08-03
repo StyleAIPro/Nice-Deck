@@ -2,6 +2,8 @@ export const MAX_ATTACHMENTS = 8;
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const ATTACHMENT_SOURCES = new Set(['selected', 'pasted']);
 
+const isAttachmentSource = source => source === 'selected' || source === 'pasted';
+
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ATTACHMENT_PATH = /^attachments\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(\.[a-z0-9]{1,16})$/;
 const ATTACHMENT_METADATA_KEYS = [
@@ -37,8 +39,8 @@ function readStrictMetadata(value) {
 
 function validateAttachmentName(name) {
   if (typeof name !== 'string' || Array.from(name).length === 0 || Array.from(name).length > 240
-    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(name)) {
-    throw new TypeError('附件名称必须是不含控制或格式字符的 1–240 个字符');
+    || /[\p{Cc}\p{Cs}\p{Bidi_Control}\u200B\uFEFF]/u.test(name)) {
+    throw new TypeError('附件名称必须是不含控制、双向或危险不可见字符的 1–240 个字符');
   }
   return name;
 }
@@ -90,7 +92,7 @@ export function validateAttachmentMetadata(value, taskId) {
   validateAttachmentName(metadata.name);
   validateAttachmentMime(metadata.mime);
   validateAttachmentSize(metadata.size);
-  if (!ATTACHMENT_SOURCES.has(metadata.source)) throw new TypeError('附件来源无效');
+  if (!isAttachmentSource(metadata.source)) throw new TypeError('附件来源无效');
   const parsedPath = parseAttachmentRelativePath(metadata.relativePath);
   if (parsedPath.taskId !== taskId || parsedPath.attachmentId !== metadata.id) {
     throw new TypeError('附件相对路径与任务或附件 ID 不匹配');

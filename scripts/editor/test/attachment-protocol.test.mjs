@@ -47,15 +47,27 @@ test('附件元数据 fail-closed 拒绝隐藏键、Symbol 与访问器', () => 
   assert.equal(getterCalls, 0);
 });
 
-test('附件 name 和 MIME 拒绝控制、格式、双向和无效 Unicode', () => {
+test('附件 name 保留语义 ZWJ/ZWNJ，但拒绝控制、双向和危险不可见 Unicode', () => {
+  for (const safe of ['家庭👨‍👩‍👧‍👦.png', 'گزارش‌نهایی.png']) {
+    assert.equal(validateAttachmentMetadata({ ...metadata, name: safe }, taskId).name, safe);
+  }
   for (const unsafe of [
     'normal\u0000.png', 'report\u202Egnp.exe', 'scope\u2066name', 'scope\u2069name',
-    'zero\u200Bwidth.png', 'surrogate\uD800.png',
+    'zero\u200Bwidth.png', 'bom\uFEFFname.png', 'surrogate\uD800.png',
   ]) {
     assert.throws(() => validateAttachmentMetadata({ ...metadata, name: unsafe }, taskId));
   }
   for (const unsafe of ['text/\u202Eplain', 'text/\u2066plain', 'text/\u200Bplain', 'text/\uD800plain']) {
     assert.throws(() => validateAttachmentMetadata({ ...metadata, mime: unsafe }, taskId));
+  }
+});
+
+test('附件 source 白名单不信任公开可变集合', () => {
+  ATTACHMENT_SOURCES.add('remote');
+  try {
+    assert.throws(() => validateAttachmentMetadata({ ...metadata, source: 'remote' }, taskId), /来源/);
+  } finally {
+    ATTACHMENT_SOURCES.delete('remote');
   }
 });
 

@@ -131,14 +131,19 @@ export function validateTask(task, { persisted=false } = {}) {
   if (!persisted && 'attachments' in task) {
     throw new TypeError('请求任务不得直接提供 attachments');
   }
-  if (persisted && Object.hasOwn(task, 'attachments')) {
-    if (!Array.isArray(task.attachments)) throw new TypeError('持久化 attachments 必须是数组');
-    if (task.attachments.length > MAX_ATTACHMENTS) {
+  if (persisted && 'attachments' in task) {
+    const descriptor = Object.getOwnPropertyDescriptor(task, 'attachments');
+    if (!descriptor || !descriptor.enumerable || !descriptor.writable || !Object.hasOwn(descriptor, 'value')) {
+      throw new TypeError('持久化 attachments 必须是自有、可枚举、可写的数据属性');
+    }
+    const storedAttachments = descriptor.value;
+    if (!Array.isArray(storedAttachments)) throw new TypeError('持久化 attachments 必须是数组');
+    if (storedAttachments.length > MAX_ATTACHMENTS) {
       throw new RangeError(`每个任务最多 ${MAX_ATTACHMENTS} 个附件`);
     }
     const ids = new Set();
     const paths = new Set();
-    const attachments = task.attachments.map(attachment => validateAttachmentMetadata(attachment, task.id));
+    const attachments = storedAttachments.map(attachment => validateAttachmentMetadata(attachment, task.id));
     for (const attachment of attachments) {
       if (ids.has(attachment.id) || paths.has(attachment.relativePath)) {
         throw new TypeError('持久化 attachments 不得重复');
@@ -146,7 +151,7 @@ export function validateTask(task, { persisted=false } = {}) {
       ids.add(attachment.id);
       paths.add(attachment.relativePath);
     }
-    task.attachments = attachments;
+    Object.defineProperty(task, 'attachments', { value:attachments });
   }
   return task;
 }

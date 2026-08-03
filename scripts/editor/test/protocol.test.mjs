@@ -110,6 +110,44 @@ test('持久化任务严格校验附件且兼容旧任务', () => {
   assert.throws(() => validateTask({ ...persisted, attachments: Array(9).fill(persisted.attachments[0]) }, { persisted: true }), /8/);
 });
 
+test('持久化 attachments 只接受一次读取的自有可写数据属性', () => {
+  const taskId = '11111111-1111-4111-8111-111111111111';
+  const attachmentId = '22222222-2222-4222-8222-222222222222';
+  const task = {
+    id: taskId, pageKey: 'p', rect: { x: 1, y: 2, w: 3, h: 4 }, instruction: '改',
+  };
+  let getterCalls = 0;
+  let setterCalls = 0;
+  Object.defineProperty(task, 'attachments', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return getterCalls === 1 ? [{
+        id: attachmentId, name: '新版架构.png', mime: 'image/png', size: 8, source: 'selected',
+        relativePath: `attachments/${taskId}/${attachmentId}.png`,
+        createdAt: '2026-08-02T12:00:00.000Z',
+      }] : [];
+    },
+    set() { setterCalls += 1; },
+  });
+  assert.throws(() => validateTask(task, { persisted: true }), /自有、可枚举、可写的数据属性/);
+  assert.equal(getterCalls, 0);
+  assert.equal(setterCalls, 0);
+});
+
+test('持久化 attachments 拒绝 Object.prototype 污染并清理全局原型', () => {
+  Object.defineProperty(Object.prototype, 'attachments', {
+    configurable: true, enumerable: false, writable: true, value: [],
+  });
+  try {
+    const task = { id: '11111111-1111-4111-8111-111111111111', pageKey: 'p', rect: { x: 1, y: 2, w: 3, h: 4 }, instruction: '改' };
+    assert.throws(() => validateTask(task, { persisted: true }), /自有、可枚举、可写的数据属性/);
+    assert.throws(() => validateTask(task), /attachments/);
+  } finally {
+    delete Object.prototype.attachments;
+  }
+});
+
 test('动作 payload 严格拒绝非有限位移、非正缩放和对象污染字段', () => {
   const target = { pageKey: 'page-001-a', path: '0/1' };
   assert.throws(() => validateAction({
