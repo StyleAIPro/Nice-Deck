@@ -163,7 +163,7 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 
 浏览器提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 不是内置聊天机器人，只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。drawer 不承担真实对话或模型调用。
 
-顶栏的“撤销 / 重做”按时间顺序操作同一份权威历史，覆盖人工文字、移动、缩放和 Agent 动作组；任务行仍保留定点撤销，定点撤销后也可从顶栏重做。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`；API / CLI 返回副本绝对 path，供外部 Agent 读取。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
+顶栏的“撤销 / 重做”按时间顺序操作同一份权威历史，覆盖人工文字、移动、缩放和 Agent 动作组；任务行仍保留定点撤销，定点撤销后也可从顶栏重做。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
 
 预览、区域标记和自动会话保存不触碰原始 source deck。`.huawei-deck-editor/` 自动保存会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。正式写回由用户明确触发，三重闸门依次检查 editor online、文件指纹、无新增溢出并执行 bundle verify。`scripts/edit-bundle.py` 仅在系统临时工作副本执行 `load`、`get_template`、`set_template`、`save`、`eb.verify`；bundle adapter / writer 负责 sidecar 备份、同目录候选、transaction、fingerprint 复核、`os.replace` 与失败恢复。冲突或验证失败拒绝覆盖。
 
@@ -309,7 +309,7 @@ flowchart TD
 
 #### sidecar、恢复与持久化
 
-`.huawei-deck-editor/` 根下的 `sessions.json` 是 session registry；每个注册 session 包含 `session.json`、`snapshots/`、`backups/`、`transactions/`、`write-errors/`。目录保存会话、任务、快照、动作、诊断与备份，不进入最终交付 deck；仓库 `.gitignore` 忽略提交它。helper 启动后持有根目录锁，所有实际读取与写入都相对已绑定 dirfd 完成，并拒绝符号链接替换、未注册 session 和不可信 record。
+`.huawei-deck-editor/` 根下的 `sessions.json` 是 session registry；每个注册 session 包含 `session.json`、`snapshots/`、`backups/`、`transactions/`、`write-errors/`、正式附件目录 `attachments/` 与上传暂存目录 `attachments/.staging/`。目录保存会话、任务、快照、动作、附件、诊断与备份，不进入最终交付 deck；仓库 `.gitignore` 忽略提交它。helper 启动后持有根目录锁，所有实际读取与写入都相对已绑定 dirfd 完成，并拒绝符号链接替换、未注册 session 和不可信 record。`attachments/` 与 `attachments/.staging/` 的 dirfd 在恢复校验后绑定，并与 helper 生命周期一致；服务关闭时先收敛附件 writer，再释放附件 dirfd 和核心 dirfd。
 
 关闭再启动同一 deck 时，registry 与文件指纹选择唯一可恢复 session。若发现 durable transaction，服务按磁盘 fingerprint、session fingerprint 与备份三方收敛；无法证明唯一安全结果时进入 `RECOVERY_REQUIRED` 只读状态，阻断动作和继续写回，要求重启恢复。外部 deck 变化记录为 `DECK_CHANGED`，只能重载新基线或另存副本，不会猜测覆盖。
 

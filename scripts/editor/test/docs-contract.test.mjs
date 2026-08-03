@@ -157,11 +157,23 @@ test('四份入口文档完整说明全局历史与任务附件边界', async ()
       '粘贴图片转 PNG': /粘贴图片[\s\S]{0,80}(?:转为|转换为|转成) PNG/,
       'sidecar 附件目录': /sidecar[\s\S]{0,160}attachments\//,
       '浏览器不提供原绝对路径': /浏览器[\s\S]{0,100}(?:无法|不能)[^。\n]{0,50}原文件[^。\n]{0,30}绝对路径/,
-      'API CLI 返回副本绝对路径': /API\s*\/\s*CLI[\s\S]{0,120}副本[^。\n]{0,40}绝对 (?:path|路径)/i,
+      '任务列表与详情派生副本绝对路径': /GET \/api\/tasks[\s\S]{0,80}GET \/api\/tasks\/<TASK_ID>[\s\S]{0,220}副本[^。\n]{0,50}绝对 (?:path|路径)/i,
+      '创建和事件任务 payload 派生绝对路径': /POST \/api\/tasks[\s\S]{0,160}task-created[\s\S]{0,80}task-updated[\s\S]{0,180}绝对 (?:path|路径)/i,
+      'CLI tasks task 派生绝对路径': /CLI[\s\S]{0,100}`tasks`[\s\S]{0,40}`task`[\s\S]{0,140}绝对 (?:path|路径)/i,
+      'session API 与磁盘只含相对路径': /GET \/api\/session[\s\S]{0,120}session\.json[\s\S]{0,100}relativePath[\s\S]{0,120}(?:不保存|不会保存)[\s\S]{0,40}(?:不返回|不会返回)[^。\n]{0,40}绝对路径/i,
       '附件不进入成品': /附件[^。\n]{0,100}不进入最终 deck/i,
       '附件随 sidecar 生命周期管理': /附件[^。\n]{0,120}sidecar[^。\n]{0,80}生命周期/,
     });
   }
+});
+
+test('架构文档列出附件 sidecar 目录与可信 dirfd 生命周期', async () => {
+  const documents = await loadDocuments();
+  requireClaims('docs/architecture.md', documents['docs/architecture.md'], {
+    '正式附件目录': /attachments\//,
+    '附件暂存目录': /attachments\/\.staging/,
+    '附件目录 dirfd 生命周期': /attachments\/[\s\S]{0,180}dirfd[\s\S]{0,180}(?:绑定|生命周期)[\s\S]{0,180}(?:关闭|释放)/,
+  });
 });
 
 test('浏览器 E2E 使用单并发串行执行', async () => {
