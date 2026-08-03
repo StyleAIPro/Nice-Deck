@@ -5,11 +5,13 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Readable, Writable } from 'node:stream';
 import {
-  lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile,
+  lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, rmdir,
+  unlink, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { AttachmentStore } from '../attachment-store.mjs';
+import { createPersistentSidecarIO } from '../sidecar-io.mjs';
 
 const TASK_ID = '11111111-1111-4111-8111-111111111111';
 const FIXED_ID = '22222222-2222-4222-8222-222222222222';
@@ -43,9 +45,38 @@ async function fixture(options = {}) {
         relativePath:`attachments/${payload.taskId}/${file.id}${file.suffix}`,
       }));
     },
-    async discardAttachmentUpload({ uploadId }) {
-      calls.discard.push(uploadId);
-      await rm(join(staging, uploadId), { recursive:true, force:true });
+    async discardAttachmentUpload(payload) {
+      calls.discard.push(payload);
+      assert.deepEqual(Object.keys(payload).sort(), ['files', 'uploadId', 'uploadIdentity']);
+      const uploadPath = join(staging, payload.uploadId);
+      let uploadInfo;
+      try { uploadInfo = await lstat(uploadPath, { bigint:true }); }
+      catch (error) {
+        if (error.code === 'ENOENT') return { removed:false };
+        throw error;
+      }
+      assert.equal(uploadInfo.isDirectory(), true);
+      assert.equal(String(uploadInfo.dev), payload.uploadIdentity.dev);
+      assert.equal(String(uploadInfo.ino), payload.uploadIdentity.ino);
+      const expected = new Map(payload.files.map(file => [
+        `${file.id}${file.suffix}`, file,
+      ]));
+      const names = (await readdir(uploadPath)).sort();
+      assert.deepEqual(names, [...expected.keys()].sort());
+      for (const name of names) {
+        const file = expected.get(name);
+        const path = join(uploadPath, name);
+        const info = await lstat(path, { bigint:true });
+        assert.equal(info.isFile(), true);
+        assert.equal(info.nlink, 1n);
+        assert.equal(String(info.dev), file.identity.dev);
+        assert.equal(String(info.ino), file.identity.ino);
+        const bytes = await readFile(path);
+        assert.equal(bytes.length, file.size);
+        assert.equal(sha256(bytes), file.sha256);
+      }
+      await Promise.all(names.map(name => unlink(join(uploadPath, name))));
+      await rmdir(uploadPath);
       return { removed:true };
     },
     async deleteTaskAttachments({ taskId }) {
@@ -76,6 +107,69 @@ async function fixture(options = {}) {
     root, session, attachments, staging, identities, calls, sidecarIO,
     sidecarBoundary, store,
     cleanup:async () => { await store.close(); await rm(root, { recursive:true, force:true }); },
+  };
+}
+
+async function persistentFixture(randomUUID) {
+  const temporary = await mkdtemp(join(tmpdir(), 'attachment-store-persistent-'));
+  const project = await realpath(temporary);
+  const root = join(project, '.huawei-deck-editor');
+  const deckName = 'deck.html';
+  const deckBytes = Buffer.from('deck');
+  const fingerprint = sha256(deckBytes);
+  const sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+  const session = join(root, sessionName);
+  for (const name of ['snapshots', 'backups', 'transactions', 'write-errors']) {
+    await mkdir(join(session, name), { recursive:true });
+  }
+  await writeFile(join(project, deckName), deckBytes);
+  await writeFile(join(session, 'session.json'), '{}');
+  const io = await createPersistentSidecarIO({
+    project:await directoryIdentity(project),
+    root:await directoryIdentity(root),
+  });
+  await io.prepareSession({
+    deckName, sessionId, initialFingerprint:fingerprint, sessionName, mode:'legacy',
+  });
+  const core = await io.bindSession({
+    deckName, sessionId, sessionName, create:false,
+  });
+  const attachment = await io.bindAttachments();
+  const identities = { ...core.identities, ...attachment.identities };
+  const calls = { discard:0 };
+  const sidecarIO = {
+    publishAttachments:payload => io.publishAttachments(payload),
+    discardAttachmentUpload:payload => {
+      calls.discard += 1;
+      return io.discardAttachmentUpload(payload);
+    },
+    deleteTaskAttachments:payload => io.deleteTaskAttachments(payload),
+  };
+  const store = new AttachmentStore({
+    sidecarBoundary:{
+      sessionDir:identities.session.path,
+      session:identities.session,
+      attachments:identities.attachments,
+      attachmentStaging:identities.attachmentStaging,
+      pythonIdentity:identities,
+      guard:() => io.assertBound(),
+    },
+    sidecarIO,
+    randomUUID,
+    timeoutMs:2_000,
+    killGraceMs:20,
+    hardTerminationTimeoutMs:100,
+    now:() => new Date('2026-08-03T12:00:00.000Z'),
+  });
+  return {
+    project, session, staging:identities.attachmentStaging.path,
+    io, store, calls,
+    cleanup:async () => {
+      await store.close().catch(() => {});
+      await io.close();
+      await rm(project, { recursive:true, force:true });
+    },
   };
 }
 
@@ -188,7 +282,7 @@ test('stage 调用独立 spawnAttachmentWriter 注入点并按序执行多文件
   assert.equal(staged.length, 2);
 });
 
-test('stream 截断错误会杀死 writer，部分 stage 失败会清理整个 upload', async t => {
+test('stream 截断错误会杀死 writer，并冻结无 receipt partial 留给 reconcile', async t => {
   const fx = await fixture();
   t.after(fx.cleanup);
   const upload = fx.store.beginUpload();
@@ -203,8 +297,44 @@ test('stream 截断错误会杀死 writer，部分 stage 失败会清理整个 u
     upload.stage({ stream:broken, name:'broken.txt', mime:'text/plain', source:'selected' }),
     error => error.code === 'ATTACHMENT_STREAM_ERROR',
   );
-  assert.deepEqual(await lstat(join(fx.staging, upload.id)).then(() => 'exists', () => 'missing'), 'missing');
-  assert.equal(fx.calls.discard.length, 1);
+  assert.deepEqual(await lstat(join(fx.staging, upload.id)).then(() => 'exists', () => 'missing'), 'exists');
+  assert.equal(fx.calls.discard.length, 0);
+  assert.deepEqual(await upload.discard(), {
+    removed:false, retained:true, reason:'untrusted-baseline',
+  });
+});
+
+test('真实 Store+PersistentSidecarIO 对无 receipt partial 冻结并留给 reconcile', async t => {
+  const ids = [
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+  ];
+  const fx = await persistentFixture(() => ids.shift());
+  t.after(fx.cleanup);
+  const upload = fx.store.beginUpload();
+  await upload.stage({
+    stream:Readable.from(['trusted']), name:'first.txt', mime:'text/plain', source:'selected',
+  });
+  const second = new PassThrough();
+  const staging = upload.stage({
+    stream:second, name:'second.txt', mime:'text/plain', source:'selected',
+  });
+  second.write('partial');
+  const partial = join(fx.staging, upload.id, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd.txt');
+  await waitForPath(partial);
+  second.destroy(new Error('truncated'));
+  await assert.rejects(staging, error => error.code === 'ATTACHMENT_STREAM_ERROR');
+  assert.equal(fx.calls.discard, 0, '无 writer cleanup receipt 时不得尝试 helper discard');
+  assert.equal(await readFile(partial, 'utf8'), 'partial');
+
+  await fx.store.close();
+  assert.deepEqual((await readdir(fx.staging)).sort(), [upload.id]);
+  assert.deepEqual(
+    await fx.io.reconcileAttachments({ referencedTaskIds:[] }),
+    { discardedUploads:1, deletedTasks:0 },
+  );
+  assert.deepEqual(await readdir(fx.staging), []);
 });
 
 test('真实 Store+writer 遇到 upload/target replacement 不按旧 uploadId 补偿删除', async t => {
@@ -465,20 +595,28 @@ test('stage 失败后的 committed cleanup 包装保留 helper 语义并以原�
     committed:true, commitScope:'attachments',
     details:{ target:'upload', unlinkedFiles:1, directoryRemoved:false },
   });
+  let spawnCalls = 0;
   const fx = await fixture({
+    spawnAttachmentWriter:(command, args, options) => {
+      spawnCalls += 1;
+      if (spawnCalls === 1) return spawn(command, args, options);
+      return hangingChild({
+        exitCode:1,
+        output:`${JSON.stringify({
+          ok:false, code:'ATTACHMENT_EMPTY', stage:'attachment-limit',
+          message:'empty', committed:false, cleanupSafe:true,
+        })}\n`,
+      });
+    },
     sidecarIO:{ discardAttachmentUpload:async () => { throw cleanup; } },
   });
   t.after(async () => { await fx.store.close().catch(() => {}); await rm(fx.root, { recursive:true, force:true }); });
   const upload = fx.store.beginUpload();
   await upload.stage({ stream:Readable.from(['first']), name:'first.txt', mime:'text/plain', source:'selected' });
-  const broken = new Readable({
-    read() {
-      this.push('partial');
-      queueMicrotask(() => this.destroy(new Error('truncated')));
-    },
-  });
   await assert.rejects(
-    upload.stage({ stream:broken, name:'broken.txt', mime:'text/plain', source:'selected' }),
+    upload.stage({
+      stream:Readable.from([]), name:'empty.txt', mime:'text/plain', source:'selected',
+    }),
     error => (
       error !== cleanup
       && error.code === cleanup.code
@@ -486,7 +624,7 @@ test('stage 失败后的 committed cleanup 包装保留 helper 语义并以原�
       && error.committed === true
       && error.commitScope === cleanup.commitScope
       && error.details === cleanup.details
-      && error.cause?.code === 'ATTACHMENT_STREAM_ERROR'
+      && error.cause?.code === 'ATTACHMENT_EMPTY'
     ),
   );
 });

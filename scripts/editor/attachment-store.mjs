@@ -577,7 +577,7 @@ class AttachmentUpload {
         },
       });
     } catch (error) {
-      if (error?.[WRITER_CLEANUP_SAFE] === false || this.uploadIdentity === null) {
+      if (error?.[WRITER_CLEANUP_SAFE] !== true || this.uploadIdentity === null) {
         this.cleanupFrozen = true;
       }
       throw error;
@@ -750,6 +750,11 @@ class AttachmentUpload {
   }
 
   #discardStaging() {
+    if (this.cleanupFrozen) {
+      return Promise.resolve({
+        removed:false, retained:true, reason:'untrusted-baseline',
+      });
+    }
     if (this.discardPromise) return this.discardPromise;
     this.discardPromise = (async () => {
       const reason = this.abortReason
@@ -761,13 +766,18 @@ class AttachmentUpload {
         return { removed:false, retained:true, reason:'untrusted-baseline' };
       }
       await this.store.guard();
-      return this.store.sidecarIO.discardAttachmentUpload({
-        uploadId:this.id,
-        uploadIdentity:{ ...this.uploadIdentity },
-        files:this.records.map(({ id, suffix, size, sha256, fileIdentity }) => ({
-          id, suffix, size, sha256, identity:{ ...fileIdentity },
-        })),
-      });
+      try {
+        return await this.store.sidecarIO.discardAttachmentUpload({
+          uploadId:this.id,
+          uploadIdentity:{ ...this.uploadIdentity },
+          files:this.records.map(({ id, suffix, size, sha256, fileIdentity }) => ({
+            id, suffix, size, sha256, identity:{ ...fileIdentity },
+          })),
+        });
+      } catch (error) {
+        this.cleanupFrozen = true;
+        throw error;
+      }
     })();
     return this.discardPromise;
   }
