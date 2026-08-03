@@ -97,6 +97,16 @@ class AttachmentWriterTests(unittest.TestCase):
         self.assertEqual(result["path"], str(self.target()))
         self.assertEqual(result["size"], len(contents))
         self.assertEqual(result["sha256"], hashlib.sha256(contents).hexdigest())
+        self.assertEqual(
+            set(result["uploadIdentity"]),
+            {"dev", "ino", "mountDev", "mountId"},
+        )
+        self.assertEqual(
+            set(result["fileIdentity"]),
+            {"dev", "ino", "mountDev", "mountId"},
+        )
+        self.assertEqual(result["uploadIdentity"]["ino"], str(self.target().parent.stat().st_ino))
+        self.assertEqual(result["fileIdentity"]["ino"], str(self.target().stat().st_ino))
         self.assertEqual(self.target().read_bytes(), contents)
 
     def test_rejects_empty_and_oversized_streams_without_file(self):
@@ -241,6 +251,7 @@ class AttachmentWriterTests(unittest.TestCase):
         returncode, result, stderr = self.finish_writer(process)
         self.assertNotEqual(returncode, 0, stderr.decode())
         self.assertEqual(result["code"], "UNSAFE_SIDECAR_IO")
+        self.assertIs(result["cleanupSafe"], False)
         self.assertEqual(self.target().read_bytes(), b"forged")
 
     def test_failure_cleanup_does_not_remove_replacement_upload_directory(self):
@@ -256,8 +267,55 @@ class AttachmentWriterTests(unittest.TestCase):
         returncode, result, stderr = self.finish_writer(process)
         self.assertNotEqual(returncode, 0, stderr.decode())
         self.assertEqual(result["code"], "UNSAFE_SIDECAR_IO")
+        self.assertIs(result["cleanupSafe"], False)
         self.assertTrue(upload.is_dir(), "失败清理不得删除同名 replacement")
         self.assertTrue(moved.is_dir(), "被移走的 writer upload 也不得按旧名称误删")
+
+    def test_created_upload_is_identity_cleaned_when_parent_fsync_fails(self):
+        spec = importlib.util.spec_from_file_location("attachment_writer", WRITER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"data")
+        os.close(write_fd)
+        staging_info = self.staging.stat()
+        real_fsync = module.os.fsync
+
+        def fail_staging_fsync(fd):
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) == (staging_info.st_dev, staging_info.st_ino):
+                raise OSError("injected staging fsync failure")
+            return real_fsync(fd)
+
+        try:
+            with mock.patch.object(module.os, "fsync", side_effect=fail_staging_fsync):
+                with self.assertRaises(module.AttachmentWriterError):
+                    module.write_attachment(self.config, input_fd=read_fd)
+        finally:
+            os.close(read_fd)
+        self.assertFalse((self.staging / UPLOAD_ID).exists())
+
+    def test_created_upload_is_identity_cleaned_when_initial_open_fails(self):
+        spec = importlib.util.spec_from_file_location("attachment_writer", WRITER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"data")
+        os.close(write_fd)
+        real_open = module.os.open
+
+        def fail_upload_open(path, flags, *args, **kwargs):
+            if path == UPLOAD_ID and kwargs.get("dir_fd") is not None:
+                raise OSError("injected upload open failure")
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(module.os, "open", side_effect=fail_upload_open):
+                with self.assertRaises(module.AttachmentWriterError):
+                    module.write_attachment(self.config, input_fd=read_fd)
+        finally:
+            os.close(read_fd)
+        self.assertFalse((self.staging / UPLOAD_ID).exists())
 
 
 if __name__ == "__main__":

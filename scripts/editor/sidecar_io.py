@@ -113,6 +113,50 @@ def _validate_publish_files(value):
     return normalized
 
 
+def _validate_attachment_object_identity(value, label):
+    keys = {"dev", "ino", "mountDev", "mountId"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise SidecarIOError(f"{label} identity 格式无效")
+    normalized = {}
+    for key in keys:
+        item = value[key]
+        if not isinstance(item, str) or not re.fullmatch(r"-?[0-9]+", item):
+            raise SidecarIOError(f"{label} identity 格式无效")
+        if str(int(item)) != item:
+            raise SidecarIOError(f"{label} identity 必须是规范十进制字符串")
+        normalized[key] = item
+    if int(normalized["dev"]) < 0 or int(normalized["ino"]) < 0:
+        raise SidecarIOError(f"{label} identity 不得为负数")
+    if normalized["dev"] != normalized["mountDev"]:
+        raise SidecarIOError(f"{label} dev 与 mountDev 不一致")
+    return normalized
+
+
+def _validate_discard_files(value):
+    if not isinstance(value, list) or len(value) > MAX_ATTACHMENTS:
+        raise SidecarIOError(f"files 必须包含 0–{MAX_ATTACHMENTS} 个可信附件回执")
+    normalized = []
+    ids = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "id", "suffix", "size", "sha256", "identity"
+        }:
+            raise SidecarIOError("discard 附件回执格式无效")
+        publish = _validate_publish_files([{key: item[key] for key in (
+            "id", "suffix", "size", "sha256"
+        )}])[0]
+        if publish["id"] in ids:
+            raise SidecarIOError("discard 附件回执 ID 不得重复")
+        ids.add(publish["id"])
+        normalized.append({
+            **publish,
+            "identity": _validate_attachment_object_identity(
+                item["identity"], "附件文件"
+            ),
+        })
+    return normalized
+
+
 def _require_identity(identity: dict) -> dict:
     required = {"path", "realPath", "dev", "ino"}
     if (
@@ -178,6 +222,17 @@ def _mount_identity(fd):
     else:  # pragma: no cover - 当前生产平台为 macOS/Linux
         raise SidecarIOError("当前平台不支持可靠 mount identity")
     return (str(info.st_dev), str(mount_id))
+
+
+def _matches_attachment_object_identity(fd, expected):
+    info = os.fstat(fd)
+    mount_dev, mount_id = _mount_identity(fd)
+    return (
+        str(info.st_dev) == expected["dev"]
+        and str(info.st_ino) == expected["ino"]
+        and mount_dev == expected["mountDev"]
+        and mount_id == expected["mountId"]
+    )
 
 
 def _require_same_mount(parent_fd, child_fd):
@@ -514,6 +569,24 @@ def _verify_managed_attachment_record(parent_fd, record):
     ):
         raise SidecarIOError("附件目录树在预检后变化")
     _verify_open_attachment_files(directory_fd, record["files"])
+
+
+def _verify_trusted_discard_record(record, upload_identity, files):
+    if not _matches_attachment_object_identity(record["fd"], upload_identity):
+        raise SidecarIOError("staging upload 与可信 writer identity 不一致")
+    expected = {f"{item['id']}{item['suffix']}": item for item in files}
+    if set(record["names"]) != set(expected):
+        raise SidecarIOError("staging 文件集合与可信 writer 回执不一致")
+    for name, file_record in record["files"].items():
+        item = expected[name]
+        if (
+            not _matches_attachment_object_identity(
+                file_record["fd"], item["identity"]
+            )
+            or file_record["baseline"]["size"] != item["size"]
+            or file_record["baseline"]["sha256"] != item["sha256"]
+        ):
+            raise SidecarIOError("staging 文件与可信 writer baseline 不一致")
 
 
 def _remove_preflighted_attachment_directory(parent_fd, record):
@@ -1013,13 +1086,30 @@ class PersistentHelper:
 
     @_with_attachment_lifecycle_lock
     def discard_attachment_upload(self, payload):
-        if not isinstance(payload, dict) or set(payload) != {"uploadId"}:
+        if not isinstance(payload, dict) or set(payload) != {
+            "uploadId", "uploadIdentity", "files"
+        }:
             raise SidecarIOError("discard-attachment-upload payload 格式无效")
         self.assert_bound({})
-        return _remove_managed_attachment_directory(
-            self.attachment_staging_fd,
-            _require_uuid(payload["uploadId"], "uploadId"),
+        upload_id = _require_uuid(payload["uploadId"], "uploadId")
+        upload_identity = _validate_attachment_object_identity(
+            payload["uploadIdentity"], "upload"
         )
+        files = _validate_discard_files(payload["files"])
+        record = _capture_managed_attachment_directory(
+            self.attachment_staging_fd, upload_id
+        )
+        if record is None:
+            return {"removed": False}
+        try:
+            os.fsync(self.attachment_staging_fd)
+            _verify_managed_attachment_record(self.attachment_staging_fd, record)
+            _verify_trusted_discard_record(record, upload_identity, files)
+            return _remove_preflighted_attachment_directory(
+                self.attachment_staging_fd, record
+            )
+        finally:
+            _close_managed_attachment_record(record)
 
     @_with_attachment_lifecycle_lock
     def delete_task_attachments(self, payload):

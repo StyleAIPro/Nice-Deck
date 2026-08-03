@@ -34,6 +34,20 @@ def directory_identity(path):
     }
 
 
+def attachment_identity(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) if path.is_dir() else os.O_RDONLY
+    fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        mount_dev, mount_id = sidecar_io._mount_identity(fd)
+        return {
+            "dev": str(info.st_dev), "ino": str(info.st_ino),
+            "mountDev": mount_dev, "mountId": mount_id,
+        }
+    finally:
+        os.close(fd)
+
+
 class SidecarAtomicWriteTest(unittest.TestCase):
     def test_directory_fsync_failure_reports_snapshot_commit_scope(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -531,9 +545,17 @@ class SidecarAttachmentIOTest(unittest.TestCase):
 
     def test_discard_upload_and_delete_task_only_remove_verified_uuid_directory(self):
         helper, session, _ = self.make_bound_helper()
-        upload, _ = self.stage_files(session)
+        upload, files = self.stage_files(session)
+        trusted_files = [
+            {**item, "identity": attachment_identity(upload / f"{item['id']}{item['suffix']}")}
+            for item in files
+        ]
         self.assertEqual(
-            helper.discard_attachment_upload({"uploadId": UPLOAD_ID}),
+            helper.discard_attachment_upload({
+                "uploadId": UPLOAD_ID,
+                "uploadIdentity": attachment_identity(upload),
+                "files": trusted_files,
+            }),
             {"removed": True},
         )
         self.assertFalse(upload.exists())
@@ -550,6 +572,65 @@ class SidecarAttachmentIOTest(unittest.TestCase):
             helper.delete_task_attachments({"taskId": TASK_ID}),
             {"removed": False},
         )
+
+    def test_trusted_discard_preserves_upload_and_file_replacements(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        payload = {
+            "uploadId": UPLOAD_ID,
+            "uploadIdentity": attachment_identity(upload),
+            "files": [
+                {**item, "identity": attachment_identity(upload / f"{item['id']}{item['suffix']}")}
+                for item in files
+            ],
+        }
+        moved = upload.with_name(f"{UPLOAD_ID}.held")
+        upload.rename(moved)
+        upload.mkdir()
+        replacement = upload / f"{ATTACHMENT_ID}.png"
+        replacement.write_bytes(b"replacement")
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.discard_attachment_upload(payload)
+        self.assertEqual(replacement.read_bytes(), b"replacement")
+
+        for child in upload.iterdir():
+            child.unlink()
+        upload.rmdir()
+        moved.rename(upload)
+        target = upload / f"{ATTACHMENT_ID}.png"
+        target.unlink()
+        target.write_bytes(b"png-data")
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.discard_attachment_upload(payload)
+        self.assertEqual(target.read_bytes(), b"png-data")
+
+    def test_trusted_discard_reports_committed_after_unlink_then_fsync_failure(self):
+        helper, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        payload = {
+            "uploadId": UPLOAD_ID,
+            "uploadIdentity": attachment_identity(upload),
+            "files": [
+                {**item, "identity": attachment_identity(upload / f"{item['id']}{item['suffix']}")}
+                for item in files
+            ],
+        }
+        upload_info = upload.stat()
+        real_fsync = sidecar_io.os.fsync
+
+        def fail_upload_fsync(fd):
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) == (upload_info.st_dev, upload_info.st_ino):
+                raise OSError("injected upload fsync failure")
+            return real_fsync(fd)
+
+        with mock.patch.object(sidecar_io.os, "fsync", side_effect=fail_upload_fsync):
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.discard_attachment_upload(payload)
+        self.assertTrue(caught.exception.committed)
+        self.assertEqual(caught.exception.commit_scope, "attachments")
+        self.assertEqual(caught.exception.code, "ATTACHMENT_DELETE_FAILED")
+        self.assertGreater(caught.exception.details["unlinkedFiles"], 0)
 
     def test_delete_reports_committed_when_task_directory_fsync_fails_after_unlink(self):
         helper, session, _ = self.make_bound_helper()

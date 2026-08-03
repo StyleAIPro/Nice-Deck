@@ -16,13 +16,19 @@ const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const SUFFIX = /^\.[a-z0-9]{1,16}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const RECEIPT_KEYS = [
-  'attachmentId', 'ok', 'path', 'sha256', 'size', 'suffix', 'uploadId',
+  'attachmentId', 'fileIdentity', 'ok', 'path', 'sha256', 'size', 'suffix',
+  'uploadId', 'uploadIdentity',
+];
+const FAILURE_RECEIPT_KEYS = [
+  'cleanupSafe', 'code', 'committed', 'message', 'ok', 'stage',
 ];
 const PUBLISH_RESULT_KEYS = ['id', 'relativePath', 'size'];
 const PROBE_TASK_ID = '00000000-0000-4000-8000-000000000000';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_KILL_GRACE_MS = 250;
+const DEFAULT_HARD_TERMINATION_TIMEOUT_MS = 5_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
+const WRITER_CLEANUP_SAFE = Symbol('writerCleanupSafe');
 
 function attachmentError(code, statusCode, message, details = {}) {
   return Object.assign(new Error(message), {
@@ -37,6 +43,21 @@ function abortError(code, message) {
   return attachmentError(code, 503, message, {
     stage:'attachment-abort', committed:false,
   });
+}
+
+function wrapCommittedCleanupError(cleanupError, cause) {
+  return attachmentError(
+    cleanupError?.code ?? 'ATTACHMENT_DELETE_FAILED',
+    cleanupError?.statusCode ?? 500,
+    cleanupError?.message ?? '附件 staging 清理已部分提交',
+    {
+      stage:cleanupError?.stage,
+      committed:true,
+      commitScope:cleanupError?.commitScope,
+      details:cleanupError?.details,
+      cause,
+    },
+  );
 }
 
 function exactPlainObject(value, keys) {
@@ -56,6 +77,26 @@ function canonicalUuid(value, label) {
     throw new TypeError(`${label} 必须是规范小写 UUID v4`);
   }
   return value;
+}
+
+function trustedObjectIdentity(value, label) {
+  const keys = ['dev', 'ino', 'mountDev', 'mountId'];
+  if (!exactPlainObject(value, keys)) throw new TypeError(`${label} identity 格式无效`);
+  for (const key of keys) {
+    if (typeof value[key] !== 'string' || !/^-?[0-9]+$/.test(value[key])
+      || String(BigInt(value[key])) !== value[key]) {
+      throw new TypeError(`${label} identity 必须是规范十进制字符串`);
+    }
+  }
+  if (BigInt(value.dev) < 0n || BigInt(value.ino) < 0n
+    || value.dev !== value.mountDev) {
+    throw new TypeError(`${label} identity 无效`);
+  }
+  return Object.freeze({ ...value });
+}
+
+function sameObjectIdentity(left, right) {
+  return ['dev', 'ino', 'mountDev', 'mountId'].every(key => left[key] === right[key]);
 }
 
 function captureIdentity(sidecarBoundary, name) {
@@ -127,7 +168,11 @@ function sanitizeStageMetadata({ id, name, mime, source, suffix, now }) {
 }
 
 function writerErrorFromReceipt(receipt, stderr, exitCode) {
-  if (receipt?.ok === false && typeof receipt.code === 'string') {
+  if (exactPlainObject(receipt, FAILURE_RECEIPT_KEYS)
+    && receipt.ok === false && receipt.committed === false
+    && typeof receipt.cleanupSafe === 'boolean'
+    && typeof receipt.code === 'string' && typeof receipt.stage === 'string'
+    && typeof receipt.message === 'string') {
     const statusCodes = {
       ATTACHMENT_EMPTY:400,
       ATTACHMENT_TOO_LARGE:413,
@@ -135,7 +180,7 @@ function writerErrorFromReceipt(receipt, stderr, exitCode) {
       ATTACHMENT_CONFIG_INVALID:500,
       UNSAFE_SIDECAR_IO:500,
     };
-    return attachmentError(
+    const error = attachmentError(
       receipt.code,
       statusCodes[receipt.code] ?? 500,
       typeof receipt.message === 'string' ? receipt.message : '附件 writer 失败',
@@ -144,6 +189,10 @@ function writerErrorFromReceipt(receipt, stderr, exitCode) {
         committed:false,
       },
     );
+    Object.defineProperty(error, WRITER_CLEANUP_SAFE, {
+      value:receipt.cleanupSafe, enumerable:false,
+    });
+    return error;
   }
   return attachmentError(
     'ATTACHMENT_WRITE_FAILED', 500,
@@ -171,7 +220,7 @@ function parseWriterOutput(stdout) {
 
 function runWriter({
   stream, config, expectedPath, spawnAttachmentWriter, timeoutMs, killGraceMs,
-  register, unregister,
+  hardTerminationTimeoutMs, register, unregister,
 }) {
   return new Promise((resolvePromise, rejectPromise) => {
     let child;
@@ -203,9 +252,11 @@ function runWriter({
     let observedBytes = 0;
     let observedSha256;
     let outcome = null;
-    let finalized = false;
+    let closeFinalized = false;
+    let promiseSettled = false;
     let cancelStarted = false;
-    let forceTimer;
+    let graceTimer;
+    let hardTerminationTimer;
     let timeout;
     let sourceError;
     let transportError;
@@ -229,11 +280,18 @@ function runWriter({
     const setOutcome = value => {
       if (outcome === null) outcome = value;
     };
-    const cleanup = ({ force=false } = {}) => {
-      if (finalized) return;
-      finalized = true;
+    const settlePromise = finalOutcome => {
+      if (promiseSettled) return;
+      promiseSettled = true;
+      if (finalOutcome.error) rejectPromise(finalOutcome.error);
+      else resolvePromise(finalOutcome.value);
+    };
+    const finalizeClose = () => {
+      if (closeFinalized) return;
+      closeFinalized = true;
       clearTimeout(timeout);
-      clearTimeout(forceTimer);
+      clearTimeout(graceTimer);
+      clearTimeout(hardTerminationTimer);
       child.removeListener('error', onChildError);
       child.removeListener('close', onChildClose);
       child.stdout.removeListener('data', onStdout);
@@ -241,31 +299,45 @@ function runWriter({
       stream.removeListener('error', onSourceError);
       child.on('error', absorbLateError);
       child.stdin.on('error', absorbLateError);
-      if (force) {
-        for (const candidate of [stream, hasher, child.stdin, child.stdout, child.stderr]) {
-          try { candidate.destroy?.(); } catch { /* 尽力收敛 */ }
-        }
-        child.unref?.();
-      }
       unregister(record);
       resolveClosed();
       const finalOutcome = outcome ?? { error:attachmentError(
         'ATTACHMENT_WRITE_FAILED', 500, '附件 writer 未返回结果',
         { stage:'attachment-writer-exit', committed:false },
       ) };
-      if (finalOutcome.error) rejectPromise(finalOutcome.error);
-      else resolvePromise(finalOutcome.value);
+      settlePromise(finalOutcome);
+    };
+    const escalateTermination = () => {
+      if (closeFinalized) return;
+      for (const candidate of [stream, hasher, child.stdin, child.stdout, child.stderr]) {
+        try { candidate.destroy?.(); } catch { /* 尽力关闭 stdio，不能伪造 child close */ }
+      }
+      try { child.kill?.('SIGKILL'); } catch { /* 等真实 close 或硬上限 */ }
+    };
+    const reportTerminationPending = () => {
+      if (closeFinalized) return;
+      settlePromise({ error:attachmentError(
+        'ATTACHMENT_WRITER_TERMINATION_TIMEOUT', 504,
+        '附件 writer 在绝对终止上限内未报告 close，清理仍待同步',
+        {
+          stage:'attachment-writer-termination', committed:false,
+          details:{ syncPending:true },
+        },
+      ) });
     };
     const cancel = error => {
       setOutcome({ error });
-      if (cancelStarted || finalized) return;
+      if (cancelStarted || closeFinalized) return;
       cancelStarted = true;
       try { stream.destroy?.(error); } catch { /* 输入流可能已关闭 */ }
       try { child.stdin.destroy?.(error); } catch { /* stdin 可能已关闭 */ }
       try { child.kill?.('SIGKILL'); }
-      catch { cleanup({ force:true }); return; }
-      forceTimer = setTimeout(() => cleanup({ force:true }), killGraceMs);
-      forceTimer.unref?.();
+      catch { /* kill 抛错不等于进程已 close */ }
+      graceTimer = setTimeout(escalateTermination, killGraceMs);
+      graceTimer.unref?.();
+      hardTerminationTimer = setTimeout(
+        reportTerminationPending, hardTerminationTimeoutMs,
+      );
     };
     const onSourceError = error => { sourceError = error; };
     const onStdout = chunk => {
@@ -320,7 +392,7 @@ function runWriter({
           }
         }
       }
-      cleanup();
+      finalizeClose();
     };
     const record = { child, closed, cancel };
     register(record);
@@ -338,7 +410,7 @@ function runWriter({
     timeout.unref?.();
 
     pipeline(stream, hasher, child.stdin).catch(error => {
-      if (finalized || cancelStarted) return;
+      if (closeFinalized || cancelStarted) return;
       if (sourceError) {
         cancel(attachmentError(
           'ATTACHMENT_STREAM_ERROR', 400,
@@ -370,7 +442,18 @@ function runWriter({
         { stage:'attachment-writer-protocol', committed:false },
       );
     }
-    return { ...receipt };
+    try {
+      return {
+        ...receipt,
+        uploadIdentity:trustedObjectIdentity(receipt.uploadIdentity, 'upload'),
+        fileIdentity:trustedObjectIdentity(receipt.fileIdentity, '附件文件'),
+      };
+    } catch (cause) {
+      throw attachmentError(
+        'ATTACHMENT_WRITER_PROTOCOL', 500, '附件 writer identity 回执无效',
+        { stage:'attachment-writer-protocol', committed:false, cause },
+      );
+    }
   });
 }
 
@@ -391,6 +474,8 @@ class AttachmentUpload {
     this.sealed = false;
     this.publishPromise = null;
     this.publishTaskId = null;
+    this.uploadIdentity = null;
+    this.cleanupFrozen = false;
   }
 
   stage(input) {
@@ -419,15 +504,23 @@ class AttachmentUpload {
     }
     this.reservedIds.add(id);
     const operation = this.sequence.then(async () => {
-      if (this.state !== 'open') throw this.#stateError();
       try {
+        if (this.state !== 'open') throw this.#stateError();
         const record = await this.#stageOne(id, input);
         this.records.push(record);
-        return { ...record };
+        const { fileIdentity: _fileIdentity, ...publicRecord } = record;
+        return { ...publicRecord };
       } catch (error) {
         this.#markFailed(error);
+        if (error?.code === 'ATTACHMENT_WRITER_TERMINATION_TIMEOUT') {
+          this.cleanupFrozen = true;
+          throw error;
+        }
         try { await this.#discardStaging(); }
         catch (cleanupError) {
+          if (cleanupError?.committed === true) {
+            throw wrapCommittedCleanupError(cleanupError, error);
+          }
           if (error && typeof error === 'object') error.cleanupError = cleanupError;
         }
         throw error;
@@ -464,27 +557,46 @@ class AttachmentUpload {
       this.id,
       `${id}${metadata.suffix}`,
     );
-    const receipt = await runWriter({
-      stream:input.stream,
-      config,
-      expectedPath,
-      spawnAttachmentWriter:this.store.spawnAttachmentWriter,
-      timeoutMs:this.store.timeoutMs,
-      killGraceMs:this.store.killGraceMs,
-      register:record => {
-        this.active.add(record);
-        this.store.activeWriters.add(record);
-      },
-      unregister:record => {
-        this.active.delete(record);
-        this.store.activeWriters.delete(record);
-      },
-    });
+    let receipt;
+    try {
+      receipt = await runWriter({
+        stream:input.stream,
+        config,
+        expectedPath,
+        spawnAttachmentWriter:this.store.spawnAttachmentWriter,
+        timeoutMs:this.store.timeoutMs,
+        killGraceMs:this.store.killGraceMs,
+        hardTerminationTimeoutMs:this.store.hardTerminationTimeoutMs,
+        register:record => {
+          this.active.add(record);
+          this.store.activeWriters.add(record);
+        },
+        unregister:record => {
+          this.active.delete(record);
+          this.store.activeWriters.delete(record);
+        },
+      });
+    } catch (error) {
+      if (error?.[WRITER_CLEANUP_SAFE] === false || this.uploadIdentity === null) {
+        this.cleanupFrozen = true;
+      }
+      throw error;
+    }
     if (this.state !== 'open') throw this.#stateError();
+    if (this.uploadIdentity === null) this.uploadIdentity = receipt.uploadIdentity;
+    else if (!sameObjectIdentity(this.uploadIdentity, receipt.uploadIdentity)) {
+      this.cleanupFrozen = true;
+      throw attachmentError(
+        'ATTACHMENT_WRITER_PROTOCOL', 500,
+        '同一 upload 的 writer identity 回执不一致',
+        { stage:'attachment-writer-protocol', committed:false },
+      );
+    }
     return Object.freeze({
       ...metadata,
       size:receipt.size,
       sha256:receipt.sha256,
+      fileIdentity:receipt.fileIdentity,
     });
   }
 
@@ -550,8 +662,10 @@ class AttachmentUpload {
       }
       const descriptors = this.records.map((record, index) => {
         const result = published[index];
+        const expectedRelativePath = `attachments/${taskId}/${record.id}${record.suffix}`;
         if (!exactPlainObject(result, PUBLISH_RESULT_KEYS)
-          || result.id !== record.id || result.size !== record.size) {
+          || result.id !== record.id || result.size !== record.size
+          || result.relativePath !== expectedRelativePath) {
           throw new TypeError('附件 helper 发布回执与 writer 回执不一致');
         }
         return validateAttachmentMetadata({
@@ -643,8 +757,17 @@ class AttachmentUpload {
       const active = [...this.active];
       for (const record of active) record.cancel(reason);
       await Promise.allSettled(active.map(record => record.closed));
+      if (this.cleanupFrozen || this.uploadIdentity === null) {
+        return { removed:false, retained:true, reason:'untrusted-baseline' };
+      }
       await this.store.guard();
-      return this.store.sidecarIO.discardAttachmentUpload({ uploadId:this.id });
+      return this.store.sidecarIO.discardAttachmentUpload({
+        uploadId:this.id,
+        uploadIdentity:{ ...this.uploadIdentity },
+        files:this.records.map(({ id, suffix, size, sha256, fileIdentity }) => ({
+          id, suffix, size, sha256, identity:{ ...fileIdentity },
+        })),
+      });
     })();
     return this.discardPromise;
   }
@@ -657,6 +780,7 @@ export class AttachmentStore {
     spawnAttachmentWriter=spawn,
     timeoutMs=DEFAULT_TIMEOUT_MS,
     killGraceMs=DEFAULT_KILL_GRACE_MS,
+    hardTerminationTimeoutMs=DEFAULT_HARD_TERMINATION_TIMEOUT_MS,
     randomUUID=systemRandomUUID,
     now=() => new Date(),
   } = {}) {
@@ -675,6 +799,11 @@ export class AttachmentStore {
     if (!Number.isSafeInteger(killGraceMs) || killGraceMs < 0 || killGraceMs > 5_000) {
       throw new RangeError('attachment writer kill grace 无效');
     }
+    if (!Number.isSafeInteger(hardTerminationTimeoutMs)
+      || hardTerminationTimeoutMs <= 0 || hardTerminationTimeoutMs > 30_000
+      || hardTerminationTimeoutMs < killGraceMs) {
+      throw new RangeError('attachment writer 绝对终止上限无效');
+    }
     if (typeof randomUUID !== 'function' || typeof now !== 'function') {
       throw new TypeError('AttachmentStore 随机数或时钟注入无效');
     }
@@ -683,6 +812,7 @@ export class AttachmentStore {
     this.spawnAttachmentWriter = spawnAttachmentWriter;
     this.timeoutMs = timeoutMs;
     this.killGraceMs = killGraceMs;
+    this.hardTerminationTimeoutMs = hardTerminationTimeoutMs;
     this.randomUUID = randomUUID;
     this.now = now;
     this.uploads = new Set();

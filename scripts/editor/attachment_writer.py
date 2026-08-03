@@ -36,6 +36,7 @@ class AttachmentWriterError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.stage = stage
+        self.cleanup_safe = False
 
 
 def _unsafe(message, error=None):
@@ -84,6 +85,17 @@ def _mount_identity(fd):
 def _require_same_mount(parent_fd, child_fd):
     if _mount_identity(parent_fd) != _mount_identity(child_fd):
         raise _unsafe("拒绝跨 mount 边界写入附件")
+
+
+def _trusted_fd_identity(fd):
+    info = os.fstat(fd)
+    mount_dev, mount_id = _mount_identity(fd)
+    return {
+        "dev": str(info.st_dev),
+        "ino": str(info.st_ino),
+        "mountDev": mount_dev,
+        "mountId": mount_id,
+    }
 
 
 def _validate_identity(value, label):
@@ -195,31 +207,67 @@ def _open_absolute_directory_nofollow(identity, label):
 
 def _open_child_directory(parent_fd, name, identity=None, *, create=False):
     created = False
+    created_identity = None
+    fd = None
     if create:
         try:
             os.mkdir(name, 0o700, dir_fd=parent_fd)
-            os.fsync(parent_fd)
             created = True
+            created_info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(created_info.st_mode):
+                raise _unsafe("新建附件 staging 路径不是目录")
+            created_identity = (created_info.st_dev, created_info.st_ino)
         except FileExistsError:
             pass
         except OSError as error:
             raise _unsafe(f"无法创建附件 staging 目录：{error}", error)
     try:
         fd = os.open(name, _directory_flags(), dir_fd=parent_fd)
-    except OSError as error:
-        raise _unsafe(f"无法安全打开附件子目录：{error}", error)
-    try:
         info = os.fstat(fd)
         if not stat.S_ISDIR(info.st_mode):
             raise _unsafe("附件子路径不是常规目录")
+        if created_identity is not None and (
+            info.st_dev, info.st_ino
+        ) != created_identity:
+            raise _unsafe("新建附件 staging 目录在打开期间被替换")
         if identity is not None and (
             str(info.st_dev) != identity["dev"] or str(info.st_ino) != identity["ino"]
         ):
             raise _unsafe("附件子目录 identity 与已绑定目录不一致")
         _require_same_mount(parent_fd, fd)
+        # mkdir 后先持有并记录新目录 identity，再持久化父目录项。这样后续
+        # fsync 失败时只能按 held fd 的 identity 尝试清理本次创建的空目录。
+        if created:
+            _trusted_fd_identity(fd)
+            os.fsync(parent_fd)
         return fd, created
-    except Exception:
-        os.close(fd)
+    except Exception as error:
+        if created:
+            try:
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                identity_matches = (
+                    stat.S_ISDIR(current.st_mode)
+                    and created_identity is not None
+                    and (current.st_dev, current.st_ino) == created_identity
+                )
+                if fd is not None:
+                    identity_matches = identity_matches and _same_directory_entry(
+                        parent_fd, name, fd
+                    )
+                if identity_matches:
+                    os.rmdir(name, dir_fd=parent_fd)
+                    try:
+                        os.fsync(parent_fd)
+                    except OSError:
+                        pass
+            except (OSError, AttachmentWriterError):
+                pass
+        if fd is not None:
+            os.close(fd)
+        if isinstance(error, AttachmentWriterError):
+            raise
+        if isinstance(error, OSError):
+            raise _unsafe(f"无法安全打开附件子目录：{error}", error)
         raise
 
 
@@ -296,7 +344,9 @@ def write_attachment(raw_config, *, input_fd=0):
     lock_held = False
     upload_created = False
     target_created = False
+    target_creation_attempted = False
     target_identity = None
+    active_error = None
     target_name = f"{config['attachmentId']}{config['suffix']}"
     try:
         session_fd = _open_absolute_directory_nofollow(config["session"], "session")
@@ -316,6 +366,7 @@ def write_attachment(raw_config, *, input_fd=0):
             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         )
         try:
+            target_creation_attempted = True
             target_fd = os.open(target_name, flags, 0o600, dir_fd=upload_fd)
             target_created = True
         except OSError as error:
@@ -374,6 +425,8 @@ def write_attachment(raw_config, *, input_fd=0):
             config["session"], "session"
         )
         os.close(current_session_fd)
+        upload_identity = _trusted_fd_identity(upload_fd)
+        file_identity = _trusted_fd_identity(target_fd)
         os.close(target_fd)
         target_fd = None
         target_created = False
@@ -388,28 +441,37 @@ def write_attachment(raw_config, *, input_fd=0):
             ),
             "size": size,
             "sha256": digest.hexdigest(),
+            "uploadIdentity": upload_identity,
+            "fileIdentity": file_identity,
         }
-    except AttachmentWriterError:
+    except AttachmentWriterError as error:
+        active_error = error
         raise
     except OSError as error:
-        raise AttachmentWriterError(f"附件写入失败：{error}") from error
+        wrapped = AttachmentWriterError(f"附件写入失败：{error}")
+        wrapped.__cause__ = error
+        active_error = wrapped
+        raise wrapped
     finally:
         if target_fd is not None:
             try:
                 os.close(target_fd)
             except OSError:
                 pass
-        if (
-            target_created
-            and upload_fd is not None
-            and target_identity is not None
-            and _same_file_identity(upload_fd, target_name, target_identity)
-        ):
-            try:
-                os.unlink(target_name, dir_fd=upload_fd)
-                os.fsync(upload_fd)
-            except OSError:
-                pass
+        target_cleanup_safe = not target_creation_attempted
+        if target_created and upload_fd is not None and target_identity is not None:
+            if _same_file_identity(upload_fd, target_name, target_identity):
+                try:
+                    os.unlink(target_name, dir_fd=upload_fd)
+                    os.fsync(upload_fd)
+                    target_cleanup_safe = True
+                except OSError:
+                    target_cleanup_safe = False
+            else:
+                target_cleanup_safe = False
+        elif target_creation_attempted:
+            target_cleanup_safe = False
+        upload_cleanup_safe = False
         if upload_created and upload_fd is not None and staging_fd is not None:
             try:
                 if _same_directory_entry(
@@ -417,8 +479,18 @@ def write_attachment(raw_config, *, input_fd=0):
                 ):
                     os.rmdir(config["uploadId"], dir_fd=staging_fd)
                     os.fsync(staging_fd)
+                    upload_cleanup_safe = True
             except (OSError, AttachmentWriterError):
-                pass
+                upload_cleanup_safe = False
+        elif upload_fd is not None and staging_fd is not None:
+            try:
+                upload_cleanup_safe = _same_directory_entry(
+                    staging_fd, config["uploadId"], upload_fd
+                )
+            except AttachmentWriterError:
+                upload_cleanup_safe = False
+        if active_error is not None:
+            active_error.cleanup_safe = target_cleanup_safe and upload_cleanup_safe
         for fd in (upload_fd, staging_fd):
             if fd is not None:
                 try:
@@ -467,6 +539,7 @@ def main(argv=None):
             "stage": error.stage,
             "message": str(error),
             "committed": False,
+            "cleanupSafe": error.cleanup_safe,
         })
         return 1
     except Exception:
@@ -476,6 +549,7 @@ def main(argv=None):
             "stage": "attachment-write",
             "message": "附件写入失败",
             "committed": False,
+            "cleanupSafe": False,
         })
         return 1
 

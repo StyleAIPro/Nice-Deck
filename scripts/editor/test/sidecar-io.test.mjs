@@ -153,14 +153,21 @@ test('Node helper wrapper 精确透传四个附件事务命令', async () => {
     id:'623e4567-e89b-42d3-a456-426614174000', suffix:'.png', size:8,
     sha256:sha256('png-data'),
   }];
+  const uploadIdentity = { dev:'1', ino:'9', mountDev:'1', mountId:'10' };
+  const discardFiles = files.map(file => ({
+    ...file, identity:{ dev:'1', ino:'11', mountDev:'1', mountId:'10' },
+  }));
   try {
     await io.publishAttachments({ uploadId, taskId, files });
-    await io.discardAttachmentUpload({ uploadId });
+    await io.discardAttachmentUpload({ uploadId, uploadIdentity, files:discardFiles });
     await io.deleteTaskAttachments({ taskId });
     await io.reconcileAttachments({ referencedTaskIds:[taskId] });
     assert.deepEqual(requests, [
       { command:'publish-attachments', payload:{ uploadId, taskId, files } },
-      { command:'discard-attachment-upload', payload:{ uploadId } },
+      {
+        command:'discard-attachment-upload',
+        payload:{ uploadId, uploadIdentity, files:discardFiles },
+      },
       { command:'delete-task-attachments', payload:{ taskId } },
       { command:'reconcile-attachments', payload:{ referencedTaskIds:[taskId] } },
     ]);
@@ -646,6 +653,13 @@ test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', 
     sha256:sha256('png-data'),
   }];
   const publishPayload = { uploadId, taskId, files };
+  const discardPayload = {
+    uploadId,
+    uploadIdentity:{ dev:'1', ino:'9', mountDev:'1', mountId:'10' },
+    files:files.map(file => ({
+      ...file, identity:{ dev:'1', ino:'11', mountDev:'1', mountId:'10' },
+    })),
+  };
 
   const fakeChild = onWrite => {
     const child = new EventEmitter();
@@ -761,7 +775,7 @@ test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', 
     });
     try {
       const first = io.publishAttachments(publishPayload);
-      const second = io.discardAttachmentUpload({ uploadId });
+      const second = io.discardAttachmentUpload(discardPayload);
       assert.deepEqual(
         child.requestsWritten, ['publish-attachments'],
         '第二个附件请求必须留在本地 FIFO',

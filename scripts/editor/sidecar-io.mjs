@@ -297,8 +297,10 @@ class PersistentSidecarIO {
   }
   assertBound() { return this.#request('assert-bound', {}); }
   publishAttachments(payload) { return this.#request('publish-attachments', payload); }
-  discardAttachmentUpload({ uploadId }) {
-    return this.#request('discard-attachment-upload', { uploadId });
+  discardAttachmentUpload({ uploadId, uploadIdentity, files }) {
+    return this.#request('discard-attachment-upload', {
+      uploadId, uploadIdentity, files,
+    });
   }
   deleteTaskAttachments({ taskId }) {
     return this.#request('delete-task-attachments', { taskId });
