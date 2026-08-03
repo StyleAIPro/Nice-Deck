@@ -366,17 +366,38 @@ export class BridgeService {
     return true;
   }
 
-  createTask(input, expectedRevision) {
+  createTask(input, expectedRevision, options) {
     return this.#enqueue(async () => {
       this.#assertMutable();
       const state = this.sessionStore.state;
       const snapshot = { revision: state.revision, tasks: structuredClone(state.tasks ?? []) };
       try {
-        const result = await this.sessionStore.createTask(input, expectedRevision);
-        this.#throwIfClosed();
+        const result = await this.sessionStore.createTask(input, expectedRevision, options);
+        if (this.closed) {
+          throw serviceError('SERVICE_CLOSED', 503, 'task session 已提交，但服务关闭前未完成确认', {
+            operation:'task',
+            committed:true,
+            commitScope:'session',
+            syncPending:true,
+            sessionCandidateCommitted:true,
+            revision:result.revision,
+          });
+        }
         return result;
       }
       catch (error) {
+        if (this.closed && isCommittedSession(error)) {
+          throw serviceError('SERVICE_CLOSED', 503, 'task session 已提交，但服务关闭前未完成确认', {
+            operation:'task',
+            committed:true,
+            commitScope:'session',
+            syncPending:true,
+            sessionCandidateCommitted:true,
+            revision:this.sessionStore.state.revision,
+            cause:error,
+          });
+        }
+        if (error?.sessionCandidateCommitted === true) throw error;
         this.#throwIfClosed();
         if (isCommittedSession(error)) {
           throw this.#enterRecoveryRequired({
@@ -385,6 +406,20 @@ export class BridgeService {
         }
         state.revision = snapshot.revision;
         state.tasks = snapshot.tasks;
+        if (error?.code === 'ATTACHMENT_RECOVERY_REQUIRED'
+          || error?.code === 'SNAPSHOT_RECOVERY_REQUIRED'
+          || (error?.committed === true
+            && ['attachment', 'attachments', 'snapshot'].includes(error?.commitScope))) {
+          if (!this.recoveryRequired) {
+            this.recoveryRequired = {
+              operation:error?.commitScope === 'snapshot'
+                ? 'task-snapshot-compensation' : 'task-attachment-compensation',
+              committed:error?.committed === true,
+              commitScope:error?.commitScope,
+              cause:error,
+            };
+          }
+        }
         // 仅兼容不具备可信 I/O 接口的最小测试替身；生产 SessionStore 自行清理 dirfd temp。
         if (!this.sessionStore.sidecarIO) {
           await unlink(`${this.sessionStore.sessionPath}.tmp`).catch(() => {});
@@ -638,6 +673,7 @@ export class BridgeService {
         this.#throwIfClosed();
         return result;
       } catch (error) {
+        if (error?.sessionCandidateCommitted === true) throw error;
         this.#throwIfClosed();
         throw error;
       }

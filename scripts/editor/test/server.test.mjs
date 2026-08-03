@@ -1864,6 +1864,129 @@ test('createTask 持久化失败时回滚共享状态并清理临时文件', asy
   await assert.rejects(() => readFile(temporaryPath), { code: 'ENOENT' });
 });
 
+test('Bridge createTask 在 mutation queue 内原样透传附件 lifecycle options', async () => {
+  const state = { revision:0, tasks:[], groups:[], redo:[] };
+  const calls = [];
+  const attachmentsLifecycle = {
+    async publish() { return []; },
+    async discard() {},
+  };
+  const sessionStore = {
+    state,
+    sessionPath:'/tmp/session.json',
+    async createTask(input, expectedRevision, options) {
+      calls.push({ input, expectedRevision, options });
+      state.revision = 1;
+      return { task:{ ...input, id:'task-1', attachments:[] }, revision:1 };
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const input = { instruction:'附件透传' };
+
+  const result = await bridge.createTask(input, 0, { attachmentsLifecycle });
+
+  assert.equal(result.revision, 1);
+  assert.deepEqual(calls, [{ input, expectedRevision:0, options:{ attachmentsLifecycle } }]);
+});
+
+test('附件补偿需恢复时 Bridge 保留首个顶层错误并冻结后续 mutation', async () => {
+  const state = { revision:0, tasks:[], groups:[], redo:[] };
+  let createCalls = 0;
+  const recoveryError = Object.assign(new Error('附件补偿失败'), {
+    code:'ATTACHMENT_RECOVERY_REQUIRED', statusCode:503,
+    stage:'attachment-compensation', committed:false,
+    commitScope:'attachment', sessionCandidateCommitted:false,
+  });
+  const sessionStore = {
+    state,
+    sessionPath:'/tmp/session.json',
+    async createTask() {
+      createCalls += 1;
+      throw recoveryError;
+    },
+  };
+  const bridge = new BridgeService({ sessionStore });
+
+  await assert.rejects(
+    () => bridge.createTask({ instruction:'first' }, 0),
+    error => error === recoveryError,
+  );
+  await assert.rejects(
+    () => bridge.createTask({ instruction:'second' }, 0),
+    error => error.code === 'RECOVERY_REQUIRED'
+      && error.statusCode === 503
+      && error.operation === 'task-attachment-compensation',
+  );
+  assert.equal(createCalls, 1);
+  assert.equal(state.revision, 0);
+  assert.deepEqual(state.tasks, []);
+});
+
+test('task session 已耐久提交后 Bridge 确认失败标记 committed/syncPending 且不回滚', async () => {
+  const task = { id:'task-durable', instruction:'durable', attachments:[{ id:'attachment-1' }] };
+  const state = { revision:0, tasks:[], groups:[], redo:[] };
+  let bridge;
+  const sessionStore = {
+    state,
+    sessionPath:'/tmp/session.json',
+    async createTask() {
+      state.revision = 1;
+      state.tasks = [task];
+      bridge.close();
+      return { task, revision:1 };
+    },
+  };
+  bridge = new BridgeService({ sessionStore });
+
+  await assert.rejects(
+    () => bridge.createTask({ instruction:'durable' }, 0),
+    error => error.code === 'SERVICE_CLOSED'
+      && error.statusCode === 503
+      && error.committed === true
+      && error.commitScope === 'session'
+      && error.syncPending === true
+      && error.sessionCandidateCommitted === true
+      && error.revision === 1,
+  );
+  assert.equal(state.revision, 1);
+  assert.deepEqual(state.tasks, [task]);
+});
+
+test('task session committed 错误与 close 竞态不得降级为可重试的未提交错误', async () => {
+  const task = { id:'task-committed-close', instruction:'durable', attachments:[] };
+  const state = { revision:0, tasks:[], groups:[], redo:[] };
+  const committedError = Object.assign(new Error('session directory fsync ack lost'), {
+    code:'SESSION_WRITE_FAILED', committed:true, commitScope:'session',
+    stage:'session-directory-fsync',
+  });
+  let bridge;
+  const sessionStore = {
+    state,
+    sessionPath:'/tmp/session.json',
+    async createTask() {
+      state.revision = 1;
+      state.tasks = [task];
+      bridge.close();
+      throw committedError;
+    },
+  };
+  bridge = new BridgeService({ sessionStore });
+
+  await assert.rejects(
+    () => bridge.createTask({ instruction:'durable' }, 0),
+    error => error.code === 'SERVICE_CLOSED'
+      && error.statusCode === 503
+      && error.committed === true
+      && error.commitScope === 'session'
+      && error.syncPending === true
+      && error.sessionCandidateCommitted === true
+      && error.revision === 1
+      && error.cause === committedError,
+  );
+  assert.equal(state.revision, 1);
+  assert.deepEqual(state.tasks, [task]);
+});
+
 test('任务查询、输入错误和已列路由都有明确响应', async t => {
   const app = await makeApp(t);
   const invalidJson = await fetch(`${app.url}/api/tasks?token=secret`, {

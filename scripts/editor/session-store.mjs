@@ -1,12 +1,14 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID as systemRandomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join, parse } from 'node:path';
+import { validateTask } from './protocol.mjs';
 import { localDurableIO } from './sidecar-io.mjs';
 
 export class RevisionConflict extends Error {}
 
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const MAX_SNAPSHOT_BYTES = 512 * 1024;
 
 function snapshotError(code, statusCode, message) {
@@ -17,6 +19,31 @@ const isCommittedSession = error => error?.committed === true
   && error?.commitScope === 'session';
 const isCommittedSnapshot = error => error?.committed === true
   && error?.commitScope === 'snapshot';
+const isCommittedAttachments = error => error?.committed === true
+  && error?.commitScope === 'attachments';
+
+function normalizePersistedTask(task) {
+  if (!task || typeof task !== 'object' || Array.isArray(task)
+    || Object.getPrototypeOf(task) !== Object.prototype) {
+    return validateTask(task, { persisted:true });
+  }
+  if (typeof task.id !== 'string' || !UUID_V4.test(task.id)) {
+    throw new TypeError('持久化任务 id 必须是规范 UUID v4');
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(task, 'attachments');
+  if ('attachments' in task && !descriptor) {
+    return validateTask(task, { persisted:true });
+  }
+  const normalized = {
+    ...task,
+    attachments:descriptor ? descriptor.value : [],
+  };
+  return validateTask(normalized, { persisted:true });
+}
+
+function normalizePersistedTasks(tasks) {
+  return (Array.isArray(tasks) ? tasks : []).map(normalizePersistedTask);
+}
 
 function compensatedSnapshotError(error) {
   return Object.assign(new Error(error?.message ?? 'snapshot 持久化失败'), {
@@ -44,18 +71,66 @@ function snapshotRecoveryError(writeError, compensationError) {
   });
 }
 
+function compensatedAttachmentError(error) {
+  return Object.assign(new Error(error?.message ?? '附件发布失败'), {
+    code:typeof error?.code === 'string' ? error.code : 'ATTACHMENT_PUBLISH_FAILED',
+    statusCode:Number.isInteger(error?.statusCode) ? error.statusCode : 500,
+    stage:error?.stage ?? 'attachment-publish',
+    committed:false,
+    commitScope:'attachments',
+    compensated:true,
+    cause:error,
+  });
+}
+
+function attachmentRecoveryError(originalError, compensationError, details = {}) {
+  return Object.assign(new Error('附件已发布但补偿删除失败，需要重启服务恢复'), {
+    code:'ATTACHMENT_RECOVERY_REQUIRED',
+    statusCode:503,
+    stage:'attachment-compensation',
+    committed:false,
+    commitScope:'attachment',
+    sessionCandidateCommitted:false,
+    cause:compensationError,
+    originalError,
+    ...details,
+  });
+}
+
+function committedCompensationError(originalError, compensationError, details = {}) {
+  return Object.assign(new Error(compensationError?.message ?? '资源补偿结果未确认'),
+    compensationError, {
+      code:compensationError?.code ?? 'RESOURCE_RECOVERY_REQUIRED',
+      statusCode:Number.isInteger(compensationError?.statusCode)
+        ? compensationError.statusCode : 503,
+      stage:compensationError?.stage ?? 'resource-compensation',
+      committed:true,
+      commitScope:compensationError?.commitScope ?? 'attachment',
+      cause:originalError,
+      compensationError,
+      sessionCandidateCommitted:false,
+      ...details,
+    });
+}
+
 function decodeSnapshot(snapshot) {
   if (snapshot === undefined || snapshot === null) return null;
-  if (typeof snapshot !== 'string') {
-    throw snapshotError('INVALID_SNAPSHOT', 400, 'snapshot 必须为 PNG data URL 或 null');
+  let bytes;
+  if (Buffer.isBuffer(snapshot)) {
+    bytes = Buffer.from(snapshot);
+  } else if (typeof snapshot === 'string') {
+    const match = snapshot.match(/^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/);
+    if (!match || match[1].length % 4 !== 0) {
+      throw snapshotError('INVALID_SNAPSHOT', 400, 'snapshot 不是有效的 PNG base64');
+    }
+    bytes = Buffer.from(match[1], 'base64');
+    if (bytes.toString('base64') !== match[1]) {
+      throw snapshotError('INVALID_SNAPSHOT', 400, 'snapshot 不是规范 base64');
+    }
+  } else {
+    throw snapshotError('INVALID_SNAPSHOT', 400, 'snapshot 必须为 PNG Buffer、data URL 或 null');
   }
-  const match = snapshot.match(/^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/);
-  if (!match || match[1].length % 4 !== 0) {
-    throw snapshotError('INVALID_SNAPSHOT', 400, 'snapshot 不是有效的 PNG base64');
-  }
-  const bytes = Buffer.from(match[1], 'base64');
-  if (bytes.toString('base64') !== match[1]
-    || bytes.length < PNG_SIGNATURE.length
+  if (bytes.length < PNG_SIGNATURE.length
     || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
     throw snapshotError('INVALID_SNAPSHOT', 400, 'snapshot 缺少有效 PNG 签名');
   }
@@ -76,6 +151,7 @@ export class SessionStore {
     deckFingerprint: selectedDeckFingerprint,
     sessionId: selectedSessionId,
     persistedState,
+    randomUUID: taskIdFactory = systemRandomUUID,
   }) {
     await sidecarGuard();
     const deckFingerprint = selectedDeckFingerprint ?? sha256(await readFile(deckPath));
@@ -95,9 +171,9 @@ export class SessionStore {
         persisted = null;
       }
     }
-    const sessionId = selectedSessionId ?? persisted?.sessionId ?? randomUUID();
+    const sessionId = selectedSessionId ?? persisted?.sessionId ?? systemRandomUUID();
     const store = new SessionStore(
-      deckPath, deckFingerprint, sessionDir, sidecarGuard, sidecarIO, sessionId,
+      deckPath, deckFingerprint, sessionDir, sidecarGuard, sidecarIO, sessionId, taskIdFactory,
     );
     const applyPersisted = persisted => {
       if (persisted.sessionId !== undefined && persisted.sessionId !== sessionId) {
@@ -111,7 +187,7 @@ export class SessionStore {
         ...persisted,
         deckPath,
         sessionId,
-        tasks:Array.isArray(persisted.tasks) ? persisted.tasks : [],
+        tasks:normalizePersistedTasks(persisted.tasks),
         groups:Array.isArray(persisted.groups) ? persisted.groups : [],
         redo:Array.isArray(persisted.redo) ? persisted.redo : [],
         diagnosticsBaseline:persisted.diagnosticsBaseline ?? {},
@@ -131,13 +207,16 @@ export class SessionStore {
     sessionDir,
     sidecarGuard = async () => {},
     sidecarIO = localDurableIO,
-    sessionId = randomUUID(),
+    sessionId = systemRandomUUID(),
+    taskIdFactory = systemRandomUUID,
   ) {
+    if (typeof taskIdFactory !== 'function') throw new TypeError('taskId 随机数生成器必须是函数');
     this.deckPath = deckPath;
     this.sessionDir = sessionDir;
     this.sessionPath = join(sessionDir, 'session.json');
     this.sidecarGuard = sidecarGuard;
     this.sidecarIO = sidecarIO;
+    this.taskIdFactory = taskIdFactory;
     this.state = {
       version: 1,
       sessionId,
@@ -161,18 +240,22 @@ export class SessionStore {
   }
 
   async #persist(state = this.state) {
+    const persistedState = {
+      ...state,
+      tasks:normalizePersistedTasks(state.tasks),
+    };
     await this.sidecarGuard();
     if (typeof this.sidecarIO.writeSession === 'function') {
       await this.sidecarIO.writeSession({
-        sessionId:state.sessionId,
-        bytes:Buffer.from(JSON.stringify(state, null, 2)),
+        sessionId:persistedState.sessionId,
+        bytes:Buffer.from(JSON.stringify(persistedState, null, 2)),
       });
       return;
     }
     await this.sidecarIO.atomicWrite({
       directory:dirname(this.sessionPath),
       name:basename(this.sessionPath),
-      bytes:Buffer.from(JSON.stringify(state, null, 2)),
+      bytes:Buffer.from(JSON.stringify(persistedState, null, 2)),
       commitScope:'session',
     });
   }
@@ -188,6 +271,7 @@ export class SessionStore {
 
   async persistState(state = this.state) {
     const candidate = structuredClone(state);
+    candidate.tasks = normalizePersistedTasks(candidate.tasks);
     try {
       await this.#persist(candidate);
     } catch (error) {
@@ -197,27 +281,29 @@ export class SessionStore {
     return this.#publish(candidate);
   }
 
-  async createTask(input, expectedRevision) {
+  async createTask(input, expectedRevision, { attachmentsLifecycle=null } = {}) {
     this.#expect(expectedRevision);
+    const id = this.taskIdFactory();
+    if (typeof id !== 'string' || !UUID_V4.test(id)) {
+      throw Object.assign(new Error('taskId 必须是规范 UUID v4'), {
+        code:'INVALID_TASK_ID', statusCode:500, stage:'task-id', committed:false,
+      });
+    }
+    if (this.state.tasks.some(task => task?.id === id)) {
+      throw Object.assign(new Error('生成的 taskId 与现有任务重复'), {
+        code:'TASK_ID_COLLISION', statusCode:500, stage:'task-id', committed:false,
+      });
+    }
     const snapshotBytes = decodeSnapshot(input.snapshot);
+    if (attachmentsLifecycle !== null
+      && (typeof attachmentsLifecycle !== 'object'
+        || typeof attachmentsLifecycle.publish !== 'function')) {
+      throw new TypeError('attachmentsLifecycle 必须提供 publish(taskId)');
+    }
     const now = new Date().toISOString();
-    const id = randomUUID();
     const snapshotPath = snapshotBytes ? `snapshots/${id}.png` : null;
-    const { snapshot: _snapshot, snapshotPath: _snapshotPath, ...taskInput } = input;
-    const task = {
-      ...taskInput,
-      id,
-      status: 'pending',
-      candidates: input.candidates ?? [],
-      snapshotPath,
-      createdAt: now,
-      updatedAt: now,
-    };
     const snapshotsDirectory = join(this.sessionDir, 'snapshots');
     const snapshotName = snapshotBytes ? `${id}.png` : null;
-    const candidate = structuredClone(this.state);
-    candidate.tasks.push(task);
-    candidate.revision += 1;
     const cleanupSnapshot = () => {
       if (!snapshotName) return Promise.resolve();
       return typeof this.sidecarIO.deleteSnapshot === 'function'
@@ -226,8 +312,38 @@ export class SessionStore {
           directory:snapshotsDirectory, name:snapshotName, missingOk:true,
         });
     };
-    if (snapshotBytes) {
-      try {
+    const cleanupAttachments = async () => {
+      if (typeof attachmentsLifecycle?.deleteTask === 'function') {
+        await attachmentsLifecycle.deleteTask(id);
+        return;
+      }
+      if (typeof this.sidecarIO.deleteTaskAttachments === 'function') {
+        await this.sidecarIO.deleteTaskAttachments({ taskId:id });
+        return;
+      }
+      throw Object.assign(new Error('缺少已发布附件补偿接口'), {
+        code:'ATTACHMENT_DELETE_UNAVAILABLE', committed:false,
+        commitScope:'attachments', stage:'attachment-compensation',
+      });
+    };
+    let attachmentsPublished = false;
+    let snapshotPublished = false;
+    let snapshotWriteAttempted = false;
+    try {
+      let attachments = [];
+      if (attachmentsLifecycle) {
+        try {
+          attachments = await attachmentsLifecycle.publish(id);
+          attachmentsPublished = true;
+        } catch (error) {
+          if (isCommittedAttachments(error) || attachmentsLifecycle.published === true) {
+            attachmentsPublished = true;
+          }
+          throw error;
+        }
+      }
+      if (snapshotBytes) {
+        snapshotWriteAttempted = true;
         await this.sidecarGuard();
         if (typeof this.sidecarIO.writeSnapshot === 'function') {
           await this.sidecarIO.writeSnapshot({ snapshotId:id, bytes:snapshotBytes });
@@ -239,21 +355,66 @@ export class SessionStore {
             commitScope:'snapshot',
           });
         }
-      } catch (error) {
-        if (isCommittedSnapshot(error)) {
-          try { await cleanupSnapshot(); }
-          catch (cleanupError) { throw snapshotRecoveryError(error, cleanupError); }
-          throw compensatedSnapshotError(error);
-        }
-        await cleanupSnapshot().catch(() => {});
-        throw error;
+        snapshotPublished = true;
       }
-    }
-    try {
+      const {
+        snapshot: _snapshot,
+        snapshotPath: _snapshotPath,
+        attachments: _attachments,
+        ...taskInput
+      } = input;
+      const task = validateTask({
+        ...taskInput,
+        id,
+        status:'pending',
+        candidates:input.candidates ?? [],
+        snapshotPath,
+        attachments,
+        createdAt:now,
+        updatedAt:now,
+      }, { persisted:true });
+      const candidate = structuredClone(this.state);
+      candidate.tasks.push(task);
+      candidate.revision += 1;
       await this.persistState(candidate);
       return { task, revision: this.state.revision };
     } catch (error) {
-      if (!isCommittedSession(error)) await cleanupSnapshot().catch(() => {});
+      if (isCommittedSession(error)) throw error;
+      if (isCommittedSnapshot(error)) snapshotPublished = true;
+      if (isCommittedAttachments(error) || attachmentsLifecycle?.published === true) {
+        attachmentsPublished = true;
+      }
+      let snapshotCleanupError;
+      let attachmentCleanupError;
+      if (snapshotPublished) {
+        try { await cleanupSnapshot(); }
+        catch (cleanupError) { snapshotCleanupError = cleanupError; }
+      } else if (snapshotWriteAttempted) {
+        try { await cleanupSnapshot(); }
+        catch (cleanupError) {
+          if (cleanupError?.committed === true) snapshotCleanupError = cleanupError;
+        }
+      }
+      if (attachmentsPublished) {
+        try { await cleanupAttachments(); }
+        catch (cleanupError) { attachmentCleanupError = cleanupError; }
+      }
+      const committedCleanupError = [snapshotCleanupError, attachmentCleanupError]
+        .find(cleanupError => cleanupError?.committed === true);
+      if (committedCleanupError) {
+        throw committedCompensationError(error, committedCleanupError, {
+          ...(snapshotCleanupError ? { snapshotCleanupError } : {}),
+          ...(attachmentCleanupError ? { attachmentCleanupError } : {}),
+        });
+      }
+      if (attachmentCleanupError) {
+        throw attachmentRecoveryError(error, attachmentCleanupError, {
+          ...(snapshotCleanupError ? { snapshotCleanupError } : {}),
+        });
+      }
+      if (snapshotCleanupError) throw snapshotRecoveryError(error, snapshotCleanupError);
+      if (isCommittedSnapshot(error)) throw compensatedSnapshotError(error);
+      if (isCommittedAttachments(error)) throw compensatedAttachmentError(error);
       throw error;
     }
   }

@@ -8,6 +8,43 @@ import { SessionStore, RevisionConflict } from '../session-store.mjs';
 const PNG_DATA_URL = `data:image/png;base64,${Buffer.from([
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0,
 ]).toString('base64')}`;
+const PNG_BYTES = Buffer.from([
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0,
+]);
+const TASK_ID = '11111111-1111-4111-8111-111111111111';
+const ATTACHMENT_ID = '22222222-2222-4222-8222-222222222222';
+const TASK_INPUT = {
+  pageKey:'page-001-a', pageIndex:1, pageLabel:'A',
+  rect:{ x:1, y:2, w:30, h:40 }, instruction:'改 A',
+};
+
+function attachmentFor(taskId = TASK_ID) {
+  return {
+    id:ATTACHMENT_ID,
+    name:'新版架构.png',
+    mime:'image/png',
+    size:PNG_BYTES.length,
+    source:'selected',
+    relativePath:`attachments/${taskId}/${ATTACHMENT_ID}.png`,
+    createdAt:'2026-08-02T12:00:00.000Z',
+  };
+}
+
+async function injectedStore(prefix, sidecarIO, options = {}) {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  const deck = join(root, 'deck.html');
+  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  await writeFile(deck, 'deck-v1');
+  const store = await SessionStore.open({
+    deckPath:deck,
+    sessionDir,
+    sidecarIO,
+    sessionId:options.sessionId,
+    randomUUID:options.randomUUID,
+    persistedState:options.persistedState,
+  });
+  return { root, deck, sessionDir, store };
+}
 
 test('跨页任务写入后可恢复且 revision 单调递增', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-'));
@@ -19,6 +56,7 @@ test('跨页任务写入后可恢复且 revision 单调递增', async () => {
   assert.equal(t1.revision, 1); assert.equal(t2.revision, 2);
   const reopened = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
   assert.equal(reopened.state.tasks.length, 2);
+  assert.deepEqual(reopened.state.tasks.map(task => task.attachments), [[], []]);
   await assert.rejects(() => reopened.createTask({ ...t1.task, id:undefined }, 0), RevisionConflict);
   assert.match(await readFile(reopened.sessionPath, 'utf8'), /改 B/);
 });
@@ -264,4 +302,471 @@ test('snapshot rename 后补偿删除失败返回独立恢复错误，且不声�
   assert.equal(sessionWrites, 1, 'snapshot 恢复失败也不得开始 session 候选写入');
   assert.equal(store.state.revision, 0);
   assert.deepEqual(store.state.tasks, []);
+});
+
+test('附件发布、Buffer 快照与 task/revision 按同一候选一次提交', async () => {
+  const events = [];
+  let persisted;
+  const sidecarIO = {
+    async writeSession({ bytes }) {
+      events.push('session');
+      persisted = JSON.parse(bytes.toString('utf8'));
+    },
+    async writeSnapshot({ snapshotId, bytes }) {
+      events.push(`snapshot:${snapshotId}`);
+      assert.deepEqual(bytes, PNG_BYTES);
+    },
+    async deleteSnapshot() { events.push('delete-snapshot'); },
+    async deleteTaskAttachments({ taskId }) { events.push(`delete-attachments:${taskId}`); },
+  };
+  const { store } = await injectedStore('deck-session-attachments-success-', sidecarIO, {
+    sessionId:'session-attachments-success', randomUUID:() => TASK_ID,
+  });
+  events.length = 0;
+  const lifecycle = {
+    async publish(taskId) {
+      events.push(`publish:${taskId}`);
+      return [attachmentFor(taskId)];
+    },
+    async discard() { events.push('discard'); },
+  };
+
+  const result = await store.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0, {
+    attachmentsLifecycle:lifecycle,
+  });
+
+  assert.equal(result.task.id, TASK_ID);
+  assert.deepEqual(result.task.attachments, [attachmentFor()]);
+  assert.equal(result.revision, 1);
+  assert.deepEqual(events, [`publish:${TASK_ID}`, `snapshot:${TASK_ID}`, 'session']);
+  assert.equal(persisted.revision, 1);
+  assert.deepEqual(persisted.tasks[0].attachments, [attachmentFor()]);
+  assert.doesNotMatch(JSON.stringify(persisted), /"path"\s*:/);
+});
+
+test('PNG data URL 与 Buffer 共用签名、类型和 512 KiB 上限校验', async () => {
+  const snapshots = [];
+  const makeStore = async prefix => (await injectedStore(prefix, {
+    async writeSession() {},
+    async writeSnapshot({ bytes }) { snapshots.push(Buffer.from(bytes)); },
+    async deleteSnapshot() {},
+  }, { sessionId:`session-${prefix}`, randomUUID:() => TASK_ID })).store;
+  const dataUrlStore = await makeStore('snapshot-data-url-');
+  const bufferStore = await makeStore('snapshot-buffer-');
+  const dataUrlResult = await dataUrlStore.createTask({ ...TASK_INPUT, snapshot:PNG_DATA_URL }, 0);
+  const bufferResult = await bufferStore.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0);
+
+  assert.equal(dataUrlResult.task.snapshotPath, bufferResult.task.snapshotPath);
+  assert.deepEqual(snapshots, [PNG_BYTES, PNG_BYTES]);
+  for (const snapshot of [Buffer.from('not-png'), new Uint8Array(PNG_BYTES)]) {
+    const store = await makeStore(`snapshot-invalid-${snapshots.length}-`);
+    await assert.rejects(
+      () => store.createTask({ ...TASK_INPUT, snapshot }, 0),
+      error => error.code === 'INVALID_SNAPSHOT' && error.statusCode === 400,
+    );
+  }
+  const oversized = Buffer.concat([PNG_BYTES.subarray(0, 8), Buffer.alloc(512 * 1024, 1)]);
+  const oversizedStore = await makeStore('snapshot-buffer-oversized-');
+  await assert.rejects(
+    () => oversizedStore.createTask({ ...TASK_INPUT, snapshot:oversized }, 0),
+    error => error.code === 'SNAPSHOT_TOO_LARGE' && error.statusCode === 413,
+  );
+});
+
+test('附件 publish 未提交失败时不写 snapshot/session，且不误删 task 目录', async () => {
+  const events = [];
+  const publishError = Object.assign(new Error('publish no-replace failed'), {
+    code:'ATTACHMENT_EXISTS', committed:false, commitScope:'attachments',
+  });
+  const sidecarIO = {
+    async writeSession() { events.push('session'); },
+    async writeSnapshot() { events.push('snapshot'); },
+    async deleteSnapshot() { events.push('delete-snapshot'); },
+    async deleteTaskAttachments() { events.push('delete-attachments'); },
+  };
+  const { store } = await injectedStore('deck-session-publish-failed-', sidecarIO, {
+    sessionId:'session-publish-failed', randomUUID:() => TASK_ID,
+  });
+  events.length = 0;
+  const lifecycle = {
+    published:false,
+    async publish() { events.push('publish'); throw publishError; },
+    async discard() { events.push('discard'); },
+  };
+
+  await assert.rejects(
+    () => store.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0, {
+      attachmentsLifecycle:lifecycle,
+    }),
+    error => error === publishError,
+  );
+  assert.deepEqual(events, ['publish']);
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('publish 已 committed 但回执未确认时只做 task 附件补偿，不误 discard staging', async () => {
+  const events = [];
+  const publishError = Object.assign(new Error('publish ack lost'), {
+    code:'ATTACHMENT_PUBLISH_PROTOCOL',
+    committed:true,
+    commitScope:'attachments',
+    stage:'attachment-publish-protocol',
+  });
+  const sidecarIO = {
+    async writeSession() { events.push('session'); },
+    async deleteTaskAttachments({ taskId }) { events.push(`delete:${taskId}`); },
+  };
+  const { store } = await injectedStore('deck-session-publish-unknown-', sidecarIO, {
+    sessionId:'session-publish-unknown', randomUUID:() => TASK_ID,
+  });
+  events.length = 0;
+  const lifecycle = {
+    published:true,
+    async publish() { events.push('publish'); throw publishError; },
+    async discard() { events.push('discard'); },
+  };
+
+  await assert.rejects(
+    () => store.createTask(TASK_INPUT, 0, { attachmentsLifecycle:lifecycle }),
+    error => error.code === 'ATTACHMENT_PUBLISH_PROTOCOL'
+      && error.committed === false && error.compensated === true
+      && error.cause === publishError,
+  );
+  assert.deepEqual(events, ['publish', `delete:${TASK_ID}`]);
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('snapshot 写失败时补偿已发布附件，不提交 task/revision', async () => {
+  const events = [];
+  const snapshotError = Object.assign(new Error('snapshot write failed'), {
+    code:'SNAPSHOT_WRITE_FAILED', committed:false, commitScope:'snapshot',
+  });
+  const sidecarIO = {
+    async writeSession() { events.push('session'); },
+    async writeSnapshot() { events.push('snapshot'); throw snapshotError; },
+    async deleteSnapshot() { events.push('delete-snapshot'); },
+    async deleteTaskAttachments({ taskId }) { events.push(`delete-attachments:${taskId}`); },
+  };
+  const { store } = await injectedStore('deck-session-snapshot-attachment-rollback-', sidecarIO, {
+    sessionId:'session-snapshot-attachment-rollback', randomUUID:() => TASK_ID,
+  });
+  events.length = 0;
+
+  await assert.rejects(
+    () => store.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0, {
+      attachmentsLifecycle:{ async publish() { events.push('publish'); return [attachmentFor()]; } },
+    }),
+    error => error === snapshotError,
+  );
+  assert.deepEqual(events, [
+    'publish', 'snapshot', 'delete-snapshot', `delete-attachments:${TASK_ID}`,
+  ]);
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('snapshot committed 写回执失败时仍按逆序同时补偿 snapshot 与附件', async () => {
+  const events = [];
+  const snapshotError = Object.assign(new Error('snapshot fsync ack lost'), {
+    code:'SNAPSHOT_WRITE_FAILED', committed:true, commitScope:'snapshot',
+    stage:'snapshot-directory-fsync',
+  });
+  const sidecarIO = {
+    async writeSession() { events.push('session'); },
+    async writeSnapshot() { events.push('snapshot'); throw snapshotError; },
+    async deleteSnapshot() { events.push('delete-snapshot'); },
+    async deleteTaskAttachments({ taskId }) { events.push(`delete-attachments:${taskId}`); },
+  };
+  const { store } = await injectedStore('deck-session-snapshot-committed-attachments-', sidecarIO, {
+    sessionId:'session-snapshot-committed-attachments', randomUUID:() => TASK_ID,
+  });
+  events.length = 0;
+
+  await assert.rejects(
+    () => store.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0, {
+      attachmentsLifecycle:{ async publish() { events.push('publish'); return [attachmentFor()]; } },
+    }),
+    error => error.code === 'SNAPSHOT_WRITE_FAILED'
+      && error.committed === false && error.compensated === true
+      && error.cause === snapshotError,
+  );
+  assert.deepEqual(events, [
+    'publish', 'snapshot', 'delete-snapshot', `delete-attachments:${TASK_ID}`,
+  ]);
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('snapshot 写未 committed 但清理已 committed 时顶层保留清理 scope/details', async () => {
+  const writeError = Object.assign(new Error('snapshot write failed before commit'), {
+    code:'SNAPSHOT_WRITE_FAILED', committed:false, commitScope:'snapshot',
+  });
+  const cleanupError = Object.assign(new Error('snapshot delete fsync ack lost'), {
+    code:'SNAPSHOT_DELETE_FAILED', statusCode:503,
+    committed:true, commitScope:'snapshot', stage:'snapshot-delete-directory-fsync',
+    details:{ removed:true },
+  });
+  const events = [];
+  const sidecarIO = {
+    async writeSession() {},
+    async writeSnapshot() { throw writeError; },
+    async deleteSnapshot() { throw cleanupError; },
+    async deleteTaskAttachments() { events.push('delete-attachments'); },
+  };
+  const { store } = await injectedStore('deck-session-snapshot-cleanup-committed-', sidecarIO, {
+    sessionId:'session-snapshot-cleanup-committed', randomUUID:() => TASK_ID,
+  });
+
+  await assert.rejects(
+    () => store.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0, {
+      attachmentsLifecycle:{ async publish() { return [attachmentFor()]; } },
+    }),
+    error => error.code === cleanupError.code
+      && error.stage === cleanupError.stage
+      && error.committed === true
+      && error.commitScope === cleanupError.commitScope
+      && error.details === cleanupError.details
+      && error.cause === writeError
+      && error.compensationError === cleanupError,
+  );
+  assert.deepEqual(events, ['delete-attachments']);
+  assert.equal(store.state.revision, 0);
+});
+
+test('session 未 committed 失败时按 snapshot→attachments 逆序补偿', async () => {
+  const events = [];
+  const sessionError = Object.assign(new Error('session write failed'), {
+    code:'SESSION_WRITE_FAILED', committed:false, commitScope:'session',
+  });
+  let sessionWrites = 0;
+  const sidecarIO = {
+    async writeSession() {
+      sessionWrites += 1;
+      events.push('session');
+      if (sessionWrites === 2) throw sessionError;
+    },
+    async writeSnapshot() { events.push('snapshot'); },
+    async deleteSnapshot() { events.push('delete-snapshot'); },
+    async deleteTaskAttachments({ taskId }) { events.push(`delete-attachments:${taskId}`); },
+  };
+  const { store } = await injectedStore('deck-session-attachment-persist-failed-', sidecarIO, {
+    sessionId:'session-attachment-persist-failed', randomUUID:() => TASK_ID,
+  });
+  events.length = 0;
+
+  await assert.rejects(
+    () => store.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0, {
+      attachmentsLifecycle:{ async publish() { events.push('publish'); return [attachmentFor()]; } },
+    }),
+    error => error === sessionError,
+  );
+  assert.deepEqual(events, [
+    'publish', 'snapshot', 'session', 'delete-snapshot', `delete-attachments:${TASK_ID}`,
+  ]);
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('session 已 committed 失败时保留候选 task、snapshot 与附件', async () => {
+  const events = [];
+  const committedError = Object.assign(new Error('session directory fsync lost ack'), {
+    code:'SESSION_WRITE_FAILED', committed:true, commitScope:'session',
+    stage:'session-directory-fsync',
+  });
+  let sessionWrites = 0;
+  const sidecarIO = {
+    async writeSession() {
+      sessionWrites += 1;
+      if (sessionWrites === 2) throw committedError;
+    },
+    async writeSnapshot() { events.push('snapshot'); },
+    async deleteSnapshot() { events.push('delete-snapshot'); },
+    async deleteTaskAttachments() { events.push('delete-attachments'); },
+  };
+  const { store } = await injectedStore('deck-session-attachment-committed-', sidecarIO, {
+    sessionId:'session-attachment-committed', randomUUID:() => TASK_ID,
+  });
+
+  await assert.rejects(
+    () => store.createTask({ ...TASK_INPUT, snapshot:PNG_BYTES }, 0, {
+      attachmentsLifecycle:{ async publish() { events.push('publish'); return [attachmentFor()]; } },
+    }),
+    error => error === committedError,
+  );
+  assert.deepEqual(events, ['publish', 'snapshot']);
+  assert.equal(store.state.revision, 1);
+  assert.deepEqual(store.state.tasks[0].attachments, [attachmentFor()]);
+});
+
+test('附件补偿未 committed 失败转为 ATTACHMENT_RECOVERY_REQUIRED', async () => {
+  const sessionError = Object.assign(new Error('session write failed'), {
+    code:'SESSION_WRITE_FAILED', committed:false, commitScope:'session',
+  });
+  const cleanupError = Object.assign(new Error('delete failed before unlink'), {
+    code:'ATTACHMENT_DELETE_FAILED', committed:false, commitScope:'attachments',
+  });
+  let sessionWrites = 0;
+  const sidecarIO = {
+    async writeSession() { if (++sessionWrites === 2) throw sessionError; },
+    async deleteTaskAttachments() { throw cleanupError; },
+  };
+  const { store } = await injectedStore('deck-session-attachment-recovery-', sidecarIO, {
+    sessionId:'session-attachment-recovery', randomUUID:() => TASK_ID,
+  });
+
+  await assert.rejects(
+    () => store.createTask(TASK_INPUT, 0, {
+      attachmentsLifecycle:{ async publish() { return [attachmentFor()]; } },
+    }),
+    error => error.code === 'ATTACHMENT_RECOVERY_REQUIRED'
+      && error.statusCode === 503
+      && error.stage === 'attachment-compensation'
+      && error.committed === false
+      && error.commitScope === 'attachment'
+      && error.sessionCandidateCommitted === false
+      && error.cause === cleanupError
+      && error.originalError === sessionError,
+  );
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('附件补偿已部分 committed 的错误优先传播 scope/details，原失败作为 cause', async () => {
+  const sessionError = Object.assign(new Error('session write failed'), {
+    code:'SESSION_WRITE_FAILED', committed:false, commitScope:'session',
+  });
+  const cleanupError = Object.assign(new Error('delete fsync ack lost'), {
+    code:'ATTACHMENT_DELETE_FAILED', statusCode:503,
+    committed:true, commitScope:'attachments', stage:'attachment-delete-directory-fsync',
+    details:{ removedFiles:1, target:TASK_ID },
+  });
+  let sessionWrites = 0;
+  const sidecarIO = {
+    async writeSession() { if (++sessionWrites === 2) throw sessionError; },
+    async deleteTaskAttachments() { throw cleanupError; },
+  };
+  const { store } = await injectedStore('deck-session-attachment-partial-delete-', sidecarIO, {
+    sessionId:'session-attachment-partial-delete', randomUUID:() => TASK_ID,
+  });
+
+  await assert.rejects(
+    () => store.createTask(TASK_INPUT, 0, {
+      attachmentsLifecycle:{ async publish() { return [attachmentFor()]; } },
+    }),
+    error => error.code === cleanupError.code
+      && error.statusCode === cleanupError.statusCode
+      && error.stage === cleanupError.stage
+      && error.committed === true
+      && error.commitScope === cleanupError.commitScope
+      && error.details === cleanupError.details
+      && error.cause === sessionError
+      && error.compensationError === cleanupError
+      && error.sessionCandidateCommitted === false,
+  );
+  assert.equal(store.state.revision, 0);
+  assert.deepEqual(store.state.tasks, []);
+});
+
+test('附件 lifecycle 自带 deleteTask 时只补偿一次，不再调用 sidecar 删除', async () => {
+  const events = [];
+  const sessionError = Object.assign(new Error('session write failed'), {
+    committed:false, commitScope:'session',
+  });
+  let sessionWrites = 0;
+  const sidecarIO = {
+    async writeSession() { if (++sessionWrites === 2) throw sessionError; },
+    async deleteTaskAttachments() { events.push('sidecar-delete'); },
+  };
+  const { store } = await injectedStore('deck-session-lifecycle-delete-once-', sidecarIO, {
+    sessionId:'session-lifecycle-delete-once', randomUUID:() => TASK_ID,
+  });
+  const lifecycle = {
+    async publish(taskId) { events.push(`publish:${taskId}`); return [attachmentFor(taskId)]; },
+    async deleteTask(taskId) { events.push(`lifecycle-delete:${taskId}`); },
+    async discard() { events.push('discard'); },
+  };
+
+  await assert.rejects(
+    () => store.createTask(TASK_INPUT, 0, { attachmentsLifecycle:lifecycle }),
+    error => error === sessionError,
+  );
+  assert.deepEqual(events, [`publish:${TASK_ID}`, `lifecycle-delete:${TASK_ID}`]);
+  assert.equal(store.state.revision, 0);
+});
+
+test('revision conflict 在生成/发布资源前拒绝，upload 仍由调用方结算', async () => {
+  const events = [];
+  const { store } = await injectedStore('deck-session-revision-before-publish-', {
+    async writeSession() {},
+    async deleteTaskAttachments() { events.push('delete'); },
+  }, { sessionId:'session-revision-before-publish', randomUUID:() => TASK_ID });
+  store.state.revision = 1;
+
+  await assert.rejects(
+    () => store.createTask(TASK_INPUT, 0, {
+      attachmentsLifecycle:{
+        async publish() { events.push('publish'); return [attachmentFor()]; },
+        async discard() { events.push('discard'); },
+      },
+    }),
+    RevisionConflict,
+  );
+  assert.deepEqual(events, []);
+  assert.equal(store.state.revision, 1);
+});
+
+test('旧 session 缺 attachments 归一化为空数组，伪造持久化附件则拒绝启动', async () => {
+  const legacyTask = {
+    ...TASK_INPUT, id:TASK_ID, status:'pending', candidates:[], snapshotPath:null,
+    createdAt:'2026-08-02T12:00:00.000Z', updatedAt:'2026-08-02T12:00:00.000Z',
+  };
+  const persistedState = {
+    version:1, sessionId:'session-legacy', deckPath:undefined, deckFingerprint:'deck',
+    revision:1, tasks:[legacyTask], groups:[], redo:[],
+    diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null, conflict:null,
+  };
+  const { store } = await injectedStore('deck-session-legacy-attachments-', {}, {
+    sessionId:'session-legacy', persistedState,
+  });
+  assert.deepEqual(store.state.tasks[0].attachments, []);
+  assert.ok(Object.hasOwn(store.state.tasks[0], 'attachments'));
+
+  const forged = {
+    ...persistedState,
+    tasks:[{ ...legacyTask, attachments:[{ ...attachmentFor(), path:'/tmp/escape.png' }] }],
+  };
+  await assert.rejects(
+    () => injectedStore('deck-session-forged-attachments-', {}, {
+      sessionId:'session-legacy', persistedState:forged,
+    }),
+    /附件元数据字段无效/,
+  );
+  await assert.rejects(
+    () => injectedStore('deck-session-forged-task-id-', {}, {
+      sessionId:'session-legacy',
+      persistedState:{ ...persistedState, tasks:[{ ...legacyTask, id:'../../escape' }] },
+    }),
+    /持久化任务 id/,
+  );
+});
+
+test('重复 taskId 在 publish 之前拒绝，不触碰任何资源', async () => {
+  const events = [];
+  const { store } = await injectedStore('deck-session-duplicate-task-id-', {
+    async writeSession() {},
+    async deleteTaskAttachments() { events.push('delete'); },
+  }, { sessionId:'session-duplicate-task-id', randomUUID:() => TASK_ID });
+  store.state.tasks.push({ ...TASK_INPUT, id:TASK_ID, attachments:[] });
+
+  await assert.rejects(
+    () => store.createTask(TASK_INPUT, 0, {
+      attachmentsLifecycle:{ async publish() { events.push('publish'); return []; } },
+    }),
+    error => error.code === 'TASK_ID_COLLISION'
+      && error.committed === false && error.stage === 'task-id',
+  );
+  assert.deepEqual(events, []);
+  assert.equal(store.state.revision, 0);
 });
