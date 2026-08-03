@@ -167,6 +167,128 @@ class SidecarAttachmentIOTest(unittest.TestCase):
         self.assertIn("attachmentStaging", binding["identities"])
         self.assertEqual(helper.assert_bound({}), {"safe": True})
 
+    def test_bind_attachments_is_idempotent_and_keeps_original_fds(self):
+        helper, _, binding = self.make_bound_helper()
+        original_attachments_fd = helper.attachments_fd
+        original_staging_fd = helper.attachment_staging_fd
+        closed = []
+        real_close = sidecar_io.os.close
+
+        def record_close(fd):
+            closed.append(fd)
+            return real_close(fd)
+
+        with mock.patch.object(sidecar_io.os, "close", side_effect=record_close):
+            rebound = helper.bind_attachments({})
+
+        self.assertEqual(rebound["identities"], {
+            "attachments": binding["identities"]["attachments"],
+            "attachmentStaging": binding["identities"]["attachmentStaging"],
+        })
+        self.assertEqual(helper.attachments_fd, original_attachments_fd)
+        self.assertEqual(helper.attachment_staging_fd, original_staging_fd)
+        self.assertNotIn(original_attachments_fd, closed)
+        self.assertNotIn(original_staging_fd, closed)
+
+    @unittest.skipIf(sidecar_io.fcntl is None, "当前平台不支持 flock")
+    def test_rebind_busy_preserves_existing_attachment_binding(self):
+        helper, session, _ = self.make_bound_helper()
+        original = (helper.attachments_fd, helper.attachment_staging_fd)
+        competing_fd = os.open(
+            session / "attachments", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        sidecar_io.fcntl.flock(
+            competing_fd, sidecar_io.fcntl.LOCK_EX | sidecar_io.fcntl.LOCK_NB
+        )
+        try:
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.bind_attachments({})
+        finally:
+            sidecar_io.fcntl.flock(competing_fd, sidecar_io.fcntl.LOCK_UN)
+            os.close(competing_fd)
+
+        self.assertEqual(caught.exception.code, "ATTACHMENT_BUSY")
+        self.assertEqual(
+            (helper.attachments_fd, helper.attachment_staging_fd), original
+        )
+        self.assertEqual(helper.assert_bound({}), {"safe": True})
+
+    @unittest.skipIf(sidecar_io.fcntl is None, "当前平台不支持 flock")
+    def test_first_bind_busy_stays_clean_core_only(self):
+        helper, session, _ = self.make_bound_helper(bind_attachments=False)
+        attachments = session / "attachments"
+        attachments.mkdir()
+        competing_fd = os.open(
+            attachments, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        sidecar_io.fcntl.flock(
+            competing_fd, sidecar_io.fcntl.LOCK_EX | sidecar_io.fcntl.LOCK_NB
+        )
+        try:
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.bind_attachments({})
+        finally:
+            sidecar_io.fcntl.flock(competing_fd, sidecar_io.fcntl.LOCK_UN)
+            os.close(competing_fd)
+
+        self.assertEqual(caught.exception.code, "ATTACHMENT_BUSY")
+        self.assertIsNone(helper.attachments_fd)
+        self.assertIsNone(helper.attachment_staging_fd)
+        self.assertFalse((attachments / ".staging").exists())
+        self.assertEqual(helper.assert_bound({}), {"safe": True})
+
+    def test_rebind_rejects_path_replacement_without_blessing_new_directories(self):
+        helper, session, _ = self.make_bound_helper()
+        attachments = session / "attachments"
+        trusted = session / "attachments.trusted"
+        original_fds = (helper.attachments_fd, helper.attachment_staging_fd)
+        original_info = os.fstat(helper.attachments_fd)
+        attachments.rename(trusted)
+        (attachments / ".staging").mkdir(parents=True)
+
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.bind_attachments({})
+
+        self.assertEqual((helper.attachments_fd, helper.attachment_staging_fd), original_fds)
+        held = os.fstat(helper.attachments_fd)
+        self.assertEqual((held.st_dev, held.st_ino), (original_info.st_dev, original_info.st_ino))
+        self.assertEqual(list(attachments.iterdir()), [attachments / ".staging"])
+
+    def test_core_only_attachment_commands_fail_closed_without_side_effects(self):
+        helper, session, _ = self.make_bound_helper(bind_attachments=False)
+
+        def tree():
+            return sorted(
+                (str(path.relative_to(session)), path.is_dir(), path.is_symlink())
+                for path in session.rglob("*")
+            )
+
+        before = tree()
+        operations = (
+            lambda: helper.publish_attachments({
+                "uploadId": UPLOAD_ID,
+                "taskId": TASK_ID,
+                "files": [{
+                    "id": ATTACHMENT_ID, "suffix": ".png", "size": 1,
+                }],
+            }),
+            lambda: helper.discard_attachment_upload({"uploadId": UPLOAD_ID}),
+            lambda: helper.delete_task_attachments({"taskId": TASK_ID}),
+            lambda: helper.reconcile_attachments({"referencedTaskIds": []}),
+        )
+        for operation in operations:
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                operation()
+            self.assertEqual(caught.exception.code, "ATTACHMENTS_NOT_BOUND")
+            self.assertEqual(caught.exception.stage, "attachment-bind")
+            self.assertFalse(caught.exception.committed)
+            self.assertIsNone(caught.exception.commit_scope)
+            self.assertEqual(tree(), before)
+
+        self.assertIsNone(helper.attachments_fd)
+        self.assertIsNone(helper.attachment_staging_fd)
+        self.assertEqual(helper.assert_bound({}), {"safe": True})
+
     def test_publish_atomically_moves_verified_staged_files_without_paths(self):
         helper, session, _ = self.make_bound_helper()
         upload, files = self.stage_files(session)
@@ -245,6 +367,141 @@ class SidecarAttachmentIOTest(unittest.TestCase):
         finally:
             os.close(directory_fd)
 
+    def test_scan_rejects_ninth_entry_before_any_open_or_hash(self):
+        helper, session, _ = self.make_bound_helper()
+        task = session / "attachments" / TASK_ID
+        task.mkdir()
+        for index in range(1, sidecar_io.MAX_ATTACHMENTS + 2):
+            attachment_id = f"{index:08x}-e89b-42d3-a456-426614174000"
+            (task / f"{attachment_id}.bin").write_bytes(b"x")
+        directory_fd = os.open(task, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        real_open = sidecar_io.os.open
+
+        def reject_child_open(path, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") == directory_fd:
+                raise AssertionError("超量目录不得打开任何条目")
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(sidecar_io.os, "open", side_effect=reject_child_open):
+                with mock.patch.object(
+                    sidecar_io,
+                    "_hash_open_file",
+                    side_effect=AssertionError("超量目录不得 hash"),
+                ):
+                    with self.assertRaises(sidecar_io.SidecarIOError):
+                        sidecar_io._scan_attachment_files(directory_fd, keep_open=True)
+        finally:
+            os.close(directory_fd)
+
+    def test_scan_checks_count_before_sorting_oversized_listing(self):
+        helper, _, _ = self.make_bound_helper()
+
+        class OversizedEntries:
+            def __len__(self):
+                return sidecar_io.MAX_ATTACHMENTS + 1
+
+            def __iter__(self):
+                raise AssertionError("超量目录不得进入排序或逐项处理")
+
+        with mock.patch.object(
+            sidecar_io.os, "listdir", return_value=OversizedEntries()
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError):
+                sidecar_io._scan_attachment_files(helper.attachments_fd)
+
+    def test_scan_rejects_extra_entry_before_any_open_or_hash(self):
+        _, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        (upload / "unexpected").write_bytes(b"forged")
+        directory_fd = os.open(
+            upload, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        real_open = sidecar_io.os.open
+
+        def reject_child_open(path, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") == directory_fd:
+                raise AssertionError("集合不匹配时不得打开任何条目")
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(sidecar_io.os, "open", side_effect=reject_child_open):
+                with mock.patch.object(
+                    sidecar_io,
+                    "_hash_open_file",
+                    side_effect=AssertionError("集合不匹配时不得 hash"),
+                ):
+                    with self.assertRaises(sidecar_io.SidecarIOError):
+                        sidecar_io._scan_attachment_files(
+                            directory_fd, expected=files, keep_open=True
+                        )
+        finally:
+            os.close(directory_fd)
+
+    def test_scan_rejects_valid_but_unexpected_file_set_before_open(self):
+        _, session, _ = self.make_bound_helper()
+        upload, files = self.stage_files(session)
+        (upload / f"{SESSION_ID}.bin").write_bytes(b"extra")
+        directory_fd = os.open(
+            upload, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        real_open = sidecar_io.os.open
+
+        def reject_child_open(path, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") == directory_fd:
+                raise AssertionError("回执集合不匹配时不得打开条目")
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(sidecar_io.os, "open", side_effect=reject_child_open):
+                with self.assertRaises(sidecar_io.SidecarIOError):
+                    sidecar_io._scan_attachment_files(
+                        directory_fd, expected=files, keep_open=True
+                    )
+        finally:
+            os.close(directory_fd)
+
+    def test_hash_open_file_reads_only_initial_size_plus_growth_probe(self):
+        with tempfile.TemporaryFile() as handle:
+            handle.write(b"data")
+            handle.flush()
+            requests = []
+            real_pread = sidecar_io.os.pread
+
+            def record_pread(fd, size, offset):
+                requests.append((size, offset))
+                return real_pread(fd, size, offset)
+
+            with mock.patch.object(sidecar_io.os, "pread", side_effect=record_pread):
+                digest = sidecar_io._hash_open_file(handle.fileno(), 4)
+
+        self.assertEqual(digest, hashlib.sha256(b"data").hexdigest())
+        self.assertEqual(requests, [(4, 0), (1, 4)])
+
+    def test_hash_open_file_rejects_growth_shrink_and_oversize(self):
+        with tempfile.TemporaryFile() as handle:
+            handle.write(b"data")
+            handle.flush()
+            for label, chunks in (
+                ("growth", [b"data", b"x"]),
+                ("shrink", [b"dat", b""]),
+            ):
+                with self.subTest(label=label):
+                    with mock.patch.object(
+                        sidecar_io.os, "pread", side_effect=chunks
+                    ):
+                        with self.assertRaises(sidecar_io.SidecarIOError):
+                            sidecar_io._hash_open_file(handle.fileno(), 4)
+            with mock.patch.object(
+                sidecar_io.os,
+                "pread",
+                side_effect=AssertionError("超限 size 不得读取"),
+            ):
+                with self.assertRaises(sidecar_io.SidecarIOError):
+                    sidecar_io._hash_open_file(
+                        handle.fileno(), sidecar_io.MAX_ATTACHMENT_BYTES + 1
+                    )
+
     def test_discard_upload_and_delete_task_only_remove_verified_uuid_directory(self):
         helper, session, _ = self.make_bound_helper()
         upload, _ = self.stage_files(session)
@@ -266,6 +523,94 @@ class SidecarAttachmentIOTest(unittest.TestCase):
             helper.delete_task_attachments({"taskId": TASK_ID}),
             {"removed": False},
         )
+
+    def test_delete_reports_committed_when_task_directory_fsync_fails_after_unlink(self):
+        helper, session, _ = self.make_bound_helper()
+        task = session / "attachments" / TASK_ID
+        task.mkdir()
+        attachment = task / f"{ATTACHMENT_ID}.png"
+        attachment.write_bytes(b"bytes")
+        task_info = task.stat()
+        real_fsync = sidecar_io.os.fsync
+
+        def fail_task_directory_fsync(fd):
+            info = os.fstat(fd)
+            if info.st_dev == task_info.st_dev and info.st_ino == task_info.st_ino:
+                raise OSError("injected task directory fsync failure")
+            return real_fsync(fd)
+
+        with mock.patch.object(
+            sidecar_io.os, "fsync", side_effect=fail_task_directory_fsync
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.delete_task_attachments({"taskId": TASK_ID})
+
+        self.assertTrue(caught.exception.committed)
+        self.assertEqual(caught.exception.commit_scope, "attachments")
+        self.assertEqual(caught.exception.code, "ATTACHMENT_DELETE_FAILED")
+        self.assertEqual(caught.exception.details["target"], TASK_ID)
+        self.assertEqual(caught.exception.details["unlinkedFiles"], 1)
+        self.assertFalse(attachment.exists())
+        self.assertTrue(task.is_dir())
+
+    def test_reconcile_reports_prior_counts_when_later_directory_fails(self):
+        helper, session, _ = self.make_bound_helper()
+        self.stage_files(session, UPLOAD_ID)
+        second, _ = self.stage_files(session, SECOND_UPLOAD_ID)
+        second_info = second.stat()
+        real_fsync = sidecar_io.os.fsync
+
+        def fail_second_upload_fsync(fd):
+            info = os.fstat(fd)
+            if info.st_dev == second_info.st_dev and info.st_ino == second_info.st_ino:
+                raise OSError("injected second upload fsync failure")
+            return real_fsync(fd)
+
+        with mock.patch.object(
+            sidecar_io.os, "fsync", side_effect=fail_second_upload_fsync
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.reconcile_attachments({"referencedTaskIds": []})
+
+        error = caught.exception
+        self.assertTrue(error.committed)
+        self.assertEqual(error.commit_scope, "attachments")
+        self.assertEqual(error.code, "ATTACHMENT_RECONCILE_FAILED")
+        self.assertEqual(error.details["discardedUploads"], 1)
+        self.assertEqual(error.details["deletedTasks"], 0)
+        self.assertEqual(error.details["failedTarget"], SECOND_UPLOAD_ID)
+        self.assertEqual(error.details["failedOperation"], "discard-upload")
+        self.assertFalse(
+            (session / "attachments" / ".staging" / UPLOAD_ID).exists()
+        )
+        self.assertTrue(second.is_dir())
+
+    def test_reconcile_marks_prior_commit_when_next_target_fails_before_unlink(self):
+        helper, session, _ = self.make_bound_helper()
+        first, _ = self.stage_files(session, UPLOAD_ID)
+        second, _ = self.stage_files(session, SECOND_UPLOAD_ID)
+        real_remove = sidecar_io._remove_preflighted_attachment_directory
+
+        def fail_before_second_unlink(parent_fd, record):
+            if record["name"] == SECOND_UPLOAD_ID:
+                raise sidecar_io.SidecarIOError("injected pre-unlink failure")
+            return real_remove(parent_fd, record)
+
+        with mock.patch.object(
+            sidecar_io,
+            "_remove_preflighted_attachment_directory",
+            side_effect=fail_before_second_unlink,
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.reconcile_attachments({"referencedTaskIds": []})
+
+        error = caught.exception
+        self.assertTrue(error.committed)
+        self.assertEqual(error.commit_scope, "attachments")
+        self.assertEqual(error.details["discardedUploads"], 1)
+        self.assertEqual(error.details["failedTarget"], SECOND_UPLOAD_ID)
+        self.assertFalse(first.exists())
+        self.assertTrue(second.is_dir())
 
     def test_delete_rejects_symlink_file_and_never_follows_it(self):
         helper, session, _ = self.make_bound_helper()
@@ -511,6 +856,9 @@ class SidecarAttachmentIOTest(unittest.TestCase):
                         helper.bind_attachments({})
 
                 self.assertTrue(target.is_dir())
+                self.assertIsNone(helper.attachments_fd)
+                self.assertIsNone(helper.attachment_staging_fd)
+                self.assertEqual(helper.assert_bound({}), {"safe": True})
                 if level == "attachments":
                     self.assertFalse((attachments / ".staging").exists())
 

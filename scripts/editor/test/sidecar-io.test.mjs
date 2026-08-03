@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises';
@@ -484,6 +485,155 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
   });
 });
 
+test('附件 publish 使用专用有界超时且未知 ACK 一律保守标记已提交', async t => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const baseIdentity = { path:'/tmp/project', realPath:'/tmp/project', dev:'1', ino:'2' };
+  const uploadId = '223e4567-e89b-42d3-a456-426614174000';
+  const taskId = '423e4567-e89b-42d3-a456-426614174000';
+  const files = [{
+    id:'623e4567-e89b-42d3-a456-426614174000', suffix:'.png', size:8,
+  }];
+  const payload = { uploadId, taskId, files };
+
+  const fakeChild = onWrite => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdout.setEncoding = () => {};
+    child.stderr.setEncoding = () => {};
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {};
+    child.stdin.write = data => { onWrite?.(child, JSON.parse(String(data))); return true; };
+    child.killed = false;
+    child.kill = signal => {
+      child.killed = signal;
+      queueMicrotask(() => child.emit('close', null));
+    };
+    return child;
+  };
+
+  await t.test('普通 1s 上限不截断附件专用预算内的延迟 ACK', async () => {
+    const child = fakeChild((current, request) => setTimeout(() => {
+      current.stdout.emit('data', `${JSON.stringify({
+        id:request.id, ok:true, result:[],
+      })}\n`);
+    }, 35));
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity,
+      spawnHelper:() => child,
+      timeoutMs:10,
+      attachmentTimeoutMs:100,
+      skipReadyHandshake:true,
+    });
+    try {
+      assert.deepEqual(await io.publishAttachments(payload), []);
+      assert.equal(child.killed, false);
+    } finally {
+      await io.close();
+    }
+  });
+
+  await t.test('真实 child rename 后不发 ACK，超时错误仍标记 attachments 已提交', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-sidecar-publish-timeout-'));
+    const source = join(root, 'source');
+    const target = join(root, 'target');
+    await mkdir(source);
+    await writeFile(join(source, 'attachment.bin'), 'bytes');
+    const script = `
+      const fs = require('node:fs');
+      process.stdin.setEncoding('utf8');
+      process.stdin.once('data', () => {
+        fs.renameSync(${JSON.stringify(source)}, ${JSON.stringify(target)});
+        setTimeout(() => {}, 10_000);
+      });
+    `;
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity,
+      spawnHelper:() => spawnProcess(process.execPath, ['-e', script], {
+        stdio:['pipe', 'pipe', 'pipe'],
+      }),
+      timeoutMs:10,
+      attachmentTimeoutMs:300,
+      skipReadyHandshake:true,
+    });
+    await assert.rejects(() => io.publishAttachments(payload), error => (
+      error.code === 'SIDECAR_HELPER_TIMEOUT'
+        && error.stage === 'sidecar-helper'
+        && error.committed === true
+        && error.commitScope === 'attachments'
+    ));
+    assert.equal(await readFile(join(target, 'attachment.bin'), 'utf8'), 'bytes');
+    await io.close();
+  });
+
+  await t.test('close 等待 publish ACK 后才回收 helper', async () => {
+    let request;
+    const child = fakeChild((current, incoming) => {
+      request = incoming;
+      setTimeout(() => current.stdout.emit('data', `${JSON.stringify({
+        id:incoming.id, ok:true, result:[],
+      })}\n`), 30);
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity,
+      spawnHelper:() => child,
+      timeoutMs:10,
+      attachmentTimeoutMs:100,
+      skipReadyHandshake:true,
+    });
+    const publishing = io.publishAttachments(payload);
+    assert.equal(request.command, 'publish-attachments');
+    const closing = io.close();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(child.killed, false, '未收敛 publish 不得被 close 立即 SIGKILL');
+    assert.deepEqual(await publishing, []);
+    await closing;
+    assert.equal(child.killed, 'SIGKILL');
+  });
+
+  await t.test('close 等待到 publish 硬超时并保留 recovery-required 语义', async () => {
+    const child = fakeChild();
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity,
+      spawnHelper:() => child,
+      timeoutMs:10,
+      attachmentTimeoutMs:25,
+      skipReadyHandshake:true,
+    });
+    const publishing = io.publishAttachments(payload);
+    const closing = io.close();
+    await assert.rejects(publishing, error => (
+      error.code === 'SIDECAR_HELPER_TIMEOUT'
+        && error.committed === true
+        && error.commitScope === 'attachments'
+    ));
+    await closing;
+    assert.equal(child.killed, 'SIGKILL');
+  });
+
+  for (const [label, trigger, expectedCode] of [
+    ['helper death', child => queueMicrotask(() => child.emit('close', 7)), 'SIDECAR_HELPER_CLOSED'],
+    ['protocol corruption', child => queueMicrotask(() => child.stdout.emit('data', '{bad}\n')), 'SIDECAR_HELPER_PROTOCOL'],
+  ]) {
+    await t.test(`${label} 未 ACK 不得返回未提交`, async () => {
+      const child = fakeChild(trigger);
+      const io = await createPersistentSidecarIO({
+        project:baseIdentity,
+        spawnHelper:() => child,
+        timeoutMs:100,
+        attachmentTimeoutMs:100,
+        skipReadyHandshake:true,
+      });
+      await assert.rejects(() => io.publishAttachments(payload), error => (
+        error.code === expectedCode
+          && error.committed === true
+          && error.commitScope === 'attachments'
+      ));
+      await io.close();
+    });
+  }
+});
+
 test('Node helper wrapper 原样透传原子写的 commitScope 与 stage', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const child = new EventEmitter();
@@ -504,6 +654,7 @@ test('Node helper wrapper 原样透传原子写的 commitScope 与 stage', async
       stage:'snapshot-directory-fsync',
       committed:true,
       commitScope:'snapshot',
+      details:{ target:'snapshot.png', completed:1 },
     })}\n`));
     return true;
   };
@@ -519,7 +670,9 @@ test('Node helper wrapper 原样透传原子写的 commitScope 与 stage', async
       error => error.code === 'SNAPSHOT_WRITE_FAILED'
         && error.commitScope === 'snapshot'
         && error.stage === 'snapshot-directory-fsync'
-        && error.committed === true,
+        && error.committed === true
+        && error.details?.target === 'snapshot.png'
+        && error.details?.completed === 1,
     );
   } finally {
     await io.close();

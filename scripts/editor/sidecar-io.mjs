@@ -6,6 +6,15 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'sidecar_io.py');
+const ATTACHMENT_MUTATION_COMMANDS = new Set([
+  'publish-attachments',
+  'discard-attachment-upload',
+  'delete-task-attachments',
+  'reconcile-attachments',
+]);
+// 最坏 8×25MiB 需要前后两轮 SHA-256 和 fsync；90s 允许约 5MiB/s 的保守吞吐。
+const DEFAULT_ATTACHMENT_TIMEOUT_MS = 90_000;
+const MAX_ATTACHMENT_TIMEOUT_MS = 120_000;
 const plainIdentity = identity => Object.fromEntries(
   ['path', 'realPath', 'dev', 'ino'].map(key => [key, identity[key]]),
 );
@@ -17,17 +26,30 @@ function helperError(payload) {
     stage:payload?.stage ?? 'sidecar',
     committed:payload?.committed === true,
     commitScope:typeof payload?.commitScope === 'string' ? payload.commitScope : undefined,
+    details:payload?.details && typeof payload.details === 'object'
+      ? payload.details : undefined,
   });
 }
 
 function lifecycleError(code, message) {
-  return Object.assign(new Error(message), { code, stage:'sidecar-helper' });
+  return Object.assign(new Error(message), {
+    code, stage:'sidecar-helper', committed:false,
+  });
+}
+
+function pendingLifecycleError(error, command) {
+  if (!ATTACHMENT_MUTATION_COMMANDS.has(command)) return error;
+  return Object.assign(new Error(error?.message ?? '附件命令未收到可信 ACK'), error, {
+    committed:true,
+    commitScope:'attachments',
+    cause:error,
+  });
 }
 
 class PersistentSidecarIO {
   constructor(child, {
     timeoutMs, maxInputBytes, maxOutputBytes,
-    maxSessionInputBytes, maxSessionOutputBytes,
+    maxSessionInputBytes, maxSessionOutputBytes, attachmentTimeoutMs,
   }) {
     this.child = child;
     this.timeoutMs = timeoutMs;
@@ -35,12 +57,16 @@ class PersistentSidecarIO {
     this.maxOutputBytes = maxOutputBytes;
     this.maxSessionInputBytes = maxSessionInputBytes;
     this.maxSessionOutputBytes = maxSessionOutputBytes;
+    this.attachmentTimeoutMs = Math.min(
+      attachmentTimeoutMs, MAX_ATTACHMENT_TIMEOUT_MS,
+    );
     this.pending = new Map();
     this.stdout = '';
     this.stderr = '';
     this.closed = false;
     this.finished = false;
     this.reapTimer = null;
+    this.attachmentWaiters = new Set();
     this.closePromise = new Promise(resolve => { this.resolveClosed = resolve; });
 
     child.stdout.setEncoding('utf8');
@@ -65,9 +91,27 @@ class PersistentSidecarIO {
   #failAll(error) {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(pendingLifecycleError(error, pending.command));
     }
     this.pending.clear();
+    this.#notifyAttachmentMutationsSettled();
+  }
+
+  #hasPendingAttachmentMutation() {
+    return [...this.pending.values()].some(pending => (
+      ATTACHMENT_MUTATION_COMMANDS.has(pending.command)
+    ));
+  }
+
+  #notifyAttachmentMutationsSettled() {
+    if (this.#hasPendingAttachmentMutation()) return;
+    for (const resolve of this.attachmentWaiters) resolve();
+    this.attachmentWaiters.clear();
+  }
+
+  #waitForAttachmentMutations() {
+    if (!this.#hasPendingAttachmentMutation()) return Promise.resolve();
+    return new Promise(resolve => this.attachmentWaiters.add(resolve));
   }
 
   #abort(error) {
@@ -116,6 +160,7 @@ class PersistentSidecarIO {
       clearTimeout(pending.timer);
       if (response.ok === true) pending.resolve(response.result);
       else pending.reject(helperError(response));
+      this.#notifyAttachmentMutationsSettled();
     }
   }
 
@@ -135,12 +180,15 @@ class PersistentSidecarIO {
       return Promise.reject(error);
     }
     return new Promise((resolve, reject) => {
+      const requestTimeoutMs = ATTACHMENT_MUTATION_COMMANDS.has(command)
+        ? this.attachmentTimeoutMs : this.timeoutMs;
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
         const error = lifecycleError('SIDECAR_HELPER_TIMEOUT', 'sidecar helper 请求超时');
-        reject(error);
+        reject(pendingLifecycleError(error, command));
+        this.#notifyAttachmentMutationsSettled();
         this.#abort(error);
-      }, this.timeoutMs);
+      }, requestTimeoutMs);
       timer.unref?.();
       this.pending.set(id, { resolve, reject, timer, command });
       try {
@@ -148,7 +196,8 @@ class PersistentSidecarIO {
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
-        reject(error);
+        reject(pendingLifecycleError(error, command));
+        this.#notifyAttachmentMutationsSettled();
       }
     });
   }
@@ -221,6 +270,7 @@ class PersistentSidecarIO {
   async close() {
     if (this.closed) return this.closePromise;
     this.closed = true;
+    await this.#waitForAttachmentMutations();
     if (!this.finished) {
       this.#abort(lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭'));
     }
@@ -237,6 +287,7 @@ export async function createPersistentSidecarIO({
   maxOutputBytes=1024 * 1024,
   maxSessionInputBytes=64 * 1024 * 1024,
   maxSessionOutputBytes=64 * 1024 * 1024,
+  attachmentTimeoutMs=DEFAULT_ATTACHMENT_TIMEOUT_MS,
   skipReadyHandshake=false,
 } = {}) {
   const child = spawnHelper('python3', ['-u', HELPER, '--serve'], {
@@ -244,7 +295,7 @@ export async function createPersistentSidecarIO({
   });
   const io = new PersistentSidecarIO(child, {
     timeoutMs, maxInputBytes, maxOutputBytes,
-    maxSessionInputBytes, maxSessionOutputBytes,
+    maxSessionInputBytes, maxSessionOutputBytes, attachmentTimeoutMs,
   });
   if (!skipReadyHandshake) {
     try { await io.initialize(root ? { project:plainIdentity(project), root:plainIdentity(root) } : {

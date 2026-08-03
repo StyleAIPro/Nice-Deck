@@ -49,6 +49,7 @@ class SidecarIOError(RuntimeError):
     def __init__(
         self, message, *, stage="open", committed=False,
         commit_scope=None, code="UNSAFE_SIDECAR_IO", status_code=500,
+        details=None,
     ):
         super().__init__(message)
         self.stage = stage
@@ -56,6 +57,7 @@ class SidecarIOError(RuntimeError):
         self.commit_scope = commit_scope
         self.code = code
         self.status_code = status_code
+        self.details = details
 
 
 def _require_name(name: str) -> str:
@@ -294,15 +296,27 @@ def _file_stat_signature(info):
     )
 
 
-def _hash_open_file(fd):
+def _hash_open_file(fd, expected_size):
+    if (
+        not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+        or not 1 <= expected_size <= MAX_ATTACHMENT_BYTES
+    ):
+        raise SidecarIOError("附件 hash size 超出允许范围")
     digest = hashlib.sha256()
     offset = 0
-    while True:
-        chunk = os.pread(fd, 1024 * 1024, offset)
+    while offset < expected_size:
+        remaining = expected_size - offset
+        chunk = os.pread(fd, min(1024 * 1024, remaining), offset)
         if not chunk:
-            return digest.hexdigest()
+            raise SidecarIOError("附件读取少于初始 size")
+        if len(chunk) > remaining:
+            raise SidecarIOError("附件读取超过初始 size")
         digest.update(chunk)
         offset += len(chunk)
+    if os.pread(fd, 1, expected_size):
+        raise SidecarIOError("附件在 hash 期间增长")
+    return digest.hexdigest()
 
 
 def _capture_file_baseline(directory_fd, fd):
@@ -313,7 +327,7 @@ def _capture_file_baseline(directory_fd, fd):
         raise SidecarIOError("附件文件大小超出允许范围")
     _require_same_mount(directory_fd, fd)
     mount_identity = _mount_identity(fd)
-    digest = _hash_open_file(fd)
+    digest = _hash_open_file(fd, before.st_size)
     after = os.fstat(fd)
     if (
         _file_stat_signature(before) != _file_stat_signature(after)
@@ -333,15 +347,21 @@ def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
     expected = None if expected is None else {
         f"{item['id']}{item['suffix']}": item for item in expected
     }
-    opened = {}
-    names = []
+    names = os.listdir(directory_fd)
+    if len(names) > MAX_ATTACHMENTS:
+        raise SidecarIOError(f"附件目录最多允许 {MAX_ATTACHMENTS} 个文件")
+    names.sort()
     ids = set()
+    for name in names:
+        match = ATTACHMENT_FILE_RE.fullmatch(name)
+        if match is None or match.group(1) in ids:
+            raise SidecarIOError("附件目录包含非规范文件名")
+        ids.add(match.group(1))
+    if expected is not None and set(names) != set(expected):
+        raise SidecarIOError("staging 文件集合与可信 writer 回执不一致")
+    opened = {}
     try:
-        for name in sorted(os.listdir(directory_fd)):
-            match = ATTACHMENT_FILE_RE.fullmatch(name)
-            if match is None or match.group(1) in ids:
-                raise SidecarIOError("附件目录包含非规范文件名")
-            ids.add(match.group(1))
+        for name in names:
             before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             if not stat.S_ISREG(before.st_mode):
                 raise SidecarIOError("附件目录只允许非符号链接的常规文件")
@@ -368,13 +388,10 @@ def _scan_attachment_files(directory_fd, *, expected=None, keep_open=False):
                     os.close(fd)
                     fd = None
                 raise
-            names.append(name)
             if keep_open:
                 opened[name] = {"fd": fd, "baseline": baseline}
             else:
                 os.close(fd)
-        if expected is not None and set(names) != set(expected):
-            raise SidecarIOError("staging 文件集合与可信 writer 回执不一致")
         return names, opened
     except Exception:
         for record in opened.values():
@@ -488,15 +505,25 @@ def _verify_managed_attachment_record(parent_fd, record):
 def _remove_preflighted_attachment_directory(parent_fd, record):
     _verify_managed_attachment_record(parent_fd, record)
     directory_fd = record["fd"]
+    committed = False
+    details = {
+        "target": record["name"],
+        "unlinkedFiles": 0,
+        "directoryRemoved": False,
+    }
     try:
         for child in record["names"]:
             os.unlink(child, dir_fd=directory_fd)
+            committed = True
+            details["unlinkedFiles"] += 1
         os.fsync(directory_fd)
         if not PersistentHelper._same_directory_entry(
             parent_fd, record["name"], directory_fd
         ):
             raise SidecarIOError("待删除附件目录 identity 已变化")
         os.rmdir(record["name"], dir_fd=parent_fd)
+        committed = True
+        details["directoryRemoved"] = True
         try:
             os.stat(record["name"], dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -505,9 +532,16 @@ def _remove_preflighted_attachment_directory(parent_fd, record):
             raise SidecarIOError("附件目录删除后同名条目再次出现")
         os.fsync(parent_fd)
         return {"removed": True}
-    except SidecarIOError:
-        raise
-    except OSError as error:
+    except (SidecarIOError, OSError) as error:
+        if committed:
+            raise SidecarIOError(
+                f"附件目录删除已部分提交：{error}",
+                stage="attachment-delete", committed=True,
+                commit_scope="attachments", code="ATTACHMENT_DELETE_FAILED",
+                details=details,
+            ) from error
+        if isinstance(error, SidecarIOError):
+            raise
         raise SidecarIOError(f"无法安全删除附件目录：{error}", stage="unlink") from error
 
 
@@ -546,7 +580,11 @@ def _attachment_lifecycle_lock(attachments_fd):
 def _with_attachment_lifecycle_lock(method):
     def locked(self, payload):
         if self.attachments_fd is None or self.attachment_staging_fd is None:
-            raise SidecarIOError("尚未绑定可信 attachments")
+            raise SidecarIOError(
+                "尚未绑定可信 attachments",
+                stage="attachment-bind", committed=False,
+                code="ATTACHMENTS_NOT_BOUND", status_code=409,
+            )
         with _attachment_lifecycle_lock(self.attachments_fd):
             return method(self, payload)
     return locked
@@ -767,37 +805,12 @@ class PersistentHelper:
             )
         return {"sessionName": session_name, "identities": identities}
 
-    def bind_attachments(self, payload):
-        if payload != {}:
-            raise SidecarIOError("bind-attachments payload 格式无效")
-        self._require_bound_session()
-        self._assert_bound_directories(include_attachments=False)
-        for name in ("attachment_staging_fd", "attachments_fd"):
-            fd = getattr(self, name)
-            if fd is not None:
-                os.close(fd)
-                setattr(self, name, None)
-        try:
-            self.attachments_fd = _open_child_directory(
-                self.session_fd, "attachments", create=True
-            )
-            # 任务 5 writer 必须打开同一 attachments identity 并持有同一 flock。
-            with _attachment_lifecycle_lock(self.attachments_fd):
-                self.attachment_staging_fd = _open_child_directory(
-                    self.attachments_fd, ".staging", create=True
-                )
-        except Exception:
-            for name in ("attachment_staging_fd", "attachments_fd"):
-                fd = getattr(self, name)
-                if fd is not None:
-                    os.close(fd)
-                    setattr(self, name, None)
-            raise
+    def _attachment_identities(self, attachments_fd, staging_fd):
         identities = {}
         for key, fd, child in (
-            ("attachments", self.attachments_fd, f"{self.session_name}/attachments"),
+            ("attachments", attachments_fd, f"{self.session_name}/attachments"),
             (
-                "attachmentStaging", self.attachment_staging_fd,
+                "attachmentStaging", staging_fd,
                 f"{self.session_name}/attachments/.staging",
             ),
         ):
@@ -807,6 +820,55 @@ class PersistentHelper:
                 str(Path(self.root_identity["realPath"]) / child),
             )
         return {"identities": identities}
+
+    def bind_attachments(self, payload):
+        if payload != {}:
+            raise SidecarIOError("bind-attachments payload 格式无效")
+        self._require_bound_session()
+        self._assert_bound_directories(include_attachments=False)
+        existing = (
+            self.attachments_fd is not None,
+            self.attachment_staging_fd is not None,
+        )
+        if any(existing):
+            if not all(existing):
+                raise SidecarIOError("可信 attachments 绑定状态不完整")
+            self._assert_bound_directories(include_attachments=True)
+            with _attachment_lifecycle_lock(self.attachments_fd):
+                self._assert_bound_directories(include_attachments=True)
+            return self._attachment_identities(
+                self.attachments_fd, self.attachment_staging_fd
+            )
+
+        attachments_fd = None
+        staging_fd = None
+        try:
+            attachments_fd = _open_child_directory(
+                self.session_fd, "attachments", create=True
+            )
+            # 任务 5 writer 必须打开同一 attachments identity 并持有同一 flock。
+            with _attachment_lifecycle_lock(attachments_fd):
+                staging_fd = _open_child_directory(
+                    attachments_fd, ".staging", create=True
+                )
+                if (
+                    not self._same_directory_entry(
+                        self.session_fd, "attachments", attachments_fd
+                    )
+                    or not self._same_directory_entry(
+                        attachments_fd, ".staging", staging_fd
+                    )
+                ):
+                    raise SidecarIOError("attachments identity 在绑定期间变化")
+                binding = self._attachment_identities(attachments_fd, staging_fd)
+        except Exception:
+            for fd in (staging_fd, attachments_fd):
+                if fd is not None:
+                    os.close(fd)
+            raise
+        self.attachments_fd = attachments_fd
+        self.attachment_staging_fd = staging_fd
+        return binding
 
     def read_session(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"missingOk"}:
@@ -994,6 +1056,10 @@ class PersistentHelper:
             raise SidecarIOError("attachment staging identity 已变化")
         task_records = []
         upload_records = []
+        discarded = 0
+        deleted = 0
+        failed_target = None
+        failed_operation = None
         try:
             for name in sorted(attachment_entries - {".staging"}):
                 _require_uuid(name, "task attachment directory")
@@ -1023,21 +1089,41 @@ class PersistentHelper:
                     self.attachment_staging_fd, record
                 )
 
-            discarded = 0
             for record in upload_records:
+                failed_target = record["name"]
+                failed_operation = "discard-upload"
                 _remove_preflighted_attachment_directory(
                     self.attachment_staging_fd, record
                 )
                 discarded += 1
-            deleted = 0
             for record in task_records:
                 if record["name"] in referenced_ids:
                     continue
+                failed_target = record["name"]
+                failed_operation = "delete-task"
                 _remove_preflighted_attachment_directory(
                     self.attachments_fd, record
                 )
                 deleted += 1
             return {"discardedUploads": discarded, "deletedTasks": deleted}
+        except (SidecarIOError, OSError) as error:
+            error_committed = (
+                isinstance(error, SidecarIOError) and error.committed
+            )
+            if error_committed or discarded or deleted:
+                raise SidecarIOError(
+                    f"附件 reconcile 已部分提交：{error}",
+                    stage="attachment-reconcile", committed=True,
+                    commit_scope="attachments", code="ATTACHMENT_RECONCILE_FAILED",
+                    details={
+                        "discardedUploads": discarded,
+                        "deletedTasks": deleted,
+                        "failedTarget": failed_target,
+                        "failedOperation": failed_operation,
+                        "targetProgress": getattr(error, "details", None),
+                    },
+                ) from error
+            raise
         finally:
             for record in [*upload_records, *task_records]:
                 _close_managed_attachment_record(record)
@@ -1604,6 +1690,7 @@ def serve():
                     "stage": getattr(error, "stage", "sidecar"),
                     "committed": bool(getattr(error, "committed", False)),
                     "commitScope": getattr(error, "commit_scope", None),
+                    "details": getattr(error, "details", None),
                 }
             encoded = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
             response_limit = (
