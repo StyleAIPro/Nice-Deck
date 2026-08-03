@@ -634,6 +634,297 @@ test('附件 publish 使用专用有界超时且未知 ACK 一律保守标记已
   }
 });
 
+test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', async t => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const baseIdentity = { path:'/tmp/project', realPath:'/tmp/project', dev:'1', ino:'2' };
+  const uploadId = '223e4567-e89b-42d3-a456-426614174000';
+  const taskId = '423e4567-e89b-42d3-a456-426614174000';
+  const files = [{
+    id:'623e4567-e89b-42d3-a456-426614174000', suffix:'.png', size:8,
+  }];
+  const publishPayload = { uploadId, taskId, files };
+
+  const fakeChild = onWrite => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdout.setEncoding = () => {};
+    child.stderr.setEncoding = () => {};
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {};
+    child.requestsWritten = [];
+    child.stdin.write = (data, callback) => {
+      const request = JSON.parse(String(data));
+      child.requestsWritten.push(request.command);
+      onWrite?.(child, request, callback);
+      return true;
+    };
+    child.killed = false;
+    child.kill = signal => {
+      child.killed = signal;
+      queueMicrotask(() => child.emit('close', null));
+    };
+    return child;
+  };
+
+  const emitResponse = (child, request, result) => child.stdout.emit(
+    'data', `${JSON.stringify({ id:request.id, ok:true, result })}\n`,
+  );
+
+  const serialChild = handler => {
+    const inbox = [];
+    let busy = false;
+    let child;
+    const pump = () => {
+      if (busy || inbox.length === 0) return;
+      busy = true;
+      const request = inbox.shift();
+      handler(child, request, result => {
+        emitResponse(child, request, result);
+        busy = false;
+        pump();
+      });
+    };
+    child = fakeChild((current, request, callback) => {
+      callback?.();
+      inbox.push(request);
+      pump();
+    });
+    return child;
+  };
+
+  await t.test('延迟 publish 不会被并发普通命令的短预算中止', async () => {
+    const writes = [];
+    const child = serialChild((current, request, done) => {
+      writes.push(request.command);
+      setTimeout(
+        () => done(request.command === 'publish-attachments' ? [] : { bound:true }),
+        request.command === 'publish-attachments' ? 35 : 1,
+      );
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:10, attachmentTimeoutMs:80, skipReadyHandshake:true,
+    });
+    try {
+      const publishing = io.publishAttachments(publishPayload);
+      const asserting = io.assertBound();
+      assert.deepEqual(
+        child.requestsWritten, ['publish-attachments'],
+        'active 未 ACK 前不得把 queued 普通请求写入 stdin',
+      );
+      assert.deepEqual(await publishing, []);
+      assert.deepEqual(await asserting, { bound:true });
+      assert.deepEqual(writes, ['publish-attachments', 'assert-bound']);
+      assert.equal(child.killed, false);
+    } finally {
+      await io.close();
+    }
+  });
+
+  await t.test('普通命令只在 publish 完成并 dispatch 后启动自己的短预算', async () => {
+    const dispatchAt = new Map();
+    const started = Date.now();
+    const child = serialChild((current, request, done) => {
+      dispatchAt.set(request.command, Date.now() - started);
+      if (request.command === 'publish-attachments') setTimeout(() => done([]), 25);
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:12, attachmentTimeoutMs:80, skipReadyHandshake:true,
+    });
+    const publishing = io.publishAttachments(publishPayload);
+    const asserting = io.assertBound();
+    assert.deepEqual(await publishing, []);
+    await assert.rejects(asserting, error => (
+      error.code === 'SIDECAR_HELPER_TIMEOUT' && error.committed === false
+    ));
+    assert.ok(dispatchAt.get('assert-bound') >= 20, '普通命令必须在 publish ACK 后才 dispatch');
+    await io.close();
+  });
+
+  await t.test('第二个附件命令仅在 FIFO dispatch 后启动独立附件预算', async () => {
+    const writes = [];
+    const child = serialChild((current, request, done) => {
+      writes.push(request.command);
+      setTimeout(
+        () => done(request.command === 'publish-attachments' ? [] : { removed:true }),
+        20,
+      );
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:5, attachmentTimeoutMs:30, skipReadyHandshake:true,
+    });
+    try {
+      const first = io.publishAttachments(publishPayload);
+      const second = io.discardAttachmentUpload({ uploadId });
+      assert.deepEqual(
+        child.requestsWritten, ['publish-attachments'],
+        '第二个附件请求必须留在本地 FIFO',
+      );
+      assert.deepEqual(await first, []);
+      assert.deepEqual(await second, { removed:true });
+      assert.deepEqual(writes, [
+        'publish-attachments', 'discard-attachment-upload',
+      ]);
+    } finally {
+      await io.close();
+    }
+  });
+
+  await t.test('close 将 queued 附件结算为未提交并等待 active 附件硬预算', async () => {
+    const child = fakeChild((current, request, callback) => callback?.());
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:10, attachmentTimeoutMs:25, skipReadyHandshake:true,
+    });
+    const active = io.publishAttachments(publishPayload);
+    const queued = io.deleteTaskAttachments({ taskId });
+    const queuedResult = assert.rejects(queued, error => (
+      error.code === 'SIDECAR_HELPER_CLOSED'
+        && error.committed === false
+        && error.commitScope === undefined
+    ));
+    const closing = io.close();
+    await queuedResult;
+    await assert.rejects(active, error => (
+      error.code === 'SIDECAR_HELPER_TIMEOUT'
+        && error.committed === true
+        && error.commitScope === 'attachments'
+    ));
+    await closing;
+  });
+
+  await t.test('close 快速中止普通 active 且绝不 dispatch queued 附件', async () => {
+    const child = fakeChild((current, request, callback) => callback?.());
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:100, attachmentTimeoutMs:100, skipReadyHandshake:true,
+    });
+    const active = io.assertBound();
+    const queued = io.deleteTaskAttachments({ taskId });
+    const activeResult = assert.rejects(active, error => (
+      error.code === 'SIDECAR_HELPER_CLOSED' && error.committed === false
+    ));
+    const queuedResult = assert.rejects(queued, error => (
+      error.code === 'SIDECAR_HELPER_CLOSED'
+        && error.committed === false
+        && error.commitScope === undefined
+    ));
+    const closedQuickly = await Promise.race([
+      io.close().then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 40)),
+    ]);
+    await Promise.all([activeResult, queuedResult]);
+    assert.equal(closedQuickly, true);
+    assert.deepEqual(child.requestsWritten, ['assert-bound']);
+  });
+
+  await t.test('child death 只把 active 附件标为未知提交，queued 附件保持未提交', async () => {
+    const child = fakeChild((current, request, callback) => callback?.());
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:50, attachmentTimeoutMs:50, skipReadyHandshake:true,
+    });
+    const active = io.publishAttachments(publishPayload);
+    const queued = io.deleteTaskAttachments({ taskId });
+    queueMicrotask(() => child.emit('close', 7));
+    const [activeResult, queuedResult] = await Promise.allSettled([active, queued]);
+    assert.equal(activeResult.status, 'rejected');
+    assert.equal(activeResult.reason.code, 'SIDECAR_HELPER_CLOSED');
+    assert.equal(activeResult.reason.committed, true);
+    assert.equal(activeResult.reason.commitScope, 'attachments');
+    assert.equal(queuedResult.status, 'rejected');
+    assert.equal(queuedResult.reason.code, 'SIDECAR_HELPER_CLOSED');
+    assert.equal(queuedResult.reason.committed, false);
+    assert.equal(queuedResult.reason.commitScope, undefined);
+    await io.close();
+  });
+
+  await t.test('同步 stdin EPIPE 证明附件命令未 dispatch，必须标记未提交', async () => {
+    const epipe = Object.assign(new Error('stdin EPIPE'), { code:'EPIPE' });
+    const child = fakeChild();
+    child.stdin.write = () => { throw epipe; };
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:50, attachmentTimeoutMs:50, skipReadyHandshake:true,
+    });
+    await assert.rejects(() => io.publishAttachments(publishPayload), error => (
+      error.code === 'EPIPE'
+        && error.committed === false
+        && error.commitScope === undefined
+    ));
+    await io.close();
+  });
+
+  await t.test('异步 write callback error 只结算一次 active 并保留未知提交语义', async () => {
+    const epipe = Object.assign(new Error('write callback EPIPE'), { code:'EPIPE' });
+    const child = fakeChild((current, request, callback) => {
+      queueMicrotask(() => callback?.(epipe));
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:20, attachmentTimeoutMs:40, skipReadyHandshake:true,
+    });
+    await assert.rejects(() => io.publishAttachments(publishPayload), error => (
+      error.code === 'EPIPE'
+        && error.committed === true
+        && error.commitScope === 'attachments'
+    ));
+    await io.close();
+  });
+
+  await t.test('未知 response ID fail-closed：active 附件未知提交、queued 普通命令未提交', async () => {
+    const child = fakeChild((current, request, callback) => {
+      callback?.();
+      if (request.command === 'publish-attachments') queueMicrotask(() => {
+        current.stdout.emit('data', `${JSON.stringify({
+          id:'823e4567-e89b-42d3-a456-426614174000', ok:true, result:[],
+        })}\n`);
+      });
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:30, attachmentTimeoutMs:30, skipReadyHandshake:true,
+    });
+    const active = io.publishAttachments(publishPayload);
+    const queued = io.assertBound();
+    const [activeResult, queuedResult] = await Promise.allSettled([active, queued]);
+    assert.equal(activeResult.status, 'rejected');
+    assert.equal(activeResult.reason.code, 'SIDECAR_HELPER_PROTOCOL');
+    assert.equal(activeResult.reason.committed, true);
+    assert.equal(queuedResult.status, 'rejected');
+    assert.equal(queuedResult.reason.code, 'SIDECAR_HELPER_PROTOCOL');
+    assert.equal(queuedResult.reason.committed, false);
+    await io.close();
+  });
+
+  await t.test('迟到重复 response 不得被忽略或错误匹配后续 active', async () => {
+    let publishRequest;
+    const child = fakeChild((current, request, callback) => {
+      callback?.();
+      if (request.command === 'publish-attachments') {
+        publishRequest = request;
+        setTimeout(() => emitResponse(current, request, []), 2);
+      } else {
+        setTimeout(() => emitResponse(current, publishRequest, []), 2);
+      }
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:20, attachmentTimeoutMs:40, skipReadyHandshake:true,
+    });
+    const publishing = io.publishAttachments(publishPayload);
+    const asserting = io.assertBound();
+    assert.deepEqual(await publishing, []);
+    await assert.rejects(asserting, error => (
+      error.code === 'SIDECAR_HELPER_PROTOCOL' && error.committed === false
+    ));
+    await io.close();
+  });
+});
+
 test('Node helper wrapper 原样透传原子写的 commitScope 与 stage', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const child = new EventEmitter();

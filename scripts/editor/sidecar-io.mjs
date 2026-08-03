@@ -37,8 +37,19 @@ function lifecycleError(code, message) {
   });
 }
 
-function pendingLifecycleError(error, command) {
-  if (!ATTACHMENT_MUTATION_COMMANDS.has(command)) return error;
+function undispatchedLifecycleError(error) {
+  return Object.assign(new Error(error?.message ?? 'sidecar 请求未发送'), error, {
+    code:error?.code ?? 'SIDECAR_HELPER_CLOSED',
+    stage:error?.stage ?? 'sidecar-helper',
+    committed:false,
+    commitScope:undefined,
+  });
+}
+
+function activeLifecycleError(error, request) {
+  if (!request?.dispatched || !ATTACHMENT_MUTATION_COMMANDS.has(request.command)) {
+    return undispatchedLifecycleError(error);
+  }
   return Object.assign(new Error(error?.message ?? '附件命令未收到可信 ACK'), error, {
     committed:true,
     commitScope:'attachments',
@@ -60,13 +71,14 @@ class PersistentSidecarIO {
     this.attachmentTimeoutMs = Math.min(
       attachmentTimeoutMs, MAX_ATTACHMENT_TIMEOUT_MS,
     );
-    this.pending = new Map();
+    this.queue = [];
+    this.active = null;
     this.stdout = '';
     this.stderr = '';
     this.closed = false;
     this.finished = false;
+    this.aborting = false;
     this.reapTimer = null;
-    this.attachmentWaiters = new Set();
     this.closePromise = new Promise(resolve => { this.resolveClosed = resolve; });
 
     child.stdout.setEncoding('utf8');
@@ -83,39 +95,45 @@ class PersistentSidecarIO {
   #finish(error = lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭')) {
     if (this.finished) return;
     this.finished = true;
+    this.aborting = true;
     clearTimeout(this.reapTimer);
     this.#failAll(error);
     this.resolveClosed();
   }
 
   #failAll(error) {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(pendingLifecycleError(error, pending.command));
+    const active = this.active;
+    this.active = null;
+    if (active && !active.settled) {
+      active.settled = true;
+      active.state = 'settled';
+      clearTimeout(active.timer);
+      active.reject(activeLifecycleError(error, active));
+      for (const resolve of active.waiters) resolve();
+      active.waiters.clear();
     }
-    this.pending.clear();
-    this.#notifyAttachmentMutationsSettled();
+    this.#rejectQueued(error);
   }
 
-  #hasPendingAttachmentMutation() {
-    return [...this.pending.values()].some(pending => (
-      ATTACHMENT_MUTATION_COMMANDS.has(pending.command)
-    ));
+  #rejectQueued(error) {
+    for (const request of this.queue.splice(0)) {
+      if (request.settled) continue;
+      request.settled = true;
+      request.state = 'settled';
+      request.reject(undispatchedLifecycleError(error));
+      for (const resolve of request.waiters) resolve();
+      request.waiters.clear();
+    }
   }
 
-  #notifyAttachmentMutationsSettled() {
-    if (this.#hasPendingAttachmentMutation()) return;
-    for (const resolve of this.attachmentWaiters) resolve();
-    this.attachmentWaiters.clear();
-  }
-
-  #waitForAttachmentMutations() {
-    if (!this.#hasPendingAttachmentMutation()) return Promise.resolve();
-    return new Promise(resolve => this.attachmentWaiters.add(resolve));
+  #waitForRequest(request) {
+    if (request.settled) return Promise.resolve();
+    return new Promise(resolve => request.waiters.add(resolve));
   }
 
   #abort(error) {
-    if (this.finished) return;
+    if (this.finished || this.aborting) return;
+    this.aborting = true;
     this.#failAll(error);
     this.child.kill?.('SIGKILL');
     clearTimeout(this.reapTimer);
@@ -124,12 +142,10 @@ class PersistentSidecarIO {
   }
 
   #onStdout(chunk) {
-    if (this.finished) return;
+    if (this.finished || this.aborting) return;
     this.stdout += chunk;
-    const pendingLimits = [...this.pending.values()].map(pending => (
-      pending.command === 'read-session' ? this.maxSessionOutputBytes : this.maxOutputBytes
-    ));
-    const activeLimit = pendingLimits.length ? Math.max(...pendingLimits) : this.maxOutputBytes;
+    const activeLimit = this.active?.command === 'read-session'
+      ? this.maxSessionOutputBytes : this.maxOutputBytes;
     if (Buffer.byteLength(this.stdout) > activeLimit) {
       this.#abort(lifecycleError(
         'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 输出超过上限',
@@ -146,9 +162,14 @@ class PersistentSidecarIO {
         this.#abort(lifecycleError('SIDECAR_HELPER_PROTOCOL', 'sidecar helper 返回无效 JSONL'));
         return;
       }
-      const pending = this.pending.get(response?.id);
-      if (!pending) continue;
-      const responseLimit = pending.command === 'read-session'
+      const active = this.active;
+      if (!active || response?.id !== active.id) {
+        this.#abort(lifecycleError(
+          'SIDECAR_HELPER_PROTOCOL', 'sidecar helper 返回非活动请求的 response ID',
+        ));
+        return;
+      }
+      const responseLimit = active.command === 'read-session'
         ? this.maxSessionOutputBytes : this.maxOutputBytes;
       if (Buffer.byteLength(line) > responseLimit) {
         this.#abort(lifecycleError(
@@ -156,12 +177,69 @@ class PersistentSidecarIO {
         ));
         return;
       }
-      this.pending.delete(response.id);
-      clearTimeout(pending.timer);
-      if (response.ok === true) pending.resolve(response.result);
-      else pending.reject(helperError(response));
-      this.#notifyAttachmentMutationsSettled();
+      this.#settleActive(
+        active,
+        response.ok === true ? { result:response.result } : { error:helperError(response) },
+      );
     }
+  }
+
+  #settleActive(request, { result, error }) {
+    if (this.active !== request || request.settled) return;
+    this.active = null;
+    request.settled = true;
+    request.state = 'settled';
+    clearTimeout(request.timer);
+    if (error) request.reject(error);
+    else request.resolve(result);
+    for (const resolve of request.waiters) resolve();
+    request.waiters.clear();
+    this.#dispatchNext();
+  }
+
+  #dispatchNext() {
+    if (this.active || this.closed || this.finished || this.aborting) return;
+    const request = this.queue.shift();
+    if (!request) return;
+    this.active = request;
+    request.state = 'dispatching';
+    let writeReturned = false;
+    let synchronousCallbackError;
+    const onWrite = error => {
+      if (!error || request.settled) return;
+      if (!writeReturned) {
+        synchronousCallbackError = error;
+        return;
+      }
+      if (this.active === request) this.#abort(error);
+    };
+    try {
+      this.child.stdin.write(request.line, onWrite);
+      writeReturned = true;
+      if (synchronousCallbackError) throw synchronousCallbackError;
+    } catch (error) {
+      writeReturned = true;
+      if (!request.settled && this.active === request) {
+        this.active = null;
+        request.settled = true;
+        request.state = 'settled';
+        request.reject(undispatchedLifecycleError(error));
+        for (const resolve of request.waiters) resolve();
+        request.waiters.clear();
+      }
+      this.#abort(error);
+      return;
+    }
+    if (request.settled || this.active !== request) return;
+    request.dispatched = true;
+    request.state = 'active';
+    const requestTimeoutMs = ATTACHMENT_MUTATION_COMMANDS.has(request.command)
+      ? this.attachmentTimeoutMs : this.timeoutMs;
+    request.timer = setTimeout(() => {
+      if (this.active !== request || request.settled) return;
+      this.#abort(lifecycleError('SIDECAR_HELPER_TIMEOUT', 'sidecar helper 请求超时'));
+    }, requestTimeoutMs);
+    request.timer.unref?.();
   }
 
   #request(command, payload) {
@@ -180,25 +258,12 @@ class PersistentSidecarIO {
       return Promise.reject(error);
     }
     return new Promise((resolve, reject) => {
-      const requestTimeoutMs = ATTACHMENT_MUTATION_COMMANDS.has(command)
-        ? this.attachmentTimeoutMs : this.timeoutMs;
-      const timer = setTimeout(() => {
-        if (!this.pending.delete(id)) return;
-        const error = lifecycleError('SIDECAR_HELPER_TIMEOUT', 'sidecar helper 请求超时');
-        reject(pendingLifecycleError(error, command));
-        this.#notifyAttachmentMutationsSettled();
-        this.#abort(error);
-      }, requestTimeoutMs);
-      timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer, command });
-      try {
-        this.child.stdin.write(line);
-      } catch (error) {
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(pendingLifecycleError(error, command));
-        this.#notifyAttachmentMutationsSettled();
-      }
+      this.queue.push({
+        id, command, line, resolve, reject,
+        state:'queued', dispatched:false, settled:false, timer:null,
+        waiters:new Set(),
+      });
+      this.#dispatchNext();
     });
   }
 
@@ -270,9 +335,17 @@ class PersistentSidecarIO {
   async close() {
     if (this.closed) return this.closePromise;
     this.closed = true;
-    await this.#waitForAttachmentMutations();
+    const error = lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭');
+    this.#rejectQueued(error);
+    const active = this.active;
+    if (
+      active?.dispatched
+      && ATTACHMENT_MUTATION_COMMANDS.has(active.command)
+    ) {
+      await this.#waitForRequest(active);
+    }
     if (!this.finished) {
-      this.#abort(lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭'));
+      this.#abort(error);
     }
     await this.closePromise;
   }
