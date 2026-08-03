@@ -8,6 +8,7 @@
     "test:editor": "npm run test:editor:unit && npm run test:editor:e2e && python3 -m unittest discover -s scripts/editor/test -p 'test_*.py' -v"
   },
   "dependencies": {
+    "busboy": "1.6.0",
     "html2canvas": "1.4.1",
     "ws": "8.21.1"
   }
