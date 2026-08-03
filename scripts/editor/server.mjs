@@ -7,7 +7,9 @@ import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
+import { AttachmentStore } from './attachment-store.mjs';
 import { BridgeService } from './bridge-service.mjs';
+import { parseTaskMultipart } from './multipart-task.mjs';
 import { validateAction, validateTask } from './protocol.mjs';
 import { RevisionConflict, SessionStore } from './session-store.mjs';
 import { createPersistentSidecarIO } from './sidecar-io.mjs';
@@ -762,6 +764,33 @@ function persistentBoundary(project, root, binding, io) {
   return boundary;
 }
 
+function canonicalAttachmentBoundary(sidecarBoundary) {
+  const canonical = Object.fromEntries(
+    ['session', 'attachments', 'attachmentStaging'].map(name => {
+      const source = sidecarBoundary[name];
+      const path = source?.realPath;
+      if (typeof path !== 'string' || resolve(path) !== path) {
+        throw new TypeError(`缺少可信 ${name} 真实路径`);
+      }
+      return [name, { ...source, path, realPath:path }];
+    }),
+  );
+  return {
+    ...sidecarBoundary,
+    ...canonical,
+    sessionDir:canonical.session.path,
+    pythonIdentity:{
+      ...sidecarBoundary.pythonIdentity,
+      ...Object.fromEntries(Object.entries(canonical).map(([name, identity]) => [
+        name,
+        Object.fromEntries(
+          ['path', 'realPath', 'dev', 'ino'].map(key => [key, identity[key]]),
+        ),
+      ])),
+    },
+  };
+}
+
 async function recoverRegisteredTransaction(deckPath, state, sidecarBoundary) {
   const transactionIds = await sidecarBoundary.io.listTransactions();
   if (!transactionIds.length) return state;
@@ -949,6 +978,8 @@ export async function startServer({
   writerTimeoutMs = 10_000,
   writerKillGraceMs = 250,
   spawnWriter = spawn,
+  attachmentWriterTimeoutMs = 30_000,
+  spawnAttachmentWriter = spawn,
   onActiveWritersChange = () => {},
   beforeSessionPersist = async () => {},
   syncDirectory = syncDirectoryPath,
@@ -1001,6 +1032,24 @@ export async function startServer({
     await sidecarBoundary.io.close();
     throw unsafeSidecarError('Deck 在 sidecar 初始化期间发生变化，请重试');
   }
+  let attachmentStore;
+  try {
+    attachmentStore = new AttachmentStore({
+      sidecarBoundary:canonicalAttachmentBoundary(sidecarBoundary),
+      sidecarIO:sidecarBoundary.io,
+      spawnAttachmentWriter,
+      timeoutMs:attachmentWriterTimeoutMs,
+    });
+    await sidecarBoundary.io.reconcileAttachments({
+      referencedTaskIds:sessionStore.state.tasks
+        .filter(task => Array.isArray(task.attachments) && task.attachments.length > 0)
+        .map(task => task.id),
+    });
+  } catch (error) {
+    await attachmentStore?.close().catch(() => {});
+    await sidecarBoundary.io.close();
+    throw unsafeSidecarError('附件目录无法安全完成启动对账', error);
+  }
   const bridge = new BridgeService({
     sessionStore,
     timeoutMs:bridgeTimeoutMs,
@@ -1018,6 +1067,28 @@ export async function startServer({
     for (const client of webSockets.clients) {
       if (client.readyState === WebSocket.OPEN) client.send(message);
     }
+  };
+
+  const serializeTaskOutput = async (task, revision, { committed=false } = {}) => {
+    try {
+      await attachmentStore.guard();
+      return attachmentStore.serializeTask(task);
+    } catch (error) {
+      if (committed && error && typeof error === 'object') {
+        error.committed = true;
+        error.commitScope = 'session';
+        error.revision = revision;
+      }
+      throw error;
+    }
+  };
+
+  const serializeTaskResult = async (result, { committed=false } = {}) => {
+    if (!result?.task) return result;
+    return {
+      ...result,
+      task:await serializeTaskOutput(result.task, result.revision, { committed }),
+    };
   };
 
   const watchListener = () => {
@@ -1053,16 +1124,62 @@ export async function startServer({
         return;
       }
       if (request.method === 'GET' && pathname === '/api/tasks') {
-        json(response, 200, sessionStore.state.tasks);
+        await attachmentStore.guard();
+        json(response, 200, sessionStore.state.tasks.map(task => attachmentStore.serializeTask(task)));
         return;
       }
       if (request.method === 'POST' && pathname === '/api/tasks') {
-        const { expectedRevision, ...input } = await readJson(request);
-        requireRevision(expectedRevision);
-        validateTask(input);
-        const result = await bridge.createTask(input, expectedRevision);
-        broadcast('task-created', result.revision, result.task);
-        json(response, 201, result);
+        let attachmentsLifecycle = null;
+        let attachmentOwnershipTransferred = false;
+        let primaryError = null;
+        try {
+          const contentType = request.headers['content-type'] ?? '';
+          let body;
+          if (contentType.toLowerCase().startsWith('multipart/form-data')) {
+            await attachmentStore.guard();
+            const parsed = await parseTaskMultipart(request, { attachmentStore });
+            attachmentsLifecycle = parsed.upload;
+            body = { ...parsed.input, snapshot:parsed.snapshot };
+          } else if (contentType.toLowerCase().startsWith('application/json')) {
+            body = await readJson(request);
+          } else {
+            throw httpError(
+              'UNSUPPORTED_MEDIA_TYPE', 415,
+              '任务请求必须是 JSON 或 multipart/form-data',
+            );
+          }
+          const { expectedRevision, ...input } = body;
+          requireRevision(expectedRevision);
+          validateTask(input);
+          const result = await bridge.createTask(input, expectedRevision, {
+            attachmentsLifecycle,
+          });
+          attachmentOwnershipTransferred = true;
+          const task = await serializeTaskOutput(result.task, result.revision, {
+            committed:true,
+          });
+          broadcast('task-created', result.revision, task);
+          json(response, 201, { ...result, task });
+        } catch (error) {
+          primaryError = error;
+          throw error;
+        } finally {
+          if (attachmentsLifecycle && !attachmentOwnershipTransferred
+            && attachmentsLifecycle.published !== true) {
+            try {
+              await attachmentsLifecycle.discard();
+            } catch (cleanupError) {
+              if (cleanupError?.committed === true) {
+                if (cleanupError.cause === undefined && primaryError !== null) {
+                  try { cleanupError.cause = primaryError; } catch { /* 保留已冻结错误 */ }
+                }
+                throw cleanupError;
+              }
+              if (primaryError === null) throw cleanupError;
+              try { primaryError.cleanupError = cleanupError; } catch { /* 保留首错 */ }
+            }
+          }
+        }
         return;
       }
       const taskMatch = request.method === 'GET' && pathname.match(/^\/api\/tasks\/([^/]+)$/);
@@ -1070,7 +1187,8 @@ export async function startServer({
         const id = decodeURIComponent(taskMatch[1]);
         const task = sessionStore.state.tasks.find(candidate => candidate.id === id);
         if (!task) throw httpError('TASK_NOT_FOUND', 404, '找不到任务');
-        json(response, 200, task);
+        await attachmentStore.guard();
+        json(response, 200, attachmentStore.serializeTask(task));
         return;
       }
       if (request.method === 'POST' && pathname === '/api/actions') {
@@ -1089,12 +1207,16 @@ export async function startServer({
           result = await bridge.applyActions({ taskId, actions, expectedRevision });
         } catch (error) {
           if (error?.task?.id && Number.isSafeInteger(error?.revision)) {
-            broadcast('task-updated', error.revision, error.task);
+            const task = await serializeTaskOutput(error.task, error.revision, {
+              committed:true,
+            });
+            broadcast('task-updated', error.revision, task);
           }
           throw error;
         }
-        broadcast('actions-recorded', result.revision, result);
-        json(response, 200, result);
+        const serializedResult = await serializeTaskResult(result, { committed:true });
+        broadcast('actions-recorded', result.revision, serializedResult);
+        json(response, 200, serializedResult);
         return;
       }
       const groupMatch = request.method === 'POST'
@@ -1106,8 +1228,13 @@ export async function startServer({
         const result = groupMatch[2] === 'undo'
           ? await bridge.undoGroup(groupId, expectedRevision)
           : await bridge.redoGroup(groupId, expectedRevision);
-        broadcast(`group-${groupMatch[2] === 'undo' ? 'undone' : 'redone'}`, result.revision, result);
-        json(response, 200, result);
+        const serializedResult = await serializeTaskResult(result, { committed:true });
+        broadcast(
+          `group-${groupMatch[2] === 'undo' ? 'undone' : 'redone'}`,
+          result.revision,
+          serializedResult,
+        );
+        json(response, 200, serializedResult);
         return;
       }
       if (request.method === 'POST' && pathname === '/api/write-deck') {
@@ -1248,6 +1375,7 @@ export async function startServer({
     });
   } catch (error) {
     bridge.close();
+    await attachmentStore.close().catch(() => {});
     await sidecarBoundary.io.close();
     throw error;
   }
@@ -1266,8 +1394,8 @@ export async function startServer({
       watcherClosed = true;
       watcherGeneration += 1;
       unwatchFile(absoluteDeckPath, watchListener);
-      const helperClosed = sidecarBoundary.io.close();
       bridge.close();
+      const attachmentClosed = attachmentStore.close();
       const writerClosed = [];
       for (const writer of activeWriters.values()) {
         writerClosed.push(writer.closed);
@@ -1279,14 +1407,19 @@ export async function startServer({
       await new Promise(resolvePromise => setImmediate(resolvePromise));
       server.closeIdleConnections?.();
       const writersSettled = Promise.allSettled(writerClosed);
-      await Promise.all([
+      const shutdown = await Promise.allSettled([
         watcherQueue,
-        helperClosed,
         webSocketClosed,
         httpClosed,
         writersSettled,
+        attachmentClosed,
       ]);
       server.closeAllConnections?.();
+      const helperResult = await Promise.allSettled([sidecarBoundary.io.close()]);
+      const failures = [...shutdown, ...helperResult]
+        .filter(result => result.status === 'rejected')
+        .map(result => result.reason);
+      if (failures.length) throw new AggregateError(failures, '编辑服务关闭时清理失败');
     })();
     return closePromise;
   };

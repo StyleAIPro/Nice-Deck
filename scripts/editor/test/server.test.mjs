@@ -6,11 +6,12 @@ import { EventEmitter } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
+import { PassThrough, Writable } from 'node:stream';
 import {
   mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, unlink, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import WebSocket from 'ws';
 import { BridgeService } from '../bridge-service.mjs';
 import { startServer } from '../server.mjs';
@@ -49,6 +50,8 @@ async function makeApp(t, options = {}) {
     writerTimeoutMs: options.writerTimeoutMs,
     writerKillGraceMs: options.writerKillGraceMs,
     spawnWriter: options.spawnWriter,
+    attachmentWriterTimeoutMs: options.attachmentWriterTimeoutMs,
+    spawnAttachmentWriter: options.spawnAttachmentWriter,
     onActiveWritersChange: options.onActiveWritersChange,
     beforeSessionPersist: options.beforeSessionPersist,
     syncDirectory: options.syncDirectory,
@@ -521,6 +524,273 @@ test('拒绝无令牌请求并向 WebSocket 推送新任务', async t => {
 
   assert.equal(response.status, 201);
   assert.equal((await event).type, 'task-created');
+});
+
+test('真实 multipart 创建附件任务，并仅在 API 与广播中派生绝对路径', async t => {
+  const app = await makeApp(t);
+  const ws = await connect(`${app.wsUrl}?token=secret`);
+  t.after(() => ws.close());
+  const eventPromise = nextMessage(ws);
+  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...taskInput,
+    attachmentSources:['selected', 'pasted'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('snapshot', new Blob([png], { type:'image/png' }), 'region.png');
+  form.append('attachment', new Blob([Buffer.from('reference')], {
+    type:'text/plain',
+  }), '说明.txt');
+  form.append('attachment', new Blob([png], { type:'image/png' }), 'pasted.png');
+
+  const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:form,
+  });
+  const result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  assert.equal(result.task.attachments.length, 2);
+  assert.ok(result.task.attachments.every(attachment => isAbsolute(attachment.path)));
+  assert.equal(await readFile(result.task.attachments[0].path, 'utf8'), 'reference');
+  assert.deepEqual(await readFile(result.task.attachments[1].path), png);
+
+  const event = await eventPromise;
+  assert.equal(event.type, 'task-created');
+  assert.equal(event.payload.attachments[0].path, result.task.attachments[0].path);
+  const listed = await fetch(`${app.url}/api/tasks?token=secret`).then(value => value.json());
+  const detailed = await fetch(
+    `${app.url}/api/tasks/${result.task.id}?token=secret`,
+  ).then(value => value.json());
+  assert.equal(listed[0].attachments[0].path, result.task.attachments[0].path);
+  assert.equal(detailed.attachments[1].path, result.task.attachments[1].path);
+
+  const persisted = JSON.parse(await readFile(join(app.sessionDir, 'session.json'), 'utf8'));
+  assert.equal(Object.hasOwn(persisted.tasks[0].attachments[0], 'path'), false);
+  assert.match(persisted.tasks[0].attachments[0].relativePath, /^attachments\//);
+  const session = await fetch(`${app.url}/api/session?token=secret`).then(value => value.json());
+  assert.equal(Object.hasOwn(session.tasks[0].attachments[0], 'path'), false);
+});
+
+test('任务路由拒绝未知媒体类型，multipart 限额错误不创建 task', async t => {
+  const app = await makeApp(t);
+  const unsupported = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'text/plain' }, body:'task',
+  });
+  assert.equal(unsupported.status, 415);
+  assert.equal((await unsupported.json()).code, 'UNSUPPORTED_MEDIA_TYPE');
+
+  const empty = new FormData();
+  empty.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  empty.append('attachment', new Blob([Buffer.alloc(0)], {
+    type:'application/octet-stream',
+  }), 'empty.bin');
+  const emptyResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:empty,
+  });
+  assert.equal(emptyResponse.status, 400);
+  assert.equal((await emptyResponse.json()).code, 'ATTACHMENT_EMPTY');
+
+  const tooMany = new FormData();
+  tooMany.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:Array(9).fill('selected'),
+  })], { type:'application/json' }), 'task.json');
+  for (let index = 0; index < 9; index += 1) {
+    tooMany.append('attachment', new Blob([Buffer.from('x')]), `${index}.txt`);
+  }
+  const tooManyResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:tooMany,
+  });
+  assert.equal(tooManyResponse.status, 413);
+  assert.equal((await tooManyResponse.json()).code, 'TOO_MANY_ATTACHMENTS');
+
+  const oversized = new FormData();
+  oversized.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  oversized.append('attachment', new Blob([Buffer.alloc((25 * 1024 * 1024) + 1)]), 'large.bin');
+  const oversizedResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:oversized,
+  });
+  assert.equal(oversizedResponse.status, 413);
+  assert.equal((await oversizedResponse.json()).code, 'ATTACHMENT_TOO_LARGE');
+
+  const boundary = 'truncated-service-boundary';
+  const truncatedResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST',
+    headers:{ 'content-type':`multipart/form-data; boundary=${boundary}` },
+    body:Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="task"; filename="task.json"\r\n`
+      + 'Content-Type: application/json\r\n\r\n'
+      + JSON.stringify({ ...taskInput, attachmentSources:[] }),
+    ),
+  });
+  assert.equal(truncatedResponse.status, 400);
+  assert.equal((await truncatedResponse.json()).code, 'INVALID_MULTIPART');
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.tasks, []);
+});
+
+test('附件 writer 使用独立注入点，失败保留稳定事务错误字段', async t => {
+  let deckWriterCalls = 0;
+  let attachmentWriterCalls = 0;
+  const app = await makeApp(t, {
+    spawnWriter:() => { deckWriterCalls += 1; throw new Error('deck writer 不应启动'); },
+    spawnAttachmentWriter:(command, args, options) => {
+      attachmentWriterCalls += 1;
+      const configIndex = args.indexOf('--config') + 1;
+      const config = JSON.parse(args[configIndex]);
+      config.session.ino = '0';
+      const corruptedArgs = [...args];
+      corruptedArgs[configIndex] = JSON.stringify(config);
+      return spawnProcess(command, corruptedArgs, options);
+    },
+  });
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from('x')]), 'x.txt');
+  const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:form,
+  });
+  const result = await response.json();
+  assert.equal(response.status, 500);
+  assert.equal(result.code, 'UNSAFE_SIDECAR_IO');
+  assert.equal(result.stage, 'attachment-identity');
+  assert.equal(result.committed, false);
+  assert.equal(attachmentWriterCalls, 1);
+  assert.equal(deckWriterCalls, 0);
+  assert.equal(app.session.revision, 0);
+});
+
+test('重启 reconcile 保留权威任务附件并删除孤儿与 staging', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-attachment-reconcile-'));
+  const deckPath = join(root, 'deck.html');
+  await writeFile(deckPath, 'deck');
+  let app = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false, token:'secret',
+  });
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from('authoritative')]), 'kept.txt');
+  const createdResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:form,
+  });
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
+  const keptPath = created.task.attachments[0].path;
+  await app.close();
+
+  const attachments = join(app.sessionDir, 'attachments');
+  const orphanId = '11111111-1111-4111-8111-111111111111';
+  const uploadId = '22222222-2222-4222-8222-222222222222';
+  const orphanAttachmentId = '33333333-3333-4333-8333-333333333333';
+  const stagedAttachmentId = '44444444-4444-4444-8444-444444444444';
+  await mkdir(join(attachments, orphanId));
+  await writeFile(join(attachments, orphanId, `${orphanAttachmentId}.txt`), 'orphan');
+  await mkdir(join(attachments, '.staging', uploadId));
+  await writeFile(
+    join(attachments, '.staging', uploadId, `${stagedAttachmentId}.txt`),
+    'partial',
+  );
+
+  app = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false, token:'secret',
+  });
+  t.after(() => app.close());
+  assert.equal(await readFile(keptPath, 'utf8'), 'authoritative');
+  assert.deepEqual((await readdir(attachments)).sort(), ['.staging', created.task.id].sort());
+  assert.deepEqual(await readdir(join(attachments, '.staging')), []);
+  const listed = await fetch(`${app.url}/api/tasks?token=secret`).then(value => value.json());
+  assert.equal(listed[0].attachments[0].path, keptPath);
+});
+
+test('server.close 先取消附件 upload 与 writer，再关闭 sidecar', async t => {
+  let spawnedResolve;
+  const spawned = new Promise(resolve => { spawnedResolve = resolve; });
+  let killed = 0;
+  let active = 0;
+  const spawnAttachmentWriter = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new Writable({
+      write(_chunk, _encoding, callback) { callback(); },
+    });
+    child.kill = () => {
+      killed += 1;
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      queueMicrotask(() => {
+        active -= 1;
+        child.emit('close', null, 'SIGKILL');
+      });
+      return true;
+    };
+    active += 1;
+    spawnedResolve();
+    return child;
+  };
+  const app = await makeApp(t, {
+    spawnAttachmentWriter,
+    attachmentWriterTimeoutMs:30_000,
+  });
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from('pending')]), 'pending.txt');
+  const responsePromise = fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:form,
+  }).catch(error => error);
+  await spawned;
+  let closeTimeout;
+  try {
+    await Promise.race([
+      app.close(),
+      new Promise((_, reject) => {
+        closeTimeout = setTimeout(
+          () => reject(new Error('server.close 未在 2s 内收敛')),
+          2_000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(closeTimeout);
+  }
+  await responsePromise;
+  assert.equal(killed, 1);
+  assert.equal(active, 0);
+});
+
+test('服务运行期间 attachments 被替换为 symlink 时拒绝上传且不写 outside', async t => {
+  const app = await makeApp(t);
+  const attachments = join(app.sessionDir, 'attachments');
+  const trusted = `${attachments}.trusted-original`;
+  const outside = join(app.sessionDir, '..', 'outside-attachments');
+  await rename(attachments, trusted);
+  await mkdir(outside);
+  await symlink(outside, attachments, 'dir');
+
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from('blocked')]), 'blocked.txt');
+  const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:form,
+  });
+  const result = await response.json();
+  assert.equal(response.status, 500);
+  assert.equal(result.code, 'UNSAFE_SIDECAR');
+  assert.equal(result.stage, 'sidecar');
+  assert.deepEqual(await readdir(outside), []);
+  assert.equal(app.session.revision, 0);
+  assert.deepEqual(app.session.tasks, []);
 });
 
 test('任务快照仅接受限额内 PNG，落盘后响应与 session 均无 data URL', async t => {
@@ -1504,7 +1774,16 @@ test('缺 canonical、错配 canonical 与浏览器拒绝均不得写 Journal', 
 
 test('TARGET_AMBIGUOUS 持久化关联任务为待确认并广播新 revision', async t => {
   const app = await makeApp(t);
-  const created = await createTask(app);
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
+    ...taskInput, attachmentSources:['selected'],
+  })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from('ambiguity reference')]), 'reference.txt');
+  const createdResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', body:form,
+  });
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
   const taskId = created.task.id;
   await new Promise(resolve => setTimeout(resolve, 5));
   const editor = await connect(app.editorWsUrl);
@@ -1535,12 +1814,14 @@ test('TARGET_AMBIGUOUS 持久化关联任务为待确认并广播新 revision', 
   assert.equal(event.revision, 2);
   assert.equal(event.payload.id, taskId);
   assert.equal(event.payload.status, 'needs-confirmation');
+  assert.equal(event.payload.attachments[0].path, created.task.attachments[0].path);
 
   const persisted = JSON.parse(await readFile(join(app.sessionDir, 'session.json'), 'utf8'));
   const task = persisted.tasks.find(candidate => candidate.id === taskId);
   assert.equal(persisted.revision, 2);
   assert.equal(task.status, 'needs-confirmation');
   assert.equal(task.candidates.length, 5);
+  assert.equal(Object.hasOwn(task.attachments[0], 'path'), false);
   assert.ok(task.updatedAt > created.task.updatedAt);
   assert.deepEqual(persisted.groups, []);
 
@@ -1555,6 +1836,7 @@ test('TARGET_AMBIGUOUS 持久化关联任务为待确认并广播新 revision', 
   const retryBody = await retryResponse.json();
   assert.equal(retryResponse.status, 200);
   assert.equal(retryBody.revision, 3);
+  assert.equal(retryBody.task.attachments[0].path, created.task.attachments[0].path);
   const completed = app.session.tasks.find(candidate => candidate.id === taskId);
   assert.equal(completed.status, 'completed');
   assert.equal(completed.groupId, retryBody.groupId);

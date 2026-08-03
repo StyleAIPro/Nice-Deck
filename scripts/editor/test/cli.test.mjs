@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,27 +164,38 @@ test('server CLI 输出 ready JSON、保持运行并响应 SIGINT/SIGTERM', asyn
 test('Agent CLI 经真实服务完成 status/tasks/task/apply/undo', async t => {
   const { ready } = await startServerProcess(t);
   const common = ['--url', ready.url, '--token', ready.token];
-  const auth = { authorization: `Bearer ${ready.token}`, 'content-type': 'application/json' };
 
-  const createdResponse = await fetch(`${ready.url}/api/tasks`, {
-    method: 'POST',
-    headers: auth,
-    body: JSON.stringify({
+  const form = new FormData();
+  form.append('task', new Blob([JSON.stringify({
       expectedRevision: 0,
       pageKey: 'page-001-cli',
       pageIndex: 1,
       pageLabel: 'CLI',
       rect: { x: 1, y: 2, w: 3, h: 4 },
       instruction: '通过 CLI 修改',
-    }),
+      attachmentSources:['selected'],
+    })], { type:'application/json' }), 'task.json');
+  form.append('attachment', new Blob([Buffer.from('CLI attachment')], {
+    type:'text/plain',
+  }), '说明.txt');
+  const createdResponse = await fetch(`${ready.url}/api/tasks`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${ready.token}` },
+    body: form,
   });
   assert.equal(createdResponse.status, 201);
   const created = await createdResponse.json();
   const taskId = created.task.id;
 
-  assert.equal(parseJsonOutput(await runCli([...common, 'status'])).revision, 1);
-  assert.equal(parseJsonOutput(await runCli([...common, 'tasks']))[0].id, taskId);
-  assert.equal(parseJsonOutput(await runCli([...common, 'task', taskId])).id, taskId);
+  const status = parseJsonOutput(await runCli([...common, 'status']));
+  assert.equal(status.revision, 1);
+  assert.equal(Object.hasOwn(status.tasks[0].attachments[0], 'path'), false);
+  const listedTask = parseJsonOutput(await runCli([...common, 'tasks']))[0];
+  const detailedTask = parseJsonOutput(await runCli([...common, 'task', taskId]));
+  assert.equal(listedTask.id, taskId);
+  assert.equal(detailedTask.id, taskId);
+  assert.equal(listedTask.attachments[0].path, detailedTask.attachments[0].path);
+  assert.equal(await readFile(detailedTask.attachments[0].path, 'utf8'), 'CLI attachment');
 
   const editorUrl = new URL(ready.editorUrl);
   const editorSocketUrl = new URL('/events', ready.url);
