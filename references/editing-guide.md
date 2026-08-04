@@ -147,8 +147,42 @@ node scripts/verify/steps.mjs my-deck.html 版式·流程条 /tmp/steps     # 3)
 - 已知基线：模板出厂时「版式·左图右文」页自带 3 处 nested clip（图占位框裁切自身的提示文字，+38px）——属预期表现，不是问题，换成真图后自然消失。
 - 依赖：Node ≥ 18、本机安装 Google Chrome、playwright-core。**playwright-core 按三级顺序查找**：环境变量 `PLAYWRIGHT_CORE`（指向其 index.js）→ 裸 `import('playwright-core')`（在 skill 根目录 `npm i playwright-core` 即可满足）→ openclaw 全局安装的内置路径。都找不到时脚本会以退出码 2 报错并给出提示。
 - 首次加载等待较长是正常的（脚本内置了等待 React mount 的 settle 时间）。
+- `measure_overflow` 无法可靠发现 SVG `<text>` 越界、箭头悬空、连线方向错误和线条穿框。改过架构图时必须另跑 `shot`，以原尺寸或放大截图逐项目检文字边界与连线端点。
 
-## 7. 导出 PPTX（html2pptx）
+## 7. 升级旧 Deck
+
+更新本 skill 后，已有 Deck 不需要重新复制模板。三套当前模板在 template 中带版本标记：
+
+```html
+<meta name="huawei-deck-version" content="2026.08.1">
+```
+
+用升级器识别旧版本并迁移公共运行时：
+
+```bash
+python3 scripts/upgrade_deck.py old-deck.html                    # 默认预览，不修改
+python3 scripts/upgrade_deck.py old-deck.html --check            # 只检查；有待升级项时退出码 1
+python3 scripts/upgrade_deck.py old-deck.html --yes              # 自动备份后落盘
+python3 scripts/upgrade_deck.py old-deck.html --audit            # 逐页打印视觉复核清单
+python3 scripts/upgrade_deck.py old-deck.html --audit --report audit.md
+```
+
+升级边界：
+
+- 自动迁移只处理能精确识别的公共运行时片段；当前迁移包含左上角 `图标 + x/yy` glass 页码胶囊及其翻页同步。
+- 页面 `<section>`、`nav[]`、`chapters[]` 和资源 manifest 原样保留。
+- `--yes` 落盘前生成 `文件名.before-upgrade.html`；同名备份已存在时自动追加序号，不覆盖旧备份。
+- 用户自定义过导航运行时、导致旧片段不能唯一匹配时，脚本以退出码 2 停止并提示人工合并，不做模糊替换。
+- 卡片、标题色块、说明标签、红色描边和 SVG 工程图属于内容层；升级器只列出候选问题，必须结合业务含义逐页判断。
+- 升级完成后自动运行 `eb.verify()`；仍要按第 6 节执行 overflow、截图和动画逐拍验证。
+
+脚本退出码：`0` = 已是最新或升级成功；`1` = `--check` 检测到待升级项；`2` = 参数、bundle 结构或安全迁移条件不满足。
+
+新增模板功能时，在 `scripts/upgrade_deck.py` 的 `MIGRATIONS` 中追加带独立探测条件的迁移，并提升 `CURRENT_VERSION`；同时更新三套模板中的版本标记。迁移必须幂等：目标能力已存在时不得重复修改。
+
+## 8. 导出 PPTX（html2pptx）
+
+**授权边界：只有用户明确要求生成 / 更新 PPTX 时才运行导出。** 用户要求继续修改 HTML deck，不代表授权同步覆盖现有 `.pptx`；一次导出完成后，后续修改默认只更新 HTML，直到用户再次要求导出。
 
 ```bash
 bash scripts/html2pptx/convert.sh my-deck.html            # 输出同名 my-deck.pptx
@@ -162,7 +196,7 @@ EMBED_HTML=1 bash scripts/html2pptx/convert.sh my-deck.html         # 第一页�
 - 已知限制：靠 React 内部 state 切换的自制交互页无法程序化展开，只能截到默认状态（模板自带页没有这种页；自己加页时若做了这类交互，导出前心里有数）。
 - 依赖：Node + Chrome + playwright-core（同第 6 节三级查找）、`python3 -m pip install python-pptx`。
 
-## 8. 性能守则
+## 9. 性能守则
 
 - **别删内联的 React / 字体**。运行时默认从 CDN 拉 React——正因模板把 react / react-dom UMD 内联在运行时脚本之前才真离线；删了它，断网 / 代理环境整页起不来。`scripts/react.umd.js` / `react-dom.umd.js` 是备件，误删后可用 `eb.inline_react(lines, 'scripts/react.umd.js', 'scripts/react-dom.umd.js')` 修复。
 - iframe 一律 `loading="lazy"`；能重画成矢量 / HTML 的图别贴低清大截图。

@@ -8,7 +8,7 @@
 
 ![deck 交互演示：液态玻璃工具条 · 侧边预览 · 记笔记 · 放映/滚动切换](docs/showcase/deck-demo.gif)
 
-> 本地 Chrome 实录一份用本 skill 做出的答辩 deck：顶部液态玻璃工具条随讲切章，左上侧边预览缩略图跳页，左下角记笔记留评审批注，右上放映 / 滚动一键切换——放映翻到「03 · 研究过程」后切滚动，缓慢通览到致谢页。完整图文案例见 [`docs/showcase/showcase-1.md`](docs/showcase/showcase-1.md)。
+> 本地 Chrome 实录一份用本 skill 做出的答辩 deck：顶部液态玻璃工具条随讲切章，左上 `图标 + x/yy` glass 胶囊显示实时页码并展开侧边预览缩略图跳页，左下角记笔记留评审批注，右上放映 / 滚动一键切换——放映翻到「03 · 研究过程」后切滚动，缓慢通览到致谢页。完整图文案例见 [`docs/showcase/showcase-1.md`](docs/showcase/showcase-1.md)。
 
 ## 能做什么
 
@@ -17,6 +17,9 @@
 - 品牌可替换：换 logo / 金色背景画 / 口号 / 品牌色（`references/branding.md` + `scripts/apply_bg.py`）
 - 配图有工作流：初版类型化占位标注，终版从素材 PDF 抽原图（PyMuPDF）、自绘流程 / 架构图、制表落地（`references/artwork.md`）
 - 一键 `scripts/html2pptx/convert.sh` 导出 PPTX，页内多标签（layer）自动逐标签展开成多页
+- 统一白底圆角卡片体系：浅灰细边、标题无色块底、黑色 / 品牌红标题，删除无业务含义的装饰标签
+- 按源码 / 配置展开异构模型与系统架构，自绘 SVG 同时校验文字边界、箭头方向和连线端点
+- 旧 Deck 可原地升级：版本识别、默认预览、自动备份、公共运行时顺序迁移和逐页视觉审计
 
 ## 安装
 
@@ -71,6 +74,7 @@ huawei-deck/
 ├── scripts/
 │   ├── edit-bundle.py       # 独立版编辑工具函数（增删移页自动同步 nav/chapters）
 │   ├── apply_bg.py          # 品牌图替换
+│   ├── upgrade_deck.py      # 旧 Deck 版本迁移、备份与视觉审计
 │   ├── verify/              # measure_overflow / shot / steps —— 溢出检测·单页截图·放映逐拍
 │   └── html2pptx/           # convert.sh + shoot.mjs + build_pptx.py
 └── docs/design/             # 设计规格与实现计划（本 skill 的构建记录，供参考）
@@ -80,11 +84,13 @@ huawei-deck/
 
 01 门面（封面 / 目录 / 议程 / 章扉 / 问题页）· 02 内容版式（卡片网格 / 左图右文 / 对比两栏 / 流程条 / 密集多栏 / 表格混排 / 全幅大图 / 截图对照 / 动手实验）· 03 动画机制（build / layer / 混合链 / SMIL / 多组切换）· 04 深色与黑板（金句 / 两种黑板题卡）· 05 完整示例（10 页真实课件成品，即拿即改）· 06 收尾（研讨 / 结语）。
 
-放映：打开默认滚动模式，右侧 6px 细滑块仅在滚动时显现、停止 800ms 后自动淡出；点右上角玻璃工具条的显示器图标进入放映（自动全屏）；点击空白 / 空格 / → 前进，← 后退。`Ctrl/Cmd + 滚轮` 或 `Ctrl/Cmd + +/-` 只缩放幻灯片内容，刷新保留倍率；非 100% 时顶部 glass bar 液态展开四角百分比控件，点击复位。点击右上角播放 / 滚动任一模式按钮同样恢复 100%；缩放时工具条固定、滚动态当前页不跳转。
+放映：打开默认滚动模式，左上侧边预览 glass 胶囊持续显示实时 `x/yy` 页码，右侧 6px 细滑块仅在滚动时显现、停止 800ms 后自动淡出；点右上角玻璃工具条的显示器图标进入放映（自动全屏）；点击空白 / 空格 / → 前进，← 后退。`Ctrl/Cmd + 滚轮` 或 `Ctrl/Cmd + +/-` 只缩放幻灯片内容，刷新保留倍率；非 100% 时顶部 glass bar 液态展开四角百分比控件，点击复位。点击右上角播放 / 滚动任一模式按钮同样恢复 100%；缩放时工具条固定、滚动态当前页不跳转。
 
 ## 快速上手
 
 见 `SKILL.md`。一句话：`cp assets/template-deck.html 我的演示.html` → 照 `references/template-pages.md` 挑页改占位 → 增删页用 `scripts/edit-bundle.py`（自动记账）→ 跑 `scripts/verify/` 验证 → `scripts/html2pptx/convert.sh` 出 PPTX。
+
+已有 Deck 跟随 skill 更新：先运行 `python3 scripts/upgrade_deck.py 我的演示.html` 预览，确认后运行 `python3 scripts/upgrade_deck.py 我的演示.html --yes --audit`。脚本先备份，再迁移可安全识别的公共运行时；视觉风格只输出复核清单，不盲目覆盖业务内容。
 
 ## 许可证
 
