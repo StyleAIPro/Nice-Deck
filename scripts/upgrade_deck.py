@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
-CURRENT_VERSION = "2026.08.1"
+CURRENT_VERSION = "2026.08.2"
 VERSION_RE = re.compile(r'<meta name="huawei-deck-version" content="([^"]+)">')
 
 
@@ -30,6 +30,18 @@ def load_edit_bundle():
 
 
 eb = load_edit_bundle()
+
+
+def load_runtime_migrations():
+    path = REPO / "scripts" / "runtime_migrations.py"
+    spec = importlib.util.spec_from_file_location("runtime_migrations", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+runtime_migrations = load_runtime_migrations()
 
 
 class MigrationError(RuntimeError):
@@ -102,6 +114,18 @@ def migrate_page_counter(s):
 
 MIGRATIONS = [
     Migration("page-counter-glass", "左上角 glass 胶囊实时 x/yy 页码", has_page_counter, migrate_page_counter),
+    Migration(
+        "zoom-pan-controls",
+        "放大画面空格抓手、glass 小手锁定与焦点修复",
+        runtime_migrations.has_zoom_pan,
+        runtime_migrations.migrate_zoom_pan,
+    ),
+    Migration(
+        "present-wheel-navigation",
+        "放映模式滚轮按方向推进动画与页面",
+        runtime_migrations.has_present_wheel,
+        runtime_migrations.migrate_present_wheel,
+    ),
 ]
 
 

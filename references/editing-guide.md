@@ -154,7 +154,7 @@ node scripts/verify/steps.mjs my-deck.html 版式·流程条 /tmp/steps     # 3)
 更新本 skill 后，已有 Deck 不需要重新复制模板。三套当前模板在 template 中带版本标记：
 
 ```html
-<meta name="huawei-deck-version" content="2026.08.1">
+<meta name="huawei-deck-version" content="2026.08.2">
 ```
 
 用升级器识别旧版本并迁移公共运行时：
@@ -169,7 +169,7 @@ python3 scripts/upgrade_deck.py old-deck.html --audit --report audit.md
 
 升级边界：
 
-- 自动迁移只处理能精确识别的公共运行时片段；当前迁移包含左上角 `图标 + x/yy` glass 页码胶囊及其翻页同步。
+- 自动迁移只处理能精确识别的公共运行时片段；当前独立探测并迁移：① 左上角 `图标 + x/yy` glass 页码；② 放大后的空格抓手、glass 小手锁定、缩小时隐藏与按钮焦点修复；③ 放映模式滚轮逐拍 / 翻页与手势防抖。
 - 页面 `<section>`、`nav[]`、`chapters[]` 和资源 manifest 原样保留。
 - `--yes` 落盘前生成 `文件名.before-upgrade.html`；同名备份已存在时自动追加序号，不覆盖旧备份。
 - 用户自定义过导航运行时、导致旧片段不能唯一匹配时，脚本以退出码 2 停止并提示人工合并，不做模糊替换。
@@ -178,7 +178,11 @@ python3 scripts/upgrade_deck.py old-deck.html --audit --report audit.md
 
 脚本退出码：`0` = 已是最新或升级成功；`1` = `--check` 检测到待升级项；`2` = 参数、bundle 结构或安全迁移条件不满足。
 
-新增模板功能时，在 `scripts/upgrade_deck.py` 的 `MIGRATIONS` 中追加带独立探测条件的迁移，并提升 `CURRENT_VERSION`；同时更新三套模板中的版本标记。迁移必须幂等：目标能力已存在时不得重复修改。
+新增公共运行时功能时，优先在 `scripts/runtime_migrations.py` 增加 `has_*` / `migrate_*`，再接入 `upgrade_deck.py` 的 `MIGRATIONS`，提升 `CURRENT_VERSION` 并同步三套模板版本标记。迁移必须幂等：目标能力已存在时不得重复修改；部分匹配或自定义运行时不得模糊替换。
+
+### 7.1 用户明确要求“整页直接出现”
+
+这是内容偏好，不属于版本升级：只在目标 deck 的各 `<section>` 内移除 `class` 中的 `build` token 与 `data-step`，必要时再把该 deck 的循环 SMIL 改为静态；必须经 `edit-bundle.py` 操作并重新跑 `measure_overflow --all`。升级器不得默认删除动画，因为模板 03 章本身是 build / layer / SMIL 的活教材，也有大量既有 deck 依赖逐拍讲解。
 
 ## 8. 导出 PPTX（html2pptx）
 

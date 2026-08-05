@@ -7,7 +7,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 这是什么
 
-一套**单文件 HTML 演示模板**（1920×1080，华为红品牌设计系统）：React / 字体 / 图片全部内联，拷走一个文件即真离线可用。打开默认滚动模式浏览，左上角侧边预览 glass 胶囊持续显示实时 `x/yy` 页码，右侧 6px 细滑块仅在滚动时显现、停止 800ms 后自动淡出；`Ctrl/Cmd + 滚轮` 或 `Ctrl/Cmd + +/-` 缩放幻灯片内容（刷新保留倍率）；非 100% 时顶部 glass bar 液态展开四角百分比复位控件，点它或右上角任一模式按钮恢复 100%。**点右上角玻璃工具条的显示器图标进入放映模式**（自动全屏）——点击空白、空格或方向键逐拍推进动画（`←` 回退），刷新自动回到上次页，粘贴 bilibili 视频链接可直接弹内嵌播放器。`assets/template-deck.html` 是 34 页**页型画廊**：24 页页型每页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」——画廊即文档；另有「05 · 完整示例」章 10 页取自真实课件，展示版式填入真内容后的成品。
+一套**单文件 HTML 演示模板**（1920×1080，华为红品牌设计系统）：React / 字体 / 图片全部内联，拷走一个文件即真离线可用。打开默认滚动模式浏览，左上角侧边预览 glass 胶囊持续显示实时 `x/yy` 页码，右侧 6px 细滑块仅在滚动时显现、停止 800ms 后自动淡出；`Ctrl/Cmd + 滚轮` 或 `Ctrl/Cmd + +/-` 缩放幻灯片内容（刷新保留倍率）。非 100% 时顶部 glass bar 展开四角百分比复位控件；**仅放大到 110% 及以上时**再展开小手按钮，可锁定点击 / 拖动模式，按住空格则临时抓手，松开即恢复。**点右上角显示器图标进入放映模式**（自动全屏）——点击空白、空格、方向键或上下滚轮逐拍推进 / 回退，当前页拍完才翻页；滚轮按手势防抖，触控板惯性不会连续跳页。刷新自动回到上次页，粘贴 bilibili 视频链接可直接弹内嵌播放器。`assets/template-deck.html` 是 34 页**页型画廊**：24 页页型每页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」——画廊即文档；另有「05 · 完整示例」章 10 页取自真实课件，展示版式填入真内容后的成品。
 
 ## 从零做一份 PPT？先走流程
 
@@ -47,7 +47,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 11. **卡片只用统一白卡体系**：大卡片统一白底 + 浅灰细边 + 14px 圆角；卡片标题无色块底，只用黑色或品牌红文字；删除不承载业务信息的胶囊、角标和版式说明标签 → `references/design-system.md` 第 5～6 节
 12. **异构架构必须展开差异单元**：当不同层 / Block / 模块的执行路径不同，不能只画抽象层列表；必须依据项目源码或正式规格展开代表单元，标清输入输出、状态、缓存、分支与选择策略 → `references/artwork.md` 第 3 节
 13. **自绘图按工程图验收**：红色只标真正关键节点，不画无意义红框；所有 SVG / HTML 图逐项检查文字不越框、箭头方向正确、线条接在框边而非穿框或悬空，普通 overflow 检测不能替代截图目检 → `references/artwork.md` 第 5 节
-14. **导航运行时三模板一致**：左上侧边预览按钮统一为 `图标 + x/yy` 的 glass 胶囊，页码随放映翻页、滚动定位、缩略图跳页和刷新恢复实时同步；修改导航、缩放或侧栏运行时时必须同时更新三套模板 → `references/animation.md`
+14. **导航 / 缩放 / 放映运行时三模板一致**：左上侧边预览统一为 `图标 + x/yy`；放大后统一支持空格临时抓手、glass 小手锁定；放映态普通滚轮统一复用方向键节拍且按手势防抖。修改这些公共运行时时必须更新 `runtime_migrations.py`、三套模板与升级探测 → `references/animation.md`
 
 ## 文件导航
 
@@ -69,6 +69,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 | `scripts/edit-bundle.py` | 安全编辑工具函数库（load / get·set_template / insert·delete·move_page / embed_image / verify） |
 | `scripts/apply_bg.py` | 品牌图一键替换（默认预览模式，`--yes` 落盘） |
 | `scripts/upgrade_deck.py` | 旧 Deck 版本识别、公共运行时顺序迁移、自动备份与视觉审计 |
+| `scripts/runtime_migrations.py` | 缩放抓手、按钮焦点、放映滚轮等公共运行时的独立探测与幂等迁移 |
 | `scripts/verify/*.mjs` | verify 三件套（measure_overflow / shot / steps） |
 | `scripts/html2pptx/convert.sh` | HTML → PPTX 一键转换 |
 | `scripts/react*.umd.js` | 离线 React 备件（模板已内联，仅修复用） |
