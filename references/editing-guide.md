@@ -173,18 +173,19 @@ Codex 每次加载本 skill 后，首次接触一个已有 deck 目录时，对�
 
 升级边界：
 
-- 升级器不逐项理解功能。它移除页面、导航、章节、标题和用户扩展槽后计算公共外壳 hash，并与同类型最新模板对照；不一致就直接用最新外壳重组。
+- 升级器不逐项理解功能。它移除页面、导航、章节、标题、页面 profile、品牌元素和用户扩展槽后计算公共外壳 hash，并与同类型最新模板对照。
+- 已带运行时 hash 和用户扩展槽的 Deck 直接通过稳定 seam 用最新外壳重组；未接入 seam 的历史 Deck 会从 Skill 仓库 Git 历史寻找最接近的同类型模板，以其为基线做三方合并。页面 profile（如黑板背景 selector）、品牌元素和课程专属外壳脚本因此不会被模板公共代码覆盖。
 - 用户拥有区包括页面 `<section>`、`nav[]`、`chapters[]`、标题，以及 `HUAWEI_DECK_USER_STYLE` / `HUAWEI_DECK_USER_SCRIPT` 两个扩展槽；这些内容原样保留。
 - manifest 以旧 Deck 资源为基础，补入最新公共外壳实际引用的资源；UUID 冲突且内容不同时自动重命名旧资源并同步用户内容引用。
 - 模板类型由 `huawei-deck-template-kind` 标记；历史 Deck 无标记时按旧外壳相似度在 teaching / tech-share / work-report 中选择。
 - `--yes` 落盘前生成 `文件名.before-upgrade.html`；同名备份已存在时自动追加序号，不覆盖旧备份。
-- 重组只接受同时具备 app / stage / slide-fit / section / nav / chapters / railtoggle，且页面区与两个数组边界均可唯一解析的结构。核心结构无法可靠识别时以退出码 2 停止。
+- 重组只接受同时具备 app / stage / slide-fit / section / nav / chapters / railtoggle，且页面区与两个数组边界均可唯一解析的结构。核心结构无法可靠识别、历史模板 Git 数据不可用或三方合并冲突时以退出码 2 停止，不写入目标文件。
 - 卡片、标题色块、说明标签、红色描边和 SVG 工程图属于内容层；升级器只列出候选问题，必须结合业务含义逐页判断。
 - 升级完成后自动运行 `eb.verify()`；仍要按第 6 节执行 overflow、截图和动画逐拍验证。
 
 脚本退出码：`0` = 已是最新或升级成功；`1` = `--check` 检测到待升级项；`2` = 参数、bundle 结构或安全迁移条件不满足。
 
-新增或修改公共运行时功能时，同步更新三套模板并提升版本标记即可；模板外壳变化会自然产生新 hash，`upgrade_deck.py` 无需增加功能探测。只有页面 / nav / chapters / 用户扩展槽 / manifest 等 seam 或 bundle 编码格式变化时才修改升级器。
+新增或修改公共运行时功能时，同步更新三套模板并提升版本标记即可；模板外壳变化会自然产生新 hash，`upgrade_deck.py` 无需增加功能探测。只有页面 / nav / chapters / 页面 profile / 品牌元素 / 用户扩展槽 / manifest 等 seam、历史合并规则或 bundle 编码格式变化时才修改升级器。历史三方合并只在 Deck 首次接入新版 seam 时发生，写入目标 hash 后，日常编辑和同一 skill 版本下的再次检查不会扫描 Git 历史。
 
 ### 7.1 用户明确要求“整页直接出现”
 
