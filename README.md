@@ -19,7 +19,7 @@
 - 一键 `scripts/html2pptx/convert.sh` 导出 PPTX，页内多标签（layer）自动逐标签展开成多页
 - 统一白底圆角卡片体系：浅灰细边、标题无色块底、黑色 / 品牌红标题，删除无业务含义的装饰标签
 - 按源码 / 配置展开异构模型与系统架构，自绘 SVG 同时校验文字边界、箭头方向和连线端点
-- 旧 Deck 可原地升级：版本识别、默认预览、自动备份、公共运行时顺序迁移和逐页视觉审计
+- 旧 Deck 可原地升级：公共外壳 hash 对比、最新模板重组、自动备份和逐页视觉审计
 
 ## 安装
 
@@ -74,8 +74,7 @@ huawei-deck/
 ├── scripts/
 │   ├── edit-bundle.py       # 独立版编辑工具函数（增删移页自动同步 nav/chapters）
 │   ├── apply_bg.py          # 品牌图替换
-│   ├── upgrade_deck.py      # 旧 Deck 版本迁移、备份与视觉审计
-│   ├── runtime_migrations.py # 公共运行时能力探测与幂等迁移
+│   ├── upgrade_deck.py      # 公共外壳重组、manifest 合并、备份与视觉审计
 │   ├── verify/              # measure_overflow / shot / steps —— 溢出检测·单页截图·放映逐拍
 │   └── html2pptx/           # convert.sh + shoot.mjs + build_pptx.py
 └── docs/design/             # 设计规格与实现计划（本 skill 的构建记录，供参考）
@@ -91,7 +90,7 @@ huawei-deck/
 
 见 `SKILL.md`。一句话：`cp assets/template-deck.html 我的演示.html` → 照 `references/template-pages.md` 挑页改占位 → 增删页用 `scripts/edit-bundle.py`（自动记账）→ 跑 `scripts/verify/` 验证 → `scripts/html2pptx/convert.sh` 出 PPTX。
 
-已有 Deck 跟随 skill 更新：先运行 `python3 scripts/upgrade_deck.py 我的演示.html` 预览，确认后运行 `python3 scripts/upgrade_deck.py 我的演示.html --yes --audit`。脚本先备份，再迁移可安全识别的公共运行时；视觉风格只输出复核清单，不盲目覆盖业务内容。
+已有 Deck 跟随 skill 更新：Codex 每次加载本 skill 后，首次接触一个 deck 目录时批量运行一次 `python3 scripts/upgrade_deck.py 我的演示.html --yes`，同一工作过程不重复检查。脚本对照同类型最新模板的公共外壳 hash；不一致就保留页面、导航、章节与用户扩展，自动重组外壳并合并 manifest。发生升级时先备份并向用户报告；视觉风格只输出复核清单，不盲目覆盖业务内容。
 
 ## 许可证
 
