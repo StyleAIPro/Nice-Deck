@@ -20,25 +20,17 @@
 import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { loadChromium } from './load-playwright.mjs';
 
 const TRUNC = 36; // 元素文本摘要统一截断长度
-
-async function loadChromium() {
-  const candidates = [process.env.PLAYWRIGHT_CORE, 'playwright-core',
-    '/opt/homebrew/lib/node_modules/openclaw/node_modules/playwright-core/index.js'].filter(Boolean);
-  for (const c of candidates) {
-    try { const m = await import(c); return (m.default ?? m).chromium; } catch { /* 尝试下一个 */ }
-  }
-  console.error(`无法加载 playwright-core（已尝试: ${candidates.join(' → ')}）`);
-  console.error('请在本目录 npm i playwright-core，或设环境变量 PLAYWRIGHT_CORE 指向其 index.js');
-  process.exit(2);
-}
 
 const [deckFile, label, outDir] = process.argv.slice(2);
 if (!deckFile || !label || !outDir) { console.error('用法: node steps.mjs <deck.html> <label> <outdir>'); process.exit(2); }
 if (!existsSync(deckFile)) { console.error(`找不到 deck 文件: ${deckFile}`); process.exit(2); }
 
-const chromium = await loadChromium();
+let chromium;
+try { chromium = await loadChromium(); }
+catch (error) { console.error(error.message); process.exit(2); }
 let browser, exitCode = 0;
 try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -48,7 +40,9 @@ try {
   await page.waitForTimeout(5000); // React mount + 字体/图片 settle
   await page.addStyleTag({ content: `
     .glassbar.railtoggle,.glassbar.navbar,.glassbar.modebar,.railpanel,.railfoot,.hint,.noteschip,#__deck_loading_overlay{display:none!important;}
-    .stage .slide-canvas{content-visibility:visible!important;}
+    /* 与 shot.mjs 一致：逐拍图按逻辑画布 1:1 输出，不能继承 stage 的自适应缩放。 */
+    .stage .slide-fit{width:1920px!important;height:1080px!important;}
+    .stage .slide-canvas{content-visibility:visible!important;transform:none!important;width:1920px!important;height:1080px!important;}
     img[alt="HUAWEI"], img[data-brand-logo] { right: 30px !important; } /* fixed logo 超出 canvas 元素框右缘会被 element.screenshot 裁掉 → 左移 8px */
     [data-steps-target] .build{opacity:0!important; transition:none!important;}
     [data-steps-target] .build[data-shown]{opacity:1!important; transform:none!important; filter:none!important;}` });

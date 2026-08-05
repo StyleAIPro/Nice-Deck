@@ -1,0 +1,1885 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { constants as fsConstants, unwatchFile, watchFile } from 'node:fs';
+import { createServer } from 'node:http';
+import { isIP } from 'node:net';
+import { lstat, open, readFile, realpath } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { WebSocket, WebSocketServer } from 'ws';
+import {
+  AgentRunCoordinator, createAgentRouter, manualAgentConnection,
+  providerConfiguration, resolveAgentConnection,
+} from './agent-runner.mjs';
+import { createAgentSessionCatalog } from './agent-session-catalog.mjs';
+import { pickAgentProject } from './agent-project-picker.mjs';
+import { AttachmentStore } from './attachment-store.mjs';
+import { BridgeService } from './bridge-service.mjs';
+import { parseTaskMultipart } from './multipart-task.mjs';
+import { validateAction, validateTask } from './protocol.mjs';
+import { RevisionConflict, SessionStore } from './session-store.mjs';
+import { createPersistentSidecarIO } from './sidecar-io.mjs';
+
+const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
+const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
+const PUBLIC_DIR = join(EDITOR_DIR, 'public');
+const MAX_BODY_BYTES = 1024 * 1024;
+const EDITOR_ASSETS = new Map([
+  ['/editor/editor.css', { path: join(PUBLIC_DIR, 'editor.css'), type: 'text/css; charset=utf-8' }],
+  ['/editor/editor.mjs', { path: join(PUBLIC_DIR, 'editor.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/agent-connection-panel.mjs', {
+    path: join(PUBLIC_DIR, 'agent-connection-panel.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/inspector-panel.mjs', {
+    path: join(PUBLIC_DIR, 'inspector-panel.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/action-compiler.mjs', { path: join(EDITOR_DIR, 'action-compiler.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/history-state.mjs', { path: join(EDITOR_DIR, 'history-state.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/frame-bridge.mjs', { path: join(PUBLIC_DIR, 'frame-bridge.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/task-drawer.mjs', { path: join(PUBLIC_DIR, 'task-drawer.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/ws-client.mjs', { path: join(PUBLIC_DIR, 'ws-client.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/protocol.mjs', { path: join(EDITOR_DIR, 'protocol.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/attachment-protocol.mjs', { path: join(EDITOR_DIR, 'attachment-protocol.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/html2canvas.min.js', {
+    path: join(PROJECT_DIR, 'node_modules/html2canvas/dist/html2canvas.min.js'),
+    type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/patch-runtime.js', {
+    path: join(EDITOR_DIR, 'runtime/patch-runtime.js'),
+    type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/huawei-logo.png', {
+    path: join(PROJECT_DIR, 'assets/huawei-refs/logos/huawei-横版logo-透明.png'),
+    type: 'image/png',
+  }],
+]);
+
+function httpError(code, statusCode, message = code) {
+  return Object.assign(new Error(message), { code, statusCode });
+}
+
+function adapterError(code, statusCode, message) {
+  return Object.assign(httpError(code, statusCode, message), {
+    stage:'adapter',
+    recovery:'检查适配器诊断、目录权限和磁盘空间后重试',
+  });
+}
+
+function detailedHttpError(code, statusCode, message, details = {}) {
+  return Object.assign(httpError(code, statusCode, message), details);
+}
+
+function restoreConflictError(expectedFingerprint, actualFingerprint, message, cause) {
+  return detailedHttpError('RESTORE_CONFLICT', 409, message, {
+    stage:'recovery',
+    recovery:'保留磁盘外部版本，重新载入后在新基线上重放补丁',
+    expectedFingerprint,
+    actualFingerprint,
+    cause,
+  });
+}
+
+function unsafeSidecarError(message, cause) {
+  return detailedHttpError('UNSAFE_SIDECAR', 500, message, {
+    stage:'sidecar',
+    recovery:'移除 sidecar 路径中的符号链接并使用 Deck 同目录下的真实目录后重试',
+    cause,
+  });
+}
+
+async function captureDirectoryIdentity(path, label, parentIdentity = null) {
+  const absolutePath = resolve(path);
+  const info = await lstat(absolutePath, { bigint:true });
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`${label} 必须是非符号链接的真实目录`);
+  }
+  const realPath = await realpath(absolutePath);
+  if (parentIdentity && dirname(realPath) !== parentIdentity.realPath) {
+    throw new Error(`${label} 真实路径逃逸预期父目录`);
+  }
+  return {
+    path:absolutePath,
+    realPath,
+    dev:String(info.dev),
+    ino:String(info.ino),
+    label,
+  };
+}
+
+async function safeBackupsDirectory(sessionDir, sidecarBoundary) {
+  if (!sidecarBoundary) throw new Error('缺少可信 sidecar boundary');
+  await sidecarBoundary.guard();
+  if (resolve(sessionDir) !== sidecarBoundary.session.path) {
+    throw new Error('session 路径与启动身份不一致');
+  }
+  const backupRoot = sidecarBoundary.backups.path;
+  const backupReal = sidecarBoundary.backups.realPath;
+  return { backupRoot, backupReal };
+}
+
+async function safeTransactionsDirectory(sessionDir, sidecarBoundary) {
+  if (!sidecarBoundary) throw new Error('缺少可信 sidecar boundary');
+  await sidecarBoundary.guard();
+  if (resolve(sessionDir) !== sidecarBoundary.session.path) {
+    throw new Error('session 路径与启动身份不一致');
+  }
+  const transactionRoot = sidecarBoundary.transactions.path;
+  const transactionReal = sidecarBoundary.transactions.realPath;
+  return { transactionRoot, transactionReal };
+}
+
+function requireTransactionId(transactionId) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+    transactionId,
+  )) throw new Error('transactionId 不是规范 UUID v4');
+  return transactionId;
+}
+
+async function readTransactionRecord(
+  deckPath,
+  sessionDir,
+  transactionId,
+  expectedFingerprint,
+  backupRecord,
+  sidecarBoundary,
+) {
+  requireTransactionId(transactionId);
+  const { transactionRoot, transactionReal } = await safeTransactionsDirectory(
+    sessionDir, sidecarBoundary,
+  );
+  const transactionPath = join(transactionRoot, `${transactionId}.json`);
+  void transactionReal;
+  const record = await sidecarBoundary.io.readTransaction({ transactionId });
+  const expectedKeys = [
+    'backup', 'candidateFingerprint', 'deckPath', 'oldFingerprint',
+    'sessionDir', 'sessionId', 'transactionId', 'version',
+  ];
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(expectedKeys)
+    || record.version !== 1
+    || record.transactionId !== transactionId
+    || record.sessionId !== sidecarBoundary.sessionId
+    || resolve(record.deckPath ?? '') !== resolve(deckPath)
+    || resolve(record.sessionDir ?? '') !== resolve(sessionDir)
+    || record.oldFingerprint !== expectedFingerprint
+    || !/^[a-f0-9]{64}$/.test(record.candidateFingerprint ?? '')
+    || resolve(record.backup ?? '') !== backupRecord.backupPath) {
+    throw new Error('事务记录未严格绑定当前 Deck、session 和保存基线');
+  }
+  await readTrustedBackup(
+    sessionDir, record.backup, expectedFingerprint, sidecarBoundary,
+  );
+  return { transactionPath, record };
+}
+
+async function removeTransactionRecord(sessionDir, transactionId, sidecarBoundary) {
+  const { transactionRoot } = await safeTransactionsDirectory(
+    sessionDir, sidecarBoundary,
+  );
+  void transactionRoot;
+  await sidecarBoundary.io.deleteTransaction({
+    transactionId:requireTransactionId(transactionId),
+  });
+}
+
+async function pruneTransactionRecords(sessionDir, maximum = 32, sidecarBoundary) {
+  await safeTransactionsDirectory(sessionDir, sidecarBoundary);
+  await sidecarBoundary.io.pruneTransactions({ maximum });
+}
+
+async function readTrustedBackup(
+  sessionDir, backupPath, expectedFingerprint, sidecarBoundary,
+) {
+  const { backupRoot, backupReal } = await safeBackupsDirectory(
+    sessionDir, sidecarBoundary,
+  );
+  const absoluteBackup = resolve(backupPath);
+  if (dirname(absoluteBackup) !== backupRoot) {
+    throw new Error('备份路径不在当前会话 backups 目录内');
+  }
+  void backupReal;
+  await sidecarBoundary.io.verifyBackup({
+    backupName:basename(absoluteBackup), expectedFingerprint,
+  });
+  return { backupPath:absoluteBackup };
+}
+
+async function syncDirectoryPath(path) {
+  const handle = await open(
+    path,
+    fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try { await handle.sync(); }
+  finally { await handle.close(); }
+}
+
+async function restoreDeckBackup(
+  deckPath,
+  sessionDir,
+  backupRecord,
+  expectedFingerprint,
+  candidateFingerprint,
+  sidecarBoundary,
+) {
+  try {
+    await sidecarBoundary.io.restoreDeck({
+      deckName:basename(deckPath),
+      backupName:basename(backupRecord.backupPath),
+      oldFingerprint:expectedFingerprint,
+      candidateFingerprint,
+    });
+  } catch (error) {
+    if (error?.stage !== 'restore-conflict') throw error;
+    const currentFingerprint = await sidecarBoundary.io.hashDeck()
+      .then(result => result.fingerprint).catch(() => 'unavailable');
+    throw restoreConflictError(
+      candidateFingerprint,
+      currentFingerprint,
+      error.message,
+      error,
+    );
+  }
+}
+
+async function validateWriterResult(
+  deckPath,
+  sessionDir,
+  result,
+  backupRecord,
+  transactionId,
+  sidecarBoundary = null,
+) {
+  if (result?.ok !== true) throw adapterError('WRITE_FAILED', 500, '写入 Deck 未返回成功状态');
+  if (typeof result.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(result.fingerprint)) {
+    throw adapterError('WRITE_FAILED', 500, '写入 Deck 返回无效 fingerprint');
+  }
+  if (typeof result.backup !== 'string' || resolve(result.backup) !== backupRecord.backupPath) {
+    throw adapterError('WRITE_FAILED', 500, '写入 Deck 返回不可信 backup');
+  }
+  const expectedTransactionPath = join(
+    sessionDir, 'transactions', `${requireTransactionId(transactionId)}.json`,
+  );
+  if (typeof result.transaction !== 'string'
+    || resolve(result.transaction) !== resolve(expectedTransactionPath)) {
+    throw adapterError('WRITE_FAILED', 500, '写入 Deck 返回不可信 transaction');
+  }
+  await readTrustedBackup(
+    sessionDir, result.backup, backupRecord.expectedFingerprint, sidecarBoundary,
+  );
+  const { record } = await readTransactionRecord(
+    deckPath,
+    sessionDir,
+    transactionId,
+    backupRecord.expectedFingerprint,
+    backupRecord,
+    sidecarBoundary,
+  );
+  if (record.candidateFingerprint !== result.fingerprint) {
+    throw adapterError('WRITE_FAILED', 500, '事务记录 candidate 与 writer 回执不一致');
+  }
+  if ((await sidecarBoundary.io.hashDeck()).fingerprint !== result.fingerprint) {
+    throw adapterError('WRITE_FAILED', 500, '写入 Deck 回执与官方文件指纹不一致');
+  }
+  return result;
+}
+
+function authCookieName(token) {
+  const sessionId = createHash('sha256').update(token).digest('hex').slice(0, 16);
+  return `huawei_deck_editor_${sessionId}`;
+}
+
+function cookieValue(request, name) {
+  for (const part of (request.headers.cookie ?? '').split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function authorize(request, url, token, serviceOrigin) {
+  if (request.headers.origin !== undefined) {
+    let suppliedOrigin;
+    try { suppliedOrigin = new URL(request.headers.origin).origin; }
+    catch { throw httpError('FORBIDDEN', 403, '请求 Origin 无效'); }
+    if (suppliedOrigin !== serviceOrigin) {
+      throw httpError('FORBIDDEN', 403, '请求 Origin 不属于当前本地编辑服务');
+    }
+  }
+  const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '');
+  const cookieToken = cookieValue(request, authCookieName(token));
+  if (url.searchParams.get('token') !== token && bearer !== token && cookieToken !== token) {
+    throw httpError('FORBIDDEN', 403, '无权访问本地编辑服务');
+  }
+}
+
+function isProtected(pathname) {
+  return pathname === '/api' || pathname.startsWith('/api/')
+    || pathname === '/preview'
+    || pathname === '/editor' || pathname.startsWith('/editor/')
+    || pathname === '/events';
+}
+
+async function readJson(request) {
+  const chunks = [];
+  let bodyBytes = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bodyBytes += bytes.length;
+    if (bodyBytes > MAX_BODY_BYTES) {
+      throw httpError('BODY_TOO_LARGE', 413, '请求体过大');
+    }
+    chunks.push(bytes);
+  }
+  if (bodyBytes === 0) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks, bodyBytes).toString('utf8'));
+  } catch {
+    throw httpError('INVALID_JSON', 400, '请求体不是有效 JSON');
+  }
+}
+
+function requestMediaType(value) {
+  if (typeof value !== 'string') return '';
+  const separator = value.indexOf(';');
+  return value.slice(0, separator < 0 ? value.length : separator).trim().toLowerCase();
+}
+
+function requireRevision(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw httpError('INVALID_INPUT', 400, 'expectedRevision 必须为非负整数');
+  }
+  return value;
+}
+
+function requireTaskId(value) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length === 0) {
+    throw httpError('INVALID_INPUT', 400, 'taskId 必须为 null 或非空字符串');
+  }
+  return value;
+}
+
+function json(response, statusCode, value) {
+  const body = JSON.stringify(value);
+  response.writeHead(statusCode, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+  });
+  response.end(body);
+}
+
+function send(response, statusCode, body, contentType, headers = {}) {
+  response.writeHead(statusCode, {
+    'content-type': contentType,
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+    ...headers,
+  });
+  response.end(body);
+}
+
+async function sendEditorIndex(request, response, url, token, editorToken, serviceOrigin) {
+  authorize(request, url, token, serviceOrigin);
+  if (url.searchParams.get('editorToken') !== editorToken) {
+    throw httpError('FORBIDDEN', 403, '缺少编辑器能力令牌');
+  }
+  const contents = await readFile(join(PUBLIC_DIR, 'index.html'));
+  send(response, 200, contents, 'text/html; charset=utf-8', {
+    'set-cookie': `${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`,
+  });
+}
+
+function injectPreviewBridge(contents) {
+  let preview = contents.replace(
+    /(<script\b[^>]*?\bsrc=)(["'])(?:\.\.\/)+runtime\/patch-runtime\.js\2/gi,
+    '$1$2/editor/patch-runtime.js$2',
+  );
+  if (!/<script\b[^>]*\bsrc=["']\/editor\/patch-runtime\.js["'][^>]*>/i.test(preview)) {
+    const runtimeTag = '<script src="/editor/patch-runtime.js"></script>\n';
+    const headOpen = preview.match(/<head\b[^>]*>/i);
+    preview = headOpen
+      ? `${preview.slice(0, headOpen.index + headOpen[0].length)}\n${runtimeTag}${preview.slice(headOpen.index + headOpen[0].length)}`
+      : `${runtimeTag}${preview}`;
+  }
+  const tags = [];
+  if (!/<script\b[^>]*\bsrc=["']\/editor\/html2canvas\.min\.js["'][^>]*>/i.test(preview)) {
+    tags.push('<script src="/editor/html2canvas.min.js"></script>');
+  }
+  if (!/<script\b[^>]*\bsrc=["']\/editor\/frame-bridge\.mjs["'][^>]*>/i.test(preview)) {
+    tags.push('<script type="module" src="/editor/frame-bridge.mjs"></script>');
+  }
+  if (!tags.length) return preview;
+  const injection = `${tags.join('\n')}\n`;
+  const bodyEnd = preview.toLowerCase().lastIndexOf('</body>');
+  if (bodyEnd < 0) return `${preview}\n${injection}`;
+  preview = `${preview.slice(0, bodyEnd)}${injection}${preview.slice(bodyEnd)}`;
+  return preview;
+}
+
+function errorResponse(response, error) {
+  let statusCode = error?.statusCode;
+  let code = error?.code;
+  if (error instanceof RevisionConflict) {
+    statusCode = 409;
+    code = 'REVISION_CONFLICT';
+  } else if (error instanceof TypeError || error instanceof RangeError || error instanceof URIError) {
+    statusCode ??= 400;
+    code ??= 'INVALID_INPUT';
+  }
+  statusCode ??= 500;
+  code ??= 'INTERNAL_ERROR';
+  const safeMessages = new Set([
+    'JOURNAL_PERSIST_FAILED', 'EDITOR_SYNC_REQUIRED', 'VERIFY_FAILED', 'WRITE_FAILED',
+  ]);
+  const message = statusCode === 500 && !safeMessages.has(code) ? '服务内部错误' : error.message;
+  const details = {};
+  if (typeof error?.failedActionId === 'string') details.failedActionId = error.failedActionId;
+  if (Array.isArray(error?.candidates)) details.candidates = error.candidates.slice(0, 5);
+  if (typeof error?.committed === 'boolean') details.committed = error.committed;
+  if (typeof error?.commitScope === 'string') details.commitScope = error.commitScope;
+  if (typeof error?.commitConfirmed === 'boolean') details.commitConfirmed = error.commitConfirmed;
+  if (typeof error?.recoveredBySync === 'boolean') details.recoveredBySync = error.recoveredBySync;
+  if (Number.isSafeInteger(error?.revision)) details.revision = error.revision;
+  if (typeof error?.groupId === 'string') details.groupId = error.groupId;
+  if (typeof error?.stage === 'string') details.stage = error.stage;
+  if (typeof error?.recovery === 'string') details.recovery = error.recovery;
+  if (typeof error?.diagnostic === 'string') details.diagnostic = error.diagnostic;
+  if (typeof error?.candidate === 'string') details.candidate = error.candidate;
+  if (typeof error?.backup === 'string') details.backup = error.backup;
+  if (typeof error?.expectedFingerprint === 'string') details.expectedFingerprint = error.expectedFingerprint;
+  if (typeof error?.actualFingerprint === 'string') details.actualFingerprint = error.actualFingerprint;
+  if (Array.isArray(error?.blockers)) details.blockers = error.blockers;
+  json(response, statusCode, { error: code, code, message, ...details });
+}
+
+function runWritePatches(
+  deckPath,
+  sessionDir,
+  patches,
+  expectedFingerprint,
+  transactionId,
+  sessionId,
+  sidecarIdentity,
+  {
+  spawnWriter,
+  timeoutMs,
+  killGraceMs,
+  activeWriters,
+  onActiveWritersChange,
+}) {
+  const adapterPath = join(EDITOR_DIR, 'bundle_adapter.py');
+  const program = [
+    'import importlib.util,json,sys',
+    'spec=importlib.util.spec_from_file_location("bundle_adapter",sys.argv[1])',
+    'module=importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(module)',
+    'patches=json.load(sys.stdin)',
+    'identity=json.loads(sys.argv[5])',
+    'print(json.dumps(module.write_patches_safe(sys.argv[2],patches,sys.argv[3],sys.argv[4],sys.argv[7],identity,sys.argv[6]),ensure_ascii=False))',
+  ].join(';');
+  return new Promise((resolvePromise, reject) => {
+    const child = spawnWriter('python3', [
+      '-c', program, adapterPath, deckPath, sessionDir, expectedFingerprint,
+      JSON.stringify(sidecarIdentity), sessionId, transactionId,
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let requestSettled = false;
+    let processFinalized = false;
+    let cancelStarted = false;
+    let resolveClosed;
+    const closed = new Promise(resolveClosedPromise => { resolveClosed = resolveClosedPromise; });
+    let requestTimer;
+    let killGraceTimer;
+    const absorbLateError = () => {};
+    const notifyActiveWriters = () => {
+      try {
+        onActiveWritersChange(activeWriters.size);
+      } catch {
+        // 测试/诊断 hook 不得影响 writer 生命周期。
+      }
+    };
+    const settleRequest = (error, value) => {
+      if (requestSettled) return;
+      requestSettled = true;
+      clearTimeout(requestTimer);
+      if (error) reject(error);
+      else resolvePromise(value);
+    };
+    const finalizeProcess = ({ force = false } = {}) => {
+      if (processFinalized) return;
+      processFinalized = true;
+      clearTimeout(requestTimer);
+      clearTimeout(killGraceTimer);
+      child.removeListener('error', onChildError);
+      child.removeListener('close', onChildClose);
+      child.stdout.removeListener('data', onStdoutData);
+      child.stderr.removeListener('data', onStderrData);
+      child.stdin.removeListener('error', onStdinError);
+      child.on('error', absorbLateError);
+      child.stdin.on('error', absorbLateError);
+      if (force) {
+        for (const stream of [child.stdin, child.stdout, child.stderr]) {
+          try {
+            stream.destroy?.();
+          } catch {
+            // 强制收敛阶段只做尽力清理。
+          }
+        }
+        child.unref?.();
+      }
+      if (activeWriters.delete(child)) notifyActiveWriters();
+      resolveClosed();
+    };
+    const cancel = error => {
+      settleRequest(error);
+      if (cancelStarted || processFinalized) return;
+      cancelStarted = true;
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        finalizeProcess({ force: true });
+        return;
+      }
+      if (!processFinalized) {
+        killGraceTimer = setTimeout(() => finalizeProcess({ force: true }), killGraceMs);
+        killGraceTimer.unref?.();
+      }
+    };
+    const onStdoutData = chunk => { stdout += chunk; };
+    const onStderrData = chunk => { stderr += chunk; };
+    const onStdinError = error => {
+      if (!requestSettled) {
+        cancel(adapterError(
+          'WRITE_DECK_IO_ERROR', 502, `写入 Deck 输入失败：${error.code ?? 'IO_ERROR'}`,
+        ));
+      }
+    };
+    const onChildError = error => {
+      settleRequest(adapterError(
+        'WRITE_FAILED', 500, `无法启动 Deck 保存适配器：${error.code ?? error.message}`,
+      ));
+      finalizeProcess();
+    };
+    const onChildClose = code => {
+      if (!requestSettled) {
+        if (code !== 0) {
+          settleRequest(adapterError(
+            'WRITE_FAILED', 500, stderr.trim() || `写入 Deck 进程退出码 ${code}`,
+          ));
+        } else {
+          try {
+            const resultLine = stdout.trim().split(/\r?\n/).at(-1);
+            const result = JSON.parse(resultLine);
+            if (result?.ok === false) {
+              const statuses = {
+                DECK_CHANGED:409, VERIFY_FAILED:500, WRITE_FAILED:500,
+                UNSAFE_SIDECAR:500,
+              };
+              settleRequest(Object.assign(
+                httpError(result.code ?? 'WRITE_FAILED', statuses[result.code] ?? 500,
+                  result.message ?? '写回 Deck 失败'),
+                {
+                  stage:result.stage ?? 'write',
+                  recovery:result.recovery ?? '检查诊断信息后重试',
+                  diagnostic:result.diagnostic,
+                  candidate:result.candidate,
+                },
+              ));
+            } else if (result?.ok === true) {
+              settleRequest(null, result);
+            } else {
+              settleRequest(adapterError('WRITE_FAILED', 500, '写入 Deck 未返回明确成功状态'));
+            }
+          } catch {
+            settleRequest(adapterError('WRITE_FAILED', 500, '写入 Deck 返回无效结果'));
+          }
+        }
+      }
+      finalizeProcess();
+    };
+    activeWriters.set(child, { cancel, closed });
+    notifyActiveWriters();
+    requestTimer = setTimeout(() => {
+      cancel(adapterError('WRITE_DECK_TIMEOUT', 504, '写入 Deck 超时'));
+    }, timeoutMs);
+    requestTimer.unref?.();
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', onStdoutData);
+    child.stderr.on('data', onStderrData);
+    child.stdin.on('error', onStdinError);
+    child.once('error', onChildError);
+    child.once('close', onChildClose);
+    try {
+      child.stdin.end(JSON.stringify(patches));
+    } catch (error) {
+      cancel(httpError('WRITE_DECK_IO_ERROR', 502, `写入 Deck 输入失败：${error.code ?? 'IO_ERROR'}`));
+    }
+  });
+}
+
+async function runWriteTransaction({
+  deckPath,
+  sessionDir,
+  expectedFingerprint,
+  runWriter,
+  sidecarBoundary,
+  syncDirectory,
+}) {
+  const transactionId = randomUUID();
+  const backupRecord = {
+    backupPath:join(
+      sidecarBoundary.backups.path,
+      `${basename(deckPath, '.html')}-${expectedFingerprint}.html`,
+    ),
+    expectedFingerprint,
+  };
+  try {
+    await sidecarBoundary?.guard();
+    // 仅保留既有故障注入接口；生产备份由 adapter 在发布 record 前完成 durable fsync。
+    if (syncDirectory !== syncDirectoryPath) {
+      await syncDirectory(sidecarBoundary.backups.path);
+    }
+  } catch (error) {
+    if (error?.code === 'UNSAFE_SIDECAR') throw error;
+    if (error?.code === 'DECK_CHANGED') throw error;
+    throw adapterError('WRITE_FAILED', 500, `无法建立可信事务备份：${error.message}`);
+  }
+  try {
+    const result = await runWriter(transactionId);
+    await validateWriterResult(
+      deckPath, sessionDir, result, backupRecord, transactionId, sidecarBoundary,
+    );
+    await pruneTransactionRecords(sessionDir, 32, sidecarBoundary);
+    return result;
+  } catch (error) {
+    if (error?.code === 'SERVICE_CLOSED') throw error;
+    const actualFingerprint = await sidecarBoundary.io.hashDeck()
+      .then(result => result.fingerprint).catch(readError => (
+      `unavailable:${readError.code ?? 'READ_ERROR'}`
+      ));
+    let transaction;
+    try {
+      transaction = await readTransactionRecord(
+        deckPath,
+        sessionDir,
+        transactionId,
+        expectedFingerprint,
+        backupRecord,
+        sidecarBoundary,
+      );
+    } catch (recordError) {
+      if (actualFingerprint === expectedFingerprint) throw error;
+      if (error?.code === 'DECK_CHANGED') {
+        Object.assign(error, { expectedFingerprint, actualFingerprint });
+        throw error;
+      }
+      throw restoreConflictError(
+        expectedFingerprint,
+        actualFingerprint,
+        'writer 失败且缺少可信 transaction，保留当前磁盘 Deck',
+        recordError,
+      );
+    }
+    if (actualFingerprint === expectedFingerprint) {
+      await removeTransactionRecord(sessionDir, transactionId, sidecarBoundary);
+      throw error;
+    }
+    if (actualFingerprint !== transaction.record.candidateFingerprint) {
+      const conflict = restoreConflictError(
+        transaction.record.candidateFingerprint,
+        actualFingerprint,
+        'writer 失败后磁盘 Deck 已是第三方版本，拒绝恢复旧文件',
+        error,
+      );
+      conflict.transaction = transaction.transactionPath;
+      throw conflict;
+    }
+    await restoreDeckBackup(
+      deckPath,
+      sessionDir,
+      backupRecord,
+      expectedFingerprint,
+      transaction.record.candidateFingerprint,
+      sidecarBoundary,
+    );
+    await removeTransactionRecord(sessionDir, transactionId, sidecarBoundary);
+    throw error;
+  }
+}
+
+async function finalizeWriteTransaction(value, sessionDir, sidecarBoundary) {
+  if (typeof value?.transaction !== 'string') return;
+  const transactionPath = resolve(value.transaction);
+  const expectedRoot = resolve(sessionDir, 'transactions');
+  if (dirname(transactionPath) !== expectedRoot) {
+    throw unsafeSidecarError('拒绝清理当前 session 外的 transaction record');
+  }
+  const match = basename(transactionPath).match(
+    /^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/,
+  );
+  if (!match) throw unsafeSidecarError('transaction record 名称不可信');
+  await removeTransactionRecord(sessionDir, match[1], sidecarBoundary);
+}
+
+const LEGACY_SESSION_KEYS = [
+  'conflict', 'deckFingerprint', 'deckPath', 'diagnosticsBaseline',
+  'diagnosticsCurrent', 'diagnosticsRevision', 'groups', 'redo', 'revision',
+  'tasks', 'version',
+];
+
+function strictLegacySessionState(state, deckPath, fingerprint) {
+  return Boolean(state && typeof state === 'object' && !Array.isArray(state)
+    && JSON.stringify(Object.keys(state).sort()) === JSON.stringify(LEGACY_SESSION_KEYS)
+    && state.version === 1
+    && resolve(state.deckPath ?? '') === resolve(deckPath)
+    && state.deckFingerprint === fingerprint
+    && Number.isInteger(state.revision) && state.revision >= 0
+    && Array.isArray(state.tasks) && Array.isArray(state.groups) && Array.isArray(state.redo)
+    && state.diagnosticsBaseline && typeof state.diagnosticsBaseline === 'object'
+    && state.diagnosticsCurrent && typeof state.diagnosticsCurrent === 'object');
+}
+
+function validateRegisteredSessionState(state, entry, deckPath, { preparing=false } = {}) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)
+    || state.sessionId !== entry.sessionId
+    || resolve(state.deckPath ?? '') !== resolve(deckPath)
+    || !/^[a-f0-9]{64}$/.test(state.deckFingerprint ?? '')
+    || (preparing && state.deckFingerprint !== entry.initialFingerprint)
+    || !Array.isArray(state.tasks) || !Array.isArray(state.groups) || !Array.isArray(state.redo)) {
+    throw new Error('session.json 未严格绑定 registry sessionId/Deck/fingerprint');
+  }
+  return state;
+}
+
+function persistentBoundary(project, root, binding, io) {
+  const boundary = {
+    project:{ ...project, label:'Deck 项目目录' },
+    root:{ ...root, label:'sidecar root' },
+    ...Object.fromEntries(Object.entries(binding.identities).map(([key, value]) => (
+      [key, { ...value, label:key }]
+    ))),
+    sidecarRoot:root.path,
+    sessionDir:binding.identities.session.path,
+    io,
+  };
+  boundary.guard = async () => {
+    try { await io.assertBound(); }
+    catch (error) { throw unsafeSidecarError('sidecar 身份已在服务运行期间变化，拒绝继续写入', error); }
+  };
+  boundary.pythonIdentity = Object.fromEntries(
+    [
+      'project', 'root', 'session', 'snapshots', 'backups', 'transactions', 'writeErrors',
+      'attachments', 'attachmentStaging',
+    ]
+      .filter(name => boundary[name])
+      .map(name => [name, Object.fromEntries(
+        ['path', 'realPath', 'dev', 'ino'].map(key => [key, boundary[name][key]]),
+      )]),
+  );
+  return boundary;
+}
+
+function canonicalAttachmentBoundary(sidecarBoundary) {
+  const canonical = Object.fromEntries(
+    ['session', 'attachments', 'attachmentStaging'].map(name => {
+      const source = sidecarBoundary[name];
+      const path = source?.realPath;
+      if (typeof path !== 'string' || resolve(path) !== path) {
+        throw new TypeError(`缺少可信 ${name} 真实路径`);
+      }
+      return [name, { ...source, path, realPath:path }];
+    }),
+  );
+  return {
+    ...sidecarBoundary,
+    ...canonical,
+    sessionDir:canonical.session.path,
+    pythonIdentity:{
+      ...sidecarBoundary.pythonIdentity,
+      ...Object.fromEntries(Object.entries(canonical).map(([name, identity]) => [
+        name,
+        Object.fromEntries(
+          ['path', 'realPath', 'dev', 'ino'].map(key => [key, identity[key]]),
+        ),
+      ])),
+    },
+  };
+}
+
+async function recoverRegisteredTransaction(deckPath, state, sidecarBoundary) {
+  const transactionIds = await sidecarBoundary.io.listTransactions();
+  if (!transactionIds.length) return state;
+  if (transactionIds.length !== 1) {
+    throw new Error('当前注册 session 存在多个未完成 transaction，拒绝猜测恢复顺序');
+  }
+  const [transactionId] = transactionIds;
+  const record = await sidecarBoundary.io.readTransaction({ transactionId });
+  const expectedKeys = [
+    'backup', 'candidateFingerprint', 'deckPath', 'oldFingerprint',
+    'sessionDir', 'sessionId', 'transactionId', 'version',
+  ];
+  const expectedBackup = join(
+    sidecarBoundary.backups.path,
+    `${basename(deckPath, '.html')}-${record?.oldFingerprint}.html`,
+  );
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(expectedKeys)
+    || record.version !== 1
+    || record.transactionId !== transactionId
+    || record.sessionId !== sidecarBoundary.sessionId
+    || resolve(record.deckPath ?? '') !== resolve(deckPath)
+    || resolve(record.sessionDir ?? '') !== resolve(sidecarBoundary.sessionDir)
+    || !/^[a-f0-9]{64}$/.test(record.oldFingerprint ?? '')
+    || !/^[a-f0-9]{64}$/.test(record.candidateFingerprint ?? '')
+    || resolve(record.backup ?? '') !== resolve(expectedBackup)) {
+    throw new Error('未完成 transaction 未严格绑定 registry/Deck/session');
+  }
+  await sidecarBoundary.io.verifyBackup({
+    backupName:basename(expectedBackup), expectedFingerprint:record.oldFingerprint,
+  });
+  if (![record.oldFingerprint, record.candidateFingerprint].includes(state.deckFingerprint)) {
+    throw new Error('session fingerprint 与未完成 transaction 不一致');
+  }
+  const diskFingerprint = (await sidecarBoundary.io.hashDeck()).fingerprint;
+  if (diskFingerprint === record.candidateFingerprint
+    && state.deckFingerprint === record.oldFingerprint) {
+    await sidecarBoundary.io.restoreDeck({
+      backupName:basename(expectedBackup),
+      oldFingerprint:record.oldFingerprint,
+      candidateFingerprint:record.candidateFingerprint,
+    });
+    await sidecarBoundary.io.deleteTransaction({ transactionId });
+    return state;
+  }
+  if ((diskFingerprint === record.candidateFingerprint
+      && state.deckFingerprint === record.candidateFingerprint)
+    || (diskFingerprint === record.oldFingerprint
+      && state.deckFingerprint === record.oldFingerprint)) {
+    await sidecarBoundary.io.deleteTransaction({ transactionId });
+    return state;
+  }
+  const conflicted = {
+    ...state,
+    conflict:{
+      code:'DECK_CHANGED',
+      expectedFingerprint:state.deckFingerprint,
+      actualFingerprint:diskFingerprint,
+      detectedAt:new Date().toISOString(),
+    },
+  };
+  await sidecarBoundary.io.writeSession({
+    sessionId:sidecarBoundary.sessionId,
+    bytes:Buffer.from(JSON.stringify(conflicted, null, 2)),
+  });
+  await sidecarBoundary.io.deleteTransaction({ transactionId });
+  return conflicted;
+}
+
+async function initializePersistentSidecar(deckPath) {
+  const project = await captureDirectoryIdentity(dirname(deckPath), 'Deck 项目目录');
+  const io = await createPersistentSidecarIO({ project });
+  try {
+    const { identity:root } = await io.ensureRoot();
+    const deckName = basename(deckPath);
+    const discovery = await io.discover({ deckName });
+    let { fingerprint:currentFingerprint } = await io.hashDeck();
+    let entry;
+    let persistedState;
+    let binding;
+
+    if (discovery.registry !== null && discovery.sessions.length > 1) {
+      throw new Error('当前 Deck registry 存在多个 session，拒绝猜测');
+    }
+    if (discovery.sessions.length === 1) {
+      [entry] = discovery.sessions;
+      if (entry.kind === 'unsafe'
+        || (entry.kind === 'missing' && !(entry.status === 'preparing' && entry.mode === 'fresh'))) {
+        throw new Error('registry session 目录缺失或不安全');
+      }
+      binding = await io.bindSession({
+        deckName, sessionId:entry.sessionId,
+        sessionName:entry.sessionName, create:entry.kind === 'missing',
+      });
+      persistedState = await io.readSession({ missingOk:entry.status === 'preparing' });
+      if (entry.status === 'active') {
+        validateRegisteredSessionState(persistedState, entry, deckPath);
+      } else if (entry.mode === 'legacy') {
+        if ((await io.listTransactions()).length) {
+          throw new Error('preparing legacy session 出现 pending transaction');
+        }
+        if (persistedState?.sessionId === undefined) {
+          if (!strictLegacySessionState(
+            persistedState, deckPath, entry.initialFingerprint,
+          )) throw new Error('preparing legacy session 不再满足迁移约束');
+          persistedState = { ...persistedState, sessionId:entry.sessionId };
+          await io.writeSession({
+            sessionId:entry.sessionId,
+            bytes:Buffer.from(JSON.stringify(persistedState, null, 2)),
+          });
+        } else {
+          validateRegisteredSessionState(persistedState, entry, deckPath, { preparing:true });
+        }
+      } else if (persistedState !== null) {
+        validateRegisteredSessionState(persistedState, entry, deckPath, { preparing:true });
+      }
+    } else {
+      const legacy = await io.inspectLegacy({ deckName, currentFingerprint });
+      if (legacy.candidates.some(candidate => candidate.transactionIds.length)) {
+        throw new Error('无 registry 的 legacy session 含 pending transaction，拒绝迁移');
+      }
+      if (legacy.candidates.length > 1) {
+        throw new Error('无 registry 时存在多个 legacy session，拒绝猜测');
+      }
+      const candidate = legacy.candidates[0] ?? null;
+      if (candidate && (!candidate.expectedCurrentName
+        || !strictLegacySessionState(candidate.sessionState, deckPath, currentFingerprint))) {
+        throw new Error('未注册 session 不是可迁移的严格 legacy');
+      }
+      const mode = candidate ? 'legacy' : 'fresh';
+      const sessionId = randomUUID();
+      const sessionName = candidate?.sessionName
+        ?? `${basename(deckPath, '.html')}-${currentFingerprint.slice(0, 8)}`;
+      entry = await io.prepareSession({
+        deckName, sessionId, initialFingerprint:currentFingerprint, sessionName, mode,
+      });
+      binding = await io.bindSession({
+        deckName, sessionId, sessionName, create:mode === 'fresh',
+      });
+      if (candidate) {
+        persistedState = { ...candidate.sessionState, sessionId };
+        await io.writeSession({
+          sessionId, bytes:Buffer.from(JSON.stringify(persistedState, null, 2)),
+        });
+      } else {
+        persistedState = null;
+      }
+    }
+    const recoveryBoundary = persistentBoundary(project, root, binding, io);
+    recoveryBoundary.sessionId = entry.sessionId;
+    if (entry.status === 'active') {
+      persistedState = await recoverRegisteredTransaction(
+        deckPath, persistedState, recoveryBoundary,
+      );
+      currentFingerprint = (await io.hashDeck()).fingerprint;
+    }
+    const attachmentBinding = await io.bindAttachments();
+    binding = {
+      ...binding,
+      identities:{ ...binding.identities, ...attachmentBinding.identities },
+    };
+    const sidecarBoundary = persistentBoundary(project, root, binding, io);
+    sidecarBoundary.sessionId = entry.sessionId;
+    return {
+      sidecarBoundary,
+      entry,
+      persistedState,
+      currentFingerprint,
+      needsActivation:entry.status === 'preparing',
+    };
+  } catch (error) {
+    await io.close();
+    throw error;
+  }
+}
+
+export async function startServer({
+  deckPath,
+  host = '127.0.0.1',
+  port = 0,
+  openBrowser = false,
+  exitWhenEditorCloses = false,
+  editorCloseGraceMs = 10_000,
+  token = randomUUID(),
+  editorToken = randomUUID(),
+  bridgeTimeoutMs = 10_000,
+  writerTimeoutMs = 10_000,
+  writerKillGraceMs = 250,
+  spawnWriter = spawn,
+  attachmentWriterTimeoutMs = 30_000,
+  spawnAttachmentWriter = spawn,
+  onActiveWritersChange = () => {},
+  beforeSessionPersist = async () => {},
+  syncDirectory = syncDirectoryPath,
+  agentProvider = 'codex',
+  agentThreadId = null,
+  agentAdapter = null,
+  agentSessionCatalog = null,
+  pickAgentProjectDirectory = pickAgentProject,
+  spawnAgent = spawn,
+  agentRunTimeoutMs = 20 * 60 * 1000,
+} = {}) {
+  void openBrowser;
+  if (!deckPath) throw new TypeError('缺少 deckPath');
+  if (!Number.isSafeInteger(editorCloseGraceMs) || editorCloseGraceMs < 0) {
+    throw new TypeError('editorCloseGraceMs 必须为非负整数');
+  }
+  const normalizedHost = String(host).toLowerCase();
+  const ipv4Loopback = isIP(normalizedHost) === 4 && normalizedHost.startsWith('127.');
+  if (!ipv4Loopback && normalizedHost !== '::1' && normalizedHost !== 'localhost') {
+    throw httpError('INVALID_HOST', 400, '编辑服务只允许监听 loopback 地址');
+  }
+  host = normalizedHost;
+  const urlHost = host.includes(':') ? `[${host}]` : host;
+  const absoluteDeckPath = resolve(deckPath);
+  const defaultAgentProject = dirname(absoluteDeckPath);
+  let sidecarBoundary;
+  let initialization;
+  try {
+    initialization = await initializePersistentSidecar(absoluteDeckPath);
+    sidecarBoundary = initialization.sidecarBoundary;
+  } catch (error) {
+    if (error?.code === 'SESSION_LOCKED') {
+      throw httpError('SESSION_LOCKED', 409, '当前 Deck 已由另一编辑服务占用');
+    }
+    if (error?.code === 'UNSAFE_SIDECAR') throw error;
+    throw unsafeSidecarError('sidecar 路径不可信，拒绝启动编辑服务', error);
+  }
+  let sessionStore;
+  let initialAgentConnection;
+  try {
+    sessionStore = await SessionStore.open({
+      deckPath:absoluteDeckPath,
+      rootDir:sidecarBoundary.sidecarRoot,
+      sessionDir:sidecarBoundary.sessionDir,
+      sidecarGuard:sidecarBoundary.guard,
+      sidecarIO:sidecarBoundary.io,
+      directoriesPrepared:true,
+      deckFingerprint:initialization.currentFingerprint,
+      sessionId:initialization.entry.sessionId,
+      persistedState:initialization.persistedState,
+    });
+    if (initialization.needsActivation) {
+      await sidecarBoundary.io.activateSession({
+        sessionId:initialization.entry.sessionId,
+      });
+    }
+    initialAgentConnection = resolveAgentConnection({
+      provider:agentProvider,
+      launchThreadId:agentThreadId,
+      persistedConnection:sessionStore.state.agentConnection,
+    });
+    if (JSON.stringify(initialAgentConnection) !== JSON.stringify(sessionStore.state.agentConnection)) {
+      const candidate = {
+        ...structuredClone(sessionStore.state),
+        agentConnection:initialAgentConnection,
+      };
+      await sessionStore.persistState(candidate);
+      Object.assign(sessionStore.state, candidate);
+    }
+  } catch (error) {
+    await sidecarBoundary.io.close();
+    throw unsafeSidecarError('session/registry 无法安全完成初始化', error);
+  }
+  if (resolve(sessionStore.sessionDir) !== resolve(sidecarBoundary.sessionDir)) {
+    await sidecarBoundary.io.close();
+    throw unsafeSidecarError('Deck 在 sidecar 初始化期间发生变化，请重试');
+  }
+  let attachmentStore;
+  try {
+    attachmentStore = new AttachmentStore({
+      sidecarBoundary:canonicalAttachmentBoundary(sidecarBoundary),
+      sidecarIO:sidecarBoundary.io,
+      spawnAttachmentWriter,
+      timeoutMs:attachmentWriterTimeoutMs,
+    });
+    await sidecarBoundary.io.reconcileAttachments({
+      referencedTaskIds:sessionStore.state.tasks
+        .filter(task => Array.isArray(task.attachments) && task.attachments.length > 0)
+        .map(task => task.id),
+    });
+  } catch (error) {
+    await attachmentStore?.close().catch(() => {});
+    await sidecarBoundary.io.close();
+    throw unsafeSidecarError('附件目录无法安全完成启动对账', error);
+  }
+  const bridge = new BridgeService({
+    sessionStore,
+    timeoutMs:bridgeTimeoutMs,
+    beforeSessionPersist,
+  });
+  const webSockets = new WebSocketServer({ noServer: true });
+  const activeWriters = new Map();
+  let watcherClosed = false;
+  let watcherGeneration = 0;
+  let watcherQueue = Promise.resolve();
+  let serviceOrigin;
+  let editorConnectedOnce = false;
+  let editorCloseTimer;
+  let closePromise;
+  let agentRuns;
+  let activeAgentAdapter;
+  const sessionCatalog = agentSessionCatalog ?? createAgentSessionCatalog();
+  const allowedAgentProjects = new Map([[
+    defaultAgentProject,
+    {
+      path:defaultAgentProject, name:basename(defaultAgentProject) || defaultAgentProject,
+      source:'default', providers:[],
+    },
+  ]]);
+  const knownSessionProjects = new Map();
+  let agentProjectPickerActive = false;
+
+  const broadcast = (type, revision, payload) => {
+    const message = JSON.stringify({ type, revision, payload });
+    for (const client of webSockets.clients) {
+      if (client.readyState === WebSocket.OPEN) client.send(message);
+    }
+  };
+
+  const requireAgentProject = async path => {
+    if (typeof path !== 'string' || !isAbsolute(path) || !allowedAgentProjects.has(path)) {
+      throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, 'Agent 项目目录不在已发现或已选择的列表中');
+    }
+    const actualPath = await realpath(path);
+    const info = await lstat(actualPath);
+    if (!info.isDirectory()) {
+      throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, 'Agent 项目路径不是目录');
+    }
+    return actualPath;
+  };
+
+  const agentContext = () => ({
+    deckPath:absoluteDeckPath,
+    serviceUrl:serviceOrigin,
+    token,
+  });
+
+  try {
+    activeAgentAdapter = agentAdapter ?? createAgentRouter({
+      initialConnection:initialAgentConnection,
+      persistConnection:async (connection, { expectedRevision } = {}) => {
+        const result = await bridge.setAgentConnection(
+          connection,
+          expectedRevision ?? sessionStore.state.revision,
+        );
+        broadcast(
+          'agent-connection-updated',
+          result.revision,
+          providerConfiguration(result.connection.provider, result.connection),
+        );
+        return result;
+      },
+      spawnProcess:spawnAgent,
+      timeoutMs:agentRunTimeoutMs,
+    });
+    agentRuns = new AgentRunCoordinator({
+      provider:activeAgentAdapter.id,
+      adapter:activeAgentAdapter,
+      getSession:() => sessionStore.state,
+      getContext:agentContext,
+      onUpdate:run => broadcast('agent-run-updated', sessionStore.state.revision, run),
+    });
+  } catch (error) {
+    bridge.close();
+    await attachmentStore.close().catch(() => {});
+    await sidecarBoundary.io.close();
+    throw error;
+  }
+
+  const serializeTaskOutput = async (task, revision, { committed=false } = {}) => {
+    try {
+      return await attachmentStore.serializeTaskVerified(task);
+    } catch (error) {
+      if (committed && error && typeof error === 'object') {
+        error.committed = true;
+        error.commitScope = 'session';
+        error.revision = revision;
+      }
+      throw error;
+    }
+  };
+
+  const serializeTaskResult = async (result, { committed=false } = {}) => {
+    if (!result?.task) return result;
+    return {
+      ...result,
+      task:await serializeTaskOutput(result.task, result.revision, { committed }),
+    };
+  };
+
+  const watchListener = () => {
+    const generation = watcherGeneration;
+    watcherQueue = watcherQueue.then(async () => {
+      if (watcherClosed || generation !== watcherGeneration) return;
+      const changed = await bridge.noteDeckFingerprint(async () => {
+        try { return (await sidecarBoundary.io.hashDeck()).fingerprint; }
+        catch (error) { return `unavailable:${error.code ?? 'READ_ERROR'}`; }
+      });
+      if (!watcherClosed && generation === watcherGeneration && changed) {
+        broadcast('deck-conflict', sessionStore.state.revision, sessionStore.state.conflict);
+      }
+    }).catch(() => {});
+  };
+
+  const server = createServer(async (request, response) => {
+    response.once('finish', () => {
+      if (watcherClosed) server.closeIdleConnections?.();
+    });
+    try {
+      const url = new URL(request.url ?? '/', `http://${urlHost}`);
+      const { pathname } = url;
+      if (isProtected(pathname)) authorize(request, url, token, serviceOrigin);
+
+      if (request.method === 'GET' && pathname === '/') {
+        await sendEditorIndex(request, response, url, token, editorToken, serviceOrigin);
+        return;
+      }
+
+      if (request.method === 'GET' && pathname === '/api/session') {
+        json(response, 200, sessionStore.state);
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/tasks') {
+        const tasks = await Promise.all(sessionStore.state.tasks.map(task => (
+          serializeTaskOutput(task, sessionStore.state.revision)
+        )));
+        json(response, 200, tasks);
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-providers') {
+        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
+        json(response, 200, providerConfiguration(
+          connection.provider,
+          connection,
+        ));
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-connection') {
+        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
+        json(response, 200, providerConfiguration(
+          connection.provider,
+          connection,
+        ));
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-sessions') {
+        const catalog = await sessionCatalog.list();
+        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
+        for (const session of catalog.sessions) {
+          if (typeof session.cwd !== 'string' || !isAbsolute(session.cwd)) continue;
+          const projectPath = resolve(session.cwd);
+          knownSessionProjects.set(`${session.provider}\0${session.id}`, projectPath);
+          const existingProject = allowedAgentProjects.get(projectPath);
+          allowedAgentProjects.set(projectPath, {
+            path:projectPath,
+            name:basename(projectPath) || projectPath,
+            source:existingProject?.source ?? 'discovered',
+            providers:[...new Set([...(existingProject?.providers ?? []), session.provider])],
+          });
+        }
+        catalog.sessions = catalog.sessions.map(session => {
+          const selected = session.provider === connection.provider
+            && session.id === connection.threadId;
+          return {
+            ...session,
+            selected,
+            skillStatus:selected && ['loaded', 'detected'].includes(connection.skillStatus)
+              ? connection.skillStatus
+              : session.skillStatus,
+          };
+        });
+        catalog.projects = [...allowedAgentProjects.values()].map(project => ({
+          ...project, providers:[...project.providers],
+        })).sort((a, b) => (
+          a.name.localeCompare(b.name, 'zh-CN') || a.path.localeCompare(b.path)
+        ));
+        catalog.defaultProjectPath = defaultAgentProject;
+        json(response, 200, catalog);
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-projects/pick') {
+        if (agentProjectPickerActive) {
+          throw httpError('PROJECT_PICKER_ACTIVE', 409, '项目目录选择器已经打开');
+        }
+        agentProjectPickerActive = true;
+        let selectedPath;
+        try {
+          selectedPath = await pickAgentProjectDirectory();
+        } finally {
+          agentProjectPickerActive = false;
+        }
+        if (selectedPath === null) {
+          json(response, 200, { status:'cancelled' });
+          return;
+        }
+        const projectPath = await realpath(selectedPath);
+        const info = await lstat(projectPath);
+        if (!info.isDirectory()) {
+          throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, '选择结果不是项目目录');
+        }
+        const project = {
+          path:projectPath,
+          name:basename(projectPath) || projectPath,
+          source:'selected',
+          providers:allowedAgentProjects.get(projectPath)?.providers ?? [],
+        };
+        allowedAgentProjects.set(projectPath, project);
+        json(response, 200, { status:'selected', project });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-sessions/inspect') {
+        const { provider, sessionId } = await readJson(request);
+        const candidate = manualAgentConnection({ provider, threadId:sessionId });
+        json(response, 200, await sessionCatalog.inspectSkill(
+          candidate.provider, candidate.threadId,
+        ));
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-sessions') {
+        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
+          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能新建会话');
+        }
+        if (typeof activeAgentAdapter.createSession !== 'function') {
+          throw httpError('AGENT_SESSION_CREATE_UNAVAILABLE', 409, '当前 Agent adapter 不支持新建会话');
+        }
+        const { expectedRevision, provider, projectPath } = await readJson(request);
+        requireRevision(expectedRevision);
+        if (expectedRevision !== sessionStore.state.revision) {
+          const error = httpError('REVISION_CONFLICT', 409, '编辑会话已经变化，请刷新后重试');
+          error.revision = sessionStore.state.revision;
+          throw error;
+        }
+        const trustedProjectPath = await requireAgentProject(projectPath);
+        const result = await activeAgentAdapter.createSession(
+          { provider, projectPath:trustedProjectPath },
+          agentContext(),
+        );
+        const project = allowedAgentProjects.get(trustedProjectPath);
+        if (project) project.providers = [...new Set([...project.providers, provider])];
+        const configuration = providerConfiguration(
+          result.connection.provider, result.connection,
+        );
+        json(response, 201, { ...configuration, revision:sessionStore.state.revision });
+        return;
+      }
+      if (request.method === 'PUT' && pathname === '/api/agent-connection') {
+        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
+          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能更改连接');
+        }
+        if (typeof activeAgentAdapter.configure !== 'function') {
+          throw httpError('AGENT_CONNECTION_UNAVAILABLE', 409, '当前 Agent adapter 不支持手动连接');
+        }
+        const { expectedRevision, provider, threadId } = await readJson(request);
+        requireRevision(expectedRevision);
+        const currentConnection = activeAgentAdapter.connection ?? initialAgentConnection;
+        let skillStatus = 'unknown';
+        if (threadId !== null) {
+          if (provider === currentConnection.provider && threadId === currentConnection.threadId
+            && ['loaded', 'detected'].includes(currentConnection.skillStatus)) {
+            skillStatus = currentConnection.skillStatus;
+          } else {
+            try {
+              ({ skillStatus } = await sessionCatalog.inspectSkill(provider, threadId));
+            } catch {
+              skillStatus = 'unknown';
+            }
+          }
+        }
+        const projectPath = threadId === null ? null
+          : (knownSessionProjects.get(`${provider}\0${threadId}`)
+            ?? (provider === currentConnection.provider && threadId === currentConnection.threadId
+              ? currentConnection.projectPath : null));
+        const configured = await activeAgentAdapter.configure(
+          { provider, threadId, projectPath, source:'manual', skillStatus },
+          { expectedRevision },
+        );
+        const configuration = providerConfiguration(configured.connection.provider, configured.connection);
+        json(response, 200, { ...configuration, revision:configured.revision });
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-runs/current') {
+        json(response, 200, agentRuns.snapshot());
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-runs') {
+        const { expectedRevision, taskIds } = await readJson(request);
+        const run = agentRuns.start({ expectedRevision, taskIds });
+        json(response, 202, run);
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/tasks') {
+        let attachmentsLifecycle = null;
+        let attachmentOwnershipTransferred = false;
+        let primaryError = null;
+        try {
+          const contentType = request.headers['content-type'] ?? '';
+          const mediaType = requestMediaType(contentType);
+          let body;
+          if (mediaType === 'multipart/form-data') {
+            await attachmentStore.guard();
+            const parsed = await parseTaskMultipart(request, { attachmentStore });
+            attachmentsLifecycle = parsed.upload;
+            body = { ...parsed.input, snapshot:parsed.snapshot };
+          } else if (mediaType === 'application/json') {
+            body = await readJson(request);
+          } else {
+            throw httpError(
+              'UNSUPPORTED_MEDIA_TYPE', 415,
+              '任务请求必须是 JSON 或 multipart/form-data',
+            );
+          }
+          const { expectedRevision, ...input } = body;
+          requireRevision(expectedRevision);
+          validateTask(input);
+          const result = await bridge.createTask(input, expectedRevision, {
+            attachmentsLifecycle,
+          });
+          attachmentOwnershipTransferred = true;
+          const task = await serializeTaskOutput(result.task, result.revision, {
+            committed:true,
+          });
+          broadcast('task-created', result.revision, task);
+          json(response, 201, { ...result, task });
+        } catch (error) {
+          primaryError = error;
+          throw error;
+        } finally {
+          if (attachmentsLifecycle && !attachmentOwnershipTransferred
+            && attachmentsLifecycle.published !== true) {
+            try {
+              await attachmentsLifecycle.discard();
+            } catch (cleanupError) {
+              if (cleanupError?.committed === true) {
+                if (cleanupError.cause === undefined && primaryError !== null) {
+                  try { cleanupError.cause = primaryError; } catch { /* 保留已冻结错误 */ }
+                }
+                throw cleanupError;
+              }
+              if (primaryError === null) throw cleanupError;
+              try { primaryError.cleanupError = cleanupError; } catch { /* 保留首错 */ }
+            }
+          }
+        }
+        return;
+      }
+      const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+      if (taskMatch && ['PATCH', 'DELETE'].includes(request.method)) {
+        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
+          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能修改任务列表');
+        }
+        const id = decodeURIComponent(taskMatch[1]);
+        const body = await readJson(request);
+        requireRevision(body.expectedRevision);
+        if (request.method === 'PATCH') {
+          const result = await bridge.updateTask(id, body.instruction, body.expectedRevision);
+          const task = await serializeTaskOutput(result.task, result.revision, { committed:true });
+          broadcast('task-updated', result.revision, task);
+          json(response, 200, { ...result, task });
+          return;
+        }
+        const result = await bridge.deleteTask(id, body.expectedRevision);
+        broadcast('task-deleted', result.revision, { id });
+        json(response, 200, result);
+        return;
+      }
+      if (taskMatch && request.method === 'GET') {
+        const id = decodeURIComponent(taskMatch[1]);
+        const task = sessionStore.state.tasks.find(candidate => candidate.id === id);
+        if (!task) throw httpError('TASK_NOT_FOUND', 404, '找不到任务');
+        json(response, 200, await serializeTaskOutput(task, sessionStore.state.revision));
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/actions') {
+        const { expectedRevision, taskId, actions } = await readJson(request);
+        requireRevision(expectedRevision);
+        requireTaskId(taskId);
+        if (!Array.isArray(actions) || actions.length === 0) {
+          throw httpError('INVALID_INPUT', 400, 'actions 必须为非空数组');
+        }
+        actions.forEach(validateAction);
+        if (new Set(actions.map(action => action.id)).size !== actions.length) {
+          throw httpError('DUPLICATE_ACTION_ID', 400, '同一批次 action id 不得重复');
+        }
+        let result;
+        try {
+          result = await bridge.applyActions({ taskId, actions, expectedRevision });
+        } catch (error) {
+          if (error?.task?.id && Number.isSafeInteger(error?.revision)) {
+            const task = await serializeTaskOutput(error.task, error.revision, {
+              committed:true,
+            });
+            broadcast('task-updated', error.revision, task);
+          }
+          throw error;
+        }
+        const serializedResult = await serializeTaskResult(result, { committed:true });
+        broadcast('actions-recorded', result.revision, serializedResult);
+        json(response, 200, serializedResult);
+        return;
+      }
+      const groupMatch = request.method === 'POST'
+        && pathname.match(/^\/api\/groups\/([^/]+)\/(undo|redo)$/);
+      if (groupMatch) {
+        const groupId = decodeURIComponent(groupMatch[1]);
+        const { expectedRevision } = await readJson(request);
+        requireRevision(expectedRevision);
+        const result = groupMatch[2] === 'undo'
+          ? await bridge.undoGroup(groupId, expectedRevision)
+          : await bridge.redoGroup(groupId, expectedRevision);
+        const serializedResult = await serializeTaskResult(result, { committed:true });
+        broadcast(
+          `group-${groupMatch[2] === 'undo' ? 'undone' : 'redone'}`,
+          result.revision,
+          serializedResult,
+        );
+        json(response, 200, serializedResult);
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/write-deck') {
+        const { expectedRevision } = await readJson(request);
+        requireRevision(expectedRevision);
+        let result;
+        try {
+          result = await bridge.writeDeck(
+            expectedRevision,
+            {
+              fingerprint:() => sidecarBoundary.io.hashDeck().then(result => result.fingerprint),
+              writer:(patches, expectedFingerprint) => runWriteTransaction({
+                deckPath:absoluteDeckPath,
+                sessionDir:sessionStore.sessionDir,
+                expectedFingerprint,
+                sidecarBoundary,
+                syncDirectory,
+                runWriter:transactionId => runWritePatches(
+                  absoluteDeckPath,
+                  sessionStore.sessionDir,
+                  patches,
+                  expectedFingerprint,
+                  transactionId,
+                  sessionStore.state.sessionId,
+                  sidecarBoundary.pythonIdentity,
+                  {
+                    spawnWriter,
+                    timeoutMs: writerTimeoutMs,
+                    killGraceMs: writerKillGraceMs,
+                    activeWriters,
+                    onActiveWritersChange,
+                  },
+                ),
+              }),
+              restore:(writerResult, expectedFingerprint) => restoreDeckBackup(
+                absoluteDeckPath,
+                sessionStore.sessionDir,
+                { backupPath:resolve(writerResult.backup) },
+                expectedFingerprint,
+                writerResult.fingerprint,
+                sidecarBoundary,
+              ),
+              finalize:value => finalizeWriteTransaction(
+                value, sessionStore.sessionDir, sidecarBoundary,
+              ),
+            },
+          );
+        } catch (error) {
+          if (error?.conflictCreated === true) {
+            broadcast('deck-conflict', sessionStore.state.revision, sessionStore.state.conflict);
+          }
+          throw error;
+        }
+        json(response, 200, { revision: sessionStore.state.revision, ...result });
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/preview') {
+        const contents = await readFile(absoluteDeckPath, 'utf8');
+        const preview = injectPreviewBridge(contents);
+        send(response, 200, preview, 'text/html; charset=utf-8');
+        return;
+      }
+      if (request.method === 'GET' && (pathname === '/editor' || pathname === '/editor/')) {
+        await sendEditorIndex(request, response, url, token, editorToken, serviceOrigin);
+        return;
+      }
+      if (request.method === 'GET' && EDITOR_ASSETS.has(pathname)) {
+        const asset = EDITOR_ASSETS.get(pathname);
+        const contents = await readFile(asset.path);
+        send(response, 200, contents, asset.type);
+        return;
+      }
+      if (request.method === 'GET' && (pathname === '/editor' || pathname.startsWith('/editor/'))) {
+        throw httpError('EDITOR_ASSET_NOT_FOUND', 404, `编辑器资源不存在：${pathname}`);
+      }
+      if (request.method === 'GET' && pathname === '/events') {
+        response.setHeader('upgrade', 'websocket');
+        throw httpError('WEBSOCKET_UPGRADE_REQUIRED', 426, '请使用 WebSocket 连接');
+      }
+      throw httpError('NOT_FOUND', 404, '资源不存在');
+    } catch (error) {
+      errorResponse(response, error);
+    }
+  });
+
+  server.on('upgrade', (request, socket, head) => {
+    let url;
+    try {
+      url = new URL(request.url ?? '/', `http://${urlHost}`);
+    } catch {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (url.pathname !== '/events' || url.searchParams.get('token') !== token) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (request.headers.origin !== undefined) {
+      let suppliedOrigin;
+      try { suppliedOrigin = new URL(request.headers.origin).origin; }
+      catch { suppliedOrigin = null; }
+      if (suppliedOrigin !== serviceOrigin) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return;
+      }
+    }
+    const suppliedEditorToken = url.searchParams.get('editorToken');
+    const isEditor = suppliedEditorToken === editorToken;
+    if (suppliedEditorToken !== null && !isEditor) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (isEditor && bridge.hasEditorSocket()) {
+      socket.end('HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    webSockets.handleUpgrade(request, socket, head, client => {
+      client.isEditor = isEditor;
+      webSockets.emit('connection', client, request);
+    });
+  });
+
+  webSockets.on('connection', socket => {
+    if (socket.isEditor) {
+      editorConnectedOnce = true;
+      clearTimeout(editorCloseTimer);
+      editorCloseTimer = undefined;
+      bridge.setEditorSocket(socket);
+    }
+    socket.on('message', data => bridge.handleMessage(socket, data));
+    socket.on('close', () => {
+      if (!socket.isEditor) return;
+      bridge.clearEditorSocket(socket);
+      if (!exitWhenEditorCloses || !editorConnectedOnce || watcherClosed) return;
+      clearTimeout(editorCloseTimer);
+      editorCloseTimer = setTimeout(() => {
+        editorCloseTimer = undefined;
+        void close().catch(() => {});
+      }, editorCloseGraceMs);
+      editorCloseTimer.unref?.();
+    });
+  });
+
+  try {
+    await new Promise((resolvePromise, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => {
+        server.off('error', reject);
+        resolvePromise();
+      });
+    });
+  } catch (error) {
+    bridge.close();
+    await agentRuns.close().catch(() => {});
+    await attachmentStore.close().catch(() => {});
+    await sidecarBoundary.io.close();
+    throw error;
+  }
+  const address = server.address();
+  const actualPort = typeof address === 'object' && address ? address.port : port;
+  const url = `http://${urlHost}:${actualPort}`;
+  serviceOrigin = url;
+  const wsUrl = `ws://${urlHost}:${actualPort}/events`;
+  const editorWsUrl = `${wsUrl}?token=${encodeURIComponent(token)}&editorToken=${encodeURIComponent(editorToken)}`;
+  watchFile(absoluteDeckPath, { interval:500 }, watchListener);
+
+  const close = () => {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      watcherClosed = true;
+      watcherGeneration += 1;
+      clearTimeout(editorCloseTimer);
+      editorCloseTimer = undefined;
+      unwatchFile(absoluteDeckPath, watchListener);
+      bridge.close();
+      const agentClosed = agentRuns.close();
+      const attachmentClosed = attachmentStore.close();
+      const writerClosed = [];
+      for (const writer of activeWriters.values()) {
+        writerClosed.push(writer.closed);
+        writer.cancel(httpError('SERVICE_CLOSED', 503, '服务已关闭'));
+      }
+      for (const client of webSockets.clients) client.terminate();
+      const webSocketClosed = new Promise(resolvePromise => webSockets.close(() => resolvePromise()));
+      const httpClosed = new Promise(resolvePromise => server.close(() => resolvePromise()));
+      await new Promise(resolvePromise => setImmediate(resolvePromise));
+      server.closeIdleConnections?.();
+      const writersSettled = Promise.allSettled(writerClosed);
+      const shutdown = await Promise.allSettled([
+        watcherQueue,
+        webSocketClosed,
+        httpClosed,
+        writersSettled,
+        agentClosed,
+        attachmentClosed,
+      ]);
+      server.closeAllConnections?.();
+      const helperResult = await Promise.allSettled([sidecarBoundary.io.close()]);
+      const failures = [...shutdown, ...helperResult]
+        .filter(result => result.status === 'rejected')
+        .map(result => result.reason);
+      if (failures.length) throw new AggregateError(failures, '编辑服务关闭时清理失败');
+    })();
+    return closePromise;
+  };
+
+  return {
+    url,
+    wsUrl,
+    token,
+    editorToken,
+    editorWsUrl,
+    port: actualPort,
+    deckPath: absoluteDeckPath,
+    sessionDir: sessionStore.sessionDir,
+    session: sessionStore.state,
+    agentRuns,
+    close,
+  };
+}
+
+function serverHelp() {
+  return [
+    '用法: node scripts/editor/server.mjs <deck> [选项]',
+    '',
+    '选项:',
+    '  --host HOST   监听地址（默认 127.0.0.1）',
+    '  --port PORT   监听端口（默认 0，自动分配）',
+    '  --no-open     不自动打开浏览器',
+    '  --exit-when-editor-closes  编辑器页面关闭后自动退出（桌面应用使用）',
+    '  --agent-thread-id ID  绑定来源 Codex 任务（Skill 自动传入）',
+    '  --agent-provider ID   新建会话的默认 Agent provider（默认 codex）',
+    '  --help        显示帮助',
+  ].join('\n');
+}
+
+function parseServerArguments(argv) {
+  let deckPath;
+  let host = '127.0.0.1';
+  let port = 0;
+  let openBrowser = true;
+  let exitWhenEditorCloses = false;
+  let agentThreadId = null;
+  let agentProvider = 'codex';
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === '--help' || argument === '-h') return { help: true };
+    if (argument === '--no-open') {
+      openBrowser = false;
+      continue;
+    }
+    if (argument === '--exit-when-editor-closes') {
+      exitWhenEditorCloses = true;
+      continue;
+    }
+    if (argument === '--host' || argument === '--port'
+      || argument === '--agent-thread-id' || argument === '--agent-provider') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) throw new TypeError(`${argument} 缺少值`);
+      if (argument === '--host') host = value;
+      else if (argument === '--agent-thread-id') agentThreadId = value;
+      else if (argument === '--agent-provider') agentProvider = value;
+      else {
+        port = Number(value);
+        if (!Number.isSafeInteger(port) || port < 0 || port > 65535) {
+          throw new TypeError('--port 必须是 0 到 65535 的整数');
+        }
+      }
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('-')) throw new TypeError(`未知参数: ${argument}`);
+    if (deckPath) throw new TypeError(`多余参数: ${argument}`);
+    deckPath = argument;
+  }
+  if (!deckPath) throw new TypeError('缺少 deck 文件');
+  return {
+    help:false, deckPath, host, port, openBrowser, exitWhenEditorCloses,
+    agentThreadId, agentProvider,
+  };
+}
+
+export function buildOpenCommand(platform, editorUrl) {
+  if (platform === 'darwin') return { command: 'open', args: [editorUrl] };
+  if (platform === 'win32') {
+    return {
+      command: 'rundll32.exe',
+      args: ['url.dll,FileProtocolHandler', editorUrl],
+    };
+  }
+  return { command: 'xdg-open', args: [editorUrl] };
+}
+
+function openEditor(editorUrl) {
+  const { command, args } = buildOpenCommand(process.platform, editorUrl);
+  const opener = spawn(command, args, { detached: true, stdio: 'ignore' });
+  opener.once('error', () => {});
+  opener.unref();
+}
+
+export async function runServerCli(argv = process.argv.slice(2)) {
+  let options;
+  try {
+    options = parseServerArguments(argv);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 2;
+  }
+  if (options.help) {
+    process.stdout.write(`${serverHelp()}\n`);
+    return 0;
+  }
+
+  let app;
+  try {
+    app = await startServer({
+      deckPath: options.deckPath,
+      host: options.host,
+      port: options.port,
+      openBrowser: false,
+      exitWhenEditorCloses: options.exitWhenEditorCloses,
+      agentThreadId: options.agentThreadId,
+      agentProvider: options.agentProvider,
+    });
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+  const editorUrl = `${app.url}/editor/?token=${encodeURIComponent(app.token)}`
+    + `&editorToken=${encodeURIComponent(app.editorToken)}`;
+  process.stdout.write(`${JSON.stringify({ url: app.url, token: app.token, editorUrl })}\n`);
+  if (options.openBrowser) openEditor(editorUrl);
+
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true;
+    process.off('SIGINT', shutdown);
+    process.off('SIGTERM', shutdown);
+    await app.close();
+    process.exit(0);
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  return 0;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exitCode = await runServerCli();
+}

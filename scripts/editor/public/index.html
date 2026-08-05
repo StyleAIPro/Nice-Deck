@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Huawei Deck 编辑器</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/editor/editor.css">
+</head>
+<body>
+  <svg class="glass-filter-defs" width="0" height="0" aria-hidden="true">
+    <filter id="glassRipple" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.009 0.012" numOctaves="2" seed="7"
+        stitchTiles="stitch" result="noise"></feTurbulence>
+      <feGaussianBlur in="noise" stdDeviation="1" result="snoise"></feGaussianBlur>
+      <feImage preserveAspectRatio="none" result="map" x="0" y="0" width="100%" height="100%"
+        href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='100'%20height='100'%20preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient%20id='gx'%20x1='0'%20x2='1'%3E%3Cstop%20offset='0'%20stop-color='rgb(205,0,0)'/%3E%3Cstop%20offset='0.30'%20stop-color='rgb(128,0,0)'/%3E%3Cstop%20offset='0.70'%20stop-color='rgb(128,0,0)'/%3E%3Cstop%20offset='1'%20stop-color='rgb(51,0,0)'/%3E%3C/linearGradient%3E%3ClinearGradient%20id='gy'%20x1='0'%20y1='0'%20x2='0'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='rgb(0,205,0)'/%3E%3Cstop%20offset='0.30'%20stop-color='rgb(0,128,0)'/%3E%3Cstop%20offset='0.70'%20stop-color='rgb(0,128,0)'/%3E%3Cstop%20offset='1'%20stop-color='rgb(0,51,0)'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect%20width='100'%20height='100'%20fill='black'/%3E%3Crect%20width='100'%20height='100'%20fill='url(%23gx)'%20style='mix-blend-mode:screen'/%3E%3Crect%20width='100'%20height='100'%20fill='url(%23gy)'%20style='mix-blend-mode:screen'/%3E%3C/svg%3E"></feImage>
+      <feGaussianBlur in="map" stdDeviation="4" result="smap"></feGaussianBlur>
+      <feDisplacementMap in="SourceGraphic" in2="smap" scale="16" xChannelSelector="R"
+        yChannelSelector="G" result="edged"></feDisplacementMap>
+      <feDisplacementMap in="edged" in2="snoise" scale="22" xChannelSelector="R"
+        yChannelSelector="G"></feDisplacementMap>
+    </filter>
+  </svg>
+  <main class="editor-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <img class="brand-logo" src="/editor/huawei-logo.png" alt="Huawei">
+        <span class="topbar-divider" aria-hidden="true"></span>
+        <div>
+          <h1>Deck 可视化编辑器</h1>
+          <p>本地协作工作台</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="history-controls" role="group" aria-label="修改历史" data-busy="false">
+          <button class="history-button" type="button" data-history-undo disabled
+            title="撤销 · Cmd/Ctrl+Z" aria-keyshortcuts="Meta+Z Control+Z">
+            <span aria-hidden="true">↶</span><span>撤销</span>
+          </button>
+          <button class="history-button" type="button" data-history-redo disabled
+            title="重做 · Cmd/Ctrl+Shift+Z" aria-keyshortcuts="Meta+Shift+Z Control+Shift+Z Control+Y">
+            <span aria-hidden="true">↷</span><span>重做</span>
+          </button>
+        </div>
+        <div class="agent-connection-anchor" data-agent-connection-anchor>
+          <button class="agent-status" type="button" data-agent-status="offline"
+            aria-haspopup="dialog" aria-expanded="false"
+            title="Agent 会话未连接，点击设置">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span data-agent-label>Agent 离线</span>
+          </button>
+        </div>
+        <span data-ws-state="connecting" hidden aria-hidden="true">
+          <span data-ws-label>正在连接</span>
+        </span>
+      </div>
+    </header>
+
+    <section class="agent-connection-popover deck-notespanel" data-agent-connection-panel
+      role="dialog" aria-label="Agent 连接" hidden></section>
+
+    <section class="workspace" aria-label="Deck 编辑工作台">
+      <aside class="panel page-panel" aria-label="页面列表">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">DECK</p>
+            <h2>页面</h2>
+          </div>
+          <span class="page-count" data-page-count>0 页</span>
+        </div>
+        <nav class="page-list" data-page-list aria-label="幻灯片页面">
+          <div class="loading-state">正在读取页面…</div>
+        </nav>
+      </aside>
+
+      <section class="canvas-column" aria-label="画布">
+        <div class="canvas-toolbar">
+          <div class="canvas-context">
+            <strong data-current-page>尚未载入</strong>
+            <span data-current-key>等待 Deck 响应</span>
+          </div>
+          <div class="mode-tools" role="toolbar" aria-label="编辑模式" data-active-mode="preview">
+            <button class="mode-button" type="button" data-mode="preview" aria-pressed="true">预览</button>
+            <button class="mode-button" type="button" data-mode="edit" aria-pressed="false">编辑</button>
+            <button class="mode-button" type="button" data-mode="region" aria-pressed="false">区域标记</button>
+          </div>
+          <div class="canvas-tools" aria-label="画布状态">
+            <span class="canvas-resolution">1920 × 1080</span>
+            <span class="zoom-value" data-zoom>—</span>
+            <span class="revision-value">R<span data-revision>0</span></span>
+          </div>
+        </div>
+        <div class="frame-viewport" data-frame-viewport>
+          <div class="frame-scene" data-frame-scene>
+            <iframe id="deck-frame" title="Deck 预览" referrerpolicy="same-origin"></iframe>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel inspector-panel" aria-label="属性面板">
+        <div class="panel-heading inspector-heading">
+          <div>
+            <p class="eyebrow">INSPECTOR</p>
+            <h2>属性</h2>
+          </div>
+          <span class="selection-state" data-selection-state>未选中</span>
+        </div>
+        <div class="inspector-content" data-inspector-content>
+          <div class="inspector-empty">
+            <div class="selection-frame" aria-hidden="true"></div>
+            <h3>选择文字或画面元素开始编辑</h3>
+            <p>双击文字直接修改；拖动元素移动，拖动右下角控制点缩放；Cmd/Ctrl+Enter 提交，Escape 取消。</p>
+          </div>
+        </div>
+      </aside>
+    </section>
+    <aside class="task-drawer" data-task-drawer aria-label="Agent 修改任务"></aside>
+  </main>
+  <script type="module" src="/editor/editor.mjs"></script>
+</body>
+</html>

@@ -5,6 +5,7 @@
 覆盖：
   · 外部依赖 skill：pdf（vendored 于 .agents/skills/pdf/）及其 Python 库 pypdf / pdfplumber
   · 本 skill 运行时：Node ≥ 18、playwright-core（三级查找）、python-pptx、pymupdf、Chrome、soffice(LibreOffice)
+  · 可视化编辑器：ws、html2canvas、busboy
 
 行为（默认）：能自动装的（pip / npx / npm）先打印命令再装；装不了的（Node/Chrome/soffice）给安装提示。
   --check-only  只体检并报告，不改动环境。
@@ -56,6 +57,14 @@ def probe_pymod(mod):
                  capture_output=True, text=True)
         return cp.returncode == 0, f"import {mod}"
     return _p
+
+def probe_node_module(mod):
+    cp = run(["node", "-e", f"require.resolve({mod!r})"],
+             cwd=str(REPO), capture_output=True, text=True)
+    return cp.returncode == 0, f"require.resolve('{mod}')"
+
+def probe_nodemod(mod):
+    return lambda: probe_node_module(mod)
 
 def probe_node():
     cp = run(["node", "--version"], capture_output=True, text=True)
@@ -121,6 +130,12 @@ CHECKS = [
     dict(key="node", label="Node.js", why="verify 三件套 / html2pptx",
          probe=probe_node, install=None,
          hint="安装 Node ≥ 18（nodejs.org 或 brew install node）"),
+    dict(key="ws", label="ws", why="可视化编辑器 WebSocket 协作桥",
+         probe=probe_nodemod("ws"), install=["npm", "i", "ws@8.21.1"], install_cwd=str(REPO)),
+    dict(key="html2canvas", label="html2canvas", why="区域标记局部截图",
+         probe=probe_nodemod("html2canvas"), install=["npm", "i", "html2canvas@1.4.1"], install_cwd=str(REPO)),
+    dict(key="busboy", label="busboy", why="可视化编辑器任务附件上传",
+         probe=probe_nodemod("busboy"), install=["npm", "i", "busboy@1.6.0"], install_cwd=str(REPO)),
     dict(key="playwright-core", label="playwright-core", why="截图 / 溢出检测 / 逐拍",
          probe=probe_playwright, install=["npm", "i", "playwright-core"],
          install_cwd=str(REPO),

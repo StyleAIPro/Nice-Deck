@@ -14,23 +14,15 @@
 
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-
-async function loadChromium() {
-  const candidates = [process.env.PLAYWRIGHT_CORE, 'playwright-core',
-    '/opt/homebrew/lib/node_modules/openclaw/node_modules/playwright-core/index.js'].filter(Boolean);
-  for (const c of candidates) {
-    try { const m = await import(c); return (m.default ?? m).chromium; } catch { /* 尝试下一个 */ }
-  }
-  console.error(`无法加载 playwright-core（已尝试: ${candidates.join(' → ')}）`);
-  console.error('请在本目录 npm i playwright-core，或设环境变量 PLAYWRIGHT_CORE 指向其 index.js');
-  process.exit(2);
-}
+import { loadChromium } from './load-playwright.mjs';
 
 const [deckFile, label, outFile] = process.argv.slice(2);
 if (!deckFile || !label || !outFile) { console.error('用法: node shot.mjs <deck.html> <label> <out.jpg>'); process.exit(2); }
 if (!existsSync(deckFile)) { console.error(`找不到 deck 文件: ${deckFile}`); process.exit(2); }
 
-const chromium = await loadChromium();
+let chromium;
+try { chromium = await loadChromium(); }
+catch (error) { console.error(error.message); process.exit(2); }
 let browser, exitCode = 0;
 try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -40,7 +32,10 @@ try {
   await page.waitForTimeout(5000); // React mount + 字体/图片 settle
   await page.addStyleTag({ content: `
     .glassbar.railtoggle,.glassbar.navbar,.glassbar.modebar,.railpanel,.railfoot,.hint,.noteschip,#__deck_loading_overlay{display:none!important;}
-    .stage .slide-canvas{content-visibility:visible!important;}
+    /* Deck 会按 stage 可用宽度给 1920×1080 画布加缩放 transform；
+       element.screenshot 会把该视觉缩放写进像素尺寸，因此验证截图必须临时恢复 1:1。 */
+    .stage .slide-fit{width:1920px!important;height:1080px!important;}
+    .stage .slide-canvas{content-visibility:visible!important;transform:none!important;width:1920px!important;height:1080px!important;}
     img[alt="HUAWEI"], img[data-brand-logo] { right: 30px !important; }` }); // 不强制 content-visibility 会截到白页；
   // logo 水印是 position:fixed right:22px，比 canvas 元素框更靠右，element.screenshot 会裁掉右缘 → 左移 8px 收进框内
   // build 元素全显
