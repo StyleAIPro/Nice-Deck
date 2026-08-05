@@ -23,10 +23,12 @@ import json, base64, gzip, zlib, uuid, re
 
 # ---------------- 读写 ----------------
 def load(path):
-    return open(path, encoding='utf-8').read().split('\n')
+    with open(path, encoding='utf-8') as stream:
+        return stream.read().split('\n')
 
 def save(path, lines):
-    open(path, 'w', encoding='utf-8').write('\n'.join(lines))
+    with open(path, 'w', encoding='utf-8') as stream:
+        stream.write('\n'.join(lines))
 
 def _tpl_idx(lines):
     for i, ln in enumerate(lines):

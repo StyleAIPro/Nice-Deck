@@ -30,7 +30,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 旧 Deck 升级
 
-本次会话加载 skill 后，首次接触一个已有 deck 目录时，对目录内目标 deck 各无感运行一次 `python3 scripts/upgrade_deck.py old-deck.html --yes`；不要等用户提醒，也不要先询问。同一会话、同一目录、同一批文件后续编辑不得重复检查。仅在 skill 更新后首次加载、切换目录、出现新 deck、文件被外部替换，或用户明确要求时重新检查。脚本把页面 / 导航 / 章节 / 用户扩展与公共外壳分离，通过 hash 对照同类型最新模板；外壳不一致就自动重组，不逐项维护功能迁移。有变更时生成 `.before-upgrade.html` 备份，保留用户内容并合并 manifest。完成后告诉用户是否升级、目标版本和备份路径。核心结构无法可靠识别时仍安全停止。加 `--audit` 输出逐页视觉复核清单；完整用法见 `references/editing-guide.md` 第 7 节。
+本次会话加载 skill 后，首次接触一个已有 deck 目录时，对目录内目标 deck 各无感运行一次 `python3 scripts/upgrade_deck.py old-deck.html --yes`；不要等用户提醒，也不要先询问。同一会话、同一目录、同一批文件后续编辑不得重复检查。仅在 skill 更新后首次加载、切换目录、出现新 deck、文件被外部替换，或用户明确要求时重新检查。脚本把页面 / 导航 / 章节 / 用户扩展与公共外壳分离，通过 hash 对照同类型最新模板；带 hash 的 Deck 用当前 seam 重组，历史 Deck 则从 Git 历史寻找最接近的同类模板并做三方合并，避免覆盖页面 profile、品牌元素和课程专属外壳逻辑。升级器不逐项维护功能迁移。有变更时生成 `.before-upgrade.html` 备份，保留用户内容并合并 manifest。完成后告诉用户是否升级、目标版本和备份路径。核心结构无法可靠识别或三方合并冲突时安全停止。加 `--audit` 输出逐页视觉复核清单；完整用法见 `references/editing-guide.md` 第 7 节。
 
 ## 设计铁律（细则见对应 reference）
 
@@ -68,7 +68,8 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 | `assets/huawei-refs/` | 官方 PPT 提取素材库：封面 KV / logo / 图标 / 装饰组件 + 官方空白模板 pptx（内附 README 索引） |
 | `scripts/edit-bundle.py` | 安全编辑工具函数库（load / get·set_template / insert·delete·move_page / embed_image / verify） |
 | `scripts/apply_bg.py` | 品牌图一键替换（默认预览模式，`--yes` 落盘） |
-| `scripts/upgrade_deck.py` | 公共外壳 hash 对比、最新模板重组、manifest 合并、自动备份与视觉审计 |
+| `scripts/upgrade_deck.py` | 公共外壳 hash 对比、历史模板三方合并、最新模板重组、manifest 合并、自动备份与视觉审计 |
+| `scripts/test_upgrade_deck.py` | 升级器的 profile、品牌元素、历史模板与最新版运行时回归测试 |
 | `scripts/verify/*.mjs` | verify 三件套（measure_overflow / shot / steps） |
 | `scripts/html2pptx/convert.sh` | HTML → PPTX 一键转换 |
 | `scripts/react*.umd.js` | 离线 React 备件（模板已内联，仅修复用） |

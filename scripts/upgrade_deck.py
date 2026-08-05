@@ -13,7 +13,9 @@ import importlib.util
 import json
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -134,6 +136,29 @@ def _replace_slot(s, start_marker, end_marker, content):
     return s[:inner_start] + content + s[end:]
 
 
+def _profile_style(s):
+    start = s.find('<style id="tpl-bg-950">')
+    if start < 0:
+        return ""
+    end = s.find('</style>', start)
+    if end < 0:
+        raise MigrationError("页面背景 profile 样式未闭合。")
+    return s[start:end + len('</style>')]
+
+
+def _profile_element(s, pattern):
+    match = re.search(pattern, s, re.S)
+    return match.group(0) if match else ""
+
+
+def _replace_profile(result, latest_block, user_block, label):
+    if not user_block:
+        return result
+    if not latest_block or result.count(latest_block) != 1:
+        raise MigrationError(f"最新模板无法唯一定位 {label}。")
+    return result.replace(latest_block, user_block, 1)
+
+
 def extract_user_content(s):
     if not is_recomposable(s):
         raise MigrationError("无法唯一识别页面、导航或章节，不能安全重组公共外壳。")
@@ -148,6 +173,13 @@ def extract_user_content(s):
         "title": title.group(0) if title else "",
         "user_style": _slot_content(s, USER_STYLE_START, USER_STYLE_END),
         "user_script": _slot_content(s, USER_SCRIPT_START, USER_SCRIPT_END),
+        "profile_style": _profile_style(s),
+        "brand_button": _profile_element(
+            s, r'<button\b[^>]*\bid="brandbtn"[^>]*>.*?</button>'
+        ),
+        "brand_logo": _profile_element(
+            s, r'<img\b(?=[^>]*(?:data-brand-logo|alt="HUAWEI"))[^>]*>'
+        ),
     }
 
 
@@ -165,6 +197,21 @@ def compose_latest(latest, content):
         result = re.sub(r'<title>.*?</title>', content["title"], result, count=1, flags=re.S)
     result = _replace_slot(result, USER_STYLE_START, USER_STYLE_END, content["user_style"])
     result = _replace_slot(result, USER_SCRIPT_START, USER_SCRIPT_END, content["user_script"])
+    result = _replace_profile(
+        result, _profile_style(latest), content["profile_style"], "页面背景 profile"
+    )
+    result = _replace_profile(
+        result,
+        _profile_element(latest, r'<button\b[^>]*\bid="brandbtn"[^>]*>.*?</button>'),
+        content["brand_button"],
+        "品牌标题",
+    )
+    result = _replace_profile(
+        result,
+        _profile_element(latest, r'<img\b(?=[^>]*(?:data-brand-logo|alt="HUAWEI"))[^>]*>'),
+        content["brand_logo"],
+        "品牌 Logo",
+    )
     return result
 
 
@@ -188,6 +235,17 @@ def _normalize_runtime(s):
     result = VERSION_RE.sub('<meta name="huawei-deck-version" content="__VERSION__">', result)
     result = HASH_RE.sub('<meta name="huawei-deck-runtime-hash" content="__HASH__">', result)
     result = KIND_RE.sub('<meta name="huawei-deck-template-kind" content="__KIND__">', result)
+    profile = _profile_style(result)
+    if profile:
+        result = result.replace(profile, "__PAGE_PROFILE_STYLE__", 1)
+    brand = _profile_element(result, r'<button\b[^>]*\bid="brandbtn"[^>]*>.*?</button>')
+    if brand:
+        result = result.replace(brand, "__BRAND_BUTTON__", 1)
+    logo = _profile_element(
+        result, r'<img\b(?=[^>]*(?:data-brand-logo|alt="HUAWEI"))[^>]*>'
+    )
+    if logo:
+        result = result.replace(logo, "__BRAND_LOGO__", 1)
     return result
 
 
@@ -256,6 +314,122 @@ def select_latest_template(s):
     return kind, eb.load(path)
 
 
+def _merge_normalize(s):
+    """三方合并用：只把用户页面数据换成稳定占位，保留壳内用户定制。"""
+    start, end = _slide_bounds(s)
+    result = s[:start] + "__HUAWEI_DECK_SLIDES__" + s[end:]
+    for name in ("nav", "chapters"):
+        start, end = _array_bounds(result, name)
+        result = result[:start] + f"__HUAWEI_DECK_{name.upper()}__" + result[end:]
+    result = re.sub(
+        r'<title>.*?</title>', "__HUAWEI_DECK_TITLE__", result, count=1, flags=re.S
+    )
+    result = VERSION_RE.sub("", result)
+    result = HASH_RE.sub("", result)
+    result = KIND_RE.sub("", result)
+    for start_marker, end_marker in (
+        (USER_STYLE_START, USER_STYLE_END),
+        (USER_SCRIPT_START, USER_SCRIPT_END),
+    ):
+        if start_marker in result:
+            start = result.find(start_marker)
+            end = result.find(end_marker, start)
+            if end < 0:
+                raise MigrationError(f"用户扩展槽未闭合：{start_marker}")
+            result = result[:start] + result[end + len(end_marker):]
+    return result
+
+
+def _git(*args):
+    try:
+        return subprocess.check_output(
+            ["git", "-c", f"safe.directory={REPO}", *args],
+            cwd=REPO,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise MigrationError("历史 Deck 安全升级需要 Skill 仓库的 Git 历史。") from exc
+
+
+def find_legacy_baseline(s, template_kind):
+    path = LATEST_TEMPLATES[template_kind].relative_to(REPO).as_posix()
+    commits = _git("log", "--format=%H", "--", path).splitlines()
+    if not commits:
+        raise MigrationError(f"未找到 {template_kind} 模板历史基线。")
+    target = _similarity_surface(s)
+    candidates = []
+    for commit in commits:
+        try:
+            raw = _git("show", f"{commit}:{path}")
+            candidate = eb.get_template(raw.split('\n'))
+            score = difflib.SequenceMatcher(
+                None, target, _similarity_surface(candidate), autojunk=False
+            ).ratio()
+            candidates.append((score, commit, candidate))
+        except (MigrationError, RuntimeError, ValueError):
+            continue
+    if not candidates:
+        raise MigrationError(f"无法解析 {template_kind} 的历史模板。")
+    return max(candidates, key=lambda item: item[0])
+
+
+def merge_legacy_shell(original, latest, template_kind, content):
+    score, commit, baseline = find_legacy_baseline(original, template_kind)
+    with tempfile.TemporaryDirectory() as directory:
+        paths = []
+        for name, value in (
+            ("user", original), ("base", baseline), ("latest", latest)
+        ):
+            path = Path(directory) / name
+            path.write_text(_merge_normalize(value), encoding="utf-8")
+            paths.append(path)
+        result = subprocess.run(
+            ["git", "merge-file", "-p", *(str(path) for path in paths)],
+            text=True,
+            capture_output=True,
+        )
+    if result.returncode != 0 or "<<<<<<<" in result.stdout:
+        raise MigrationError(
+            f"历史模板三方合并冲突（基线 {commit[:8]}，相似度 {score:.3f}），已停止写入。"
+        )
+    merged = result.stdout
+    replacements = {
+        "__HUAWEI_DECK_SLIDES__": content["slides"],
+        "__HUAWEI_DECK_NAV__": content["nav"],
+        "__HUAWEI_DECK_CHAPTERS__": content["chapters"],
+        "__HUAWEI_DECK_TITLE__": content["title"],
+    }
+    for marker, value in replacements.items():
+        if marker == "__HUAWEI_DECK_TITLE__" and not value and marker not in merged:
+            continue
+        if merged.count(marker) != 1:
+            raise MigrationError(f"三方合并结果缺少唯一占位：{marker}")
+        merged = merged.replace(marker, value, 1)
+    # 历史模板没有扩展槽；升级后接入当前 seam，后续不再依赖 Git 基线。
+    latest_style_slot = (
+        USER_STYLE_START
+        + _slot_content(latest, USER_STYLE_START, USER_STYLE_END)
+        + USER_STYLE_END
+    )
+    latest_script_slot = (
+        USER_SCRIPT_START
+        + _slot_content(latest, USER_SCRIPT_START, USER_SCRIPT_END)
+        + USER_SCRIPT_END
+    )
+    if USER_STYLE_START not in merged:
+        merged = merged.replace('</head>', latest_style_slot + '\n</head>', 1)
+    if USER_SCRIPT_START not in merged:
+        merged = merged.replace('</body>', latest_script_slot + '\n</body>', 1)
+    merged = _replace_slot(
+        merged, USER_STYLE_START, USER_STYLE_END, content["user_style"]
+    )
+    merged = _replace_slot(
+        merged, USER_SCRIPT_START, USER_SCRIPT_END, content["user_script"]
+    )
+    return merged, commit, score
+
+
 def runtime_surface(s):
     """用于判断最新公共外壳实际引用了哪些 manifest 资源。"""
     return _normalize_runtime(s)
@@ -284,7 +458,17 @@ def build_upgrade(old_lines, latest_lines, template_kind):
     merged_manifest, content = merge_manifests(
         eb.get_manifest(old_lines), eb.get_manifest(latest_lines), latest, content
     )
-    upgraded = compose_latest(latest, content)
+    is_legacy = (
+        not HASH_RE.search(original)
+        or USER_STYLE_START not in original
+        or USER_SCRIPT_START not in original
+    )
+    if is_legacy:
+        upgraded, _, _ = merge_legacy_shell(
+            original, latest, template_kind, content
+        )
+    else:
+        upgraded = compose_latest(latest, content)
     upgraded = set_version(upgraded, CURRENT_VERSION)
     upgraded = set_template_kind(upgraded, template_kind)
     target_hash = runtime_hash(latest)
@@ -374,12 +558,16 @@ def main():
         latest = eb.get_template(latest_lines)
         version = get_version(original)
         target_hash = runtime_hash(latest)
-        current_hash = runtime_hash(original) if is_recomposable(original) else "无法识别"
-        needs_runtime = current_hash != target_hash
-        needs_version = version != CURRENT_VERSION
         stored_hash = HASH_RE.search(original)
         stored_hash = stored_hash.group(1) if stored_hash else ""
-        needs_metadata = stored_hash != current_hash or get_template_kind(original) != template_kind
+        current_hash = (
+            stored_hash
+            if stored_hash
+            else (runtime_hash(original) if is_recomposable(original) else "无法识别")
+        )
+        needs_runtime = current_hash != target_hash
+        needs_version = version != CURRENT_VERSION
+        needs_metadata = not stored_hash or get_template_kind(original) != template_kind
 
         print(f"Deck：{path}")
         print(f"模板类型：{template_kind}")
