@@ -155,6 +155,8 @@ node scripts/verify/steps.mjs my-deck.html 版式·流程条 /tmp/steps     # 3)
 
 ```html
 <meta name="huawei-deck-version" content="2026.08.2">
+<meta name="huawei-deck-template-kind" content="teaching">
+<meta name="huawei-deck-runtime-hash" content="…">
 ```
 
 用升级器识别旧版本并迁移公共运行时：
@@ -167,18 +169,22 @@ python3 scripts/upgrade_deck.py old-deck.html --audit            # 逐页打印�
 python3 scripts/upgrade_deck.py old-deck.html --audit --report audit.md
 ```
 
+Codex 每次加载本 skill 后，首次接触一个已有 deck 目录时，对目标 deck 批量运行一次 `--yes`：最新版不会写盘；旧版自动备份并升级，完成后向用户报告。同一会话、同一目录、同一批文件后续编辑不重复检查。skill 更新后首次加载、切换目录、出现新 deck、文件被外部替换，或用户明确要求时才重新检查。默认预览命令保留给人工排查与脚本调试，不作为日常协作闸门。
+
 升级边界：
 
-- 自动迁移只处理能精确识别的公共运行时片段；当前独立探测并迁移：① 左上角 `图标 + x/yy` glass 页码；② 放大后的空格抓手、glass 小手锁定、缩小时隐藏与按钮焦点修复；③ 放映模式滚轮逐拍 / 翻页与手势防抖。
-- 页面 `<section>`、`nav[]`、`chapters[]` 和资源 manifest 原样保留。
+- 升级器不逐项理解功能。它移除页面、导航、章节、标题和用户扩展槽后计算公共外壳 hash，并与同类型最新模板对照；不一致就直接用最新外壳重组。
+- 用户拥有区包括页面 `<section>`、`nav[]`、`chapters[]`、标题，以及 `HUAWEI_DECK_USER_STYLE` / `HUAWEI_DECK_USER_SCRIPT` 两个扩展槽；这些内容原样保留。
+- manifest 以旧 Deck 资源为基础，补入最新公共外壳实际引用的资源；UUID 冲突且内容不同时自动重命名旧资源并同步用户内容引用。
+- 模板类型由 `huawei-deck-template-kind` 标记；历史 Deck 无标记时按旧外壳相似度在 teaching / tech-share / work-report 中选择。
 - `--yes` 落盘前生成 `文件名.before-upgrade.html`；同名备份已存在时自动追加序号，不覆盖旧备份。
-- 用户自定义过导航运行时、导致旧片段不能唯一匹配时，脚本以退出码 2 停止并提示人工合并，不做模糊替换。
+- 重组只接受同时具备 app / stage / slide-fit / section / nav / chapters / railtoggle，且页面区与两个数组边界均可唯一解析的结构。核心结构无法可靠识别时以退出码 2 停止。
 - 卡片、标题色块、说明标签、红色描边和 SVG 工程图属于内容层；升级器只列出候选问题，必须结合业务含义逐页判断。
 - 升级完成后自动运行 `eb.verify()`；仍要按第 6 节执行 overflow、截图和动画逐拍验证。
 
 脚本退出码：`0` = 已是最新或升级成功；`1` = `--check` 检测到待升级项；`2` = 参数、bundle 结构或安全迁移条件不满足。
 
-新增公共运行时功能时，优先在 `scripts/runtime_migrations.py` 增加 `has_*` / `migrate_*`，再接入 `upgrade_deck.py` 的 `MIGRATIONS`，提升 `CURRENT_VERSION` 并同步三套模板版本标记。迁移必须幂等：目标能力已存在时不得重复修改；部分匹配或自定义运行时不得模糊替换。
+新增或修改公共运行时功能时，同步更新三套模板并提升版本标记即可；模板外壳变化会自然产生新 hash，`upgrade_deck.py` 无需增加功能探测。只有页面 / nav / chapters / 用户扩展槽 / manifest 等 seam 或 bundle 编码格式变化时才修改升级器。
 
 ### 7.1 用户明确要求“整页直接出现”
 

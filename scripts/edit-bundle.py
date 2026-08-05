@@ -51,6 +51,14 @@ def dump_template(s):
 def set_template(lines, s):
     lines[_tpl_idx(lines)] = dump_template(s)
 
+def get_manifest(lines):
+    return json.loads(lines[_man_idx(lines)].strip())
+
+def set_manifest(lines, manifest):
+    raw = json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))
+    assert '\n' not in raw and json.loads(raw) == manifest, 'manifest encode invariant failed'
+    lines[_man_idx(lines)] = raw
+
 # ---------------- 图片 / 资源 ----------------
 def embed_image(lines, file_path, mime='image/jpeg', prefix='img'):
     """把图片追加进 manifest，返回可用作 <img src="..."> 的 uuid。jpg/png 用 compressed:false。"""
