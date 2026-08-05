@@ -8,7 +8,7 @@ import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
 import { PassThrough, Writable } from 'node:stream';
 import {
-  mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, unlink, writeFile,
+  mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -55,6 +55,13 @@ async function makeApp(t, options = {}) {
     onActiveWritersChange: options.onActiveWritersChange,
     beforeSessionPersist: options.beforeSessionPersist,
     syncDirectory: options.syncDirectory,
+    agentThreadId: options.agentThreadId,
+    agentProvider: options.agentProvider,
+    agentAdapter: options.agentAdapter,
+    agentSessionCatalog: options.agentSessionCatalog,
+    pickAgentProjectDirectory: options.pickAgentProjectDirectory,
+    spawnAgent: options.spawnAgent,
+    agentRunTimeoutMs: options.agentRunTimeoutMs,
   });
   t.after(() => app.close());
   return app;
@@ -538,6 +545,123 @@ test('拒绝无令牌请求并向 WebSocket 推送新任务', async t => {
 
   assert.equal(response.status, 201);
   assert.equal((await event).type, 'task-created');
+});
+
+test('Agent 连接跟随 Deck 持久化，并可在网页接口手动改绑', async t => {
+  const sourceThreadId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
+  const manualThreadId = '019fc842-816b-7413-bb23-10b0f87e1d4d';
+  const first = await makeApp(t, { agentThreadId:sourceThreadId });
+  let configuration = await fetch(
+    `${first.url}/api/agent-connection?token=secret`,
+  ).then(response => response.json());
+  assert.equal(configuration.connection.threadId, sourceThreadId);
+  assert.equal(configuration.connection.source, 'launch');
+
+  const changedResponse = await fetch(`${first.url}/api/agent-connection?token=secret`, {
+    method:'PUT', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({
+      expectedRevision:0, provider:'codex', threadId:manualThreadId,
+    }),
+  });
+  configuration = await changedResponse.json();
+  assert.equal(changedResponse.status, 200, JSON.stringify(configuration));
+  assert.equal(configuration.connection.threadId, manualThreadId);
+  assert.equal(configuration.connection.source, 'manual');
+  assert.equal(configuration.revision, 1);
+
+  await first.close();
+  const reopened = await startServer({
+    deckPath:first.deckPath, host:'127.0.0.1', port:0,
+    openBrowser:false, token:'reopened-secret', editorToken:'reopened-editor-secret',
+  });
+  t.after(() => reopened.close());
+  configuration = await fetch(
+    `${reopened.url}/api/agent-connection?token=reopened-secret`,
+  ).then(response => response.json());
+  assert.equal(configuration.connection.threadId, manualThreadId);
+  assert.equal(configuration.connection.source, 'manual');
+  assert.equal(configuration.connection.mode, 'resume');
+});
+
+test('会话目录可列出其他 Agent，并在连接前写入只读 Skill 检测结果', async t => {
+  const sessionId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
+  const agentSessionCatalog = {
+    async list() {
+      return {
+        version:1,
+        providers:[{ id:'claude-code', name:'Claude Code', available:true }],
+        sessions:[{
+          provider:'claude-code', id:sessionId, title:'Deck 后续修改',
+          updatedAt:'2026-08-04T00:00:00.000Z', skillStatus:'unknown',
+        }],
+      };
+    },
+    async inspectSkill(provider, selectedId) {
+      assert.deepEqual([provider, selectedId], ['claude-code', sessionId]);
+      return { provider, sessionId:selectedId, skillStatus:'detected' };
+    },
+  };
+  const app = await makeApp(t, { agentSessionCatalog });
+
+  const catalog = await fetch(`${app.url}/api/agent-sessions?token=secret`).then(response => response.json());
+  assert.equal(catalog.sessions[0].title, 'Deck 后续修改');
+  const response = await fetch(`${app.url}/api/agent-connection?token=secret`, {
+    method:'PUT', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0, provider:'claude-code', threadId:sessionId }),
+  });
+  const configuration = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(configuration));
+  assert.equal(configuration.connection.provider, 'claude-code');
+  assert.equal(configuration.connection.skillStatus, 'detected');
+});
+
+test('右上角连接接口可添加项目并在该目录立即创建 Agent 会话', async t => {
+  const projectPath = await mkdtemp(join(tmpdir(), 'deck-agent-project-'));
+  const canonicalProjectPath = await realpath(projectPath);
+  t.after(() => rm(projectPath, { recursive:true, force:true }));
+  let created;
+  const sessionId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
+  const connection = {
+    version:1, provider:'codex', threadId:sessionId, projectPath:canonicalProjectPath,
+    source:'created', skillStatus:'loaded', updatedAt:'2026-08-04T00:00:00.000Z',
+  };
+  const app = await makeApp(t, {
+    pickAgentProjectDirectory:async () => projectPath,
+    agentSessionCatalog:{
+      async list() {
+        return {
+          version:1,
+          providers:[{ id:'codex', name:'Codex', available:true }],
+          sessions:[],
+        };
+      },
+      async inspectSkill() { return { skillStatus:'unknown' }; },
+    },
+    agentAdapter:{
+      id:'agent-router',
+      get connection() { return null; },
+      async run() { return { summary:'unused' }; },
+      async createSession(input, context) {
+        created = { input, context };
+        return { connection };
+      },
+    },
+  });
+
+  const picked = await fetch(`${app.url}/api/agent-projects/pick?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:'{}',
+  }).then(response => response.json());
+  assert.equal(picked.project.path, canonicalProjectPath);
+  const response = await fetch(`${app.url}/api/agent-sessions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0, provider:'codex', projectPath:canonicalProjectPath }),
+  });
+  const result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  assert.deepEqual(created.input, { provider:'codex', projectPath:canonicalProjectPath });
+  assert.equal(created.context.deckPath, app.deckPath);
+  assert.equal(result.connection.projectPath, canonicalProjectPath);
+  assert.equal(result.connection.skillStatus, 'loaded');
 });
 
 test('真实 multipart 创建附件任务，并仅在 API 与广播中派生绝对路径', async t => {
@@ -3551,4 +3675,33 @@ test('close 关闭 WebSocket、HTTP 端口并拒绝未完成命令', async () =>
   } finally {
     await restarted.close();
   }
+});
+
+test('桌面模式在编辑器页面关闭后自动回收本地服务', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-server-app-close-'));
+  const deck = join(root, 'deck.html');
+  await writeFile(deck, 'deck');
+  const app = await startServer({
+    deckPath:deck,
+    host:'127.0.0.1',
+    port:0,
+    token:'secret',
+    editorToken:'editor-secret',
+    exitWhenEditorCloses:true,
+    editorCloseGraceMs:10,
+  });
+  const editor = await connect(app.editorWsUrl);
+  await new Promise(resolve => {
+    editor.once('close', resolve);
+    editor.close();
+  });
+  const deadline = Date.now() + 1_000;
+  let stopped = false;
+  while (!stopped && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    stopped = await fetch(`${app.url}/api/session?token=secret`)
+      .then(() => false, () => true);
+  }
+  assert.equal(stopped, true);
+  await app.close();
 });

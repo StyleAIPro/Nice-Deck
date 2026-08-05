@@ -40,6 +40,9 @@ export async function startFixtureServer(options = {}) {
       writerKillGraceMs: options.writerKillGraceMs,
       spawnWriter: options.spawnWriter,
       onActiveWritersChange: options.onActiveWritersChange,
+      agentAdapter: options.agentAdapter,
+      agentSessionCatalog: options.agentSessionCatalog,
+      pickAgentProjectDirectory: options.pickAgentProjectDirectory,
     });
     const closeServer = app.close;
     let closePromise;

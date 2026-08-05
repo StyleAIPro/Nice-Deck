@@ -4,8 +4,101 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { startFixtureServer, openEditor, dragInFrame } from './test-helpers.mjs';
 
+test('Agent 连接设置可发现并选择会话，并在页面重开后恢复', async t => {
+  const threadId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
+  const app = await startFixtureServer({
+    agentSessionCatalog:{
+      async list() {
+        return {
+          version:1,
+          providers:[
+            { id:'codex', name:'Codex', available:true },
+            { id:'claude-code', name:'Claude Code', available:true },
+          ],
+          sessions:[
+            {
+              provider:'codex', id:threadId, title:'Huawei Deck 第一版',
+              cwd:'/tmp/huawei-deck-project',
+              updatedAt:'2026-08-04T00:00:00.000Z', skillStatus:'detected',
+            },
+            {
+              provider:'claude-code', id:'019fc842-816b-7413-bb23-10b0f87e1d4e',
+              title:'Claude 修改会话', cwd:'/tmp/claude-project',
+              updatedAt:'2026-08-03T00:00:00.000Z', skillStatus:'not-detected',
+            },
+          ],
+        };
+      },
+      async inspectSkill() {
+        return { provider:'codex', sessionId:threadId, skillStatus:'detected' };
+      },
+    },
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'offline'
+  ));
+  assert.match(await page.locator('[data-agent-status]').innerText(), /离线/);
+  assert.equal(
+    await page.locator('[data-agent-status] .status-dot').evaluate(node => getComputedStyle(node).backgroundColor),
+    'rgb(199, 0, 11)',
+  );
+  await page.click('[data-agent-status]');
+  await page.waitForSelector('[data-agent-connection-panel]:not([hidden])');
+  assert.equal(await page.locator('[data-agent-connection]').count(), 0, '任务抽屉不再承载连接设置');
+  await page.click('[data-agent-connection-panel] [data-provider="claude-code"]');
+  assert.match(await page.locator('[data-agent-connection-panel]').innerText(), /claude-project/);
+  assert.match(await page.locator('[data-agent-connection-panel]').innerText(), /Claude 修改会话/);
+  await page.click('[data-agent-connection-panel] [data-provider="codex"]');
+  await page.waitForSelector(`[data-agent-session="${threadId}"]`);
+  const projectSummary = page.locator('[data-project-path="/tmp/huawei-deck-project"] > summary');
+  const sessionRow = page.locator(`[data-agent-session="${threadId}"]`);
+  assert.notEqual(
+    await projectSummary.evaluate(node => getComputedStyle(node).backgroundColor),
+    await sessionRow.evaluate(node => getComputedStyle(node).backgroundColor),
+  );
+  assert.ok((await sessionRow.boundingBox()).x > (await projectSummary.boundingBox()).x);
+  assert.match(await page.locator(`[data-agent-session="${threadId}"]`).innerText(), /检测到 Skill/);
+  await page.click(`[data-agent-session="${threadId}"]`);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
+  ));
+  await page.waitForFunction(() => (
+    getComputedStyle(document.querySelector('[data-agent-status] .status-dot')).backgroundColor
+      === 'rgb(22, 163, 74)'
+  ));
+  assert.match(await page.locator('[data-agent-status]').innerText(), /Codex 在线/);
+  assert.equal(
+    await page.locator('[data-agent-status] .status-dot').evaluate(node => getComputedStyle(node).backgroundColor),
+    'rgb(22, 163, 74)',
+  );
+
+  await page.reload();
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
+  ));
+  const configuration = await fetch(
+    `${app.url}/api/agent-connection?token=${app.token}`,
+  ).then(response => response.json());
+  assert.equal(configuration.connection.threadId, threadId);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('拉框弹输入框并跨页持久化两条任务', async t => {
-  const app = await startFixtureServer();
+  let submittedTaskIds = [];
+  const app = await startFixtureServer({
+    agentAdapter:{
+      id:'codex',
+      async run({ taskIds }) {
+        submittedTaskIds = taskIds;
+        return { summary:'Agent 已完成测试批次' };
+      },
+    },
+  });
   t.after(() => app.close());
   const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
   t.after(() => browser.close());
@@ -77,9 +170,42 @@ test('拉框弹输入框并跨页持久化两条任务', async t => {
   await frame.locator('[data-task-highlight]').waitFor({ state: 'detached', timeout: 1_200 });
   assert.equal(await page.locator('[data-process-all]').innerText(), '交给 Agent 处理全部 2 条');
   await page.locator('[data-process-all]').click();
-  assert.match(await page.locator('[data-process-note]').innerText(), /外部 Agent CLI 读取命令.*tasks/);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-process-note]')?.textContent.includes('Agent 已完成测试批次')
+  ));
+  assert.equal(submittedTaskIds.length, 2);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
+});
+
+test('待处理任务可二次编辑说明并确认删除', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(3_000);
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.click('[data-mode="region"]');
+  await dragInFrame(page, { x:100, y:100 }, { x:320, y:240 });
+  await frame.locator('[data-region-popover] textarea').fill('原始修改说明');
+  await frame.locator('[data-region-submit]').click();
+  const row = page.locator('[data-task-row]');
+  await row.waitFor();
+
+  await row.locator('[data-task-edit]').click();
+  await row.locator('[data-task-edit-input]').fill('更新后的修改说明');
+  await row.locator('[data-task-edit-save]').click();
+  await page.waitForFunction(() => document.querySelector('[data-task-row]')?.textContent.includes('更新后的修改说明'));
+  let tasks = await fetch(`${app.url}/api/tasks?token=${app.token}`).then(response => response.json());
+  assert.equal(tasks[0].instruction, '更新后的修改说明');
+
+  await row.locator('[data-task-delete]').click();
+  await row.locator('[data-task-delete-confirm]').click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-task-row]').length === 0);
+  tasks = await fetch(`${app.url}/api/tasks?token=${app.token}`).then(response => response.json());
+  assert.deepEqual(tasks, []);
+  assert.equal(await page.locator('[data-page-badge]').count(), 0);
 });
 
 test('区域截图失败时以 snapshot=null 非阻断提交任务', async t => {

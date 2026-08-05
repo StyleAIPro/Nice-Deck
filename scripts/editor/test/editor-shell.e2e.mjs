@@ -11,6 +11,7 @@ const RUNTIME_CONTRACT = {
   schema:1,
   version:'1.0.0',
   api:'pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,pendingTransactionCount,activeActionCount,suspendedTargetCount',
+  features:'textPath,textRangeStyle',
 };
 
 function count(text, fragment) {
@@ -63,11 +64,37 @@ test('iframe 挂载后发现两个同名页并显示独立页序', async t => {
   assert.equal(new Set(pageKeys).size, 2);
   assert.equal(await page.locator('#deck-frame').getAttribute('src'), `/preview?token=${app.token}`);
   await page.waitForFunction(() => document.querySelector('[data-ws-state]')?.dataset.wsState === 'online');
-  assert.match(await page.locator('[data-ws-state]').innerText(), /在线/);
+  assert.equal(await page.locator('[data-agent-status]').getAttribute('data-agent-status'), 'offline');
+  assert.match(await page.locator('[data-agent-status]').innerText(), /Agent 离线/);
   assert.equal(await rejectedWebSocketStatus(app.editorWsUrl), 409);
-  assert.equal(await page.locator('[data-agent-placeholder]').count(), 1);
+  assert.equal(await page.locator('[data-agent-placeholder]').count(), 0);
   assert.ok(await page.locator('.brand-logo').evaluate(image => image.naturalWidth > 0));
-  assert.equal(await page.locator('.mode-badge').innerText(), '预览模式');
+  assert.equal(await page.locator('.mode-badge').count(), 0);
+  assert.deepEqual(await page.locator('[data-mode]').evaluateAll(buttons => (
+    buttons.map(button => button.dataset.mode)
+  )), ['preview', 'edit', 'region']);
+  assert.equal(await page.locator('.mode-slider, .mode-hover-drop').count(), 0);
+  assert.equal(await page.locator('.mode-tools').getAttribute('data-active-mode'), 'preview');
+  assert.equal(await page.locator('.mode-tools').evaluate(element => getComputedStyle(element).boxShadow), 'none');
+  assert.notEqual(await page.locator('[data-mode="edit"]').evaluate(element => (
+    getComputedStyle(element, '::before').content
+  )), 'none');
+  assert.ok(await page.locator('.canvas-toolbar').evaluate(toolbar => {
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const modeRect = toolbar.querySelector('.mode-tools').getBoundingClientRect();
+    return Math.abs((toolbarRect.left + toolbarRect.width / 2)
+      - (modeRect.left + modeRect.width / 2)) < 1;
+  }));
+  await page.locator('[data-mode="edit"]').click();
+  assert.equal(await page.locator('.mode-tools').getAttribute('data-active-mode'), 'edit');
+  assert.equal(await page.locator('[data-mode="edit"]').evaluate(element => (
+    getComputedStyle(element).backgroundColor
+  )), 'rgba(0, 0, 0, 0)');
+  assert.equal(await page.locator('[data-task-drawer]').evaluate(element => getComputedStyle(element).position), 'fixed');
+  assert.equal(await page.locator('[data-task-drawer-panel]').evaluate(element => getComputedStyle(element).position), 'absolute');
+  assert.equal(await page.locator('[data-agent-connection-panel]').evaluate(element => getComputedStyle(element).position), 'fixed');
+  assert.equal(await page.locator('[data-agent-connection-anchor] [data-agent-connection-panel]').count(), 0);
+  assert.equal(await page.locator('[data-task-drawer]').evaluate(element => getComputedStyle(element).backdropFilter), 'none');
   assert.match(await page.locator('.inspector-empty').innerText(), /选择文字或画面元素开始编辑/);
   await page.waitForTimeout(100);
   assert.deepEqual(browserProblems, []);
@@ -297,6 +324,7 @@ test('preview 仅在内存注入一次且静态资源保持受保护', async t =
   for (const path of [
     '/preview',
     '/editor/editor.mjs',
+    '/editor/inspector-panel.mjs',
     '/editor/history-state.mjs',
     '/editor/task-drawer.mjs',
     '/editor/protocol.mjs',
@@ -310,6 +338,7 @@ test('preview 仅在内存注入一次且静态资源保持受保护', async t =
   }
   for (const path of [
     `/editor/editor.mjs?token=${app.token}`,
+    `/editor/inspector-panel.mjs?token=${app.token}`,
     `/editor/history-state.mjs?token=${app.token}`,
     `/editor/task-drawer.mjs?token=${app.token}`,
     `/editor/protocol.mjs?token=${app.token}`,
@@ -367,7 +396,7 @@ test('frame bridge 在 Deck 未嵌 runtime 时只加载一个受保护实例', a
   assert.deepEqual(browserProblems, []);
 });
 
-test('frame bridge 复用真实 inline runtime 且不请求外部 runtime', async t => {
+test('frame bridge 先加载受保护 runtime 并让真实 inline runtime 安全复用', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());
   const fixture = await readFile(app.deckPath, 'utf8');
@@ -382,7 +411,7 @@ test('frame bridge 复用真实 inline runtime 且不请求外部 runtime', asyn
   assert.equal(await page.locator('#deck-frame').evaluate(frame => (
     Boolean(frame.contentWindow.HuaweiDeckPatchRuntime)
   )), true);
-  assert.equal(resourceRequests.filter(url => new URL(url).pathname === '/editor/patch-runtime.js').length, 0);
+  assert.equal(resourceRequests.filter(url => new URL(url).pathname === '/editor/patch-runtime.js').length, 1);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });

@@ -28,6 +28,12 @@ test('四份入口文档共享后期微调、安全写回与第一版边界', as
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
       '启动命令': /python3 scripts\/deck-editor\.py <deck\.html>/,
+      'macOS 双击入口': /双击[^。\n]{0,100}`Huawei Deck 编辑器\.app`/,
+      '双击先进入网页': /先打开本地网页导入页/,
+      '网页点击后才选择': /网页点击“添加 Deck HTML”后/,
+      '每次只添加一份': /每次应用启动只允许成功添加一份 deck HTML/i,
+      '不允许切换': /不提供切换或再次添加入口/,
+      '命令式入口保留': /命令式入口[^。\n]{0,80}(?:保留|保持)[\s\S]{0,180}python3 scripts\/deck-editor\.py <deck\.html>/,
       'sidecar 目录': /\.huawei-deck-editor\//,
       '外部 Agent 而非内置聊天': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,180}(?:不是|不内置)[\s\S]{0,80}(?:聊天|聊天机器人)/,
       '正式写回经 edit-bundle': /(?:正式)?写回[\s\S]{0,260}scripts\/edit-bundle\.py/,
@@ -61,7 +67,7 @@ test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 side
   });
 
   requireClaims('references/editing-guide.md', documents['references/editing-guide.md'], {
-    '五种模式': /预览[\s\S]{0,80}区域标记[\s\S]{0,80}文字[\s\S]{0,80}移动[\s\S]{0,80}缩放/,
+    '三种一级模式': /预览[\s\S]{0,80}编辑[\s\S]{0,80}区域标记/,
     '撤销与重做': /撤销[\s\S]{0,80}重做/,
     '保存会话与写回有区别': /保存会话[\s\S]{0,180}(?:不同于|不等于|区别)[\s\S]{0,180}(?:正式)?写回/,
     '稳定错误码': /DECK_CHANGED[\s\S]{0,120}NEW_OVERFLOW[\s\S]{0,120}EDITOR_OFFLINE[\s\S]{0,120}RECOVERY_REQUIRED/,
@@ -72,6 +78,7 @@ test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 side
 test('Skill、README 与架构文档各自承担入口、仓库和开发者职责', async () => {
   const documents = await loadDocuments();
   requireClaims('SKILL.md', documents['SKILL.md'], {
+    '初版生成后直接打开应用': /第一版[\s\S]{0,180}open -n "Huawei Deck 编辑器\.app" --args/,
     '启动器文件导航': /`scripts\/deck-editor\.py`/,
     '编辑器目录文件导航': /`scripts\/editor\/`/,
     '批量重构仍由 Agent 完成': /(?:新建|批量重构)[\s\S]{0,180}Agent[\s\S]{0,120}edit-bundle/,

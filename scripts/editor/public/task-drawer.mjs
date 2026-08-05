@@ -27,7 +27,21 @@ function formatSize(size) {
   return `${value.toFixed(1).replace(/\.0$/, '')} ${unit}`;
 }
 
-export function renderTaskDrawer(root, { tasks, onLocate, onProcessAll, onUndo }) {
+function runMessage(run) {
+  if (!run || run.status === 'idle') return '';
+  const defaults = {
+    queued:'反馈已提交，正在启动 Agent',
+    running:'Agent 正在处理本批反馈',
+    succeeded:'Agent 已完成本批处理，请检查结果',
+    failed:'Agent 批处理失败',
+    cancelled:'Agent 任务已取消',
+  };
+  return run.message || defaults[run.status] || '';
+}
+
+export function renderTaskDrawer(root, {
+  tasks, agentRun = { status:'idle' }, onLocate, onProcessAll, onUndo, onEdit, onDelete,
+}) {
   const wasOpen = root.dataset.open === 'true';
   const previousCount = Number(root.dataset.taskCount ?? 0);
   const shouldOpen = wasOpen || (previousCount === 0 && tasks.length > 0);
@@ -43,18 +57,32 @@ export function renderTaskDrawer(root, { tasks, onLocate, onProcessAll, onUndo }
   toggle.append(element('span', 'task-drawer-agent', 'AGENT'));
   toggle.append(element('strong', '', `修改任务 ${tasks.length}`));
   toggle.append(element('span', 'task-drawer-chevron', shouldOpen ? '收起' : '展开'));
-  toggle.addEventListener('click', () => {
-    const open = root.dataset.open !== 'true';
+  const setOpen = open => {
     root.dataset.open = String(open);
     toggle.setAttribute('aria-expanded', String(open));
     toggle.querySelector('.task-drawer-chevron').textContent = open ? '收起' : '展开';
-  });
+  };
+  toggle.addEventListener('click', () => setOpen(root.dataset.open !== 'true'));
   root.append(toggle);
 
-  const panel = element('section', 'task-drawer-panel');
+  const panel = element('section', 'task-drawer-panel deck-notespanel');
   panel.dataset.taskDrawerPanel = '';
   panel.setAttribute('aria-label', 'Agent 修改任务');
+  const panelHeader = element('header', 'task-panel-header');
+  panelHeader.append(element('span', 'deck-panel-dot'));
+  panelHeader.append(element('strong', 'deck-panel-title', 'Agent 修改任务'));
+  panelHeader.append(element('span', 'task-panel-count', String(tasks.length)));
+  const close = element('button', 'deck-panel-close', '✕');
+  close.type = 'button';
+  close.setAttribute('aria-label', '关闭 Agent 修改任务面板');
+  close.addEventListener('click', () => {
+    setOpen(false);
+    toggle.focus();
+  });
+  panelHeader.append(close);
+  panel.append(panelHeader);
   const list = element('div', 'task-list');
+  const activeRun = ['queued', 'running'].includes(agentRun.status);
   if (!tasks.length) {
     list.append(element('p', 'task-empty', '拉框标记页面区域后，任务会记录在这里。'));
   }
@@ -72,6 +100,109 @@ export function renderTaskDrawer(root, { tasks, onLocate, onProcessAll, onUndo }
     locate.append(meta, element('p', 'task-instruction', task.instruction));
     locate.addEventListener('click', () => onLocate?.(task));
     row.append(locate);
+    const mutable = ['pending', 'failed', 'needs-confirmation'].includes(task.status)
+      && !task.groupId;
+    if (mutable && (onEdit || onDelete)) {
+      const actions = element('div', 'task-row-actions');
+      if (onEdit) {
+        const edit = element('button', 'task-edit', '编辑');
+        edit.type = 'button';
+        edit.dataset.taskEdit = task.id;
+        edit.disabled = activeRun;
+        edit.addEventListener('click', () => {
+          const originalChildren = [...row.childNodes];
+          const form = element('form', 'task-edit-form');
+          form.dataset.taskEditForm = task.id;
+          const input = element('textarea', 'task-edit-input');
+          input.dataset.taskEditInput = task.id;
+          input.rows = 3;
+          input.maxLength = 10_000;
+          input.value = task.instruction;
+          input.setAttribute('aria-label', '修改任务说明');
+          const note = element('p', 'task-edit-note');
+          note.dataset.taskEditNote = '';
+          note.setAttribute('role', 'status');
+          const controls = element('div', 'task-edit-controls');
+          const cancel = element('button', 'task-edit-cancel', '取消');
+          cancel.type = 'button';
+          cancel.dataset.taskEditCancel = task.id;
+          const save = element('button', 'task-edit-save', '保存');
+          save.type = 'submit';
+          save.dataset.taskEditSave = task.id;
+          controls.append(cancel, save);
+          form.append(input, note, controls);
+          const restore = () => row.replaceChildren(...originalChildren);
+          cancel.addEventListener('click', restore);
+          form.addEventListener('submit', async event => {
+            event.preventDefault();
+            const instruction = input.value.trim();
+            if (!instruction) {
+              note.textContent = '修改说明不能为空';
+              input.focus();
+              return;
+            }
+            input.disabled = true;
+            cancel.disabled = true;
+            save.disabled = true;
+            note.textContent = '正在保存…';
+            try {
+              await onEdit(task, instruction);
+            } catch (error) {
+              if (!form.isConnected) return;
+              input.disabled = false;
+              cancel.disabled = false;
+              save.disabled = false;
+              note.textContent = `保存失败：${error?.message || '未知错误'}`;
+              input.focus();
+            }
+          });
+          row.replaceChildren(form);
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+        });
+        actions.append(edit);
+      }
+      if (onDelete) {
+        const remove = element('button', 'task-delete', '删除');
+        remove.type = 'button';
+        remove.dataset.taskDelete = task.id;
+        remove.disabled = activeRun;
+        remove.addEventListener('click', () => {
+          if (row.querySelector('[data-task-delete-confirmation]')) return;
+          const confirmation = element('div', 'task-delete-confirmation');
+          confirmation.dataset.taskDeleteConfirmation = task.id;
+          confirmation.append(element('p', '', '确定删除这条任务？区域截图和附件也会一并清理。'));
+          const controls = element('div', 'task-delete-controls');
+          const cancel = element('button', 'task-delete-cancel', '取消');
+          cancel.type = 'button';
+          cancel.dataset.taskDeleteCancel = task.id;
+          const confirm = element('button', 'task-delete-confirm', '确认删除');
+          confirm.type = 'button';
+          confirm.dataset.taskDeleteConfirm = task.id;
+          cancel.addEventListener('click', () => confirmation.remove());
+          confirm.addEventListener('click', async () => {
+            cancel.disabled = true;
+            confirm.disabled = true;
+            confirm.textContent = '正在删除…';
+            try {
+              await onDelete(task);
+            } catch (error) {
+              if (!confirmation.isConnected) return;
+              cancel.disabled = false;
+              confirm.disabled = false;
+              confirm.textContent = '确认删除';
+              confirmation.querySelector('p').textContent = `删除失败：${error?.message || '未知错误'}`;
+            }
+          });
+          controls.append(cancel, confirm);
+          confirmation.append(controls);
+          row.append(confirmation);
+          confirm.focus();
+        });
+        actions.append(remove);
+      }
+      row.append(actions);
+    }
     if (task.groupId && onUndo) {
       const undo = element('button', 'task-undo', '撤销');
       undo.type = 'button';
@@ -138,15 +269,30 @@ export function renderTaskDrawer(root, { tasks, onLocate, onProcessAll, onUndo }
   panel.append(list);
 
   const footer = element('div', 'task-drawer-footer');
-  const process = element('button', 'task-process-all', `交给 Agent 处理全部 ${tasks.length} 条`);
+  const actionableTasks = tasks.filter(task => ['pending', 'failed'].includes(task.status));
+  const buttonText = activeRun
+    ? `Agent 正在处理 ${agentRun.taskCount ?? actionableTasks.length} 条`
+    : `交给 Agent 处理全部 ${actionableTasks.length} 条`;
+  const process = element('button', 'task-process-all', buttonText);
   process.type = 'button';
   process.dataset.processAll = '';
-  process.disabled = tasks.length === 0;
+  process.disabled = actionableTasks.length === 0 || activeRun;
+  process.setAttribute('aria-busy', String(activeRun));
   const note = element('p', 'task-process-note');
   note.dataset.processNote = '';
+  note.setAttribute('role', 'status');
+  note.setAttribute('aria-live', 'polite');
+  note.textContent = runMessage(agentRun);
   process.addEventListener('click', () => {
-    const message = onProcessAll?.(tasks);
-    note.textContent = message || '请在外部 Agent CLI 中读取任务；此处不会伪装已调用。';
+    process.disabled = true;
+    note.textContent = '正在把本批反馈交给 Agent…';
+    Promise.resolve(onProcessAll?.(actionableTasks)).then(message => {
+      if (note.isConnected && message) note.textContent = message;
+    }).catch(error => {
+      if (!note.isConnected) return;
+      note.textContent = `提交失败：${error?.message || '未知错误'}`;
+      process.disabled = false;
+    });
   });
   footer.append(process, note);
   panel.append(footer);

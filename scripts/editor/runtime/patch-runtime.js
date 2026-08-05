@@ -2,6 +2,7 @@
   const contract=Object.freeze({
     brand:'com.huawei.deck.visual-editor.patch-runtime',schema:1,version:'1.0.0',
     api:'pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,pendingTransactionCount,activeActionCount,suspendedTargetCount',
+    features:'textPath,textRangeStyle',
   });
   const contractError=code => Object.assign(new Error(code),{code});
   const compatible=runtime => {
@@ -101,10 +102,12 @@
   };
   const fingerprint = el => fnv1a(`${el.tagName}\0${el.className}\0${(el.textContent ?? '').trim().slice(0,120)}\0${el.getAttribute('style') ?? ''}`);
   const locatorKey = locator => `${locator.pageKey}|${locator.path}|${locator.tag}|${locator.fingerprint}`;
-  const stableTargetKey = locator => `${locator.pageKey}|${locator.path}|${locator.tag}`;
+  const stableTargetKey = locator => `${locator.pageKey}|${locator.path}|${locator.tag}|${locator.textPath ?? ''}`;
   const actionKey = action => {
     const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
-    return `${stableTargetKey(action.target)}|${kind}|${action.kind === 'setStyle' ? action.payload.property : ''}`;
+    const textRange=action.kind==='setStyle' ? action.payload.textRange : null;
+    const rangeKey=textRange ? `${textRange.start}:${textRange.end}` : '';
+    return `${stableTargetKey(action.target)}|${kind}|${action.kind === 'setStyle' ? action.payload.property : ''}|${rangeKey}`;
   };
   function runtimeError(code, candidates = []) {
     return Object.assign(new Error(code), { code, candidates });
@@ -174,10 +177,23 @@
     return el;
   }
   const finite = value => Number.isFinite(value);
+  const validTextPath = value => typeof value === 'string'
+    && /^(0|[1-9]\d{0,3})(\/(0|[1-9]\d{0,3})){0,31}$/.test(value);
+  const textNodeFor = (action,el) => {
+    if (action.target.textPath === undefined) return null;
+    let node=el;
+    for (const part of action.target.textPath.split('/')) node=node?.childNodes[Number(part)];
+    if (!node || node.nodeType!==Node.TEXT_NODE) throw runtimeError('TARGET_NOT_FOUND');
+    return node;
+  };
   function validatePayload(action) {
     const payload = action?.payload;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)
       || Object.getPrototypeOf(payload)!==Object.prototype) throw runtimeError('INVALID_ACTION');
+    if (action.target?.textPath !== undefined
+      && (action.kind!=='setText' || !validTextPath(action.target.textPath))) {
+      throw runtimeError('INVALID_ACTION');
+    }
     if (action.kind === 'setText' && typeof payload.text !== 'string') throw runtimeError('INVALID_ACTION');
     if (action.kind === 'translate' && (![payload.x,payload.y].every(finite)
       || Object.keys(payload).some(key => !['x','y'].includes(key)))) throw runtimeError('INVALID_ACTION');
@@ -189,8 +205,24 @@
       if (!scale && !size) throw runtimeError('INVALID_ACTION');
     }
     if (action.kind === 'setStyle') {
-      const allowed=['color','background-color','font-size','font-weight','opacity'];
-      if (!allowed.includes(payload.property) || typeof payload.value !== 'string') throw runtimeError('INVALID_ACTION');
+      const allowed=[
+        'color','background-color','font-size','font-weight','opacity',
+        'border-color','border-width','border-style','fill','stroke','stroke-width',
+      ];
+      const textRange=payload.textRange;
+      const rangeAllowed=['color','font-size','font-weight'];
+      const validRange=textRange===undefined || (textRange
+        && typeof textRange==='object' && !Array.isArray(textRange)
+        && Object.getPrototypeOf(textRange)===Object.prototype
+        && Object.keys(textRange).length===2
+        && Object.keys(textRange).every(key => ['start','end'].includes(key))
+        && Number.isSafeInteger(textRange.start) && Number.isSafeInteger(textRange.end)
+        && textRange.start>=0 && textRange.end>textRange.start && textRange.end<=1000000);
+      const allowedKeys=textRange===undefined ? ['property','value'] : ['property','value','textRange'];
+      if (!allowed.includes(payload.property) || typeof payload.value !== 'string'
+        || !validRange || (textRange && !rangeAllowed.includes(payload.property))
+        || Object.keys(payload).length!==allowedKeys.length
+        || Object.keys(payload).some(key => !allowedKeys.includes(key))) throw runtimeError('INVALID_ACTION');
     }
     if (action.kind === 'hide' && Object.keys(payload).length) throw runtimeError('INVALID_ACTION');
     if (action.kind === 'show' && (Object.keys(payload).some(key => key !== 'display')
@@ -202,12 +234,76 @@
     const parts=(computed && computed!=='none' ? computed : '0px 0px').split(/\s+/);
     return { x:parseFloat(parts[0])||0, y:parseFloat(parts[1])||0 };
   };
+  const textNodesOf = el => {
+    const walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT);
+    const nodes=[];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    return nodes;
+  };
+  const textPointAt = (el,offset,bias) => {
+    const nodes=textNodesOf(el);
+    let consumed=0;
+    for (const node of nodes) {
+      const next=consumed+node.data.length;
+      if (offset<next || (offset===next && bias==='end')) {
+        return {node,offset:offset-consumed};
+      }
+      consumed=next;
+    }
+    if (offset===consumed && nodes.length) {
+      const node=nodes[nodes.length-1];
+      return {node,offset:node.data.length};
+    }
+    throw runtimeError('TARGET_NOT_FOUND');
+  };
+  const rangeComputedStyle = (el,textRange,property) => {
+    const point=textPointAt(el,textRange.start,'start');
+    const owner=point.node.parentElement ?? el;
+    return getComputedStyle(owner).getPropertyValue(property).trim();
+  };
+  const textRangeWrapper = (el,textRange,property) => [...el.querySelectorAll(
+    '[data-deck-text-range-style]',
+  )].find(wrapper => wrapper.dataset.deckTextRangeProperty===property
+    && Number(wrapper.dataset.deckTextRangeStart)===textRange.start
+    && Number(wrapper.dataset.deckTextRangeEnd)===textRange.end);
+  const applyTextRangeStyle = (el,payload) => {
+    const {textRange,property,value}=payload;
+    const existing=textRangeWrapper(el,textRange,property);
+    const before=existing
+      ? getComputedStyle(existing).getPropertyValue(property).trim()
+      : rangeComputedStyle(el,textRange,property);
+    const after=value;
+    if (before===after) return {before,after};
+    if (existing) {
+      existing.style.setProperty(property,value);
+      return {before,after};
+    }
+    const start=textPointAt(el,textRange.start,'start');
+    const end=textPointAt(el,textRange.end,'end');
+    const range=document.createRange();
+    range.setStart(start.node,start.offset);
+    range.setEnd(end.node,end.offset);
+    const wrapper=document.createElement('span');
+    wrapper.dataset.deckTextRangeStyle='';
+    wrapper.dataset.deckTextRangeProperty=property;
+    wrapper.dataset.deckTextRangeStart=String(textRange.start);
+    wrapper.dataset.deckTextRangeEnd=String(textRange.end);
+    wrapper.style.setProperty('display','contents','important');
+    wrapper.style.setProperty(property,value);
+    wrapper.append(range.extractContents());
+    range.insertNode(wrapper);
+    return {before,after};
+  };
   function applyOne(action, el=resolve(action.target)) {
     validatePayload(action);
     let before, after;
     if (action.kind === 'setText') {
-      before=el.textContent; after=action.payload.text;
-      if (before !== after) el.textContent=after;
+      const textNode=textNodeFor(action,el);
+      before=textNode ? textNode.data : el.textContent; after=action.payload.text;
+      if (before !== after) {
+        if (textNode) textNode.data=after;
+        else el.textContent=after;
+      }
     }
     if (action.kind === 'translate') {
       before=translateOf(el); after={ x:action.payload.x, y:action.payload.y };
@@ -226,8 +322,12 @@
       }
     }
     if (action.kind === 'setStyle') {
-      before=el.style.getPropertyValue(action.payload.property); after=action.payload.value;
-      el.style.setProperty(action.payload.property, after);
+      if (action.payload.textRange) {
+        ({before,after}=applyTextRangeStyle(el,action.payload));
+      } else {
+        before=el.style.getPropertyValue(action.payload.property); after=action.payload.value;
+        el.style.setProperty(action.payload.property, after);
+      }
     }
     if (action.kind === 'hide' || action.kind === 'show') {
       before=el.style.display; after=action.kind === 'hide'?'none':(action.payload.display ?? '');
@@ -243,25 +343,48 @@
     else el.style.removeProperty(property);
   };
   function captureBaseline(action,el) {
-    if (action.kind==='setText') return { text:el.textContent };
+    if (action.kind==='setText') {
+      const textNode=textNodeFor(action,el);
+      return { text:textNode ? textNode.data : el.textContent };
+    }
     if (action.kind==='translate') return { translate:inlineProperty(el,'translate') };
     if (action.kind==='resize') return {
       width:inlineProperty(el,'width'), height:inlineProperty(el,'height'), scale:inlineProperty(el,'scale'),
     };
     if (action.kind==='setStyle') {
+      if (action.payload.textRange) {
+        const wrapper=textRangeWrapper(el,action.payload.textRange,action.payload.property);
+        return { rangeStyle:wrapper ? {
+          existed:true,
+          property:inlineProperty(wrapper,action.payload.property),
+        } : { existed:false } };
+      }
       return { property:action.payload.property, style:inlineProperty(el,action.payload.property) };
     }
     return { display:inlineProperty(el,'display') };
   }
   function restoreBaseline(action,baseline) {
     const el=baseline.el?.isConnected ? baseline.el : resolve(action.target);
-    if (action.kind==='setText') el.textContent=baseline.text;
+    if (action.kind==='setText') {
+      const textNode=textNodeFor(action,el);
+      if (textNode) textNode.data=baseline.text;
+      else el.textContent=baseline.text;
+    }
     else if (action.kind==='translate') restoreInlineProperty(el,'translate',baseline.translate);
     else if (action.kind==='resize') {
       restoreInlineProperty(el,'width',baseline.width);
       restoreInlineProperty(el,'height',baseline.height);
       restoreInlineProperty(el,'scale',baseline.scale);
-    } else if (action.kind==='setStyle') restoreInlineProperty(el,baseline.property,baseline.style);
+    } else if (action.kind==='setStyle' && action.payload.textRange) {
+      const wrapper=textRangeWrapper(el,action.payload.textRange,action.payload.property);
+      if (baseline.rangeStyle?.existed) {
+        if (wrapper) restoreInlineProperty(wrapper,action.payload.property,baseline.rangeStyle.property);
+      } else if (wrapper) {
+        wrapper.replaceWith(...wrapper.childNodes);
+        el.normalize();
+      }
+    }
+    else if (action.kind==='setStyle') restoreInlineProperty(el,baseline.property,baseline.style);
     else restoreInlineProperty(el,'display',baseline.display);
   }
   const resizeBranch = action => action?.kind==='resize'
@@ -274,7 +397,8 @@
     } else activeActions[index]=action;
   }
   function applyAction(action) {
-    const el=resolve(action.target), baseline={ ...captureBaseline(action,el),el };
+    const el=resolve(action.target),key=actionKey(action);
+    const baseline=activeBaselines.get(key) ?? { ...captureBaseline(action,el),el };
     const applied=applyOne(action,el); recordActive(applied,baseline); return applied;
   }
   const snapshotElement = el => ({ html:el.innerHTML,style:el.getAttribute('style') });

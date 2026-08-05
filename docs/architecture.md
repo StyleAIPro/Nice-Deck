@@ -1,13 +1,13 @@
 # huawei-deck · 设计原则、工作流与代码架构梳理
 
-> 本文是对本 skill 的系统性梳理：它按什么原则设计、用户与 Claude 按什么流程协作、代码分几层各干什么。
+> 本文是对本 skill 的系统性梳理：它按什么原则设计、用户与 Agent 按什么流程协作、代码分几层各干什么。
 > 与 `docs/design/` 的关系：`design-spec.md` / `implementation-plan.md` 是**构建时**的规格与计划（记录「当初怎么做出来的」）；本文描述**现状**（现在的结构是什么、为什么这样设计）。改动仓库时若行为与本文不符，以 `SKILL.md` 与 `references/` 为准并回来同步本文。
 
 ---
 
 ## 1. 这是什么
 
-huawei-deck 是一个 **Claude Code skill**，不是普通应用代码库。它交付的能力是：从三套华为红品牌模板出发，做出 1920×1080、离线可拷走的**单文件 HTML 演示（网页 PPT）**，并可一键导出 PPTX。
+huawei-deck 是一个符合 `SKILL.md` 目录约定的 **Agent Skill**，不是普通应用代码库。它交付的能力是：从三套华为红品牌模板出发，做出 1920×1080、离线可拷走的**单文件 HTML 演示（网页 PPT）**，并可一键导出 PPTX。
 
 交付物四块：
 
@@ -150,7 +150,7 @@ flowchart LR
 
 ### 3.7 环境体检
 
-动手前 `python3 scripts/check_deps.py`：探测 12 项依赖（pdf skill、pypdf、pdfplumber、Node≥18、ws、html2canvas、playwright-core、Chrome、python-pptx、pymupdf、soffice、可选 reportlab），能自动装的（pip/npm/npx）先打印命令再装并复检，装不了的给安装提示；`--check-only` 只报告。
+动手前 `python3 scripts/check_deps.py`：探测 13 项依赖（pdf skill、pypdf、pdfplumber、Node≥18、ws、html2canvas、busboy、playwright-core、Chrome、python-pptx、pymupdf、soffice、可选 reportlab），能自动装的（pip/npm/npx）先打印命令再装并复检，装不了的给安装提示；`--check-only` 只报告。
 
 ### 3.8 后期可视化微调工作流
 
@@ -161,9 +161,9 @@ python3 scripts/deck-editor.py <deck.html>
 python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 ```
 
-浏览器提供预览、区域标记、文字、移动、缩放五种模式。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；简单内容可直接改文字、移动、缩放。外部 Codex / Claude Code / Agent 不是内置聊天机器人，只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。drawer 不承担真实对话或模型调用。
+浏览器提供预览、编辑、区域标记三种一级模式；`edit` 在 frame 内统一路由文字、移动和缩放，旧 `text` / `move` / `resize` 消息会规范化为 `edit`，但不再作为界面工具出现。双击文字进入修改，拖动元素本体移动，选中框右下控制点缩放；移动与缩放超过 3 个屏幕像素才更新预览，避免单击和双击误提交动作。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；待处理、失败和待确认任务可经 `PATCH /api/tasks/<TASK_ID>` 修改说明，或经 `DELETE` 二次确认删除，Agent run 活跃时服务端统一拒绝，已完成任务需先撤销。任务删除先提交权威 session，再清理截图与附件；清理失败只留下可对账孤儿，不会恢复任务或制造悬空引用。frame 的文字命中先使用点击坐标取得真实 Text 节点：无 class 叶节点直接定位元素；混排父元素则在 element locator 上附加最多 32 层的规范 childNodes `textPath`，编辑时仅临时包装该文本节点，提交前恢复 DOM，再由 runtime 精确写回节点 data，因此不会把 `strong`、链接和 `<br>` 扁平化。action compiler 的状态键包含 `textPath`，但 locator 仍跨片段和动作类型复用同一元素的最早安全指纹。进入文字编辑时只按点击坐标放置折叠光标，blur 或 `Cmd/Ctrl+Enter` 统一提交动作。移动命中则沿祖先寻找最近的 positioned 或 block / flex / grid 等独立布局盒，不依赖 class，同时排除 section / stage / canvas 等结构容器。图片内文字、SVG 和交互组件仍 fail closed。外部 Codex / Claude Code / Agent 不是内置聊天机器人；drawer 不承载对话，但“交给 Agent”会经固定 schema 的 `POST /api/agent-runs` 立即触发当前批次。Agent 只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`PATCH|DELETE /api/tasks/<TASK_ID>` 维护任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。
 
-顶栏的“撤销 / 重做”按时间顺序操作同一份权威历史，覆盖人工文字、移动、缩放和 Agent 动作组；任务行仍保留定点撤销，定点撤销后也可从顶栏重做。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
+顶栏的“撤销 / 重做”按时间顺序操作同一份权威历史，覆盖人工文字、移动、缩放和 Agent 动作组。parent 与 frame 分别监听键盘并通过受限 `history-shortcut` 消息汇合到同一 `changeHistory`：`Cmd/Ctrl+Z` 撤销，`Cmd/Ctrl+Shift+Z` 重做，Windows 兼容 `Ctrl+Y`；输入框、`role=textbox` 与 `contenteditable` 保留浏览器原生撤销。任务行仍保留定点撤销，定点撤销后也可从顶栏重做。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
 
 预览、区域标记和自动会话保存不触碰原始 source deck。`.huawei-deck-editor/` 自动保存会话、任务、快照、动作、诊断与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。正式写回由用户明确触发，三重闸门依次检查 editor online、文件指纹、无新增溢出并执行 bundle verify。`scripts/edit-bundle.py` 仅在系统临时工作副本执行 `load`、`get_template`、`set_template`、`save`、`eb.verify`；bundle adapter / writer 负责 sidecar 备份、同目录候选、transaction、fingerprint 复核、`os.replace` 与失败恢复。冲突或验证失败拒绝覆盖。
 
@@ -284,21 +284,39 @@ flowchart TD
 
 ### 4.6 后期编辑器组件与运行时契约
 
+后期编辑器的启动 seam 是 `scripts/deck-editor.py`：macOS 的 `Huawei Deck 编辑器.app` 是桌面 adapter，Python 启动器是命令 adapter。用户双击 `Huawei Deck 编辑器.app` 后会先打开本地网页导入页；只有用户在网页点击“添加 Deck HTML”后，才会打开系统文件选择器以选择已有 deck HTML。导入状态只能从 idle 进入 choosing，再进入 selected；取消回到 idle，成功后立即锁定并关闭导入服务。每次应用启动只允许成功添加一份 deck HTML；添加后不提供切换或再次添加入口。命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。
+
+无路径时，Python 只启动 `app-server.mjs`；它以随机 token 保护 loopback 导入页，按钮请求只能触发本机选择器，浏览器不能提交任意文件路径。选择成功后，它在同一 Node 进程启动现有 `server.mjs` 并跳转到编辑工作台。有路径时则绕过导入页，直接进入 `server.mjs`，因此 Skill 生成第一版后仍可直接带路径打开。带路径的 Python 入口自动捕获 `CODEX_THREAD_ID`，macOS App 参数也可显式传 `--agent-thread-id`；该启动值只是 Deck-Agent 连接模块的高优先级输入，解析后会写入 Deck sidecar。以后独立导入同一份 Deck 时即使没有启动参数，也会恢复持久化连接。两条路径共享 deck 校验、依赖探测、编辑服务、Agent 调度、bundle adapter、BridgeService 与写回闸门；桌面 adapter 仅增加一次性导入、原生错误提示、缺失 Node 模块自动安装和浏览器关闭后的延迟退出。
+
+macOS App 的主可执行文件只做短时派发：经 `nohup` 启动 Python 后立即退出，编辑服务独立持有生命周期。不能让 shell 型 App 主进程随编辑服务长期存活，否则 LaunchServices 会把它当成单实例应用；第二次双击无法向非 Cocoa 进程投递 reopen 事件并返回 `-600`。App 必须保留在 skill 根目录，若被单独移动则以原生对话框明确提示，而不是静默退出。
+
 后期编辑器由 browser parent 和 preview frame 两层组成：parent 的 `public/editor.mjs` 管模式、页列表、task drawer、session 拉取与外部事件；frame 中注入 `frame-bridge.mjs` 和 `runtime/patch-runtime.js`，负责坐标换算、locator、区域快照、直接操作与 tentative DOM 变更。两层通过同源 `postMessage` 协作，frame 不获得通用文件系统能力。
 
 核心组件职责如下：
 
 | 组件 | 职责 |
 |---|---|
+| `Huawei Deck 编辑器.app` / `deck-editor.py` | 桌面与命令双入口；无路径进入一次性网页导入，有路径直接接收 deck |
+| `app-server.mjs` | loopback 导入页与 idle → choosing → selected 状态机；成功后关闭自身并启动既有编辑服务 |
 | observer WebSocket | 普通 token 客户端连接 `/events`，只订阅 revision、task、action、undo / redo 与冲突广播，不能发送动作命令 |
 | editor capability WebSocket | 同一 `/events` 端点上额外携带 `editorToken`；只允许一个 editor client，服务用它下发 frame 事务 / 诊断命令并接收 ACK |
 | `BridgeService` | mutation queue 串行化任务、动作、undo / redo、诊断和写回；执行页面事务与 durable session 的两阶段收敛 |
 | `SessionStore` + `PatchJournal` | session revision、跨页任务、PNG 快照路径、动作组、redo 集与 diagnostics；编译当前权威动作集合 |
+| `AgentRunCoordinator` + provider router | 冻结一次点击的任务 ID，限制单批并发，管理 queued / running / succeeded / failed；按当前 Deck 连接路由到 Codex / Claude Code / OpenCode / OpenClaw adapter |
+| `agent-session-catalog.mjs` | 只读聚合各 provider 的本机会话目录，隔离未安装 / 读取失败，并按历史证据给出 Skill 状态 |
 | persistent dirfd helper | Python JSONL 长驻进程；绑定 project / root / session / snapshots / backups / transactions / write-errors 的目录 fd，执行原子持久化 |
 | bundle adapter | Python `bundle_adapter.py`；只在可信临时副本上调用 `scripts/edit-bundle.py`，构造离线补丁块并做 bundle verify |
 | diagnostics / watch / write gate | frame 诊断 1920×1080 溢出，watch 监测外部 deck 指纹，write gate 聚合 online、fingerprint、overflow 与 bundle 校验 |
 
 状态模型可以概括为一条链：session registry 绑定稳定 sessionId，transaction record 记录可恢复写回事务，revision 守住并发前提，mutation queue 串行化变更，canonical action 固化 frame 实际接受的动作，authoritative reload 用完整编译集合替换浏览器状态。
+
+#### Agent 批处理与 provider seam
+
+浏览器点击“交给 Agent”时只向 `POST /api/agent-runs` 发送 `expectedRevision` 和仍为 pending / failed 的任务 ID。服务端校验 revision、任务存在性与单批互斥后立即返回 run snapshot；后续状态通过 `GET /api/agent-runs/current` 和 observer WebSocket 的 `agent-run-updated` 广播。浏览器不能指定 executable、命令参数或 Prompt，因此该入口不是任意命令执行器。点击之后新建的任务不属于已冻结批次。
+
+adapter 不再根据 App 的打开方式选择会话，而只读取当前 Deck-Agent 连接。Codex 使用 `codex exec resume`，Claude Code 使用 print/resume，OpenCode 使用 run/session，OpenClaw 使用 agent/session；没有绑定时可由当前 provider 新建专用会话。用户在连接面板显式新建会话时，adapter 立即以所选 `projectPath` 为 cwd 做一次只读 Skill 初始化，并在 Deck 不属于该项目时单独授予 Deck 目录；初始化不处理任务、不修改 deck。旧会话的 Skill 状态若为未检测到 / 无法确认，则只在首次任务注入 `SKILL.md` 与所需 references。成功后经 BridgeService mutation queue 把会话 ID、`projectPath` 与 `skillStatus=loaded` 持久化到 `session.json.agentConnection`。启动参数、网页会话选择、手动设置和新建结果都汇入同一个 seam。顶栏把连接投影为绿色“<provider> 在线”或红色“Agent 离线”；点击后按 provider 标签和项目 cwd 分组展示会话，项目标题与缩进会话使用不同视觉层级。Agent 只能经已有 CLI / HTTP 读取任务、提交 action，不直接改 bundle，也不自动调用 `write-deck`。
+
+provider seam 统一为 `run(...)`、`connection`、`configure(...)` 与 `createSession(...)`：adapter 内部负责非交互命令、session 续跑、结构化事件解析、项目 cwd、权限与 Skill 注入。`GET /api/agent-sessions` 聚合 Codex app-server `thread/list`、Claude Code 本地 JSONL、OpenCode `session list` 与 OpenClaw `sessions --json`，同时返回按 cwd 归并的项目；`POST /api/agent-sessions/inspect` 只读检查选定会话，`POST /api/agent-projects/pick` 只接收原生目录选择器返回的规范路径，`POST /api/agent-sessions` 只允许在这批已验证项目中创建会话。检测结果分为 `loaded`（sidecar 已确认）、`detected`（历史有明确证据）、`not-detected`（可读历史无证据）与 `unknown`（provider 无法证明）。`GET /api/agent-providers` 暴露能力目录，`GET/PUT /api/agent-connection` 只接受 provider 枚举、规范会话 ID、已知项目路径与 revision，网页不能传 executable、参数或 Prompt；运行期间禁止改绑。编辑器 URL / token 经子进程环境变量传递，避免进入 provider 命令参数。
 
 #### 动作事务
 
@@ -328,7 +346,7 @@ flowchart TD
 
 #### 信任边界
 
-网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由 fingerprint、revision、locator 与 transaction 校验。服务没有任意路径读写 API。外部 Agent 常用受控接口包括 session / status（`GET /api/session`）、tasks（列表 `GET /api/tasks`、详情 `GET /api/tasks/<TASK_ID>`、创建 `POST /api/tasks`）、actions（`POST /api/actions`）、undo / redo（`POST /api/groups/<GROUP_ID>/undo|redo`）、write-deck（`POST /api/write-deck`）和 observer events（`GET /events` 升级 WebSocket）；唯一 editor capability 只为 frame 事务命令与 ACK 服务。
+网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由 fingerprint、revision、locator 与 transaction 校验。服务没有任意路径读写 API。外部 Agent 常用受控接口包括 session / status（`GET /api/session`）、tasks（列表 `GET /api/tasks`、详情 `GET /api/tasks/<TASK_ID>`、创建 `POST /api/tasks`）、actions（`POST /api/actions`）、undo / redo（`POST /api/groups/<GROUP_ID>/undo|redo`）、write-deck（`POST /api/write-deck`）和 observer events（`GET /events` 升级 WebSocket）；Agent 调度另有固定 schema 的 `POST /api/agent-runs`、`GET /api/agent-runs/current`、`GET /api/agent-providers`、`GET /api/agent-sessions`、`POST /api/agent-sessions/inspect`、`POST /api/agent-projects/pick`、`POST /api/agent-sessions` 与 `GET/PUT /api/agent-connection`。唯一 editor capability 只为 frame 事务命令与 ACK 服务。
 
 目标 locator 找不到返回 `TARGET_NOT_FOUND`，不能唯一匹配返回 `TARGET_AMBIGUOUS`；frame 未就绪返回 `EDITOR_OFFLINE`。所有错误都保留稳定 code 与恢复提示，浏览器 tentative 状态和 durable session 不会分叉。
 

@@ -429,6 +429,20 @@ export class BridgeService {
     });
   }
 
+  updateTask(taskId, instruction, expectedRevision) {
+    return this.#mutateTask(
+      'task-update',
+      () => this.sessionStore.updateTask(taskId, instruction, expectedRevision),
+    );
+  }
+
+  deleteTask(taskId, expectedRevision) {
+    return this.#mutateTask(
+      'task-delete',
+      () => this.sessionStore.deleteTask(taskId, expectedRevision),
+    );
+  }
+
   applyActions({ taskId, actions, expectedRevision }) {
     return this.#enqueue(async () => {
       this.#assertMutable();
@@ -649,6 +663,23 @@ export class BridgeService {
     });
   }
 
+  setAgentConnection(connection, expectedRevision = this.sessionStore.state.revision) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      this.assertRevision(expectedRevision);
+      const candidate = {
+        ...structuredClone(this.sessionStore.state),
+        revision:this.sessionStore.state.revision + 1,
+        agentConnection:structuredClone(connection),
+      };
+      await this.#persistCandidate(candidate, { operation:'agent-connection' });
+      return {
+        revision:this.sessionStore.state.revision,
+        connection:structuredClone(this.sessionStore.state.agentConnection),
+      };
+    });
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true;
@@ -681,6 +712,46 @@ export class BridgeService {
     const result = this.mutationQueue.then(guarded, guarded);
     this.mutationQueue = result.catch(() => {});
     return result;
+  }
+
+  #mutateTask(operation, mutation) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      try {
+        const result = await mutation();
+        if (this.closed) {
+          throw serviceError('SERVICE_CLOSED', 503, '任务变更已提交，但服务关闭前未完成确认', {
+            operation,
+            committed:true,
+            commitScope:'session',
+            syncPending:true,
+            sessionCandidateCommitted:true,
+            revision:result.revision,
+          });
+        }
+        return result;
+      } catch (error) {
+        if (this.closed && isCommittedSession(error)) {
+          throw serviceError('SERVICE_CLOSED', 503, '任务变更已提交，但服务关闭前未完成确认', {
+            operation,
+            committed:true,
+            commitScope:'session',
+            syncPending:true,
+            sessionCandidateCommitted:true,
+            revision:this.sessionStore.state.revision,
+            cause:error,
+          });
+        }
+        if (error?.sessionCandidateCommitted === true) throw error;
+        this.#throwIfClosed();
+        if (isCommittedSession(error)) {
+          throw this.#enterRecoveryRequired({
+            operation, committed:true, commitScope:'session', cause:error,
+          });
+        }
+        throw error;
+      }
+    });
   }
 
   async #changeGroup(method, groupId, expectedRevision) {

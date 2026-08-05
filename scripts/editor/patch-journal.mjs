@@ -5,7 +5,11 @@ function inverse(action) {
   let kind = action.kind;
   let payload;
   if (kind === 'setText') payload = { text:action.before };
-  if (kind === 'setStyle') payload = { property:action.payload.property, value:action.before };
+  if (kind === 'setStyle') payload = {
+    property:action.payload.property,
+    value:action.before,
+    ...(action.payload.textRange ? { textRange:structuredClone(action.payload.textRange) } : {}),
+  };
   if (kind === 'translate' || kind === 'resize') payload = action.before;
   if (kind === 'hide') { kind = 'show'; payload = { display:action.before }; }
   else if (kind === 'show') { kind = 'hide'; payload = {}; }

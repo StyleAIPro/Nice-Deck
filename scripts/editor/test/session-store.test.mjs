@@ -61,6 +61,22 @@ test('跨页任务写入后可恢复且 revision 单调递增', async () => {
   assert.match(await readFile(reopened.sessionPath, 'utf8'), /改 B/);
 });
 
+test('待处理任务可改说明、删除并清理快照', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-task-edit-'));
+  const deck = join(root, 'deck.html');
+  await writeFile(deck, 'deck-v1');
+  const store = await SessionStore.open({ deckPath:deck, rootDir:join(root, '.huawei-deck-editor') });
+  const created = await store.createTask({ ...TASK_INPUT, snapshot:PNG_DATA_URL }, 0);
+  const updated = await store.updateTask(created.task.id, '  更新后的说明  ', 1);
+  assert.equal(updated.task.instruction, '更新后的说明');
+  assert.equal(updated.revision, 2);
+  const deleted = await store.deleteTask(created.task.id, 2);
+  assert.equal(deleted.revision, 3);
+  assert.equal(deleted.cleanupPending, false);
+  assert.deepEqual(store.state.tasks, []);
+  assert.deepEqual(await readdir(join(store.sessionDir, 'snapshots')), []);
+});
+
 test('合法 PNG 快照原子落盘且 session JSON 不保存 base64', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-snapshot-'));
   const deck = join(root, 'deck.html');

@@ -97,6 +97,7 @@ let tornDown = false;
 let directEdit = null;
 let transformDrag = null;
 let transformSelection = null;
+let textRangeSelection = null;
 const pendingManual = new Map();
 const tentativeCommands = new Map();
 let statusTimer;
@@ -105,6 +106,15 @@ let requiresAuthoritativeReload = false;
 let authoritativeReloadRequested = false;
 let authoritativeReloadRequestSequence = 0;
 const INTERACTIVE_TRANSFORM_SELECTOR = 'svg,a,button,input,select,textarea,iframe,[role="button"],.layer-panel';
+const EDIT_MODE_ALIASES = new Set(['edit', 'text', 'move', 'resize']);
+const INSPECTOR_STYLE_PROPERTIES = new Set([
+  'color', 'background-color', 'font-size', 'font-weight', 'opacity',
+  'border-color', 'border-width', 'border-style', 'fill', 'stroke', 'stroke-width',
+]);
+
+function canonicalMode(value) {
+  return EDIT_MODE_ALIASES.has(value) ? 'edit' : value;
+}
 
 function structuralSignature(canvas) {
   const source = canvas.querySelector('section[data-label]') ?? canvas;
@@ -145,6 +155,7 @@ function createCanvasMonitor(onPublish, signal, onObserved = () => {}) {
   let observedStage;
   let quietTimer;
   let maxTimer;
+  let bootstrapTimer;
   let stopped = false;
   const stageObserver = new MutationObserver(records => {
     const relevant = records.some(record => {
@@ -182,6 +193,7 @@ function createCanvasMonitor(onPublish, signal, onObserved = () => {}) {
   };
   function consider() {
     if (stopped) return;
+    bindDocument(document.documentElement);
     const latest = capture();
     bindStage(latest.stage);
     if (published && !sameReferences(published, latest)) onObserved(latest.canvases);
@@ -189,8 +201,12 @@ function createCanvasMonitor(onPublish, signal, onObserved = () => {}) {
       candidate = latest;
       clearTimeout(quietTimer);
       quietTimer = undefined;
+      clearTimeout(bootstrapTimer);
+      bootstrapTimer = setTimeout(consider, QUIET_MS);
       return;
     }
+    clearTimeout(bootstrapTimer);
+    bootstrapTimer = undefined;
     if (same(candidate, latest)) return;
     candidate = latest;
     clearTimeout(quietTimer);
@@ -200,12 +216,20 @@ function createCanvasMonitor(onPublish, signal, onObserved = () => {}) {
   const documentObserver = new MutationObserver(records => {
     if (records.some(mutationTouchesStage)) consider();
   });
-  documentObserver.observe(document.documentElement, { childList:true, subtree:true });
+  let observedDocumentElement;
+  const bindDocument = root => {
+    if (!root || root === observedDocumentElement) return;
+    documentObserver.disconnect();
+    observedDocumentElement = root;
+    documentObserver.observe(root, { childList:true, subtree:true });
+  };
+  bindDocument(document.documentElement);
   const stop = () => {
     if (stopped) return;
     stopped = true;
     clearTimeout(quietTimer);
     clearTimeout(maxTimer);
+    clearTimeout(bootstrapTimer);
     documentObserver.disconnect();
     stageObserver.disconnect();
   };
@@ -272,7 +296,9 @@ style.textContent = `
   [data-direct-status][data-state="error"]{background:#8f1018}
   [data-transform-selection]{position:fixed;z-index:2147483637;box-sizing:border-box;border:2px solid #c7000b;background:rgba(199,0,11,.035);pointer-events:none}
   [data-resize-handle]{position:fixed;z-index:2147483640;box-sizing:border-box;border:2px solid #fff;border-radius:3px;background:#c7000b;box-shadow:0 1px 5px rgba(0,0,0,.3);cursor:nwse-resize;touch-action:none}
-  [data-direct-editing]{outline-style:solid!important;outline-color:#c7000b!important;outline-width:calc(3px / var(--deck-editor-ui-scale-x,1))!important;outline-offset:calc(3px / var(--deck-editor-ui-scale-x,1));background:rgba(255,255,255,.96)!important;cursor:text!important}
+  [data-direct-editing]{cursor:text!important}
+  html[data-deck-editor-dragging="translate"],html[data-deck-editor-dragging="translate"] *{cursor:grabbing!important}
+  html[data-deck-editor-dragging="resize"],html[data-deck-editor-dragging="resize"] *{cursor:nwse-resize!important}
   @keyframes deck-editor-pulse{from{box-shadow:0 0 0 0 rgba(230,0,18,.35)}to{box-shadow:0 0 0 8px rgba(230,0,18,0)}}
 `;
 document.head.append(style);
@@ -333,6 +359,7 @@ function showPage(pageKey) {
   const preserveSelection = interactionBelongsToSnapshot(transformSelection?.element, canvases)
     && transformSelection.element.closest('.slide-canvas') === canvas;
   finishDirectEdit();
+  clearTextRangeSelection();
   cancelTransformDrag();
   if (!preserveSelection) removeTransformSelection();
   removePopover();
@@ -473,7 +500,7 @@ function effectiveMode() {
   try {
     const pending = parent.document.querySelector('[data-mode][aria-pressed="true"]')?.dataset.mode;
     // confirmed mode 是主状态；父页值只覆盖消息派发尚未抵达的模式切换窗口。
-    if (pending && pending !== mode) return pending;
+    if (pending && canonicalMode(pending) !== mode) return canonicalMode(pending);
   } catch {
     // 跨源时只使用 confirmed postMessage 状态。
   }
@@ -482,6 +509,10 @@ function effectiveMode() {
 
 function isRegionMode() {
   return effectiveMode() === 'region';
+}
+
+function isEditMode() {
+  return effectiveMode() === 'edit';
 }
 
 function positionPopover(popover, region) {
@@ -872,35 +903,100 @@ function manualSuccessMessage(result, fallback) {
 }
 
 function textTargetFromEvent(event) {
-  const semantic = event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,td,th');
-  if (semantic) return semantic;
-  const leaf = event.target.closest?.('span,div');
-  if (leaf?.parentElement?.closest('.slide-canvas') && leaf.parentElement.children.length > 1) {
-    return leaf.parentElement;
+  const canvas = event.target.closest?.('.slide-canvas');
+  if (!canvas) return null;
+  for (let element = event.target; element && element !== canvas; element = element.parentElement) {
+    if (element.matches?.('[data-deck-text-range-style]')) continue;
+    if ((element.textContent ?? '').trim()) return element;
   }
-  return leaf;
+  return null;
 }
 
-function textRejection(element) {
+function textRejection(element, { allowChildren = false } = {}) {
   if (!element || !element.closest('.slide-canvas')) return '请在页面文字上双击';
   if (element.closest('[data-deck-editor-ui],button,a,input,textarea,select,[role="button"],.layer-panel')
-    || element.matches('svg,iframe') || element.querySelector('svg,iframe,.layer-panel')) {
+    || element.closest('svg,iframe') || element.querySelector('svg,iframe,.layer-panel')) {
     return '该元素包含交互或复杂组件，请改用区域标记';
   }
-  if (element.children.length > 0) return '该文字包含复杂富文本结构，请改用区域标记';
+  if (!(element.textContent ?? '').trim()) return '请在页面文字上双击';
+  if (!allowChildren && element.children.length > 0) {
+    return '该文字包含复杂富文本结构，请改用区域标记';
+  }
   return null;
+}
+
+function textNodeAtPoint(element, event) {
+  const range = element.ownerDocument.caretRangeFromPoint?.(event.clientX, event.clientY);
+  const node = range?.startContainer;
+  return node?.nodeType === Node.TEXT_NODE && element.contains(node)
+    && (node.data ?? '').trim() ? node : null;
+}
+
+function textNodePath(root, textNode) {
+  const path = [];
+  for (let node = textNode; node && node !== root; node = node.parentNode) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    const index = [...parent.childNodes].indexOf(node);
+    if (index < 0 || index > 9_999) return null;
+    path.unshift(index);
+  }
+  return path.length > 0 && path.length <= 32 ? path.join('/') : null;
+}
+
+function directTextTarget(event) {
+  const element = textTargetFromEvent(event);
+  const rejection = textRejection(element, { allowChildren:true });
+  if (rejection) return { rejection };
+  if (element.children.length === 0) return { element };
+  if (runtime.contract?.features?.split(',').includes('textPath') !== true) {
+    return { rejection:'当前 Deck 的补丁运行时较旧，请重新写回后再编辑富文本片段' };
+  }
+  const textNode = textNodeAtPoint(element, event);
+  if (!textNode) return { rejection:'请双击具体文字；复杂组件仍请使用区域标记' };
+  let root = textNode.parentElement;
+  while (root?.matches('[data-deck-text-range-style]')) root = root.parentElement;
+  const path = textNodePath(root, textNode);
+  if (!root || !path) return { rejection:'无法稳定定位该段文字，请改用区域标记' };
+  const rootRejection = textRejection(root, { allowChildren:true });
+  if (rootRejection) return { rejection:rootRejection };
+  return { element:root, textNode, textPath:path };
 }
 
 function finishDirectEdit({ restore = true } = {}) {
   if (!directEdit) return;
   const state = directEdit;
   directEdit = null;
-  if (restore) state.element.textContent = state.originalText;
+  state.element.removeEventListener('blur', onDirectEditBlur);
+  if (state.textNode) {
+    state.textNode.data = restore ? state.originalText : (state.element.textContent ?? '');
+  } else if (restore) state.element.textContent = state.originalText;
   state.element.removeAttribute('contenteditable');
   delete state.element.dataset.directEditing;
   state.element.spellcheck = state.originalSpellcheck;
+  if (state.textNode) state.element.replaceWith(state.textNode);
   state.resumeReplay?.();
   requestAuthoritativeReloadIfSettled();
+}
+
+function onDirectEditBlur(event) {
+  if (directEdit?.element !== event.currentTarget || directEdit.committing) return;
+  commitDirectEdit();
+}
+
+function placeDirectEditCaret(element, event) {
+  const selection = element.ownerDocument.getSelection();
+  if (!selection) return;
+  let range = element.ownerDocument.caretRangeFromPoint?.(event.clientX, event.clientY) ?? null;
+  if (!range || !element.contains(range.startContainer)) {
+    range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+  } else {
+    range.collapse(true);
+  }
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 function commitDirectEdit() {
@@ -923,31 +1019,50 @@ function commitDirectEdit() {
 }
 
 function onDoubleClick(event) {
-  if (effectiveMode() !== 'text') return;
-  const element = textTargetFromEvent(event);
-  const rejection = textRejection(element);
+  if (!isEditMode()) return;
+  const directTarget = directTextTarget(event);
+  const rejection = directTarget.rejection;
   if (rejection) {
     showStatus(rejection, 'error');
     event.preventDefault();
     return;
   }
   finishDirectEdit();
+  cancelTransformDrag();
+  clearTextRangeSelection({ notify:false });
+  removeTransformSelection();
+  let { element } = directTarget;
   let target;
-  try { target = runtime.makeLocator(element); }
+  let formatTarget;
+  try {
+    formatTarget = runtime.makeLocator(element);
+    target = formatTarget;
+    if (directTarget.textPath) target = { ...target, textPath:directTarget.textPath };
+  }
   catch { showStatus('无法定位该文字，请改用区域标记', 'error'); return; }
+  if (directTarget.textNode) {
+    const wrapper = document.createElement('span');
+    wrapper.dataset.directTextRun = '';
+    directTarget.textNode.replaceWith(wrapper);
+    wrapper.append(directTarget.textNode);
+    element = wrapper;
+  }
   directEdit = {
     element, target, originalText: element.textContent ?? '',
     originalSpellcheck: element.spellcheck, committing: false,
+    textNode:directTarget.textNode ?? null,
+    formatRoot:directTarget.element,
+    formatTarget,
     resumeReplay: runtime.suspendTarget?.(target),
   };
   element.setAttribute('contenteditable', 'plaintext-only');
   element.dataset.directEditing = '';
   element.spellcheck = false;
+  element.addEventListener('blur', onDirectEditBlur);
   updateUiScale();
   element.focus({ preventScroll: true });
-  const selection = getSelection();
-  selection?.selectAllChildren(element);
-  showStatus('Cmd/Ctrl+Enter 提交 · Escape 取消');
+  placeDirectEditCaret(element, event);
+  showStatus('点击别处或 Cmd/Ctrl+Enter 提交 · Escape 取消');
   event.preventDefault();
 }
 
@@ -956,10 +1071,16 @@ function editableTransformTarget(event) {
   if (!canvas || !canvases.includes(canvas) || event.target.closest?.('[data-deck-editor-ui]')) return null;
   const interactive = event.target.closest?.(INTERACTIVE_TRANSFORM_SELECTOR);
   if (interactive && interactive.closest('.slide-canvas') === canvas) return interactive;
-  const element = event.target.closest?.('h1,h2,h3,h4,h5,h6,p,li,span,img,svg,table,.card,[class]');
-  if (!element || element.closest('.slide-canvas') !== canvas) return null;
-  if (element.matches('.stage,.slide-canvas') || element.querySelector('.stage,.slide-canvas')) return null;
-  return element;
+  for (let element = event.target; element && element !== canvas; element = element.parentElement) {
+    if (element.matches('html,body,section,.stage,.slide-fit,.slide-canvas')) continue;
+    if (element.closest('.slide-canvas') !== canvas) return null;
+    const style = getComputedStyle(element);
+    const independentBox = style.position !== 'static'
+      || ['block','inline-block','flex','inline-flex','grid','inline-grid','table','list-item']
+        .includes(style.display);
+    if (independentBox || element.matches('img,video,canvas,svg,table')) return element;
+  }
+  return null;
 }
 
 function currentTranslate(element) {
@@ -968,10 +1089,142 @@ function currentTranslate(element) {
   return { x: Number.parseFloat(x) || 0, y: Number.parseFloat(y) || 0 };
 }
 
-function removeTransformSelection() {
+function inspectorKind(element) {
+  if (element instanceof SVGElement) return 'svg';
+  if (element.matches('img,video,canvas,iframe')) return 'image';
+  return (element.textContent ?? '').trim() ? 'text' : 'shape';
+}
+
+function textNodesWithin(element) {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  return nodes;
+}
+
+function textOffsetWithin(root, node, offset) {
+  let total = 0;
+  for (const textNode of textNodesWithin(root)) {
+    if (textNode === node) {
+      return Number.isSafeInteger(offset) && offset >= 0 && offset <= textNode.data.length
+        ? total + offset : null;
+    }
+    total += textNode.data.length;
+  }
+  return null;
+}
+
+function textNodeAtOffset(root, offset) {
+  let total = 0;
+  const nodes = textNodesWithin(root);
+  for (const node of nodes) {
+    if (offset < total + node.data.length) return node;
+    total += node.data.length;
+  }
+  return offset === total ? nodes.at(-1) ?? null : null;
+}
+
+function clearTextRangeSelection({ notify = true } = {}) {
+  if (!textRangeSelection) return;
+  textRangeSelection = null;
+  if (notify) publishInspectorSelection();
+}
+
+function updateTextRangeSelection() {
+  if (!directEdit?.formatRoot?.isConnected) return;
+  const selection = document.getSelection();
+  if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) {
+    if (document.hasFocus()) clearTextRangeSelection();
+    return;
+  }
+  const range = selection.getRangeAt(0);
+  const root = directEdit.formatRoot;
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    if (document.hasFocus()) clearTextRangeSelection();
+    return;
+  }
+  const start = textOffsetWithin(root, range.startContainer, range.startOffset);
+  const end = textOffsetWithin(root, range.endContainer, range.endOffset);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start) {
+    clearTextRangeSelection();
+    return;
+  }
+  const sameRange = textRangeSelection?.element === root
+    && textRangeSelection.start === start && textRangeSelection.end === end;
+  textRangeSelection = {
+    element:root,
+    target:directEdit.formatTarget,
+    start,
+    end,
+    selectionId:sameRange ? textRangeSelection.selectionId : crypto.randomUUID(),
+  };
+  publishInspectorSelection();
+}
+
+function inspectorLabel(element) {
+  return element.getAttribute('aria-label')
+    || element.dataset.label
+    || element.getAttribute('title')
+    || element.id
+    || '';
+}
+
+function inspectorSelectionSnapshot() {
+  const state = textRangeSelection ?? transformSelection;
+  if (!state?.element?.isConnected || !state.target) return null;
+  const { element } = state;
+  const canvas = element.closest('.slide-canvas');
+  if (!canvas) return null;
+  const isTextRange = state === textRangeSelection;
+  const kind = isTextRange ? 'text' : inspectorKind(element);
+  const rangeOwner = isTextRange
+    ? (textNodeAtOffset(element, state.start)?.parentElement ?? element) : element;
+  const computedStyle = getComputedStyle(rangeOwner);
+  const computed = {};
+  const inline = {};
+  for (const property of INSPECTOR_STYLE_PROPERTIES) {
+    computed[property] = computedStyle.getPropertyValue(property).trim();
+    inline[property] = isTextRange
+      ? computed[property] : element.style.getPropertyValue(property);
+  }
+  const selectedText = isTextRange
+    ? (element.textContent ?? '').slice(state.start, state.end) : '';
+  return {
+    selectionId:state.selectionId,
+    target:state.target,
+    ...pageInfo(canvas),
+    kind,
+    tag:element.tagName,
+    label:isTextRange ? `已选 ${state.end - state.start} 个字` : inspectorLabel(element),
+    textPreview:(isTextRange ? selectedText : (element.textContent ?? ''))
+      .replace(/\s+/g, ' ').trim().slice(0, 72),
+    ...(isTextRange ? {
+      scope:'text-range', textRange:{ start:state.start, end:state.end },
+    } : { scope:'element' }),
+    computed,
+    inline,
+    capabilities:{
+      typography:kind === 'text',
+      fill:!isTextRange && kind !== 'image',
+      border:!isTextRange && kind !== 'svg',
+      svgStyle:kind === 'svg',
+      opacity:!isTextRange,
+    },
+  };
+}
+
+function publishInspectorSelection() {
+  parent.postMessage({
+    type:'inspector-selection-changed',
+    selection:inspectorSelectionSnapshot(),
+  }, location.origin);
+}
+
+function removeTransformSelection({ notify = true } = {}) {
   transformSelection?.overlay.remove();
   transformSelection?.handle?.remove();
   transformSelection = null;
+  if (notify) publishInspectorSelection();
 }
 
 function interactionBelongsToSnapshot(element, nextCanvases) {
@@ -1007,8 +1260,9 @@ function positionTransformSelection() {
   transformSelection.handle.dataset.screenSize = '14';
 }
 
-function selectTransformElement(element, withHandle) {
-  removeTransformSelection();
+function selectTransformElement(element, withHandle, target) {
+  clearTextRangeSelection({ notify:false });
+  removeTransformSelection({ notify:false });
   const overlay = document.createElement('div');
   overlay.dataset.deckEditorUi = '';
   overlay.dataset.transformSelection = '';
@@ -1022,8 +1276,12 @@ function selectTransformElement(element, withHandle) {
   }
   document.body.append(overlay);
   if (handle) document.body.append(handle);
-  transformSelection = { element, overlay, handle };
+  transformSelection = {
+    element, overlay, handle, target:target ?? runtime.makeLocator(element),
+    selectionId:crypto.randomUUID(),
+  };
   positionTransformSelection();
+  publishInspectorSelection();
 }
 
 function restoreTransformPreview(state) {
@@ -1046,6 +1304,7 @@ function cancelTransformDrag() {
   if (!transformDrag) return;
   const state = transformDrag;
   transformDrag = null;
+  delete document.documentElement.dataset.deckEditorDragging;
   state.capture?.releasePointerCapture?.(state.pointerId);
   restoreTransformPreview(state);
   requestAuthoritativeReloadIfSettled();
@@ -1055,11 +1314,11 @@ function beginMove(event, element) {
   let target;
   try { target = runtime.makeLocator(element); } catch { return; }
   const canvas = element.closest('.slide-canvas');
-  selectTransformElement(element, false);
+  selectTransformElement(element, true, target);
   transformDrag = {
     kind: 'translate', pointerId: event.pointerId, capture: element, element, target, canvas,
     start: { x: event.clientX, y: event.clientY }, base: currentTranslate(element),
-    current: currentTranslate(element), originalTranslate: element.style.translate,
+    current: currentTranslate(element), originalTranslate: element.style.translate, changed: false,
   };
   element.setPointerCapture?.(event.pointerId);
   event.preventDefault();
@@ -1097,6 +1356,15 @@ function onTransformPointerMove(event) {
   if (!transformDrag || event.pointerId !== transformDrag.pointerId) return false;
   const state = transformDrag;
   const bounds = state.canvas.getBoundingClientRect();
+  const visualScale = frameVisualScale();
+  const screenDx = (event.clientX - state.start.x) * visualScale.x;
+  const screenDy = (event.clientY - state.start.y) * visualScale.y;
+  if (!state.changed && Math.hypot(screenDx, screenDy) < 3) {
+    event.preventDefault();
+    return true;
+  }
+  state.changed = true;
+  document.documentElement.dataset.deckEditorDragging = state.kind;
   const dx = (event.clientX - state.start.x) * 1920 / bounds.width;
   const dy = (event.clientY - state.start.y) * 1080 / bounds.height;
   if (state.kind === 'translate') {
@@ -1114,7 +1382,6 @@ function onTransformPointerMove(event) {
     state.element.style.width = `${state.current.width}px`;
     state.element.style.height = `${state.current.height}px`;
   }
-  state.changed = Math.abs(dx) >= 1 || Math.abs(dy) >= 1;
   positionTransformSelection();
   event.preventDefault();
   return true;
@@ -1124,6 +1391,7 @@ function finishTransformPointer(event) {
   if (!transformDrag || event.pointerId !== transformDrag.pointerId) return false;
   const state = transformDrag;
   transformDrag = null;
+  delete document.documentElement.dataset.deckEditorDragging;
   state.capture?.releasePointerCapture?.(state.pointerId);
   restoreTransformPreview(state);
   if (requiresAuthoritativeReload) {
@@ -1143,6 +1411,7 @@ function finishTransformPointer(event) {
       showStatus(manualSuccessMessage(result, '变换已记录'));
     } else if (!result.ok) showStatus(manualFailureMessage(result, '变换失败，已恢复原状态'), 'error');
     positionTransformSelection();
+    publishInspectorSelection();
   });
   event.preventDefault();
   return true;
@@ -1150,21 +1419,15 @@ function finishTransformPointer(event) {
 
 function onPointerDown(event) {
   const currentMode = effectiveMode();
-  if (currentMode === 'resize' && event.target.closest?.('[data-resize-handle]')) {
+  if (directEdit) return;
+  if (currentMode === 'edit' && event.target.closest?.('[data-resize-handle]')) {
     beginResize(event);
     return;
   }
-  if (currentMode === 'move' && event.button === 0) {
+  if (currentMode === 'edit' && event.button === 0) {
     const element = editableTransformTarget(event);
     if (element) beginMove(event, element);
-    return;
-  }
-  if (currentMode === 'resize' && event.button === 0) {
-    const element = editableTransformTarget(event);
-    if (element) {
-      selectTransformElement(element, true);
-      event.preventDefault();
-    }
+    else removeTransformSelection();
     return;
   }
   if (!isRegionMode() || activePopover?.submitting
@@ -1250,12 +1513,28 @@ function onKeyDown(event) {
   if (directEdit) {
     if (event.key === 'Escape') {
       event.preventDefault();
+      clearTextRangeSelection();
       finishDirectEdit();
       showStatus('已取消文字修改');
     } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       commitDirectEdit();
     }
+    return;
+  }
+  const shortcutKey = event.key.toLowerCase();
+  const shortcutMethod = !event.altKey && (event.metaKey || event.ctrlKey)
+    ? (shortcutKey === 'z' ? (event.shiftKey ? 'redo' : 'undo')
+      : (shortcutKey === 'y' && event.ctrlKey && !event.metaKey && !event.shiftKey
+        ? 'redo' : null))
+    : null;
+  const shortcutElement = event.target instanceof Element ? event.target : event.target?.parentElement;
+  const acceptsNativeShortcut = shortcutElement?.closest(
+    'input,textarea,select,[role="textbox"],[contenteditable]:not([contenteditable="false"])',
+  );
+  if (shortcutMethod && !acceptsNativeShortcut) {
+    event.preventDefault();
+    parent.postMessage({ type:'history-shortcut', method:shortcutMethod }, location.origin);
     return;
   }
   if (event.key === 'Escape' && (transformDrag || transformSelection)) {
@@ -1268,6 +1547,10 @@ function onKeyDown(event) {
 function rollbackAllTentative() {
   for (const pending of tentativeCommands.values()) pending.transaction.rollback();
   tentativeCommands.clear();
+  if (transformSelection) {
+    positionTransformSelection();
+    publishInspectorSelection();
+  }
   requestAuthoritativeReloadIfSettled();
 }
 
@@ -1282,17 +1565,69 @@ function onParentMessage(event) {
     return;
   }
   if (event.data?.type === 'set-editor-mode'
-    && ['preview', 'region', 'text', 'move', 'resize'].includes(event.data.mode)) {
-    if (event.data.mode !== mode) {
+    && ['preview', 'edit', 'region', 'text', 'move', 'resize'].includes(event.data.mode)) {
+    const nextMode = canonicalMode(event.data.mode);
+    if (nextMode !== mode) {
       finishDirectEdit();
+      clearTextRangeSelection();
       cancelTransformDrag();
       removeTransformSelection();
     }
-    mode = event.data.mode;
+    mode = nextMode;
     document.documentElement.dataset.deckEditorMode = mode;
-    document.documentElement.style.cursor = mode === 'region' ? 'crosshair'
-      : (mode === 'move' ? 'move' : '');
+    document.documentElement.style.cursor = mode === 'region' ? 'crosshair' : '';
     if (mode !== 'region') removePopover();
+    return;
+  }
+  if (event.data?.type === 'apply-inspector-styles'
+    && typeof event.data.requestId === 'string'
+    && typeof event.data.selectionId === 'string') {
+    const requestId = event.data.requestId;
+    const selectionId = event.data.selectionId;
+    const changes = event.data.changes;
+    const reject = message => parent.postMessage({
+      type:'inspector-style-result', requestId, selectionId, ok:false, message,
+    }, location.origin);
+    const selectedState = textRangeSelection?.selectionId === selectionId
+      ? textRangeSelection : transformSelection;
+    if (!selectedState?.element?.isConnected || selectedState.selectionId !== selectionId) {
+      reject('选中对象已经变化，请重新选择');
+      return;
+    }
+    if (!Array.isArray(changes) || changes.length === 0 || changes.length > 12
+      || changes.some(change => !change || typeof change.value !== 'string'
+        || !INSPECTOR_STYLE_PROPERTIES.has(change.property))
+      || new Set(changes.map(change => change.property)).size !== changes.length) {
+      reject('样式参数无效');
+      return;
+    }
+    const textRange = selectedState === textRangeSelection
+      ? { start:selectedState.start, end:selectedState.end } : null;
+    if (textRange && changes.some(change => !['color', 'font-size', 'font-weight']
+      .includes(change.property))) {
+      reject('局部文字仅支持字重、字号和文字颜色');
+      return;
+    }
+    const actions = changes.map(change => ({
+      id:crypto.randomUUID(), taskId:null, target:selectedState.target,
+      kind:'setStyle', payload:{
+        property:change.property, value:change.value,
+        ...(textRange ? { textRange } : {}),
+      },
+    }));
+    submitManualActions(actions, result => {
+      if (transformSelection?.selectionId === selectionId) {
+        positionTransformSelection();
+      }
+      publishInspectorSelection();
+      parent.postMessage({
+        type:'inspector-style-result', requestId, selectionId,
+        ok:result.ok === true,
+        message:result.message,
+        sessionRefreshPending:result.sessionRefreshPending === true,
+        failedActionId:result.failedActionId,
+      }, location.origin);
+    });
     return;
   }
   if (event.data?.type === 'apply-actions' && typeof event.data.commandId === 'string') {
@@ -1306,6 +1641,10 @@ function onParentMessage(event) {
         const transaction = runtime.beginTransaction(event.data.actions, {
           replace:event.data.replace === true,
         });
+        if (transformSelection) {
+          positionTransformSelection();
+          publishInspectorSelection();
+        }
         const reply = {
           type: 'actions-prepared', commandId: event.data.commandId,
           applied: transaction.results.length, results: transaction.results,
@@ -1314,6 +1653,10 @@ function onParentMessage(event) {
         parent.postMessage(reply, location.origin);
       } else {
         const results = runtime.applyTransaction(event.data.actions);
+        if (transformSelection) {
+          positionTransformSelection();
+          publishInspectorSelection();
+        }
         parent.postMessage({
           type: 'actions-applied', commandId: event.data.commandId,
           applied: results.length, results,
@@ -1341,6 +1684,10 @@ function onParentMessage(event) {
     const pending = tentativeCommands.get(event.data.commandId);
     const rolledBack = pending?.transaction.rollback() ?? false;
     tentativeCommands.delete(event.data.commandId);
+    if (transformSelection) {
+      positionTransformSelection();
+      publishInspectorSelection();
+    }
     parent.postMessage({ type:'actions-rolled-back', commandId:event.data.commandId, rolledBack }, location.origin);
     requestAuthoritativeReloadIfSettled();
     return;
@@ -1353,6 +1700,10 @@ function onParentMessage(event) {
     try {
       rollbackAllTentative();
       runtime.applyAll(event.data.actions);
+      if (transformSelection) {
+        positionTransformSelection();
+        publishInspectorSelection();
+      }
       if (typeof event.data.commandId === 'string') {
         parent.postMessage({ type:'actions-synced', commandId:event.data.commandId }, location.origin);
       }
@@ -1442,6 +1793,7 @@ function teardown() {
   finishDirectEdit();
   cancelTransformDrag();
   removeTransformSelection();
+  clearTextRangeSelection();
   pendingManual.clear();
   rollbackAllTentative();
   dragging?.selection.remove();
@@ -1451,12 +1803,14 @@ function teardown() {
   document.querySelector('[data-direct-status]')?.remove();
   style.remove();
   document.documentElement.style.cursor = '';
+  delete document.documentElement.dataset.deckEditorDragging;
   delete document.documentElement.dataset.deckEditorMode;
   document.documentElement.style.removeProperty('--deck-editor-ui-scale-x');
   document.documentElement.style.removeProperty('--deck-editor-ui-scale-y');
   window.removeEventListener('message', onParentMessage);
   window.removeEventListener('dblclick', onDoubleClick, true);
   window.removeEventListener('keydown', onKeyDown, true);
+  document.removeEventListener('selectionchange', updateTextRangeSelection);
   window.removeEventListener('pointerdown', onPointerDown, true);
   window.removeEventListener('pointermove', onPointerMove, true);
   window.removeEventListener('pointerup', finishPointer, true);
@@ -1469,12 +1823,15 @@ if (parent !== window) {
   window.addEventListener('message', onParentMessage);
   window.addEventListener('dblclick', onDoubleClick, true);
   window.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('selectionchange', updateTextRangeSelection);
   window.addEventListener('pointerdown', onPointerDown, true);
   window.addEventListener('pointermove', onPointerMove, true);
   window.addEventListener('pointerup', finishPointer, true);
   window.addEventListener('pointercancel', cancelPointer, true);
   window.addEventListener('pagehide', teardown);
   canvasMonitor = createCanvasMonitor(nextCanvases => {
+    if (!style.isConnected) document.head?.append(style);
+    document.documentElement.dataset.deckEditorMode = mode;
     pruneDisconnectedInteractionState(nextCanvases);
     if (requiresAuthoritativeReload) {
       requestAuthoritativeReloadIfSettled();

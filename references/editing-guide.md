@@ -8,7 +8,9 @@ deck 是一个「独立版」单文件 HTML：React 运行时、字体、全部�
 
 可视化编辑器用于制作后期：页面结构和顺序已经确认，只剩精确位置、字号观感、短文案与跨页修改清单。新建 deck、批量替换、增删页或大范围结构重构仍由外部 Agent 经 `scripts/edit-bundle.py` 完成。
 
-先体检依赖，再启动浏览器工作台：
+macOS 可直接双击 skill 根目录的 `Huawei Deck 编辑器.app`。应用会先打开本地网页导入页；只有用户在网页点击“添加 Deck HTML”后，才会打开系统文件选择器以选择已有 deck HTML。每次应用启动只允许成功添加一份 deck HTML；添加后锁定该文件，不提供切换或再次添加入口；取消选择可以重试。桌面入口不会弹出终端，首次运行会按 `package-lock.json` 自动补齐 `ws`、`html2canvas`、`busboy`。Node.js ≥18 和 Python 3 不会由应用安装，缺失时会显示原生错误对话框。
+
+命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。Skill / Agent 完成第一版 deck 并通过基础结构与溢出验证后，直接用路径启动：
 
 ```bash
 python3 scripts/check_deps.py
@@ -18,29 +20,41 @@ python3 scripts/deck-editor.py <deck.html>
 python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 ```
 
-启动器只接受 `deck`、`--host`、`--port`、`--no-open`；不要把测试内部的 `--keep-temp` 当作用户参数。默认监听 `127.0.0.1` 并自动打开浏览器。服务终端会输出一行 JSON，其中的 `url` 与 `token` 供外部 Agent 连接。
+不传 `deck` 或显式使用 `--choose` 都会打开一次性网页导入页，不会立即弹出文件选择器；`--host`、`--port`、`--no-open` 保持兼容。不要把测试内部的 `--keep-temp` 当作用户参数。默认监听 `127.0.0.1` 并自动打开浏览器。带路径的编辑服务终端会输出一行 JSON，其中的 `url` 与 `token` 供外部 Agent 连接。桌面模式在编辑器浏览器页关闭 10 秒后自动退出；带路径的命令式入口不改变原生命周期，仍由调用者用 `Ctrl+C` 结束。
 
-### 0.2 五种模式
+macOS 上 Skill 可以直接把第一版带进桌面入口：
 
-五种模式依次为：预览、区域标记、文字、移动、缩放。
+```bash
+open -n "Huawei Deck 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
+```
+
+带 deck 路径的 Python 入口会自动读取当前 `CODEX_THREAD_ID`。来源任务 ID 和编辑器选择 / 新建的专用会话 ID 都会写入该 Deck 的 sidecar；关掉编辑器后再双击 App、重新添加同一份 deck，会自动恢复此前绑定。右上角绿色“<provider> 在线”表示已绑定，红色“Agent 离线”表示未绑定；点击该状态可在原位展开连接面板。Codex、Claude Code、OpenCode 与 OpenClaw 各自使用独立标签，每个 Agent 的会话按项目目录分组；项目标题使用独立底色，会话整体向内缩进并显示竖向引导线。项目可以折叠；面板可以选择已有会话、通过 macOS 系统目录选择器添加 / 新建项目、在目标项目中立即创建会话，底部保留手动 provider + 会话 ID 和解除绑定。单个 provider 未安装或读取失败不阻断其他结果。
+
+Skill 状态是证据等级，不是假装能读取各家 Agent 的内存：sidecar 已记录首次加载时显示“Skill 已加载”；会话历史含 `$huawei-deck`、`SKILL.md` 等明确证据时显示“检测到 Skill”；完整可读历史中没有证据时显示“未检测到 Skill”；provider 无只读历史能力时显示“选择时检测 / 无法确认”。目录读取与检测不会 resume 会话。用户在连接面板显式新建会话时，会立即在所选项目目录做一次只读初始化：读取一遍 `SKILL.md`、建立 Deck 编辑上下文，但不处理任务、不修改 deck；对未检测到或无法确认的旧会话，则在第一次点击“交给 Agent”时补读一次 `SKILL.md` 与本批所需 references。成功后都会持久化“已加载”；已确认会话直接续跑，不反复完整读取 Skill。
+
+### 0.2 三种一级模式
+
+三种一级模式依次为：预览、编辑、区域标记。原来的文字、移动、缩放已经合并到“编辑”，不需要来回切换工具。
 
 | 模式 | 使用方式 | 结果 |
 |---|---|---|
 | 预览 | 浏览、切页，不拦截 deck 原有交互 | 不产生动作 |
+| 编辑 | 双击文字进入修改；拖动元素本体移动；单击元素后拖动右下控制点缩放；`Escape` 取消 | 分别创建 `setText`、`translate` 或 `resize` 动作组，单击 / 双击的小幅抖动不会误提交移动 |
 | 区域标记 | 在 1920×1080 页面上区域拉框，在选区旁侧输入修改说明 | 创建带归一化区域、候选 locator 和可选 PNG 快照的任务 |
-| 文字 | 双击简单叶子文字，`Cmd/Ctrl+Enter` 提交，`Escape` 取消 | 创建 `setText` 动作组；复杂富文本会提示改用区域标记 |
-| 移动 | 拖动可定位元素 | 创建 `translate` 动作组 |
-| 缩放 | 选择元素并拖动右下控制点 | 普通元素记录宽高，SVG / 交互组件等记录 scale |
 
-区域任务可以跨页连续添加；左侧文字页序列表用 badge 显示任务数。右下角 Agent 任务 drawer 负责任务记录、定位和状态展示，可定位回原页和原区域；任务已完成并关联动作组后，drawer 会显示撤销按钮。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
+区域任务可以跨页连续添加；左侧文字页序列表用 badge 显示任务数。右下角 Agent 任务 drawer 负责任务记录、定位和状态展示，可定位回原页和原区域。待处理、失败和待确认任务可在任务行二次编辑说明或经二次确认删除；编辑后回到待处理，删除同步清理对应局部截图与附件。Agent 批处理期间禁止改删，已完成任务需先撤销。任务已完成并关联动作组后，drawer 会显示撤销按钮。直接文字、移动、缩放与 Agent 动作进入同一 `PatchJournal`，因此共享 revision 和动作组语义。
 
-顶栏的“撤销 / 重做”按时间顺序操作这份权威历史，覆盖人工文字、移动、缩放和 Agent 动作组；任务行仍保留定点撤销，定点撤销后也可从顶栏重做。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
+编辑模式中的文字操作只修改实际点中的最小文字片段，因此编辑加粗 / 着色片段时不会覆盖同一标题里的其他兄弟文字，也不会剥掉外层样式。对同时包含普通文字、`strong` / `span` / 链接和 `<br>` 的混排段落，动作 target 额外保存 childNodes `textPath`，只写回点击位置对应的文本节点；不同片段拥有独立编译槽，刷新、撤销和重做仍保持原 HTML 结构。链接本身、按钮、表单、SVG、iframe、layer 组件与图片内文字不会伪装成普通可编辑文字；这类目标继续使用区域标记交给 Agent。
+
+顶栏的“撤销 / 重做”按时间顺序操作这份权威历史，覆盖人工文字、移动、缩放和 Agent 动作组；也可使用 `Cmd/Ctrl+Z` 撤销、`Cmd/Ctrl+Shift+Z` 重做，Windows 额外兼容 `Ctrl+Y`。焦点位于文字、任务说明或连接输入框时保留浏览器原生撤销，不会操作 Deck 全局历史。任务行仍保留定点撤销，定点撤销后也可从顶栏重做。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
 
 ### 0.3 外部 Agent 协作与撤销 / 重做
 
 已完成任务可直接从 drawer 撤销；`undo` 也可通过 CLI 或 HTTP 执行，`redo` 通过 HTTP 执行。
 
-外部 Codex / Claude Code / Agent 不是内置聊天机器人，只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。drawer 的“交给 Agent 处理全部”只显示命令提示，不会假装已调用外部系统。
+外部 Codex / Claude Code / Agent 不是内置聊天机器人。drawer 的“交给 Agent 处理全部”向 `POST /api/agent-runs` 提交当前 revision 和未完成任务 ID；服务端冻结本批范围并立即启动 Agent，`GET /api/agent-runs/current` 与 `agent-run-updated` 事件提供 queued / running / succeeded / failed 状态。同一时间只允许一批运行；按钮之后新增的任务不会混入当前批次。
+
+Agent 只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`POST /api/actions` 提交动作，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 正式写回。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。浏览器不能提交 executable、命令参数或 Prompt；只能从固定 provider 枚举中选择会话。Codex、Claude Code、OpenCode 与 OpenClaw adapter 已接入同一 router；provider 未安装或未登录时，直到选择 / 运行该 provider 才返回清晰错误，不影响其他会话与任务协议。
 
 ```bash
 # 用启动器输出的真实值替换下面两项

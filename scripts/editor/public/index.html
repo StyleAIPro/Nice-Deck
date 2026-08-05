@@ -8,6 +8,20 @@
   <link rel="stylesheet" href="/editor/editor.css">
 </head>
 <body>
+  <svg class="glass-filter-defs" width="0" height="0" aria-hidden="true">
+    <filter id="glassRipple" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.009 0.012" numOctaves="2" seed="7"
+        stitchTiles="stitch" result="noise"></feTurbulence>
+      <feGaussianBlur in="noise" stdDeviation="1" result="snoise"></feGaussianBlur>
+      <feImage preserveAspectRatio="none" result="map" x="0" y="0" width="100%" height="100%"
+        href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='100'%20height='100'%20preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient%20id='gx'%20x1='0'%20x2='1'%3E%3Cstop%20offset='0'%20stop-color='rgb(205,0,0)'/%3E%3Cstop%20offset='0.30'%20stop-color='rgb(128,0,0)'/%3E%3Cstop%20offset='0.70'%20stop-color='rgb(128,0,0)'/%3E%3Cstop%20offset='1'%20stop-color='rgb(51,0,0)'/%3E%3C/linearGradient%3E%3ClinearGradient%20id='gy'%20x1='0'%20y1='0'%20x2='0'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='rgb(0,205,0)'/%3E%3Cstop%20offset='0.30'%20stop-color='rgb(0,128,0)'/%3E%3Cstop%20offset='0.70'%20stop-color='rgb(0,128,0)'/%3E%3Cstop%20offset='1'%20stop-color='rgb(0,51,0)'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect%20width='100'%20height='100'%20fill='black'/%3E%3Crect%20width='100'%20height='100'%20fill='url(%23gx)'%20style='mix-blend-mode:screen'/%3E%3Crect%20width='100'%20height='100'%20fill='url(%23gy)'%20style='mix-blend-mode:screen'/%3E%3C/svg%3E"></feImage>
+      <feGaussianBlur in="map" stdDeviation="4" result="smap"></feGaussianBlur>
+      <feDisplacementMap in="SourceGraphic" in2="smap" scale="16" xChannelSelector="R"
+        yChannelSelector="G" result="edged"></feDisplacementMap>
+      <feDisplacementMap in="edged" in2="snoise" scale="22" xChannelSelector="R"
+        yChannelSelector="G"></feDisplacementMap>
+    </filter>
+  </svg>
   <main class="editor-shell">
     <header class="topbar">
       <div class="brand-block">
@@ -20,20 +34,31 @@
       </div>
       <div class="topbar-actions">
         <div class="history-controls" role="group" aria-label="修改历史" data-busy="false">
-          <button class="history-button" type="button" data-history-undo disabled title="撤销">
+          <button class="history-button" type="button" data-history-undo disabled
+            title="撤销 · Cmd/Ctrl+Z" aria-keyshortcuts="Meta+Z Control+Z">
             <span aria-hidden="true">↶</span><span>撤销</span>
           </button>
-          <button class="history-button" type="button" data-history-redo disabled title="重做">
+          <button class="history-button" type="button" data-history-redo disabled
+            title="重做 · Cmd/Ctrl+Shift+Z" aria-keyshortcuts="Meta+Shift+Z Control+Shift+Z Control+Y">
             <span aria-hidden="true">↷</span><span>重做</span>
           </button>
         </div>
-        <span class="ws-status" data-ws-state="connecting" role="status" aria-live="polite">
-          <span class="status-dot" aria-hidden="true"></span>
+        <div class="agent-connection-anchor" data-agent-connection-anchor>
+          <button class="agent-status" type="button" data-agent-status="offline"
+            aria-haspopup="dialog" aria-expanded="false"
+            title="Agent 会话未连接，点击设置">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span data-agent-label>Agent 离线</span>
+          </button>
+        </div>
+        <span data-ws-state="connecting" hidden aria-hidden="true">
           <span data-ws-label>正在连接</span>
         </span>
-        <span class="mode-badge">预览模式</span>
       </div>
     </header>
+
+    <section class="agent-connection-popover deck-notespanel" data-agent-connection-panel
+      role="dialog" aria-label="Agent 连接" hidden></section>
 
     <section class="workspace" aria-label="Deck 编辑工作台">
       <aside class="panel page-panel" aria-label="页面列表">
@@ -51,19 +76,17 @@
 
       <section class="canvas-column" aria-label="画布">
         <div class="canvas-toolbar">
-          <div>
+          <div class="canvas-context">
             <strong data-current-page>尚未载入</strong>
             <span data-current-key>等待 Deck 响应</span>
           </div>
+          <div class="mode-tools" role="toolbar" aria-label="编辑模式" data-active-mode="preview">
+            <button class="mode-button" type="button" data-mode="preview" aria-pressed="true">预览</button>
+            <button class="mode-button" type="button" data-mode="edit" aria-pressed="false">编辑</button>
+            <button class="mode-button" type="button" data-mode="region" aria-pressed="false">区域标记</button>
+          </div>
           <div class="canvas-tools" aria-label="画布状态">
-            <div class="mode-tools" role="toolbar" aria-label="编辑模式">
-              <button class="mode-button" type="button" data-mode="preview" aria-pressed="true">预览</button>
-              <button class="mode-button" type="button" data-mode="region" aria-pressed="false">区域标记</button>
-              <button class="mode-button" type="button" data-mode="text" aria-pressed="false">文字</button>
-              <button class="mode-button" type="button" data-mode="move" aria-pressed="false">移动</button>
-              <button class="mode-button" type="button" data-mode="resize" aria-pressed="false">缩放</button>
-            </div>
-            <span>1920 × 1080</span>
+            <span class="canvas-resolution">1920 × 1080</span>
             <span class="zoom-value" data-zoom>—</span>
             <span class="revision-value">R<span data-revision>0</span></span>
           </div>
@@ -81,20 +104,15 @@
             <p class="eyebrow">INSPECTOR</p>
             <h2>属性</h2>
           </div>
-          <span class="selection-state">未选中</span>
+          <span class="selection-state" data-selection-state>未选中</span>
         </div>
-        <div class="inspector-empty">
-          <div class="selection-frame" aria-hidden="true"></div>
-          <h3>选择文字或画面元素开始编辑</h3>
-          <p>文字双击进入，Cmd/Ctrl+Enter 提交，Escape 取消；移动与缩放用拖拽提交，所有动作均可统一撤销。</p>
-        </div>
-        <section class="agent-placeholder" data-agent-placeholder aria-label="Agent 任务面板占位">
-          <div>
-            <p class="eyebrow">AGENT</p>
-            <h3>任务面板</h3>
+        <div class="inspector-content" data-inspector-content>
+          <div class="inspector-empty">
+            <div class="selection-frame" aria-hidden="true"></div>
+            <h3>选择文字或画面元素开始编辑</h3>
+            <p>双击文字直接修改；拖动元素移动，拖动右下角控制点缩放；Cmd/Ctrl+Enter 提交，Escape 取消。</p>
           </div>
-          <span>下一阶段启用</span>
-        </section>
+        </div>
       </aside>
     </section>
     <aside class="task-drawer" data-task-drawer aria-label="Agent 修改任务"></aside>

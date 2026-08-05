@@ -11,7 +11,89 @@ const RUNTIME_CONTRACT = {
   schema:1,
   version:'1.0.0',
   api:'pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,pendingTransactionCount,activeActionCount,suspendedTargetCount',
+  features:'textPath,textRangeStyle',
 };
+
+test('局部文字样式按字符范围重放、替换并恢复原始结构', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    const target = runtime.makeLocator(heading);
+    const action = value => ({
+      id:`range-${value}`, target, kind:'setStyle',
+      payload:{ property:'color', value, textRange:{ start:1, end:3 } },
+    });
+    runtime.applyAll([action('red')]);
+    const red = {
+      html:heading.innerHTML,
+      text:heading.querySelector('[data-deck-text-range-style]')?.textContent,
+      color:getComputedStyle(heading.querySelector('[data-deck-text-range-style]')).color,
+    };
+    runtime.applyAll([action('blue')]);
+    const blue = {
+      count:heading.querySelectorAll('[data-deck-text-range-style]').length,
+      text:heading.querySelector('[data-deck-text-range-style]')?.textContent,
+      color:getComputedStyle(heading.querySelector('[data-deck-text-range-style]')).color,
+    };
+    const bold = {
+      id:'range-bold', target, kind:'setStyle',
+      payload:{ property:'font-weight', value:'400', textRange:{ start:1, end:3 } },
+    };
+    runtime.applyAll([bold, action('red')]);
+    runtime.applyTransaction([{
+      ...bold, id:'range-bold-update', payload:{ ...bold.payload, value:'700' },
+    }]);
+    const combinedRun = [...heading.querySelectorAll('[data-deck-text-range-style]')]
+      .find(element => element.textContent === '一页' && element.style.color);
+    const combined = {
+      wrappers:heading.querySelectorAll('[data-deck-text-range-style]').length,
+      color:getComputedStyle(combinedRun).color,
+      weight:getComputedStyle(combinedRun).fontWeight,
+    };
+    runtime.applyAll([]);
+    return { red, blue, combined, restored:heading.innerHTML };
+  });
+  assert.match(result.red.html, /data-deck-text-range-style/);
+  assert.deepEqual(result.red.text, '一页');
+  assert.equal(result.red.color, 'rgb(255, 0, 0)');
+  assert.deepEqual(result.blue, { count:1, text:'一页', color:'rgb(0, 0, 255)' });
+  assert.deepEqual(result.combined, { wrappers:2, color:'rgb(255, 0, 0)', weight:'700' });
+  assert.equal(result.restored, '第一页标题');
+});
+
+test('局部文字样式替换只恢复自己的包装，不覆盖同文本框的其他修改', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    heading.innerHTML = '前文<span data-unrelated>删改前</span>后文';
+    const target = runtime.makeLocator(heading);
+    const action = value => ({
+      id:`weight-${value}`, target, kind:'setStyle',
+      payload:{ property:'font-weight', value, textRange:{ start:0, end:2 } },
+    });
+    runtime.applyAll([action('400')]);
+    heading.querySelector('[data-unrelated]').textContent = '删改后必须保留';
+    runtime.applyAll([action('700')]);
+    return {
+      unrelated:heading.querySelector('[data-unrelated]')?.textContent ?? null,
+      text:heading.textContent,
+    };
+  });
+  assert.deepEqual(result, {
+    unrelated:'删改后必须保留',
+    text:'前文删改后必须保留后文',
+  });
+});
 
 test('公开动作登记后定位第二个同名页并在 DOM 重建后幂等重放', async t => {
   const chromium = await loadChromium();

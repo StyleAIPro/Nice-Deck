@@ -1,0 +1,37 @@
+#!/bin/sh
+
+# Finder 启动时没有用户 shell 的 PATH；补上 Homebrew 与常见系统路径。
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+export PATH
+
+APP_MACOS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SKILL_ROOT=$(CDPATH= cd -- "$APP_MACOS_DIR/../../.." && pwd)
+LAUNCHER="$SKILL_ROOT/scripts/deck-editor.py"
+
+if [ ! -f "$LAUNCHER" ]; then
+  /usr/bin/osascript - "Huawei Deck 编辑器无法启动" "应用必须保留在 huawei-deck skill 根目录中，不能单独移动。请把 Huawei Deck 编辑器.app 放回包含 scripts 文件夹的目录。" <<'APPLESCRIPT'
+on run argv
+  display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"好"} default button "好"
+end run
+APPLESCRIPT
+  exit 2
+fi
+
+PYTHON_BIN=$(command -v python3 || true)
+if [ -z "$PYTHON_BIN" ]; then
+  /usr/bin/osascript - "Huawei Deck 编辑器无法启动" "找不到 Python 3。请先安装 Python 3，再重新双击应用。" <<'APPLESCRIPT'
+on run argv
+  display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"好"} default button "好"
+end run
+APPLESCRIPT
+  exit 2
+fi
+
+# LaunchServices 会把长期存活的 shell 主进程当作单实例 App；第二次双击时无法
+# 向它投递 reopen 事件并报 -600。只让 App 主进程负责派发，编辑服务独立运行。
+umask 077
+APP_LOG_DIR="${TMPDIR:-/tmp}/huawei-deck-editor"
+/bin/mkdir -p "$APP_LOG_DIR"
+/usr/bin/nohup "$PYTHON_BIN" "$LAUNCHER" --app "$@" \
+  </dev/null >>"$APP_LOG_DIR/launcher.log" 2>&1 &
+exit 0

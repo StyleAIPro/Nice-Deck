@@ -4,9 +4,15 @@ import { createServer } from 'node:http';
 import { isIP } from 'node:net';
 import { lstat, open, readFile, realpath } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
+import {
+  AgentRunCoordinator, createAgentRouter, manualAgentConnection,
+  providerConfiguration, resolveAgentConnection,
+} from './agent-runner.mjs';
+import { createAgentSessionCatalog } from './agent-session-catalog.mjs';
+import { pickAgentProject } from './agent-project-picker.mjs';
 import { AttachmentStore } from './attachment-store.mjs';
 import { BridgeService } from './bridge-service.mjs';
 import { parseTaskMultipart } from './multipart-task.mjs';
@@ -21,6 +27,12 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const EDITOR_ASSETS = new Map([
   ['/editor/editor.css', { path: join(PUBLIC_DIR, 'editor.css'), type: 'text/css; charset=utf-8' }],
   ['/editor/editor.mjs', { path: join(PUBLIC_DIR, 'editor.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/editor/agent-connection-panel.mjs', {
+    path: join(PUBLIC_DIR, 'agent-connection-panel.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/inspector-panel.mjs', {
+    path: join(PUBLIC_DIR, 'inspector-panel.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
   ['/editor/action-compiler.mjs', { path: join(EDITOR_DIR, 'action-compiler.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/history-state.mjs', { path: join(EDITOR_DIR, 'history-state.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/frame-bridge.mjs', { path: join(PUBLIC_DIR, 'frame-bridge.mjs'), type: 'text/javascript; charset=utf-8' }],
@@ -388,6 +400,13 @@ function injectPreviewBridge(contents) {
     /(<script\b[^>]*?\bsrc=)(["'])(?:\.\.\/)+runtime\/patch-runtime\.js\2/gi,
     '$1$2/editor/patch-runtime.js$2',
   );
+  if (!/<script\b[^>]*\bsrc=["']\/editor\/patch-runtime\.js["'][^>]*>/i.test(preview)) {
+    const runtimeTag = '<script src="/editor/patch-runtime.js"></script>\n';
+    const headOpen = preview.match(/<head\b[^>]*>/i);
+    preview = headOpen
+      ? `${preview.slice(0, headOpen.index + headOpen[0].length)}\n${runtimeTag}${preview.slice(headOpen.index + headOpen[0].length)}`
+      : `${runtimeTag}${preview}`;
+  }
   const tags = [];
   if (!/<script\b[^>]*\bsrc=["']\/editor\/html2canvas\.min\.js["'][^>]*>/i.test(preview)) {
     tags.push('<script src="/editor/html2canvas.min.js"></script>');
@@ -978,6 +997,8 @@ export async function startServer({
   host = '127.0.0.1',
   port = 0,
   openBrowser = false,
+  exitWhenEditorCloses = false,
+  editorCloseGraceMs = 10_000,
   token = randomUUID(),
   editorToken = randomUUID(),
   bridgeTimeoutMs = 10_000,
@@ -989,9 +1010,19 @@ export async function startServer({
   onActiveWritersChange = () => {},
   beforeSessionPersist = async () => {},
   syncDirectory = syncDirectoryPath,
+  agentProvider = 'codex',
+  agentThreadId = null,
+  agentAdapter = null,
+  agentSessionCatalog = null,
+  pickAgentProjectDirectory = pickAgentProject,
+  spawnAgent = spawn,
+  agentRunTimeoutMs = 20 * 60 * 1000,
 } = {}) {
   void openBrowser;
   if (!deckPath) throw new TypeError('缺少 deckPath');
+  if (!Number.isSafeInteger(editorCloseGraceMs) || editorCloseGraceMs < 0) {
+    throw new TypeError('editorCloseGraceMs 必须为非负整数');
+  }
   const normalizedHost = String(host).toLowerCase();
   const ipv4Loopback = isIP(normalizedHost) === 4 && normalizedHost.startsWith('127.');
   if (!ipv4Loopback && normalizedHost !== '::1' && normalizedHost !== 'localhost') {
@@ -1000,6 +1031,7 @@ export async function startServer({
   host = normalizedHost;
   const urlHost = host.includes(':') ? `[${host}]` : host;
   const absoluteDeckPath = resolve(deckPath);
+  const defaultAgentProject = dirname(absoluteDeckPath);
   let sidecarBoundary;
   let initialization;
   try {
@@ -1013,6 +1045,7 @@ export async function startServer({
     throw unsafeSidecarError('sidecar 路径不可信，拒绝启动编辑服务', error);
   }
   let sessionStore;
+  let initialAgentConnection;
   try {
     sessionStore = await SessionStore.open({
       deckPath:absoluteDeckPath,
@@ -1029,6 +1062,19 @@ export async function startServer({
       await sidecarBoundary.io.activateSession({
         sessionId:initialization.entry.sessionId,
       });
+    }
+    initialAgentConnection = resolveAgentConnection({
+      provider:agentProvider,
+      launchThreadId:agentThreadId,
+      persistedConnection:sessionStore.state.agentConnection,
+    });
+    if (JSON.stringify(initialAgentConnection) !== JSON.stringify(sessionStore.state.agentConnection)) {
+      const candidate = {
+        ...structuredClone(sessionStore.state),
+        agentConnection:initialAgentConnection,
+      };
+      await sessionStore.persistState(candidate);
+      Object.assign(sessionStore.state, candidate);
     }
   } catch (error) {
     await sidecarBoundary.io.close();
@@ -1067,6 +1113,21 @@ export async function startServer({
   let watcherGeneration = 0;
   let watcherQueue = Promise.resolve();
   let serviceOrigin;
+  let editorConnectedOnce = false;
+  let editorCloseTimer;
+  let closePromise;
+  let agentRuns;
+  let activeAgentAdapter;
+  const sessionCatalog = agentSessionCatalog ?? createAgentSessionCatalog();
+  const allowedAgentProjects = new Map([[
+    defaultAgentProject,
+    {
+      path:defaultAgentProject, name:basename(defaultAgentProject) || defaultAgentProject,
+      source:'default', providers:[],
+    },
+  ]]);
+  const knownSessionProjects = new Map();
+  let agentProjectPickerActive = false;
 
   const broadcast = (type, revision, payload) => {
     const message = JSON.stringify({ type, revision, payload });
@@ -1074,6 +1135,56 @@ export async function startServer({
       if (client.readyState === WebSocket.OPEN) client.send(message);
     }
   };
+
+  const requireAgentProject = async path => {
+    if (typeof path !== 'string' || !isAbsolute(path) || !allowedAgentProjects.has(path)) {
+      throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, 'Agent 项目目录不在已发现或已选择的列表中');
+    }
+    const actualPath = await realpath(path);
+    const info = await lstat(actualPath);
+    if (!info.isDirectory()) {
+      throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, 'Agent 项目路径不是目录');
+    }
+    return actualPath;
+  };
+
+  const agentContext = () => ({
+    deckPath:absoluteDeckPath,
+    serviceUrl:serviceOrigin,
+    token,
+  });
+
+  try {
+    activeAgentAdapter = agentAdapter ?? createAgentRouter({
+      initialConnection:initialAgentConnection,
+      persistConnection:async (connection, { expectedRevision } = {}) => {
+        const result = await bridge.setAgentConnection(
+          connection,
+          expectedRevision ?? sessionStore.state.revision,
+        );
+        broadcast(
+          'agent-connection-updated',
+          result.revision,
+          providerConfiguration(result.connection.provider, result.connection),
+        );
+        return result;
+      },
+      spawnProcess:spawnAgent,
+      timeoutMs:agentRunTimeoutMs,
+    });
+    agentRuns = new AgentRunCoordinator({
+      provider:activeAgentAdapter.id,
+      adapter:activeAgentAdapter,
+      getSession:() => sessionStore.state,
+      getContext:agentContext,
+      onUpdate:run => broadcast('agent-run-updated', sessionStore.state.revision, run),
+    });
+  } catch (error) {
+    bridge.close();
+    await attachmentStore.close().catch(() => {});
+    await sidecarBoundary.io.close();
+    throw error;
+  }
 
   const serializeTaskOutput = async (task, revision, { committed=false } = {}) => {
     try {
@@ -1135,6 +1246,167 @@ export async function startServer({
         json(response, 200, tasks);
         return;
       }
+      if (request.method === 'GET' && pathname === '/api/agent-providers') {
+        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
+        json(response, 200, providerConfiguration(
+          connection.provider,
+          connection,
+        ));
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-connection') {
+        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
+        json(response, 200, providerConfiguration(
+          connection.provider,
+          connection,
+        ));
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-sessions') {
+        const catalog = await sessionCatalog.list();
+        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
+        for (const session of catalog.sessions) {
+          if (typeof session.cwd !== 'string' || !isAbsolute(session.cwd)) continue;
+          const projectPath = resolve(session.cwd);
+          knownSessionProjects.set(`${session.provider}\0${session.id}`, projectPath);
+          const existingProject = allowedAgentProjects.get(projectPath);
+          allowedAgentProjects.set(projectPath, {
+            path:projectPath,
+            name:basename(projectPath) || projectPath,
+            source:existingProject?.source ?? 'discovered',
+            providers:[...new Set([...(existingProject?.providers ?? []), session.provider])],
+          });
+        }
+        catalog.sessions = catalog.sessions.map(session => {
+          const selected = session.provider === connection.provider
+            && session.id === connection.threadId;
+          return {
+            ...session,
+            selected,
+            skillStatus:selected && ['loaded', 'detected'].includes(connection.skillStatus)
+              ? connection.skillStatus
+              : session.skillStatus,
+          };
+        });
+        catalog.projects = [...allowedAgentProjects.values()].map(project => ({
+          ...project, providers:[...project.providers],
+        })).sort((a, b) => (
+          a.name.localeCompare(b.name, 'zh-CN') || a.path.localeCompare(b.path)
+        ));
+        catalog.defaultProjectPath = defaultAgentProject;
+        json(response, 200, catalog);
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-projects/pick') {
+        if (agentProjectPickerActive) {
+          throw httpError('PROJECT_PICKER_ACTIVE', 409, '项目目录选择器已经打开');
+        }
+        agentProjectPickerActive = true;
+        let selectedPath;
+        try {
+          selectedPath = await pickAgentProjectDirectory();
+        } finally {
+          agentProjectPickerActive = false;
+        }
+        if (selectedPath === null) {
+          json(response, 200, { status:'cancelled' });
+          return;
+        }
+        const projectPath = await realpath(selectedPath);
+        const info = await lstat(projectPath);
+        if (!info.isDirectory()) {
+          throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, '选择结果不是项目目录');
+        }
+        const project = {
+          path:projectPath,
+          name:basename(projectPath) || projectPath,
+          source:'selected',
+          providers:allowedAgentProjects.get(projectPath)?.providers ?? [],
+        };
+        allowedAgentProjects.set(projectPath, project);
+        json(response, 200, { status:'selected', project });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-sessions/inspect') {
+        const { provider, sessionId } = await readJson(request);
+        const candidate = manualAgentConnection({ provider, threadId:sessionId });
+        json(response, 200, await sessionCatalog.inspectSkill(
+          candidate.provider, candidate.threadId,
+        ));
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-sessions') {
+        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
+          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能新建会话');
+        }
+        if (typeof activeAgentAdapter.createSession !== 'function') {
+          throw httpError('AGENT_SESSION_CREATE_UNAVAILABLE', 409, '当前 Agent adapter 不支持新建会话');
+        }
+        const { expectedRevision, provider, projectPath } = await readJson(request);
+        requireRevision(expectedRevision);
+        if (expectedRevision !== sessionStore.state.revision) {
+          const error = httpError('REVISION_CONFLICT', 409, '编辑会话已经变化，请刷新后重试');
+          error.revision = sessionStore.state.revision;
+          throw error;
+        }
+        const trustedProjectPath = await requireAgentProject(projectPath);
+        const result = await activeAgentAdapter.createSession(
+          { provider, projectPath:trustedProjectPath },
+          agentContext(),
+        );
+        const project = allowedAgentProjects.get(trustedProjectPath);
+        if (project) project.providers = [...new Set([...project.providers, provider])];
+        const configuration = providerConfiguration(
+          result.connection.provider, result.connection,
+        );
+        json(response, 201, { ...configuration, revision:sessionStore.state.revision });
+        return;
+      }
+      if (request.method === 'PUT' && pathname === '/api/agent-connection') {
+        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
+          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能更改连接');
+        }
+        if (typeof activeAgentAdapter.configure !== 'function') {
+          throw httpError('AGENT_CONNECTION_UNAVAILABLE', 409, '当前 Agent adapter 不支持手动连接');
+        }
+        const { expectedRevision, provider, threadId } = await readJson(request);
+        requireRevision(expectedRevision);
+        const currentConnection = activeAgentAdapter.connection ?? initialAgentConnection;
+        let skillStatus = 'unknown';
+        if (threadId !== null) {
+          if (provider === currentConnection.provider && threadId === currentConnection.threadId
+            && ['loaded', 'detected'].includes(currentConnection.skillStatus)) {
+            skillStatus = currentConnection.skillStatus;
+          } else {
+            try {
+              ({ skillStatus } = await sessionCatalog.inspectSkill(provider, threadId));
+            } catch {
+              skillStatus = 'unknown';
+            }
+          }
+        }
+        const projectPath = threadId === null ? null
+          : (knownSessionProjects.get(`${provider}\0${threadId}`)
+            ?? (provider === currentConnection.provider && threadId === currentConnection.threadId
+              ? currentConnection.projectPath : null));
+        const configured = await activeAgentAdapter.configure(
+          { provider, threadId, projectPath, source:'manual', skillStatus },
+          { expectedRevision },
+        );
+        const configuration = providerConfiguration(configured.connection.provider, configured.connection);
+        json(response, 200, { ...configuration, revision:configured.revision });
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-runs/current') {
+        json(response, 200, agentRuns.snapshot());
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-runs') {
+        const { expectedRevision, taskIds } = await readJson(request);
+        const run = agentRuns.start({ expectedRevision, taskIds });
+        json(response, 202, run);
+        return;
+      }
       if (request.method === 'POST' && pathname === '/api/tasks') {
         let attachmentsLifecycle = null;
         let attachmentOwnershipTransferred = false;
@@ -1190,8 +1462,27 @@ export async function startServer({
         }
         return;
       }
-      const taskMatch = request.method === 'GET' && pathname.match(/^\/api\/tasks\/([^/]+)$/);
-      if (taskMatch) {
+      const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+      if (taskMatch && ['PATCH', 'DELETE'].includes(request.method)) {
+        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
+          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能修改任务列表');
+        }
+        const id = decodeURIComponent(taskMatch[1]);
+        const body = await readJson(request);
+        requireRevision(body.expectedRevision);
+        if (request.method === 'PATCH') {
+          const result = await bridge.updateTask(id, body.instruction, body.expectedRevision);
+          const task = await serializeTaskOutput(result.task, result.revision, { committed:true });
+          broadcast('task-updated', result.revision, task);
+          json(response, 200, { ...result, task });
+          return;
+        }
+        const result = await bridge.deleteTask(id, body.expectedRevision);
+        broadcast('task-deleted', result.revision, { id });
+        json(response, 200, result);
+        return;
+      }
+      if (taskMatch && request.method === 'GET') {
         const id = decodeURIComponent(taskMatch[1]);
         const task = sessionStore.state.tasks.find(candidate => candidate.id === id);
         if (!task) throw httpError('TASK_NOT_FOUND', 404, '找不到任务');
@@ -1365,10 +1656,23 @@ export async function startServer({
   });
 
   webSockets.on('connection', socket => {
-    if (socket.isEditor) bridge.setEditorSocket(socket);
+    if (socket.isEditor) {
+      editorConnectedOnce = true;
+      clearTimeout(editorCloseTimer);
+      editorCloseTimer = undefined;
+      bridge.setEditorSocket(socket);
+    }
     socket.on('message', data => bridge.handleMessage(socket, data));
     socket.on('close', () => {
-      if (socket.isEditor) bridge.clearEditorSocket(socket);
+      if (!socket.isEditor) return;
+      bridge.clearEditorSocket(socket);
+      if (!exitWhenEditorCloses || !editorConnectedOnce || watcherClosed) return;
+      clearTimeout(editorCloseTimer);
+      editorCloseTimer = setTimeout(() => {
+        editorCloseTimer = undefined;
+        void close().catch(() => {});
+      }, editorCloseGraceMs);
+      editorCloseTimer.unref?.();
     });
   });
 
@@ -1382,6 +1686,7 @@ export async function startServer({
     });
   } catch (error) {
     bridge.close();
+    await agentRuns.close().catch(() => {});
     await attachmentStore.close().catch(() => {});
     await sidecarBoundary.io.close();
     throw error;
@@ -1392,7 +1697,6 @@ export async function startServer({
   serviceOrigin = url;
   const wsUrl = `ws://${urlHost}:${actualPort}/events`;
   const editorWsUrl = `${wsUrl}?token=${encodeURIComponent(token)}&editorToken=${encodeURIComponent(editorToken)}`;
-  let closePromise;
   watchFile(absoluteDeckPath, { interval:500 }, watchListener);
 
   const close = () => {
@@ -1400,8 +1704,11 @@ export async function startServer({
     closePromise = (async () => {
       watcherClosed = true;
       watcherGeneration += 1;
+      clearTimeout(editorCloseTimer);
+      editorCloseTimer = undefined;
       unwatchFile(absoluteDeckPath, watchListener);
       bridge.close();
+      const agentClosed = agentRuns.close();
       const attachmentClosed = attachmentStore.close();
       const writerClosed = [];
       for (const writer of activeWriters.values()) {
@@ -1419,6 +1726,7 @@ export async function startServer({
         webSocketClosed,
         httpClosed,
         writersSettled,
+        agentClosed,
         attachmentClosed,
       ]);
       server.closeAllConnections?.();
@@ -1441,6 +1749,7 @@ export async function startServer({
     deckPath: absoluteDeckPath,
     sessionDir: sessionStore.sessionDir,
     session: sessionStore.state,
+    agentRuns,
     close,
   };
 }
@@ -1453,6 +1762,9 @@ function serverHelp() {
     '  --host HOST   监听地址（默认 127.0.0.1）',
     '  --port PORT   监听端口（默认 0，自动分配）',
     '  --no-open     不自动打开浏览器',
+    '  --exit-when-editor-closes  编辑器页面关闭后自动退出（桌面应用使用）',
+    '  --agent-thread-id ID  绑定来源 Codex 任务（Skill 自动传入）',
+    '  --agent-provider ID   新建会话的默认 Agent provider（默认 codex）',
     '  --help        显示帮助',
   ].join('\n');
 }
@@ -1462,6 +1774,9 @@ function parseServerArguments(argv) {
   let host = '127.0.0.1';
   let port = 0;
   let openBrowser = true;
+  let exitWhenEditorCloses = false;
+  let agentThreadId = null;
+  let agentProvider = 'codex';
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') return { help: true };
@@ -1469,10 +1784,17 @@ function parseServerArguments(argv) {
       openBrowser = false;
       continue;
     }
-    if (argument === '--host' || argument === '--port') {
+    if (argument === '--exit-when-editor-closes') {
+      exitWhenEditorCloses = true;
+      continue;
+    }
+    if (argument === '--host' || argument === '--port'
+      || argument === '--agent-thread-id' || argument === '--agent-provider') {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) throw new TypeError(`${argument} 缺少值`);
       if (argument === '--host') host = value;
+      else if (argument === '--agent-thread-id') agentThreadId = value;
+      else if (argument === '--agent-provider') agentProvider = value;
       else {
         port = Number(value);
         if (!Number.isSafeInteger(port) || port < 0 || port > 65535) {
@@ -1487,7 +1809,10 @@ function parseServerArguments(argv) {
     deckPath = argument;
   }
   if (!deckPath) throw new TypeError('缺少 deck 文件');
-  return { help: false, deckPath, host, port, openBrowser };
+  return {
+    help:false, deckPath, host, port, openBrowser, exitWhenEditorCloses,
+    agentThreadId, agentProvider,
+  };
 }
 
 export function buildOpenCommand(platform, editorUrl) {
@@ -1528,6 +1853,9 @@ export async function runServerCli(argv = process.argv.slice(2)) {
       host: options.host,
       port: options.port,
       openBrowser: false,
+      exitWhenEditorCloses: options.exitWhenEditorCloses,
+      agentThreadId: options.agentThreadId,
+      agentProvider: options.agentProvider,
     });
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

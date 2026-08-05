@@ -150,6 +150,38 @@ test('持久化 attachments 拒绝 Object.prototype 污染并清理全局原型'
 
 test('动作 payload 严格拒绝非有限位移、非正缩放和对象污染字段', () => {
   const target = { pageKey: 'page-001-a', path: '0/1' };
+  for (const property of ['border-color', 'border-width', 'border-style', 'fill', 'stroke', 'stroke-width']) {
+    assert.doesNotThrow(() => validateAction({
+      id:`style-${property}`, target, kind:'setStyle', payload:{ property, value:'1px' },
+    }));
+  }
+  assert.throws(() => validateAction({
+    id:'unsafe-style', target, kind:'setStyle', payload:{ property:'position', value:'fixed' },
+  }), /白名单/);
+  assert.doesNotThrow(() => validateAction({
+    id:'range-style', target, kind:'setStyle',
+    payload:{ property:'font-weight', value:'700', textRange:{ start:2, end:6 } },
+  }));
+  assert.throws(() => validateAction({
+    id:'range-border', target, kind:'setStyle',
+    payload:{ property:'border-color', value:'red', textRange:{ start:2, end:6 } },
+  }), /白名单/);
+  assert.throws(() => validateAction({
+    id:'backwards-range', target, kind:'setStyle',
+    payload:{ property:'color', value:'red', textRange:{ start:6, end:2 } },
+  }), /白名单/);
+  assert.doesNotThrow(() => validateAction({
+    id:'text-run', target:{ ...target, textPath:'0/2' },
+    kind:'setText', payload:{ text:'更新片段' },
+  }));
+  assert.throws(() => validateAction({
+    id:'bad-text-path', target:{ ...target, textPath:'00/2' },
+    kind:'setText', payload:{ text:'更新片段' },
+  }), /textPath/);
+  assert.throws(() => validateAction({
+    id:'move-text-path', target:{ ...target, textPath:'0' },
+    kind:'translate', payload:{ x:1, y:2 },
+  }), /textPath/);
   assert.throws(() => validateAction({
     id: 'bad-text', target, kind: 'setText', payload: { text: { html: '<script>' } },
   }), /字符串/);

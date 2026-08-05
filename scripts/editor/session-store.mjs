@@ -10,6 +10,8 @@ const sha256 = data => createHash('sha256').update(data).digest('hex');
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const MAX_SNAPSHOT_BYTES = 512 * 1024;
+const MUTABLE_TASK_STATUSES = new Set(['pending', 'failed', 'needs-confirmation']);
+const MAX_TASK_INSTRUCTION_LENGTH = 10_000;
 
 function snapshotError(code, statusCode, message) {
   return Object.assign(new Error(message), { code, statusCode });
@@ -193,6 +195,7 @@ export class SessionStore {
         diagnosticsBaseline:persisted.diagnosticsBaseline ?? {},
         diagnosticsCurrent:persisted.diagnosticsCurrent ?? {},
         conflict:persisted.conflict ?? null,
+        agentConnection:persisted.agentConnection ?? null,
       };
     };
     await sidecarGuard();
@@ -230,6 +233,7 @@ export class SessionStore {
       diagnosticsCurrent: {},
       diagnosticsRevision: null,
       conflict: null,
+      agentConnection: null,
     };
   }
 
@@ -417,5 +421,77 @@ export class SessionStore {
       if (isCommittedAttachments(error)) throw compensatedAttachmentError(error);
       throw error;
     }
+  }
+
+  async updateTask(taskId, instruction, expectedRevision) {
+    this.#expect(expectedRevision);
+    const normalizedInstruction = typeof instruction === 'string' ? instruction.trim() : '';
+    if (!normalizedInstruction) {
+      throw snapshotError('INVALID_TASK_INSTRUCTION', 400, '修改说明不能为空');
+    }
+    if (normalizedInstruction.length > MAX_TASK_INSTRUCTION_LENGTH) {
+      throw snapshotError(
+        'TASK_INSTRUCTION_TOO_LONG', 413,
+        `修改说明不得超过 ${MAX_TASK_INSTRUCTION_LENGTH} 个字符`,
+      );
+    }
+    const candidate = structuredClone(this.state);
+    const task = candidate.tasks.find(item => item.id === taskId);
+    if (!task) throw snapshotError('TASK_NOT_FOUND', 404, '找不到任务');
+    if (!MUTABLE_TASK_STATUSES.has(task.status) || task.groupId) {
+      throw snapshotError('TASK_LOCKED', 409, '处理中或已完成的任务不能编辑；已完成任务请先撤销');
+    }
+    task.instruction = normalizedInstruction;
+    task.status = 'pending';
+    task.candidates = [];
+    task.updatedAt = new Date().toISOString();
+    candidate.revision += 1;
+    await this.persistState(candidate);
+    return {
+      task:structuredClone(this.state.tasks.find(item => item.id === taskId)),
+      revision:this.state.revision,
+    };
+  }
+
+  async deleteTask(taskId, expectedRevision) {
+    this.#expect(expectedRevision);
+    const candidate = structuredClone(this.state);
+    const taskIndex = candidate.tasks.findIndex(item => item.id === taskId);
+    if (taskIndex < 0) throw snapshotError('TASK_NOT_FOUND', 404, '找不到任务');
+    const [task] = candidate.tasks.splice(taskIndex, 1);
+    if (!MUTABLE_TASK_STATUSES.has(task.status) || task.groupId) {
+      throw snapshotError('TASK_LOCKED', 409, '处理中或已完成的任务不能删除；已完成任务请先撤销');
+    }
+    candidate.revision += 1;
+    await this.persistState(candidate);
+
+    // session.json 是权威状态。先持久化删除，再清理旁路资源；清理失败只会留下孤儿文件，
+    // 不会让已删除任务重新出现或让存量任务引用缺失文件。
+    const cleanupErrors = [];
+    try {
+      await this.sidecarGuard();
+      if (task.snapshotPath) {
+        if (typeof this.sidecarIO.deleteSnapshot === 'function') {
+          await this.sidecarIO.deleteSnapshot({ snapshotId:task.id });
+        } else {
+          await this.sidecarIO.unlink({
+            directory:join(this.sessionDir, 'snapshots'),
+            name:`${task.id}.png`,
+            missingOk:true,
+          });
+        }
+      }
+      if (Array.isArray(task.attachments) && task.attachments.length > 0) {
+        if (typeof this.sidecarIO.deleteTaskAttachments !== 'function') {
+          throw new Error('缺少任务附件清理接口');
+        }
+        await this.sidecarIO.deleteTaskAttachments({ taskId:task.id });
+      }
+    } catch (error) { cleanupErrors.push(error); }
+    return {
+      taskId:task.id,
+      revision:this.state.revision,
+      cleanupPending:cleanupErrors.length > 0,
+    };
   }
 }

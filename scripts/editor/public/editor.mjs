@@ -1,4 +1,6 @@
 import { renderTaskDrawer } from './task-drawer.mjs';
+import { renderAgentConnectionPanel } from './agent-connection-panel.mjs';
+import { renderInspectorPanel } from './inspector-panel.mjs';
 import { connectEvents } from './ws-client.mjs';
 import { compileActionGroups } from './action-compiler.mjs';
 import { historyCandidates, historyLabel } from '/editor/history-state.mjs';
@@ -13,22 +15,38 @@ const currentPage = document.querySelector('[data-current-page]');
 const currentKey = document.querySelector('[data-current-key]');
 const wsState = document.querySelector('[data-ws-state]');
 const wsLabel = document.querySelector('[data-ws-label]');
+const agentStatus = document.querySelector('[data-agent-status]');
+const agentLabel = document.querySelector('[data-agent-label]');
+const agentConnectionAnchor = document.querySelector('[data-agent-connection-anchor]');
+const agentConnectionPanel = document.querySelector('[data-agent-connection-panel]');
 const frameViewport = document.querySelector('[data-frame-viewport]');
 const frameScene = document.querySelector('[data-frame-scene]');
 const zoomValue = document.querySelector('[data-zoom]');
 const revisionValue = document.querySelector('[data-revision]');
+const modeTools = document.querySelector('.mode-tools');
 const modeButtons = [...document.querySelectorAll('[data-mode]')];
-const modeBadge = document.querySelector('.mode-badge');
 const taskDrawer = document.querySelector('[data-task-drawer]');
 const historyControls = document.querySelector('.history-controls');
 const undoButton = document.querySelector('[data-history-undo]');
 const redoButton = document.querySelector('[data-history-redo]');
+const inspectorContent = document.querySelector('[data-inspector-content]');
+const selectionState = document.querySelector('[data-selection-state]');
 let pendingPageKey;
 let tornDown = false;
 let fitFrameRequest;
 let eventsClient;
 let pages = [];
 let tasks = [];
+let agentRun = { status:'idle' };
+let agentConfiguration = null;
+let agentSessions = null;
+let agentSessionsLoading = false;
+let agentSessionsPromise = null;
+let agentSessionsError = '';
+let agentPanelOpen = false;
+let agentPanelProvider = 'codex';
+let agentConnectionBusy = false;
+let agentConnectionNotice = '';
 let revision = 0;
 let editorMode = 'preview';
 let deckReady = false;
@@ -46,6 +64,11 @@ let historySnapshotFulfilled = 0;
 let sessionRefreshTargetRevision = 0;
 let sessionRefreshPromise;
 let seenOnline = false;
+let inspectorSelection = null;
+let inspectorBusy = false;
+let inspectorNotice = '';
+let pendingInspectorRequest = null;
+let historyNoticeTimer;
 const createRequests = new Set();
 const manualRequests = new Set();
 const commandReplies = new Map();
@@ -57,6 +80,11 @@ function onDeckFrameLoad() {
   deckReady = false;
   deckReadyPayload = undefined;
   activeFrameInstanceId = undefined;
+  inspectorSelection = null;
+  inspectorBusy = false;
+  pendingInspectorRequest = null;
+  inspectorNotice = '';
+  renderInspector();
 }
 
 deckFrame.addEventListener('load', onDeckFrameLoad);
@@ -100,8 +128,130 @@ function updateRevision(value) {
   revisionValue.textContent = String(revision);
 }
 
+function adoptAgentRun(nextRun) {
+  if (!nextRun?.status) return false;
+  if (agentRun.id && !nextRun.id) return false;
+  if (nextRun.id && agentRun.id && nextRun.id !== agentRun.id
+    && Number(nextRun.generation ?? 0) <= Number(agentRun.generation ?? 0)) {
+    return false;
+  }
+  if (nextRun.id && nextRun.id === agentRun.id
+    && Number(nextRun.sequence ?? 0) < Number(agentRun.sequence ?? 0)) {
+    return false;
+  }
+  agentRun = nextRun;
+  return true;
+}
+
+function renderAgentStatus() {
+  const connection = agentConfiguration?.connection;
+  const connected = Boolean(connection?.threadId);
+  const provider = agentConfiguration?.providers?.find(item => item.id === connection?.provider);
+  const providerName = provider?.name ?? connection?.provider ?? 'Agent';
+  agentStatus.dataset.agentStatus = connected ? 'online' : 'offline';
+  agentLabel.textContent = connected ? `${providerName} 在线` : 'Agent 离线';
+  const detail = connected
+    ? `已连接 ${providerName} 任务 ${connection.threadId}，点击查看连接设置`
+    : 'Agent 会话未连接，点击设置';
+  agentStatus.title = detail;
+  agentStatus.setAttribute('aria-label', detail);
+  agentStatus.setAttribute('aria-expanded', String(agentPanelOpen));
+}
+
+function openAgentConnectionSettings() {
+  agentPanelOpen = !agentPanelOpen;
+  if (agentPanelOpen) {
+    agentPanelProvider = agentConfiguration?.connection?.provider
+      ?? agentConfiguration?.selectedProvider
+      ?? agentPanelProvider;
+    void loadAgentSessions().catch(() => {});
+  }
+  renderAgentPanel();
+  renderAgentStatus();
+}
+
 function compiledSessionActions() {
   return compileActionGroups(sessionGroups);
+}
+
+const INSPECTOR_KIND_LABELS = Object.freeze({
+  text:'文字', shape:'图形', svg:'SVG', image:'图片',
+});
+
+function sameInspectorTarget(left, right) {
+  return Boolean(left && right)
+    && left.pageKey === right.pageKey
+    && left.path === right.path
+    && String(left.tag ?? '') === String(right.tag ?? '');
+}
+
+function sameInspectorScope(action, selection) {
+  const actionRange = action.payload?.textRange;
+  const selectionRange = selection.textRange;
+  if (!selectionRange) return actionRange === undefined;
+  return actionRange?.start === selectionRange.start && actionRange?.end === selectionRange.end;
+}
+
+function enrichInspectorSelection(selection) {
+  if (!selection?.target || !selection.computed || !selection.inline) return selection;
+  const resetValues = { ...selection.inline };
+  const historyBaselines = new Set();
+  for (const group of sessionGroups) {
+    for (const action of group.actions ?? []) {
+      if (action.kind !== 'setStyle' || !sameInspectorTarget(action.target, selection.target)
+        || !sameInspectorScope(action, selection)) continue;
+      const property = action.payload?.property;
+      if (typeof property === 'string' && typeof action.before === 'string'
+        && !historyBaselines.has(property)) {
+        resetValues[property] = action.before;
+        historyBaselines.add(property);
+      }
+    }
+  }
+  const modifiedProperties = compiledSessionActions()
+    .filter(action => action.kind === 'setStyle'
+      && sameInspectorTarget(action.target, selection.target)
+      && sameInspectorScope(action, selection)
+      && action.payload?.value !== resetValues[action.payload?.property])
+    .map(action => action.payload.property);
+  return { ...selection, resetValues, modifiedProperties:[...new Set(modifiedProperties)] };
+}
+
+function applyInspectorChanges(changes) {
+  if (!inspectorSelection || inspectorBusy || !Array.isArray(changes) || changes.length === 0) return;
+  const requestId = crypto.randomUUID();
+  pendingInspectorRequest = { requestId, selectionId:inspectorSelection.selectionId };
+  inspectorBusy = true;
+  inspectorNotice = '正在保存样式…';
+  renderInspector();
+  deckFrame.contentWindow?.postMessage({
+    type:'apply-inspector-styles', requestId,
+    selectionId:inspectorSelection.selectionId, changes,
+  }, location.origin);
+}
+
+function resetAllInspectorStyles() {
+  if (!inspectorSelection) return;
+  const changes = inspectorSelection.modifiedProperties.map(property => ({
+    property, value:inspectorSelection.resetValues?.[property] ?? '',
+  }));
+  applyInspectorChanges(changes);
+}
+
+function renderInspector() {
+  inspectorSelection = enrichInspectorSelection(inspectorSelection);
+  selectionState.textContent = inspectorSelection?.scope === 'text-range'
+    ? '选中文字'
+    : (inspectorSelection
+      ? (INSPECTOR_KIND_LABELS[inspectorSelection.kind] ?? '已选中') : '未选中');
+  selectionState.dataset.selected = String(Boolean(inspectorSelection));
+  renderInspectorPanel(inspectorContent, {
+    selection:inspectorSelection,
+    busy:inspectorBusy,
+    notice:inspectorNotice,
+    onApply:applyInspectorChanges,
+    onResetAll:resetAllInspectorStyles,
+  });
 }
 
 function syncSessionActions() {
@@ -163,8 +313,138 @@ function updatePageBadges() {
   }
 }
 
-function processAllHint() {
-  return `外部 Agent CLI 读取命令：node scripts/editor/cli.mjs --url ${location.origin} --token ${token} tasks`;
+async function processAllTasks(selectedTasks) {
+  try {
+    const startedRun = await requestJson('/api/agent-runs', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:revision,
+        taskIds:selectedTasks.map(task => task.id),
+      }),
+    });
+    adoptAgentRun(startedRun);
+    renderTasks();
+    return agentRun.message;
+  } catch (error) {
+    if (error.code === 'REVISION_CONFLICT') {
+      updateRevision(error.revision);
+      await loadSession(error.revision).catch(() => {});
+      showTaskNotice('任务列表已经变化，请检查后再次点击“交给 Agent”');
+      return '';
+    }
+    if (error.code === 'AGENT_RUN_ACTIVE') {
+      adoptAgentRun(await requestJson('/api/agent-runs/current').catch(() => agentRun));
+      renderTasks();
+      return '';
+    }
+    throw new Error(`无法交给 Agent：${error.message}`);
+  }
+}
+
+async function configureAgentConnection({ provider, threadId }) {
+  agentConnectionBusy = true;
+  agentConnectionNotice = threadId ? '正在检测 Skill 并连接会话…' : '正在断开当前会话…';
+  renderAgentPanel();
+  try {
+    const configuration = await requestJson('/api/agent-connection', {
+      method:'PUT',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:revision, provider, threadId }),
+    });
+    agentConfiguration = configuration;
+    agentPanelProvider = configuration.connection.provider;
+    updateRevision(configuration.revision);
+    await loadSession(configuration.revision);
+    agentConnectionNotice = threadId
+      ? '已连接；重新打开此 Deck 时会继续该会话。'
+      : '已断开；可选择已有会话或新建专用会话。';
+    void loadAgentSessions({ force:true }).catch(() => {});
+    renderTasks();
+    return agentConnectionNotice;
+  } catch (error) {
+    agentConnectionNotice = `连接失败：${error.message}`;
+    throw error;
+  } finally {
+    agentConnectionBusy = false;
+    renderAgentPanel();
+    renderAgentStatus();
+  }
+}
+
+async function loadAgentSessions({ force = false } = {}) {
+  if (agentSessionsPromise) return agentSessionsPromise;
+  if (agentSessions && !force) return agentSessions;
+  agentSessionsLoading = true;
+  agentSessionsError = '';
+  renderAgentPanel();
+  agentSessionsPromise = requestJson('/api/agent-sessions')
+    .then(catalog => {
+      agentSessions = catalog;
+      return catalog;
+    })
+    .catch(error => {
+      agentSessionsError = error?.message || '会话目录读取失败';
+      throw error;
+    })
+    .finally(() => {
+      agentSessionsLoading = false;
+      agentSessionsPromise = null;
+      renderAgentPanel();
+    });
+  return agentSessionsPromise;
+}
+
+async function pickAgentProject() {
+  agentConnectionBusy = true;
+  agentConnectionNotice = '正在打开系统项目目录选择器…';
+  renderAgentPanel();
+  try {
+    const result = await requestJson('/api/agent-projects/pick', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:'{}',
+    });
+    agentConnectionNotice = result.status === 'cancelled'
+      ? '已取消选择项目。'
+      : `已添加项目：${result.project.name}`;
+    await loadAgentSessions({ force:true });
+  } catch (error) {
+    agentConnectionNotice = `添加项目失败：${error.message}`;
+  } finally {
+    agentConnectionBusy = false;
+    renderAgentPanel();
+  }
+}
+
+async function createAgentSession({ provider, projectPath }) {
+  agentConnectionBusy = true;
+  agentConnectionNotice = '正在创建会话并加载一次 huawei-deck Skill…';
+  renderAgentPanel();
+  try {
+    const configuration = await requestJson('/api/agent-sessions', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:revision, provider, projectPath }),
+    });
+    agentConfiguration = configuration;
+    agentPanelProvider = provider;
+    updateRevision(configuration.revision);
+    await loadSession(configuration.revision);
+    agentConnectionNotice = '新会话已创建、Skill 已加载，并已连接当前 Deck。';
+    await loadAgentSessions({ force:true });
+    renderTasks();
+  } catch (error) {
+    if (error.code === 'REVISION_CONFLICT' && Number.isSafeInteger(error.revision)) {
+      updateRevision(error.revision);
+      await loadSession(error.revision).catch(() => {});
+    }
+    agentConnectionNotice = `新建会话失败：${error.message}`;
+  } finally {
+    agentConnectionBusy = false;
+    renderAgentPanel();
+    renderAgentStatus();
+  }
 }
 
 function locateTask(task) {
@@ -182,6 +462,22 @@ function showTaskNotice(message) {
   if (note) note.textContent = message;
 }
 
+function showHistoryNotice(message, state = 'warning') {
+  clearTimeout(historyNoticeTimer);
+  let notice = document.querySelector('[data-history-notice]');
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.className = 'history-notice';
+    notice.dataset.historyNotice = '';
+    notice.setAttribute('role', 'status');
+    document.body.append(notice);
+  }
+  notice.dataset.state = state;
+  notice.textContent = message;
+  notice.hidden = false;
+  historyNoticeTimer = setTimeout(() => { notice.hidden = true; }, state === 'error' ? 5200 : 3200);
+}
+
 function renderHistory() {
   const { undoGroup, redoGroup } = historyCandidates(sessionGroups, sessionRedo);
   const refreshPending = loadedSessionRevision < historyRefreshTargetRevision
@@ -191,8 +487,8 @@ function renderHistory() {
   historyControls.setAttribute('aria-busy', String(controlsBusy));
   undoButton.disabled = controlsBusy || !undoGroup;
   redoButton.disabled = controlsBusy || !redoGroup;
-  undoButton.title = historyLabel(undoGroup, tasks, 'undo');
-  redoButton.title = historyLabel(redoGroup, tasks, 'redo');
+  undoButton.title = `${historyLabel(undoGroup, tasks, 'undo')} · Cmd/Ctrl+Z`;
+  redoButton.title = `${historyLabel(redoGroup, tasks, 'redo')} · Cmd/Ctrl+Shift+Z`;
   undoButton.setAttribute('aria-label', undoButton.title);
   redoButton.setAttribute('aria-label', redoButton.title);
   undoButton.dataset.groupId = controlsBusy ? '' : (undoGroup?.id ?? '');
@@ -236,15 +532,15 @@ async function changeHistory(method, button) {
         updateRevision(error.revision);
         requireHistoryRefresh(error.revision);
         await loadSession(error.revision).catch(() => {});
-        showTaskNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、同步待确认`);
+        showHistoryNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、同步待确认`);
         return;
       }
       if (error.code === 'REVISION_CONFLICT') requireHistoryRefresh(error.revision);
       else expectHistoryRevision(error.revision);
       await loadSession(error.revision).catch(() => {});
-      showTaskNotice(error.code === 'REVISION_CONFLICT'
+      showHistoryNotice(error.code === 'REVISION_CONFLICT'
         ? '历史已更新，请重试'
-        : `${method === 'undo' ? '撤销' : '重做'}失败：${error.message}`);
+        : `${method === 'undo' ? '撤销' : '重做'}失败：${error.message}`, 'error');
       return;
     }
     updateRevision(result.revision);
@@ -252,16 +548,45 @@ async function changeHistory(method, button) {
     try {
       await ensureSessionRevision(result.revision);
     } catch {
-      showTaskNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、会话同步待重试`);
+      showHistoryNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、会话同步待重试`);
       return;
     }
     if (result.syncPending) {
-      showTaskNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、浏览器同步待重试`);
+      showHistoryNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、浏览器同步待重试`);
     }
   } finally {
     historyBusy = false;
     renderHistory();
   }
+}
+
+function historyMethodForShortcut(event) {
+  if (event.altKey || (!event.metaKey && !event.ctrlKey)) return null;
+  const key = event.key.toLowerCase();
+  if (key === 'z') return event.shiftKey ? 'redo' : 'undo';
+  if (key === 'y' && event.ctrlKey && !event.metaKey && !event.shiftKey) return 'redo';
+  return null;
+}
+
+function acceptsNativeHistoryShortcut(target) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return Boolean(element?.closest(
+    'input,textarea,select,[role="textbox"],[contenteditable]:not([contenteditable="false"])',
+  ));
+}
+
+function triggerHistoryShortcut(method) {
+  const button = method === 'undo' ? undoButton : redoButton;
+  if (historyBusy || button.disabled || !button.dataset.groupId) return false;
+  void changeHistory(method, button);
+  return true;
+}
+
+function onHistoryKeydown(event) {
+  const method = historyMethodForShortcut(event);
+  if (!method || acceptsNativeHistoryShortcut(event.target)) return;
+  event.preventDefault();
+  triggerHistoryShortcut(method);
 }
 
 async function undoTask(task) {
@@ -311,15 +636,96 @@ async function undoTask(task) {
   }
 }
 
+async function editTask(task, instruction) {
+  try {
+    const result = await requestJson(`/api/tasks/${encodeURIComponent(task.id)}`, {
+      method:'PATCH',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:revision, instruction }),
+    });
+    updateRevision(result.revision);
+    upsertTask(result.task);
+    return result.task;
+  } catch (error) {
+    if (error.code === 'REVISION_CONFLICT') {
+      updateRevision(error.revision);
+      await loadSession(error.revision).catch(() => {});
+      throw new Error('任务列表已经变化，请重新编辑');
+    }
+    throw error;
+  }
+}
+
+async function deleteTask(task) {
+  try {
+    const result = await requestJson(`/api/tasks/${encodeURIComponent(task.id)}`, {
+      method:'DELETE',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:revision }),
+    });
+    updateRevision(result.revision);
+    tasks = tasks.filter(candidate => candidate.id !== task.id);
+    renderTasks();
+    return result;
+  } catch (error) {
+    if (error.code === 'REVISION_CONFLICT') {
+      updateRevision(error.revision);
+      await loadSession(error.revision).catch(() => {});
+      throw new Error('任务列表已经变化，请重新确认删除');
+    }
+    throw error;
+  }
+}
+
 function renderTasks() {
   renderTaskDrawer(taskDrawer, {
     tasks,
+    agentRun,
     onLocate: locateTask,
-    onProcessAll: processAllHint,
+    onProcessAll: processAllTasks,
     onUndo: task => { void undoTask(task); },
+    onEdit:editTask,
+    onDelete:deleteTask,
   });
+  renderAgentStatus();
   updatePageBadges();
   renderHistory();
+}
+
+function renderAgentPanel() {
+  renderAgentConnectionPanel(agentConnectionPanel, {
+    open:agentPanelOpen,
+    configuration:agentConfiguration,
+    catalog:agentSessions,
+    loading:agentSessionsLoading,
+    error:agentSessionsError,
+    busy:agentConnectionBusy,
+    notice:agentConnectionNotice,
+    selectedProvider:agentPanelProvider,
+    onClose:() => {
+      agentPanelOpen = false;
+      renderAgentPanel();
+      renderAgentStatus();
+      agentStatus.focus();
+    },
+    onSelectProvider:provider => {
+      agentPanelProvider = provider;
+      agentConnectionNotice = '';
+      renderAgentPanel();
+    },
+    onRefresh:() => loadAgentSessions({ force:true }).catch(() => {}),
+    onConnect:session => configureAgentConnection({
+      provider:session.provider,
+      threadId:session.id,
+    }).catch(() => {}),
+    onDisconnect:() => configureAgentConnection({
+      provider:agentConfiguration?.connection?.provider ?? agentPanelProvider,
+      threadId:null,
+    }).catch(() => {}),
+    onPickProject:() => { void pickAgentProject(); },
+    onCreateSession:input => { void createAgentSession(input); },
+    onManualConnect:input => configureAgentConnection(input).catch(() => {}),
+  });
 }
 
 function upsertTask(task) {
@@ -355,6 +761,7 @@ function loadSession(targetRevision = revision) {
         sessionRedo = Array.isArray(session.redo) ? session.redo : [];
         tasks = uniqueTasks([...tasks, ...(Array.isArray(persistedTasks) ? persistedTasks : [])]);
         renderTasks();
+        renderInspector();
       } else {
         renderHistory();
       }
@@ -558,6 +965,31 @@ async function createRegionTask(message) {
 function onFrameMessage(event) {
   if (event.origin !== location.origin || event.source !== deckFrame.contentWindow) return;
   if (tornDown) return;
+  if (event.data?.type === 'inspector-selection-changed') {
+    inspectorSelection = event.data.selection?.selectionId ? event.data.selection : null;
+    if (!inspectorSelection) {
+      inspectorBusy = false;
+      pendingInspectorRequest = null;
+      inspectorNotice = '';
+    }
+    renderInspector();
+    return;
+  }
+  if (event.data?.type === 'inspector-style-result'
+    && pendingInspectorRequest?.requestId === event.data.requestId) {
+    pendingInspectorRequest = null;
+    inspectorBusy = false;
+    inspectorNotice = event.data.ok
+      ? (event.data.sessionRefreshPending ? '样式已保存，会话同步待重试' : '')
+      : `失败：${event.data.message || '样式修改未保存'}`;
+    renderInspector();
+    return;
+  }
+  if (event.data?.type === 'history-shortcut'
+    && ['undo', 'redo'].includes(event.data.method)) {
+    triggerHistoryShortcut(event.data.method);
+    return;
+  }
   if (event.data?.type === 'request-authoritative-reload'
     && typeof event.data.frameInstanceId === 'string'
     && Number.isSafeInteger(event.data.requestSequence)
@@ -593,6 +1025,11 @@ function onFrameMessage(event) {
     pageCount.textContent = '0 页';
     currentPage.textContent = '运行时错误';
     currentKey.textContent = event.data.code;
+    inspectorSelection = null;
+    inspectorBusy = false;
+    pendingInspectorRequest = null;
+    inspectorNotice = '';
+    renderInspector();
     return;
   }
   if (event.data?.type === 'deck-ready' && Array.isArray(event.data.pages)) {
@@ -655,16 +1092,12 @@ function onFrameMessage(event) {
 window.addEventListener('message', onFrameMessage);
 
 function setEditorMode(mode) {
-  editorMode = mode;
+  editorMode = ['text', 'move', 'resize'].includes(mode) ? 'edit' : mode;
+  modeTools.dataset.activeMode = editorMode;
   for (const button of modeButtons) {
-    button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
+    button.setAttribute('aria-pressed', String(button.dataset.mode === editorMode));
   }
-  const labels = {
-    preview: '预览模式', region: '区域标记模式', text: '文字模式',
-    move: '移动模式', resize: '缩放模式',
-  };
-  modeBadge.textContent = labels[mode] ?? '预览模式';
-  deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode }, location.origin);
+  deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode:editorMode }, location.origin);
 }
 
 const onModeClick = event => setEditorMode(event.currentTarget.dataset.mode);
@@ -691,6 +1124,31 @@ const resizeObserver = new ResizeObserver(() => {
 resizeObserver.observe(frameViewport);
 fitFrame();
 renderTasks();
+renderAgentPanel();
+renderInspector();
+agentStatus.addEventListener('click', openAgentConnectionSettings);
+
+function onAgentPanelOutsidePointer(event) {
+  if (!agentPanelOpen
+    || agentConnectionAnchor.contains(event.target)
+    || agentConnectionPanel.contains(event.target)) return;
+  agentPanelOpen = false;
+  renderAgentPanel();
+  renderAgentStatus();
+}
+
+function onAgentPanelKeydown(event) {
+  if (!agentPanelOpen || event.key !== 'Escape') return;
+  event.preventDefault();
+  agentPanelOpen = false;
+  renderAgentPanel();
+  renderAgentStatus();
+  agentStatus.focus();
+}
+
+document.addEventListener('pointerdown', onAgentPanelOutsidePointer);
+document.addEventListener('keydown', onAgentPanelKeydown);
+document.addEventListener('keydown', onHistoryKeydown);
 
 const eventsUrl = new URL('/events', location.href);
 eventsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -722,6 +1180,16 @@ eventsClient = connectEvents({
     }
     if (['task-created','task-updated'].includes(event?.type) && event.payload?.id) {
       upsertTask(event.payload);
+    } else if (event?.type === 'task-deleted' && event.payload?.id) {
+      tasks = tasks.filter(task => task.id !== event.payload.id);
+      renderTasks();
+    } else if (event?.type === 'agent-run-updated' && event.payload?.status) {
+      if (adoptAgentRun(event.payload)) renderTasks();
+    } else if (event?.type === 'agent-connection-updated' && event.payload?.connection) {
+      agentConfiguration = event.payload;
+      void ensureSessionRevision(event.revision).catch(() => {});
+      renderTasks();
+      renderAgentPanel();
     }
   },
   onState: state => {
@@ -736,15 +1204,25 @@ eventsClient = connectEvents({
     }
   },
 });
-void loadSession().catch(error => {
-  taskDrawer.dataset.open = 'true';
-  const note = taskDrawer.querySelector('[data-process-note]');
-  if (note) note.textContent = `任务恢复失败：${error.message}`;
+void Promise.all([
+  loadSession(),
+  requestJson('/api/agent-runs/current').then(run => {
+    if (adoptAgentRun(run)) renderTasks();
+  }),
+  requestJson('/api/agent-connection').then(configuration => {
+    agentConfiguration = configuration;
+    agentPanelProvider = configuration.connection?.provider ?? agentPanelProvider;
+    renderTasks();
+    renderAgentPanel();
+  }),
+]).catch(error => {
+  showHistoryNotice(`编辑状态恢复失败：${error.message}`, 'error');
 });
 
 function teardown() {
   if (tornDown) return;
   tornDown = true;
+  clearTimeout(historyNoticeTimer);
   deckFrame.contentWindow?.postMessage({ type: 'editor-teardown' }, location.origin);
   eventsClient?.close();
   resizeObserver.disconnect();
@@ -754,6 +1232,10 @@ function teardown() {
   for (const button of modeButtons) button.removeEventListener('click', onModeClick);
   undoButton.removeEventListener('click', onUndoClick);
   redoButton.removeEventListener('click', onRedoClick);
+  agentStatus.removeEventListener('click', openAgentConnectionSettings);
+  document.removeEventListener('pointerdown', onAgentPanelOutsidePointer);
+  document.removeEventListener('keydown', onAgentPanelKeydown);
+  document.removeEventListener('keydown', onHistoryKeydown);
   window.removeEventListener('message', onFrameMessage);
   window.removeEventListener('pagehide', teardown);
   window.removeEventListener('unload', teardown);

@@ -147,6 +147,16 @@ async function assertPng(path) {
 }
 
 async function assertPilotEffects(page, evidence) {
+  await page.waitForFunction(input => {
+    const frame = document.querySelector('#deck-frame');
+    const runtime = frame?.contentWindow?.HuaweiDeckPatchRuntime;
+    if (!runtime) return false;
+    try {
+      return runtime.resolve(input.setText.target).textContent === input.setText.after;
+    } catch {
+      return false;
+    }
+  }, evidence);
   const actual = await page.locator('#deck-frame').evaluate((frame, input) => {
     const runtime = frame.contentWindow.HuaweiDeckPatchRuntime;
     const resolveTarget = target => runtime.resolve(target);

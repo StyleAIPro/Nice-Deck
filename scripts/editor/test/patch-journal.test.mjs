@@ -26,6 +26,73 @@ test('hide 和 show 共享可见性编译槽并保留最后一次公开动作', 
   assert.deepEqual(journal.compile().map(action => action.kind), ['hide']);
 });
 
+test('同一富文本元素的不同文本片段分别保留最终动作', () => {
+  const journal = new PatchJournal();
+  journal.appendGroup(null, [{
+    id:'run-0', taskId:null, target:{ ...target, textPath:'0' },
+    kind:'setText', payload:{ text:'第一段更新' }, before:'第一段', after:'第一段更新', appliedAt:'t1',
+  }]);
+  journal.appendGroup(null, [{
+    id:'run-2', taskId:null, target:{ ...target, textPath:'2' },
+    kind:'setText', payload:{ text:'第二段更新' }, before:'第二段', after:'第二段更新', appliedAt:'t2',
+  }]);
+  assert.deepEqual(
+    journal.compile().map(action => [action.target.textPath, action.after]),
+    [['0','第一段更新'], ['2','第二段更新']],
+  );
+});
+
+test('局部文字样式按字符范围分别编译，同范围同属性只保留最终值', () => {
+  const journal = new PatchJournal();
+  journal.appendGroup(null, [{
+    id:'range-first', taskId:null, target, kind:'setStyle',
+    payload:{ property:'color', value:'red', textRange:{ start:0, end:2 } },
+    before:'rgb(0, 0, 0)', after:'red', appliedAt:'t1',
+  }]);
+  journal.appendGroup(null, [
+    {
+      id:'range-first-update', taskId:null, target, kind:'setStyle',
+      payload:{ property:'color', value:'blue', textRange:{ start:0, end:2 } },
+      before:'red', after:'blue', appliedAt:'t2',
+    },
+    {
+      id:'range-second', taskId:null, target, kind:'setStyle',
+      payload:{ property:'color', value:'green', textRange:{ start:3, end:5 } },
+      before:'rgb(0, 0, 0)', after:'green', appliedAt:'t2',
+    },
+  ]);
+  assert.deepEqual(journal.compile().map(action => [
+    action.payload.textRange, action.payload.value,
+  ]), [[{ start:0, end:2 }, 'blue'], [{ start:3, end:5 }, 'green']]);
+});
+
+test('旧历史中以运行时局部格式 span 为目标的动作会归一到原文本框', () => {
+  const journal = new PatchJournal();
+  journal.appendGroup(null, [{
+    id:'range-root', taskId:null, target, kind:'setStyle',
+    payload:{ property:'font-weight', value:'400', textRange:{ start:10, end:28 } },
+    before:'700', after:'400', appliedAt:'t1',
+  }]);
+  journal.appendGroup(null, [{
+    id:'range-generated-span', taskId:null,
+    target:{ ...target, path:`${target.path}/0`, tag:'SPAN', fingerprint:'generated' },
+    kind:'setStyle',
+    payload:{ property:'font-weight', value:'700', textRange:{ start:0, end:18 } },
+    before:'400', after:'700', appliedAt:'t2',
+  }]);
+  assert.deepEqual(journal.compile().map(action => ({
+    id:action.id,
+    target:action.target,
+    range:action.payload.textRange,
+    value:action.payload.value,
+  })), [{
+    id:'range-generated-span',
+    target,
+    range:{ start:10, end:28 },
+    value:'700',
+  }]);
+});
+
 test('编译时跨 inactive 历史组与动作 kind 复用最早安全 locator', () => {
   const journal = new PatchJournal();
   const first = journal.appendGroup('task-stable-target', [{

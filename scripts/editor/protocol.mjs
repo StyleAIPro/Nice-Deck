@@ -169,6 +169,13 @@ export function validateAction(action) {
   if (!action.target?.pageKey || !action.target?.path) {
     throw new TypeError('动作缺少目标定位器');
   }
+  if (action.target.textPath !== undefined) {
+    const validTextPath = typeof action.target.textPath === 'string'
+      && /^(0|[1-9]\d{0,3})(\/(0|[1-9]\d{0,3})){0,31}$/.test(action.target.textPath);
+    if (action.kind !== 'setText' || !validTextPath) {
+      throw new TypeError('textPath 只允许 setText 使用规范的文本节点路径');
+    }
+  }
   const payload = action.payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
     || Object.getPrototypeOf(payload) !== Object.prototype) {
@@ -194,8 +201,27 @@ export function validateAction(action) {
     }
   }
   if (action.kind === 'setStyle') {
-    const allowed = new Set(['color', 'background-color', 'font-size', 'font-weight', 'opacity']);
-    if (!allowed.has(payload.property) || typeof payload.value !== 'string') {
+    const allowed = new Set([
+      'color', 'background-color', 'font-size', 'font-weight', 'opacity',
+      'border-color', 'border-width', 'border-style', 'fill', 'stroke', 'stroke-width',
+    ]);
+    const rangeAllowed = new Set(['color', 'font-size', 'font-weight']);
+    const textRange = payload.textRange;
+    const validTextRange = textRange === undefined || (
+      textRange && typeof textRange === 'object' && !Array.isArray(textRange)
+      && Object.getPrototypeOf(textRange) === Object.prototype
+      && Object.keys(textRange).length === 2
+      && Object.keys(textRange).every(key => ['start', 'end'].includes(key))
+      && Number.isSafeInteger(textRange.start) && Number.isSafeInteger(textRange.end)
+      && textRange.start >= 0 && textRange.end > textRange.start
+      && textRange.end <= 1_000_000
+    );
+    const allowedKeys = textRange === undefined
+      ? ['property', 'value'] : ['property', 'value', 'textRange'];
+    if (!allowed.has(payload.property) || typeof payload.value !== 'string'
+      || !validTextRange || (textRange && !rangeAllowed.has(payload.property))
+      || Object.keys(payload).length !== allowedKeys.length
+      || Object.keys(payload).some(key => !allowedKeys.includes(key))) {
       throw new TypeError('setStyle 属性不在白名单内');
     }
   }
