@@ -8,16 +8,19 @@
 
 ![deck 交互演示：液态玻璃工具条 · 侧边预览 · 记笔记 · 放映/滚动切换](docs/showcase/deck-demo.gif)
 
-> 本地 Chrome 实录一份用本 skill 做出的答辩 deck：顶部液态玻璃工具条随讲切章，左上侧边预览缩略图跳页，左下角记笔记留评审批注，右上放映 / 滚动一键切换——放映翻到「03 · 研究过程」后切滚动，缓慢通览到致谢页。完整图文案例见 [`docs/showcase/showcase-1.md`](docs/showcase/showcase-1.md)。
+> 本地 Chrome 实录一份用本 skill 做出的答辩 deck：顶部液态玻璃工具条随讲切章，左上 `图标 + x/yy` glass 胶囊显示实时页码并展开侧边预览缩略图跳页，左下角记笔记留评审批注，右上放映 / 滚动一键切换——放映翻到「03 · 研究过程」后切滚动，缓慢通览到致谢页。完整图文案例见 [`docs/showcase/showcase-1.md`](docs/showcase/showcase-1.md)。
 
 ## 能做什么
 
 - 三套模板按场景起步：**授课**（34 页全量画廊）、**技术分享**（36 页，深色光轨 KV 封面，含选型 / 原理 / 性能对比 / 演进曲线 / 精读批注 / 截图跟读页型）、**工作汇报**（41 页，含 TL;DR / KPI / 数据墙 / 案例 / 批示纪要 / 场景裁剪流程 / 组织阵型 / 状态热力表 / 甘特 / 风险页型）——`references/workflow.md` 有完整的七阶段协作流程与场景适配
-- 保留整套设计系统：三色体系（品牌红 `#b5333b`）、Noto Sans SC + JetBrains Mono、统一字号刻度、玻璃组件、放映 / 滚动双模式、三种手动推进的动画机制（build 逐步揭示 / layer 标签切换 / SMIL 连续运动）
+- 保留整套设计系统：三色体系（品牌红 `#b5333b`）、Noto Sans SC + JetBrains Mono、统一字号刻度、品牌红表头 / 黑边分组标准表格、玻璃组件、放映 / 滚动双模式、独立内容缩放、放大后空格 / 小手抓取平移，以及三种手动推进动画机制（build / layer / SMIL）
 - 品牌可替换：换 logo / 金色背景画 / 口号 / 品牌色（`references/branding.md` + `scripts/apply_bg.py`）
 - 配图有工作流：初版类型化占位标注，终版从素材 PDF 抽原图（PyMuPDF）、自绘流程 / 架构图、制表落地（`references/artwork.md`）
 - 后期可视化微调：区域拉框批注、跨页 Agent 任务、直接文字 / 移动 / 缩放、统一动作日志与安全写回（`references/editing-guide.md`）
 - 一键 `scripts/html2pptx/convert.sh` 导出 PPTX，页内多标签（layer）自动逐标签展开成多页
+- 统一白底圆角卡片体系：浅灰细边、标题无色块底、黑色 / 品牌红标题，删除无业务含义的装饰标签
+- 按源码 / 配置展开异构模型与系统架构，自绘 SVG 同时校验文字边界、箭头方向和连线端点
+- 旧 Deck 可原地升级：公共外壳 hash 对比、历史模板三方合并、自动备份和逐页视觉审计
 
 ## 安装
 
@@ -76,6 +79,8 @@ huawei-deck/
 │   ├── deck-editor.py       # 后期可视化微调启动器
 │   ├── editor/              # 浏览器工作台、Agent 桥、sidecar、动作与写回模块
 │   ├── apply_bg.py          # 品牌图替换
+│   ├── upgrade_deck.py      # 历史三方合并、公共外壳重组、manifest 合并与审计
+│   ├── test_upgrade_deck.py # 升级器回归测试
 │   ├── verify/              # measure_overflow / shot / steps —— 溢出检测·单页截图·放映逐拍
 │   └── html2pptx/           # convert.sh + shoot.mjs + build_pptx.py
 └── docs/design/             # 设计规格与实现计划（本 skill 的构建记录，供参考）
@@ -85,7 +90,7 @@ huawei-deck/
 
 01 门面（封面 / 目录 / 议程 / 章扉 / 问题页）· 02 内容版式（卡片网格 / 左图右文 / 对比两栏 / 流程条 / 密集多栏 / 表格混排 / 全幅大图 / 截图对照 / 动手实验）· 03 动画机制（build / layer / 混合链 / SMIL / 多组切换）· 04 深色与黑板（金句 / 两种黑板题卡）· 05 完整示例（10 页真实课件成品，即拿即改）· 06 收尾（研讨 / 结语）。
 
-放映：打开默认滚动模式，点右上角玻璃工具条的显示器图标进入放映（自动全屏）；点击空白 / 空格 / → 前进，← 后退。
+放映：打开默认滚动模式，左上侧边预览 glass 胶囊持续显示实时 `x/yy` 页码；点右上角显示器图标进入放映（自动全屏）。点击空白 / 空格 / → / 向下滚前进，← / 向上滚后退；一段连续滚轮手势只推进一次。`Ctrl/Cmd + 滚轮` 或 `Ctrl/Cmd + +/-` 只缩放内容；非 100% 时 glass bar 展开四角百分比，点击复位；仅放大到 110% 及以上时出现小手，点按可锁定拖动，按住空格可临时拖动。缩小时不显示小手，点击四角或小手后会释放焦点，不残留浏览器黑色焦点圈。
 
 ## 快速上手
 
@@ -153,6 +158,8 @@ node scripts/verify/steps.mjs <deck.html> <页label> /tmp/steps    # 仅修改�
 ```
 
 `shot.mjs` 和动画页的 `steps.mjs` 使用 1920×1080 逻辑画布；无动画页运行 `steps.mjs` 只打印“此页无动画”并退出 0，不生成逐拍截图。操作细节与错误恢复见 [`references/editing-guide.md`](references/editing-guide.md)，开发者架构与信任边界见 [`docs/architecture.md`](docs/architecture.md)。
+
+ 已有 Deck 跟随 skill 更新：Codex 每次加载本 skill 后，首次接触一个 deck 目录时批量运行一次 `python3 scripts/upgrade_deck.py 我的演示.html --yes`，同一工作过程不重复检查。脚本对照同类型最新模板的公共外壳 hash；带 hash 的 Deck 通过稳定 seam 重组，未接入 seam 的历史 Deck 会从本仓库 Git 历史寻找最接近的同类模板并做无冲突三方合并，从而保留页面 profile、品牌元素和课程专属脚本。发生升级时先备份并向用户报告；无法可靠识别或合并冲突时停止写入。
 
 ## 许可证
 

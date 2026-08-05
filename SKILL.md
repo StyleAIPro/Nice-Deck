@@ -7,7 +7,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 这是什么
 
-一套**单文件 HTML 演示模板**（1920×1080，华为红品牌设计系统）：React / 字体 / 图片全部内联，拷走一个文件即真离线可用。打开默认滚动模式浏览，**点右上角玻璃工具条的显示器图标进入放映模式**（自动全屏）——点击空白、空格或方向键逐拍推进动画（`←` 回退），刷新自动回到上次页，粘贴 bilibili 视频链接可直接弹内嵌播放器。`assets/template-deck.html` 是 34 页**页型画廊**：24 页页型每页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」——画廊即文档；另有「05 · 完整示例」章 10 页取自真实课件，展示版式填入真内容后的成品。
+一套**单文件 HTML 演示模板**（1920×1080，华为红品牌设计系统）：React / 字体 / 图片全部内联，拷走一个文件即真离线可用。打开默认滚动模式浏览，左上角侧边预览 glass 胶囊持续显示实时 `x/yy` 页码，右侧 6px 细滑块仅在滚动时显现、停止 800ms 后自动淡出；`Ctrl/Cmd + 滚轮` 或 `Ctrl/Cmd + +/-` 缩放幻灯片内容（刷新保留倍率）。非 100% 时顶部 glass bar 展开四角百分比复位控件；**仅放大到 110% 及以上时**再展开小手按钮，可锁定点击 / 拖动模式，按住空格则临时抓手，松开即恢复。**点右上角显示器图标进入放映模式**（自动全屏）——点击空白、空格、方向键或上下滚轮逐拍推进 / 回退，当前页拍完才翻页；滚轮按手势防抖，触控板惯性不会连续跳页。刷新自动回到上次页，粘贴 bilibili 视频链接可直接弹内嵌播放器。`assets/template-deck.html` 是 34 页**页型画廊**：24 页页型每页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」——画廊即文档；另有「05 · 完整示例」章 10 页取自真实课件，展示版式填入真内容后的成品。
 
 ## 从零做一份 PPT？先走流程
 
@@ -26,7 +26,11 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
    node scripts/verify/steps.mjs my-deck.html <页label> /tmp/steps   # 动画逐拍核对
    ```
 
-5. **需要 PPT 交付时**：`bash scripts/html2pptx/convert.sh my-deck.html`——逐页截图组装 PPTX，layer 多标签页自动逐标签展开。
+5. **用户明确要求 PPTX 时才导出**：`bash scripts/html2pptx/convert.sh my-deck.html`——逐页截图组装 PPTX，layer 多标签页自动逐标签展开；后续只改 HTML 时不自动重导，除非用户再次要求。
+
+## 旧 Deck 升级
+
+本次会话加载 skill 后，首次接触一个已有 deck 目录时，对目录内目标 deck 各无感运行一次 `python3 scripts/upgrade_deck.py old-deck.html --yes`；不要等用户提醒，也不要先询问。同一会话、同一目录、同一批文件后续编辑不得重复检查。仅在 skill 更新后首次加载、切换目录、出现新 deck、文件被外部替换，或用户明确要求时重新检查。脚本把页面 / 导航 / 章节 / 用户扩展与公共外壳分离，通过 hash 对照同类型最新模板；带 hash 的 Deck 用当前 seam 重组，历史 Deck 则从 Git 历史寻找最接近的同类模板并做三方合并，避免覆盖页面 profile、品牌元素和课程专属外壳逻辑。升级器不逐项维护功能迁移。有变更时生成 `.before-upgrade.html` 备份，保留用户内容并合并 manifest。完成后告诉用户是否升级、目标版本和备份路径。核心结构无法可靠识别或三方合并冲突时安全停止。加 `--audit` 输出逐页视觉复核清单；完整用法见 `references/editing-guide.md` 第 7 节。
 
 ## 后期可视化微调
 
@@ -74,6 +78,11 @@ open -n "Huawei Deck 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" 
 7. **从零起新 deck 先对齐再动手**：主题与大纲没经用户确认前不碰模板 → `references/workflow.md`
 8. **字不如表，表不如图**：方法论 / 原理 / 流程页用图表做主表达——初版放类型化占位块，终版抽原图 / 自绘 / 制表落地、`data-todo` 归零 → `references/artwork.md`
 9. **文字朴实专业、标题即观点且点名技术**：不写套话与广告词，也不自造比喻式修辞（「整树换血」「优雅落地」一类读者对不上具体所指的词）——讲流程与机制一律直接写「动作 + 技术名称」；正文页标题必须承载这页的核心技术观点并写出最关键的技术名词（「基于 X 实现 Y」句式），栏目式 / 悬念式 / 有判断无技术名词的标题都是反模式 → `references/workflow.md`
+10. **表格统一用标准样式**：品牌红表头 + 白色居中粗体、全黑边框、分组范围 3px 黑色粗外框、正文 15px 黑字；列宽直接写到 `th` / `td`，默认按 `15% / 19% / 66%` 分配，优先单行但空间不足时自然换行，表格用 `flex:1;min-height:0` 吃满可用高度 → `references/artwork.md` 第 4 节
+11. **卡片只用统一白卡体系**：大卡片统一白底 + 浅灰细边 + 14px 圆角；卡片标题无色块底，只用黑色或品牌红文字；删除不承载业务信息的胶囊、角标和版式说明标签 → `references/design-system.md` 第 5～6 节
+12. **异构架构必须展开差异单元**：当不同层 / Block / 模块的执行路径不同，不能只画抽象层列表；必须依据项目源码或正式规格展开代表单元，标清输入输出、状态、缓存、分支与选择策略 → `references/artwork.md` 第 3 节
+13. **自绘图按工程图验收**：红色只标真正关键节点，不画无意义红框；所有 SVG / HTML 图逐项检查文字不越框、箭头方向正确、线条接在框边而非穿框或悬空，普通 overflow 检测不能替代截图目检 → `references/artwork.md` 第 5 节
+14. **导航 / 缩放 / 放映运行时三模板一致**：左上侧边预览统一为 `图标 + x/yy`；放大后统一支持空格临时抓手、glass 小手锁定；放映态普通滚轮统一复用方向键节拍且按手势防抖。修改公共运行时只需同步三套模板并更新版本标记；外壳 hash 会自动触发旧 Deck 重组。只有用户内容 seam 或 bundle 格式变化时才改升级器 → `references/animation.md`
 
 ## 文件导航
 
@@ -97,6 +106,8 @@ open -n "Huawei Deck 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" 
 | `scripts/deck-editor.py` | 桌面与命令式入口共用的启动模块（默认只监听 127.0.0.1，并自动打开浏览器工作台） |
 | `scripts/editor/` | 一次性网页导入、浏览器 parent/frame、外部 Agent 桥、sidecar、动作日志与安全写回实现 |
 | `scripts/apply_bg.py` | 品牌图一键替换（默认预览模式，`--yes` 落盘） |
+| `scripts/upgrade_deck.py` | 公共外壳 hash 对比、历史模板三方合并、最新模板重组、manifest 合并、自动备份与视觉审计 |
+| `scripts/test_upgrade_deck.py` | 升级器的 profile、品牌元素、历史模板与最新版运行时回归测试 |
 | `scripts/verify/*.mjs` | verify 三件套（measure_overflow / shot / steps） |
 | `scripts/html2pptx/convert.sh` | HTML → PPTX 一键转换 |
 | `scripts/react*.umd.js` | 离线 React 备件（模板已内联，仅修复用） |

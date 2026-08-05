@@ -23,10 +23,12 @@ import json, base64, gzip, zlib, uuid, re
 
 # ---------------- 读写 ----------------
 def load(path):
-    return open(path, encoding='utf-8').read().split('\n')
+    with open(path, encoding='utf-8') as stream:
+        return stream.read().split('\n')
 
 def save(path, lines):
-    open(path, 'w', encoding='utf-8').write('\n'.join(lines))
+    with open(path, 'w', encoding='utf-8') as stream:
+        stream.write('\n'.join(lines))
 
 def _tpl_idx(lines):
     for i, ln in enumerate(lines):
@@ -50,6 +52,14 @@ def dump_template(s):
 
 def set_template(lines, s):
     lines[_tpl_idx(lines)] = dump_template(s)
+
+def get_manifest(lines):
+    return json.loads(lines[_man_idx(lines)].strip())
+
+def set_manifest(lines, manifest):
+    raw = json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))
+    assert '\n' not in raw and json.loads(raw) == manifest, 'manifest encode invariant failed'
+    lines[_man_idx(lines)] = raw
 
 # ---------------- 图片 / 资源 ----------------
 def embed_image(lines, file_path, mime='image/jpeg', prefix='img'):

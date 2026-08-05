@@ -10,6 +10,7 @@ node_modules/
 
 # 具体 Deck 项目、编辑器会话与生成交付物
 /Deck-Projects/
+/deck-Project/
 /outputs/
 **/.huawei-deck-editor/
 **/.huawei-deck-editor.archive-*/

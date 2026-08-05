@@ -82,22 +82,58 @@ uid = eb.embed_image(lines, 'fig.png', mime='image/png', prefix='fig')
 
 **选型判别**：机制/流程/决策 → 自绘（读者要按中文标注顺着走）；实验证据/复杂官方架构 → 抽原图（重画会失真且费时）；两者可同页共存——自绘图讲「怎么转」，原图证明「真的行」。
 
-## 4. 终版落地 C：表格
+### 3.1 异构模型 / 系统架构图
 
-对比、枚举、速查用表格。分组表格式（分组徽标列 rowspan + mono 数字列）：
+画模型层、Block、算子链或系统组件时，以**项目源码、配置、正式规格和实测记录**为事实源；不要凭常识补全专有结构。先查清各单元的输入输出、状态、缓存、压缩 / 路由 / 并行方式和运行时约束，再决定抽象层级。
+
+- 不同层或模块执行路径不同时，**必须展开至少两个代表单元**，不能只画「L0 / L1 / L2」方框列表。例如分别展开共享主链与差异分支，直接标出哪个单元具有额外状态、Indexer、缓存或通信步骤。
+- 每个展开单元从输入画到输出：`input → projection / operator → state update → selection / aggregation → normalization / position encoding → cache / output`。省略中间步骤时用明确的省略号或注释，不让线条凭空出现。
+- 讲剪层、裁剪或最小复现策略时，必须把**结构覆盖 + 运行时约束**同时画出：保留哪些异构类型、为何不能只留同质层、何时通过容量 / KV / 初始化门禁、哪些点用于拟合、哪些点只做盲测。
+- 理论与测试同页时明确分工：公式给解析下界和待测变量；实测数据校准框架开销、通信和容量边界；失败数据只用于门禁或边界，不混入成功性能拟合。
+- 复杂专有结构优先用 inline SVG / HTML 矢量重画；参考截图只用于理解构图，不直接照搬其配色、链接、水印或无关标注。
+
+### 3.2 架构图视觉规范
+
+- 外层承载卡片遵循 `design-system.md` 的白底、浅灰细边、14px 圆角；卡片标题无色块底。
+- 图内节点默认白 / 中性灰 / 灰蓝。品牌红只给关键差异、风险门禁或当前关注路径；**禁止用红色矩形把普通区域圈一遍**。
+- 箭头必须从节点边缘出发并终止在目标边缘；不要穿过文字、悬空、反向或停在框内。多条分支分别画 path，不能依赖一条含多个 subpath 的 `marker-end`。
+- 图内文字短句化；长解释移到图外正文。优先缩短文案或加宽框，不通过把字号压到不可读来硬塞。
+
+## 4. 终版落地 C：标准表格
+
+对比、枚举、速查统一使用下面这套标准表格，不再自行发明配色与边框：
+
+- 表头：品牌红 `#b5333b`，白色 15px 粗体，水平 / 垂直居中，高度 46px，3px 黑色外框，列间 1px 黑线。
+- 表体：15px 黑字，内部网格全部 1px 黑线；不使用灰字、彩色底纹或彩色边框。
+- 分组：第一列用 `rowspan`，白底黑字居中；每个分组范围用 3px 黑色粗外框包住，组内仍保留 1px 黑线。
+- 列宽：三列默认 `15% / 19% / 66%`（分类 / 模块 / 说明）。**宽度同时写到表头和每个 `td`，不要只写 `colgroup`**，独立版运行时可能不采用 `colgroup` 宽度。
+- 文字：优先保持单行；确实放不下时自然换行，严禁 `white-space:nowrap` 导致裁切。说明列统一 `white-space:normal;overflow-wrap:break-word`。
+- 高度：表格放在纵向 flex 容器中，用 `flex:1;min-height:0` 吃满标题下的剩余空间；不要同时写 `height:100%`，否则标题高度会被重复计入并造成越界。
 
 ```html
-<table style="width:100%; border-collapse:collapse;">
-  <thead><tr><th style="text-align:left; padding:8px 12px; font-family:'JetBrains Mono',monospace; font-size:13px; letter-spacing:.12em; color:#8a8a92; border-bottom:2px solid #e0e0e4;">列名</th></tr></thead>
-  <tbody><tr>
-    <td rowspan="3" style="padding:8px 12px; border-bottom:1.5px solid #e0e0e4; vertical-align:middle;"><span style="font-family:'JetBrains Mono',monospace; font-size:14px; font-weight:700; color:#fff; background:#b5333b; border-radius:6px; padding:3px 10px; white-space:nowrap;">分组</span></td>
-    <td style="padding:8px 12px; border-bottom:1px solid #f0f0f2; font-size:16px; color:#585860;">内容列</td>
-    <td style="padding:8px 12px; border-bottom:1px solid #f0f0f2; font-family:'JetBrains Mono',monospace; font-size:15px; color:#b5333b; white-space:nowrap;">关键数字</td>
-  </tr></tbody>
+<table style="width:100%;flex:1;min-height:0;border-collapse:collapse;table-layout:fixed;font-size:15px;line-height:1.15;">
+  <thead><tr style="background:#b5333b;color:#fff;">
+    <th width="15%" style="width:15%;height:46px;padding:9px 8px;border-top:3px solid #000;border-bottom:3px solid #000;border-left:3px solid #000;border-right:1px solid #000;text-align:center;vertical-align:middle;font-size:15px;font-weight:900;">TRACK</th>
+    <th width="19%" style="width:19%;height:46px;padding:9px 8px;border-top:3px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:1px solid #000;text-align:center;vertical-align:middle;font-size:15px;font-weight:900;">MODULE</th>
+    <th width="66%" style="width:66%;height:46px;padding:9px 8px;border-top:3px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:3px solid #000;text-align:center;vertical-align:middle;font-size:15px;font-weight:900;">TECHNICAL PROBLEM</th>
+  </tr></thead>
+  <tbody>
+    <!-- 分组首行：三格都加 3px 顶边；rowspan 分类格同时承担分组左边与底边 -->
+    <tr>
+      <td rowspan="2" width="15%" style="width:15%;padding:8px;background:#fff;border-left:3px solid #000;border-top:3px solid #000;border-bottom:3px solid #000;border-right:1px solid #000;color:#000;font-size:15px;font-weight:900;line-height:1.28;vertical-align:middle;text-align:center;">GROUP A</td>
+      <td width="19%" style="width:19%;padding:6px 7px;border-top:3px solid #000;border-bottom:1px solid #000;border-left:1px solid #000;border-right:1px solid #000;font-weight:800;color:#000;vertical-align:middle;">Module A</td>
+      <td width="66%" style="width:66%;padding:6px 8px;border-top:3px solid #000;border-bottom:1px solid #000;border-left:1px solid #000;border-right:3px solid #000;color:#000;white-space:normal;overflow-wrap:break-word;vertical-align:middle;">One representative technical problem.</td>
+    </tr>
+    <!-- 分组末行：第二、三格加 3px 底边，闭合分组粗外框 -->
+    <tr>
+      <td width="19%" style="width:19%;padding:6px 7px;border-top:1px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:1px solid #000;font-weight:800;color:#000;vertical-align:middle;">Module B</td>
+      <td width="66%" style="width:66%;padding:6px 8px;border-top:1px solid #000;border-bottom:3px solid #000;border-left:1px solid #000;border-right:3px solid #000;color:#000;white-space:normal;overflow-wrap:break-word;vertical-align:middle;">Another representative technical problem.</td>
+    </tr>
+  </tbody>
 </table>
 ```
 
-表格单元格文字是**图元**，15–17px 即可、不受 21px 散文地板约束（判别法见 `design-system.md` 第 3 节）。行数多的总表先估高度：行高约 44px，超过 ~18 行考虑拆列或拆页。
+表格单元格文字是**图元**，标准字号为 15px、不受 21px 散文地板约束；信息较少且空间充足时可升到 17px，但必须先保证不溢出、尽量少换行。行数多的总表先估高度：标准行高约 38–44px，超过 ~18 行考虑拆列或拆页。改完必须截图目检列宽、换行、分组外框和底部留白。
 
 ## 5. 落地后的验证与踩坑
 
@@ -105,6 +141,9 @@ uid = eb.embed_image(lines, 'fig.png', mime='image/png', prefix='fig')
 - **缺字形坑**：Noto Sans SC 没有下标字符（₁₂₅ 等，会渲成方框）——公式下标用 `<sub>`/`<sup>` 标签写。
 - 图注必须写出处（「论文 Fig N」）；数字型结论优先进 stat 卡或表格，不要埋在图注里。
 - 自绘图**去花花绿绿**：只用 红 + 灰蓝 + 中性灰，红只标关键节点（同 `design-system.md` 三色铁律）。
+- **SVG 文本不会可靠触发 HTML overflow 检测**。每张自绘 SVG 必须截图放大目检：文字是否越框 / 被截，标题与说明是否贴边，公式下标是否缺字。
+- 逐条核对连线：起点 / 终点是否在框边、箭头方向是否符合计算流、分叉是否各自带箭头、线条是否穿过框或文字、状态更新是否画反。
+- 架构图修改至少做两轮截图：第一轮查结构与层级，第二轮查边界、线条和颜色；不能只凭 `measure_overflow` 的 0 退出码判定完成。
 
 ## 常见错误
 
@@ -115,4 +154,7 @@ uid = eb.embed_image(lines, 'fig.png', mime='image/png', prefix='fig')
 | 方法论页面全是文字卡 | 字不如表，表不如图——机制类内容自绘流程/架构图做主表达 |
 | 裁图带上论文原图注 | 图注语言不统一且冗余；裁掉，自己写中文图注并标「论文 Fig N」 |
 | 自绘图沿用素材原配色 | 花花绿绿破坏三色体系；节点重画为 红/灰蓝/中性灰 |
+| 用抽象层列表代替异构结构 | 看不出运行路径为何不同；依据源码展开代表层 / Block 与差异分支 |
+| 普通区域全部画红框 | 红色失去语义且画面嘈杂；改用中性灰边，只给关键差异和风险门禁用红 |
+| SVG 文字或箭头“差一点”对齐 | 放映时会明显越框、穿线或悬空；截图放大逐项校正，不能依赖 overflow 数值 |
 | 落地后不清点占位 | 漏图无声出货；`data-todo` 计数必须归零再交付 |

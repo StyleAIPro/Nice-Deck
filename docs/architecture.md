@@ -31,6 +31,7 @@ huawei-deck 是一个符合 `SKILL.md` 目录约定的 **Agent Skill**，不是�
 3. **场景三分，同一工具链**。授课 / 技术分享 / 汇报三套模板平等并列，共用设计系统与全部脚本；差异只在页型集合与基调（叙事骨架、页数节奏、动画量、语言风格——见 `workflow.md` 场景适配表）。
 4. **品牌可替换，不做通用主题系统**。华为品牌元素（背景画 / 黑板底图 / 人像 / logo / 口号 / 红色系）全部登记为**可替换点**，配有脚本和文档；但不抽象成主题配置——保持模板可直接照抄的具体性。
 5. **模板只读，副本工作**。所有编辑都发生在 `cp assets/xxx.html my-deck.html` 之后的副本上。
+6. **内容缩放与浏览器 UI 解耦**。`Ctrl/Cmd + 滚轮` / `+/-` 改 slide canvas 的用户倍率，刷新从 `deck-template-zoom-v1` 恢复；非 100% 时 navbar 液态展开四角百分比复位控件，点击右上角任一模式按钮也复位。工具条固定；滚动态以当前页为锚点同帧校正滚动位置，避免跳页与闪烁。
 
 ### 2.2 视觉设计系统（`design-system.md` / `huawei-style.md`）
 
@@ -367,6 +368,7 @@ provider seam 统一为 `run(...)`、`connection`、`configure(...)` 与 `create
 - 改脚本行为 / 命令用法 → 同步 `SKILL.md`、`README.md` 与相关 reference；
 - 改模板页数（34/36/41）→ 同步 SKILL.md、README、template-pages.md、workflow.md 中的全部提法；
 - 改动画引擎规则 → deck 运行时与 `steps.mjs` 双侧同步；
+- 改缩放 / ResizeObserver / bundle error sink → 三套模板运行时同步，并验证滚动态锚点、连续缩放无闪烁、其他运行错误仍可见；
 - 改 edit-bundle 编码/记账逻辑 → 保持 §4.2 四条不变量，并同步 editing-guide.md。
 
 ---
@@ -385,3 +387,4 @@ provider seam 统一为 `run(...)`、`connection`、`configure(...)` 与 `create
 | 8 | 不删内联 React / 字体（误删用 `eb.inline_react` 修复） | 断网环境整页起不来 |
 | 9 | 退出码契约 0/1/2 全脚本一致 | CI / 上层判断失灵 |
 | 10 | manifest 条目与 template 引用一一对应（嵌图走 embed_image，换图走 apply_bg） | manifest 残留无引用的数据白占体积，或 template 引用了不存在的条目导致图片加载失败 |
+| 11 | 三套模板缩放运行时一致；倍率持久化、四角复位控件、模式按钮复位规则一致；ResizeObserver 不同步写布局，滚动态缩放同帧锁定当前页 | 缩放告警、倍率丢失、模式切换尺寸错误、自动适配抵消、跳页或闪烁 |
