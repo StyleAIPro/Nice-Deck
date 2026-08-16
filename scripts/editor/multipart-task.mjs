@@ -14,7 +14,7 @@ const TASK_REQUIRED_KEYS = [
   'attachmentSources', 'expectedRevision', 'instruction', 'pageIndex', 'pageKey',
   'pageLabel', 'rect',
 ];
-const TASK_OPTIONAL_KEYS = ['candidates'];
+const TASK_OPTIONAL_KEYS = ['candidates', 'pageState'];
 const TASK_KEYS = new Set([...TASK_REQUIRED_KEYS, ...TASK_OPTIONAL_KEYS]);
 const RECT_KEYS = ['h', 'w', 'x', 'y'];
 const UTF8 = new TextDecoder('utf-8', { fatal:true });
@@ -332,6 +332,7 @@ function sanitizeTask(value) {
     instruction:value.instruction.trim(),
   };
   if (value.candidates !== undefined) input.candidates = cloneJsonValue(value.candidates);
+  if (value.pageState !== undefined) input.pageState = cloneJsonValue(value.pageState);
   try { validateTask(input); }
   catch (cause) { throw invalid(cause.message || 'task 区域字段无效', { cause }); }
   return {

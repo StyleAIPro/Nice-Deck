@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer as createHttpServer } from 'node:http';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -37,6 +38,14 @@ function collectProcess(child) {
 function spawnCli(args) {
   const child = spawn(process.execPath, [CLI, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   return { child, result: collectProcess(child) };
+}
+
+function spawnCliWithEnv(args, environment) {
+  const child = spawn(process.execPath, [CLI, ...args], {
+    stdio:['ignore', 'pipe', 'pipe'],
+    env:{ ...process.env, ...environment },
+  });
+  return { child, result:collectProcess(child) };
 }
 
 async function runCli(args) {
@@ -82,7 +91,9 @@ async function startServerProcess(t) {
   const root = await mkdtemp(join(tmpdir(), 'deck-editor-cli-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, '<!doctype html><title>CLI test</title>');
-  const child = spawn(process.execPath, [SERVER, deck, '--host', '127.0.0.1', '--port', '0', '--no-open'], {
+  const child = spawn(process.execPath, [
+    SERVER, deck, '--host', '127.0.0.1', '--port', '0', '--no-open', '--no-agent-autostart',
+  ], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(async () => {
@@ -138,13 +149,166 @@ function parseJsonOutput(result) {
   return JSON.parse(result.stdout);
 }
 
-test('server CLI 输出 ready JSON、保持运行并响应 SIGINT/SIGTERM', async t => {
+test('creation CLI 从受控 capability 文件读取凭据并提交统一 CreationCommand', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-creation-cli-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const capability = join(root, 'capability.json');
+  const payload = join(root, 'brief.json');
+  await writeFile(capability, JSON.stringify({ version:1, scope:'creation-draft', token:'creation-secret' }));
+  await writeFile(payload, JSON.stringify({
+    expectedRevision:4,
+    patch:{ title:'CLI 新建 Deck' },
+  }));
+  const received = [];
+  const server = createHttpServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received.push({
+      method:request.method,
+      url:request.url,
+      authorization:request.headers.authorization,
+      body:chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null,
+    });
+    response.writeHead(200, { 'content-type':'application/json' });
+    response.end(JSON.stringify(request.method === 'GET'
+      ? request.url === '/api/creation-draft/templates'
+        ? { version:2, templates:[{ templateId:'tech-share' }] }
+        : { draftId:'draft-cli', revision:4, phase:'brief' }
+      : { revision:5, snapshot:{ revision:5, brief:{ title:'CLI 新建 Deck' } } }));
+  });
+  await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
+  t.after(() => new Promise(resolvePromise => server.close(resolvePromise)));
+  const address = server.address();
+  const environment = {
+    HUAWEI_DECK_CREATION_URL:`http://127.0.0.1:${address.port}`,
+    HUAWEI_DECK_CREATION_CAPABILITY_FILE:capability,
+  };
+  const status = parseJsonOutput(await spawnCliWithEnv(['creation', 'status'], environment).result);
+  assert.equal(status.revision, 4);
+  const templates = parseJsonOutput(await spawnCliWithEnv(['creation', 'templates'], environment).result);
+  assert.equal(templates.templates[0].templateId, 'tech-share');
+  const updated = parseJsonOutput(await spawnCliWithEnv([
+    'creation', 'update-brief', '--json', payload,
+  ], environment).result);
+  assert.equal(updated.revision, 5);
+  assert.equal(received.length, 3);
+  assert.equal(received[0].authorization, 'Bearer creation-secret');
+  assert.equal(received[1].url, '/api/creation-draft/templates');
+  assert.equal(received[2].body.type, 'update-brief');
+  assert.equal(received[2].body.expectedRevision, 4);
+});
+
+test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/solidify/redo', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-workspace-cli-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const received = [];
+  const server = createHttpServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received.push({
+      method:request.method,
+      url:request.url,
+      authorization:request.headers.authorization,
+      body:chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null,
+    });
+    response.writeHead(200, { 'content-type':'application/json' });
+    if (request.method === 'GET') response.end(JSON.stringify({ revision:9, groups:[] }));
+    else response.end(JSON.stringify({ revision:10, ok:true }));
+  });
+  await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
+  t.after(() => new Promise(resolvePromise => server.close(resolvePromise)));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  const fromEnvironment = parseJsonOutput(await spawnCliWithEnv(['status'], {
+    HUAWEI_DECK_EDITOR_URL:url,
+    HUAWEI_DECK_EDITOR_TOKEN:'environment-secret',
+    HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
+  }).result);
+  assert.equal(fromEnvironment.revision, 9);
+  assert.equal(received.at(-1).authorization, 'Bearer environment-secret');
+
+  const capability = join(root, 'workspace-capability.json');
+  await writeFile(capability, JSON.stringify({
+    version:1, scope:'managed-deck-workspace', url, token:'capability-secret',
+  }));
+  parseJsonOutput(await spawnCliWithEnv([
+    '--capability-file', capability, '--expected-revision', '7', 'verify',
+  ], {
+    HUAWEI_DECK_EDITOR_URL:'', HUAWEI_DECK_EDITOR_TOKEN:'',
+    HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
+  }).result);
+  assert.equal(received.at(-1).url, '/api/write-deck');
+  assert.deepEqual(received.at(-1).body, { expectedRevision:7 });
+  assert.equal(received.at(-1).authorization, 'Bearer capability-secret');
+
+  const beforeSolidify = received.length;
+  parseJsonOutput(await spawnCliWithEnv(['solidify'], {
+    HUAWEI_DECK_EDITOR_URL:url,
+    HUAWEI_DECK_EDITOR_TOKEN:'environment-secret',
+    HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
+  }).result);
+  assert.deepEqual(received.slice(beforeSolidify).map(item => item.url), [
+    '/api/session', '/api/solidify-deck',
+  ]);
+  assert.deepEqual(received.at(-1).body, { expectedRevision:9 });
+
+  parseJsonOutput(await spawnCliWithEnv([
+    '--url', url, '--token', 'explicit-secret', '--expected-revision', '11',
+    'redo', 'group-1',
+  ], {}).result);
+  assert.equal(received.at(-1).url, '/api/groups/group-1/redo');
+  assert.deepEqual(received.at(-1).body, { expectedRevision:11 });
+
+  parseJsonOutput(await spawnCliWithEnv([
+    '--url', url, '--token', 'explicit-secret', '--expected-revision', '12',
+    'begin-source-task', 'task-structure-1',
+  ], {}).result);
+  assert.equal(received.at(-1).url, '/api/source-edits');
+  assert.deepEqual(received.at(-1).body, {
+    expectedRevision:12, taskId:'task-structure-1',
+  });
+
+  parseJsonOutput(await spawnCliWithEnv([
+    '--url', url, '--token', 'explicit-secret', '--expected-revision', '13',
+    'begin-source-edit',
+  ], {}).result);
+  assert.equal(received.at(-1).url, '/api/source-edits');
+  assert.deepEqual(received.at(-1).body, { expectedRevision:13, taskId:null });
+
+  parseJsonOutput(await spawnCliWithEnv([
+    '--url', url, '--token', 'explicit-secret', '--expected-revision', '14',
+    'commit-source-edit', 'source-edit-1',
+  ], {}).result);
+  assert.equal(received.at(-1).url, '/api/source-edits/source-edit-1/commit');
+  assert.deepEqual(received.at(-1).body, { expectedRevision:14 });
+
+  parseJsonOutput(await spawnCliWithEnv([
+    '--url', url, '--token', 'explicit-secret', '--expected-revision', '15',
+    'cancel-source-edit', 'source-edit-1',
+  ], {}).result);
+  assert.equal(received.at(-1).url, '/api/source-edits/source-edit-1/cancel');
+  assert.deepEqual(received.at(-1).body, { expectedRevision:15 });
+
+  parseJsonOutput(await spawnCliWithEnv([
+    '--url', url, '--token', 'explicit-secret', '--expected-revision', '12',
+    'cancel-source-task', 'task-structure-1',
+  ], {}).result);
+  assert.equal(received.at(-1).url, '/api/tasks/task-structure-1/source-edit/cancel');
+  assert.deepEqual(received.at(-1).body, { expectedRevision:12 });
+});
+
+test('server CLI 输出 ready JSON、保持运行并响应 SIGINT/SIGTERM', {
+  skip:process.platform === 'win32' ? 'Windows 没有 POSIX SIGINT/SIGTERM 退出语义' : false,
+}, async t => {
   for (const signal of ['SIGINT', 'SIGTERM']) {
     await t.test(signal, async t => {
       const { child, ready } = await startServerProcess(t);
       assert.match(ready.url, /^http:\/\/127\.0\.0\.1:\d+$/);
       assert.equal(typeof ready.token, 'string');
       assert.match(ready.editorUrl, /^http:\/\/127\.0\.0\.1:\d+\/editor\//);
+      assert.equal(ready.mode, 'visible-editor');
+      assert.equal(JSON.parse(await readFile(ready.capabilityPath, 'utf8')).scope,
+        'managed-deck-workspace');
       const editorUrl = new URL(ready.editorUrl);
       assert.equal(editorUrl.searchParams.get('token'), ready.token);
       assert.ok(editorUrl.searchParams.get('editorToken'));
@@ -157,11 +321,12 @@ test('server CLI 输出 ready JSON、保持运行并响应 SIGINT/SIGTERM', asyn
       const exit = await waitForExit(child);
       assert.deepEqual(exit, { code: 0, signal: null });
       await assert.rejects(() => fetch(`${ready.url}/api/session`));
+      await assert.rejects(() => readFile(ready.capabilityPath, 'utf8'), { code:'ENOENT' });
     });
   }
 });
 
-test('Agent CLI 经真实服务完成 status/tasks/task/apply/undo', async t => {
+test('Agent CLI 经真实服务完成 revision/status/tasks/task/apply/undo', async t => {
   const { ready } = await startServerProcess(t);
   const common = ['--url', ready.url, '--token', ready.token];
 
@@ -190,6 +355,7 @@ test('Agent CLI 经真实服务完成 status/tasks/task/apply/undo', async t => 
   const status = parseJsonOutput(await runCli([...common, 'status']));
   assert.equal(status.revision, 1);
   assert.equal(Object.hasOwn(status.tasks[0].attachments[0], 'path'), false);
+  assert.deepEqual(parseJsonOutput(await runCli([...common, 'revision'])), { revision:1 });
   const listedTask = parseJsonOutput(await runCli([...common, 'tasks']))[0];
   const detailedTask = parseJsonOutput(await runCli([...common, 'task', taskId]));
   assert.equal(listedTask.id, taskId);
@@ -252,7 +418,15 @@ test('Agent CLI 对被 outside symlink 替换的附件目标 fail-closed', async
   await rename(taskDirectory, `${taskDirectory}.trusted`);
   await mkdir(outside);
   await writeFile(join(outside, basename(created.task.attachments[0].path)), 'outside');
-  await symlink(outside, taskDirectory, 'dir');
+  try {
+    await symlink(outside, taskDirectory, 'dir');
+  } catch (error) {
+    if (process.platform === 'win32' && error?.code === 'EPERM') {
+      t.skip('Windows 未启用开发者模式，无法创建目录符号链接');
+      return;
+    }
+    throw error;
+  }
 
   for (const command of [
     [...common, 'tasks'],
@@ -320,6 +494,49 @@ test('actions API 拒绝缺失、空字符串或非字符串 taskId', async t =>
   }
 });
 
+test('replace-text 先唯一定位文字节点再提交同一 actions API', async t => {
+  const received = [];
+  const server = createHttpServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received.push({ method:request.method, url:request.url, body:chunks.length
+      ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null });
+    response.writeHead(200, { 'content-type':'application/json' });
+    if (request.url.startsWith('/api/text-locations')) {
+      response.end(JSON.stringify({
+        revision:7,
+        results:[{
+          pageKey:'page-' + 'a'.repeat(32), pageIndex:1, pageLabel:'封面',
+          target:{
+            pageKey:'page-' + 'a'.repeat(32), path:'0/1', tag:'H1',
+            fingerprint:'1234abcd', textPath:'0', rect:{ x:1, y:2, w:3, h:4 },
+          },
+          text:'旧标题文字', occurrences:1,
+        }],
+      }));
+    } else {
+      response.end(JSON.stringify({ revision:8, groupId:'group-text' }));
+    }
+  });
+  await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
+  t.after(() => new Promise(resolvePromise => server.close(resolvePromise)));
+  const common = [
+    '--url', `http://127.0.0.1:${server.address().port}`, '--token', 'secret',
+  ];
+  const result = parseJsonOutput(await runCli([
+    ...common, 'replace-text', '旧标题', '新标题',
+  ]));
+  assert.equal(result.revision, 8);
+  assert.equal(received[0].method, 'GET');
+  assert.equal(new URL(received[0].url, 'http://local').searchParams.get('text'), '旧标题');
+  assert.equal(received[1].method, 'POST');
+  assert.equal(received[1].body.expectedRevision, 7);
+  assert.equal(received[1].body.taskId, null);
+  assert.equal(received[1].body.actions[0].kind, 'setText');
+  assert.equal(received[1].body.actions[0].payload.text, '新标题文字');
+  assert.equal(received[1].body.actions[0].target.textPath, '0');
+});
+
 test('浏览器打开命令始终使用参数数组且 win32 不经过命令解释器', async () => {
   const { buildOpenCommand } = await import('../server.mjs');
   const editorUrl = 'http://127.0.0.1:3210/editor/?token=a&editorToken=b';
@@ -360,5 +577,10 @@ test('Agent CLI 区分 HTTP 失败 exit 1 与参数/文件/JSON错误 exit 2', a
 
 test('Agent CLI help 是 JSON 且列出固定命令', async () => {
   const help = parseJsonOutput(await runCli(['--help']));
-  assert.deepEqual(help.commands, ['status', 'tasks', 'task', 'apply', 'undo']);
+  assert.deepEqual(help.commands, [
+    'revision', 'status', 'tasks', 'task', 'locate-text', 'replace-text',
+    'apply', 'begin-source-edit', 'begin-source-task',
+    'commit-source-edit', 'cancel-source-edit', 'cancel-source-task',
+    'undo', 'redo', 'verify', 'solidify', 'creation ...',
+  ]);
 });

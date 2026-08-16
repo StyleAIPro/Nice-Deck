@@ -1,5 +1,9 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
+
+// 这里故障注入 POSIX attachment_writer.py；Windows 原生 writer 的完整
+// stage/publish/verify/delete 闭环由 windows-sidecar-io.test.mjs 覆盖。
+const test = process.platform === 'win32' ? nodeTest.skip : nodeTest;
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -258,6 +262,8 @@ test('stage 调用独立 spawnAttachmentWriter 注入点并按序执行多文件
     assert.equal(command, 'python3');
     assert.equal(args[0], '-u');
     assert.deepEqual(options.stdio, ['pipe', 'pipe', 'pipe']);
+    assert.equal(options.env.PYTHONIOENCODING, 'utf-8');
+    assert.equal(options.env.PYTHONUTF8, '1');
     const config = JSON.parse(args[args.indexOf('--config') + 1]);
     const child = hangingChild();
     child.stdin = new Writable({

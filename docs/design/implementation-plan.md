@@ -16,7 +16,7 @@
 
 - **本项目不是 git 仓库，且项目目录内备份会被外部进程清空。** 所有 commit 步骤替换为「checkpoint 副本」：`cp` 产物到 session scratchpad（环境提示中的 scratchpad 目录，下文记 `$SCRATCH`），命名 `_ckpt_task<N>_<说明>.html`。构建脚本（一次性）也放 `$SCRATCH`，最终 skill 目录里只留使用者需要的文件。
 - **主课程 deck 与 `dc-slide-deck/` 只读，绝不修改。**
-- 每次改模板 deck 后必跑：`python3 dc-slide-deck/edit-bundle.py "class-1/huawei-deck/assets/template-deck.html"`（即 `eb.verify`，断言 slide-fit/sections/nav 三者一致且 nav i: 连续）。
+- 每次改模板 deck 后必跑：`python3 dc-slide-deck/edit-bundle.py "class-1/huawei-deck/assets/training-deck.html"`（即 `eb.verify`，断言 slide-fit/sections/nav 三者一致且 nav i: 连续）。
 - 所有 Python 构建脚本用如下方式引用 edit-bundle（它带连字符不能 import）：
 
 ```python
@@ -35,7 +35,7 @@ eb = importlib.util.module_from_spec(spec); spec.loader.exec_module(eb)
 class-1/huawei-deck/
 ├── SKILL.md                        # 任务 8 产出
 ├── assets/
-│   └── template-deck.html          # 任务 1-5 产出（24 页页型画廊）
+│   └── training-deck.html          # 任务 1-5 产出（24 页页型画廊）
 ├── references/
 │   ├── template-pages.md           # 任务 8
 │   ├── design-system.md            # 任务 8
@@ -91,7 +91,7 @@ class-1/huawei-deck/
 ### 任务 1：整块重组产出 24 页模板 deck
 
 **文件：**
-- 创建：`class-1/huawei-deck/assets/template-deck.html`
+- 创建：`class-1/huawei-deck/assets/training-deck.html`
 - 创建（构建脚本）：`$SCRATCH/tpl_task1_rebuild.py`
 
 - [ ] **步骤 1：建目录骨架**
@@ -112,7 +112,7 @@ spec = importlib.util.spec_from_file_location('eb', os.path.join(ROOT, 'dc-slide
 eb = importlib.util.module_from_spec(spec); spec.loader.exec_module(eb)
 
 SRC = os.path.join(ROOT, '训练Infra课程-独立版 (2).html')
-DST = os.path.join(ROOT, 'huawei-deck/assets/template-deck.html')
+DST = os.path.join(ROOT, 'huawei-deck/assets/training-deck.html')
 SEP = '\n\n    '
 
 # (源DOM idx, 新data-label, nav code)——顺序即新页序。源 label 有重复，一律按 DOM 序号抽取。
@@ -188,13 +188,13 @@ eb.verify(DST)
 - [ ] **步骤 4：浏览器冒烟**
 
 用任务 6 之前的临时方式跑一次现有工具：
-`node "$ROOT/scratchpad/measure_overflow.mjs" "$ROOT/huawei-deck/assets/template-deck.html" 封面 版式·卡片网格 结语页`
+`node "$ROOT/scratchpad/measure_overflow.mjs" "$ROOT/huawei-deck/assets/training-deck.html" 封面 版式·卡片网格 结语页`
 注意：该旧脚本第 10 行有 `length > 60` 的等待条件，对 24 页会 falsy——先临时把该行 `60` 改 `20`（此脚本在 scratchpad，可改）。预期三页都能找到、section overflow Y=0。
 
 - [ ] **步骤 5：checkpoint**
 
 ```bash
-cp "$ROOT/huawei-deck/assets/template-deck.html" "$SCRATCH/_ckpt_task1_rebuilt.html"
+cp "$ROOT/huawei-deck/assets/training-deck.html" "$SCRATCH/_ckpt_task1_rebuilt.html"
 ```
 
 ---
@@ -202,7 +202,7 @@ cp "$ROOT/huawei-deck/assets/template-deck.html" "$SCRATCH/_ckpt_task1_rebuilt.h
 ### 任务 2：图片→占位框 + 口号占位（占位化第一批：全局机械替换）
 
 **文件：**
-- 修改：`class-1/huawei-deck/assets/template-deck.html`
+- 修改：`class-1/huawei-deck/assets/training-deck.html`
 - 创建：`$SCRATCH/tpl_task2_imgs.py`
 
 品牌图（**保留不占位**）：封面/结语的金色背景画、HUAWEI logo 水印、金框题卡的 `tpl-bg-950` 背景。识别方法：这些以 CSS `background-image:url(<uuid>)` 或 `.tpl-bg-950` 规则引用，或 `<img>` 出现在 section 0/23 的背景层（`position:absolute` 且 `z-index` 为负或最先出现）。**内容图（占位）**：其余 `<img src="<32位hex uuid>">` 课程截图。
@@ -278,7 +278,7 @@ s = s.replace(old, new)
 ### 任务 3：manifest 清理（体积 24MB → 目标 ≤10MB）
 
 **文件：**
-- 修改：`class-1/huawei-deck/assets/template-deck.html`
+- 修改：`class-1/huawei-deck/assets/training-deck.html`
 - 创建：`$SCRATCH/tpl_task3_prune.py`
 
 清理规则：**保留 template 字符串中仍被引用的每一个 uuid**（含运行时 `<script src=uuid>`、字体/CSS `url(uuid)`、品牌图、金框背景），删除其余 manifest 条目。全自动、无需人工分类——被删页与被占位的课程截图自然失去引用。
@@ -309,7 +309,7 @@ eb.verify(DST)
 
 - [ ] **步骤 2：运行，记录体积**
 
-运行：`python3 "$SCRATCH/tpl_task3_prune.py"`；然后 `ls -lh huawei-deck/assets/template-deck.html`。
+运行：`python3 "$SCRATCH/tpl_task3_prune.py"`；然后 `ls -lh huawei-deck/assets/training-deck.html`。
 预期：体积明显下降（剩字体 + React + 品牌图 + 运行时，约 5-10MB）。若仍 >10MB，打印 man2 各条目大小排序，检查是否有漏占位的大图（回任务 2 补），**不删字体/React/品牌图**。
 
 - [ ] **步骤 3：断网可开验证**
@@ -323,7 +323,7 @@ eb.verify(DST)
 ### 任务 4：文字占位化（逐批，每批截图验证）
 
 **文件：**
-- 修改：`class-1/huawei-deck/assets/template-deck.html`
+- 修改：`class-1/huawei-deck/assets/training-deck.html`
 - 创建：`$SCRATCH/tpl_task4_batch{1..5}.py`（每批一个脚本，section 切片字符串手术）
 
 **总规则（每批相同）：**
@@ -387,13 +387,13 @@ eb.verify(DST)
 cd "$ROOT"
 cp dc-slide-deck/edit-bundle.py huawei-deck/scripts/
 cp dc-slide-deck/react.umd.js dc-slide-deck/react-dom.umd.js huawei-deck/scripts/
-cp dc-slide-deck/html2pptx/convert.sh dc-slide-deck/html2pptx/build_pptx.py huawei-deck/scripts/html2pptx/
+cp dc-slide-deck/html2pptx/{convert.py,convert.sh,build_pptx.py} huawei-deck/scripts/html2pptx/
 cp dc-slide-deck/html2pptx/shoot.mjs huawei-deck/scripts/html2pptx/
 chmod +x huawei-deck/scripts/html2pptx/convert.sh
 ```
 
-- [ ] **步骤 6.5：shoot.mjs 去机器绑定** —— 第 8 行 import 改成与 6.1 相同的 `PLAYWRIGHT_CORE` env 方式（convert.sh/build_pptx.py 无绝对路径，无需改）。
-- [ ] **步骤 6.6：html2pptx 全流程实测** —— `huawei-deck/scripts/html2pptx/convert.sh huawei-deck/assets/template-deck.html "$SCRATCH/template-deck.pptx"`。预期：23 页 deck 出 ≥30 张（「动画·layer切换」4 标签 +3、「动画·混合链」5 标签 +4；精确张数以 shoot.mjs 输出为准并记录到 editing-guide.md）；打开 pptx 抽查 layer 展开页齐全、build 页全显。
+- [ ] **步骤 6.5：shoot.mjs 去机器绑定** —— 第 8 行 import 改成与 6.1 相同的 `PLAYWRIGHT_CORE` env 方式（convert.py/build_pptx.py 无绝对路径，无需改）。
+- [ ] **步骤 6.6：html2pptx 全流程实测** —— `python3 huawei-deck/scripts/html2pptx/convert.py huawei-deck/assets/training-deck.html "$SCRATCH/training-deck.pptx"`（Windows 用 `py -3`）。预期：23 页 deck 出 ≥30 张（「动画·layer切换」4 标签 +3、「动画·混合链」5 标签 +4；精确张数以 shoot.mjs 输出为准并记录到 editing-guide.md）；打开 pptx 抽查 layer 展开页齐全、build 页全显。
 
 ---
 
@@ -401,7 +401,7 @@ chmod +x huawei-deck/scripts/html2pptx/convert.sh
 
 **文件：** 无新建（全部用已建工具）；产出验证记录追加到 `$SCRATCH/factory_check.md`
 
-- [ ] **步骤 1：完整性** —— `python3 huawei-deck/scripts/edit-bundle.py huawei-deck/assets/template-deck.html`：slide-fit=sections=nav=23、i: 连续、chapters 5 条 start={1,5,14,18,21}。
+- [ ] **步骤 1：完整性** —— `python3 huawei-deck/scripts/edit-bundle.py huawei-deck/assets/training-deck.html`：slide-fit=sections=nav=23、i: 连续、chapters 5 条 start={1,5,14,18,21}。
 - [ ] **步骤 2：版式** —— `measure_overflow.mjs --all`：23 页 Y=0 X=0；输出中的 nested clips 逐条核对均为图占位框/装饰容器而非文字截断。
 - [ ] **步骤 3：动画逐拍** —— 对全部带动画页（选定表中 build/layer/SMIL 非零的 ~14 页）跑 `steps.mjs`，逐拍目检：无提前露出的空框（「外层背景框必须挂 build」铁律）、layer 推进顺序正确、回退无残留。SMIL 页截 2 个时刻确认在动。**另加背景抽查**：tpl-bg-950 相关 7 页截图确认门面画/金框/人像在。
 - [ ] **步骤 4：易用性** —— headless 实测：① 加载 overlay 出现→消失；② 刷新恢复：evaluate 跳到第 10 页→reload→`JSON.parse(localStorage.deck_pos).i === 10` 且视口回到该页（参考 PROGRESS 07-06 `test_restore.mjs` 做法）；③ 控制台无网络请求报错（真离线）。
@@ -422,7 +422,7 @@ chmod +x huawei-deck/scripts/html2pptx/convert.sh
 - [ ] **步骤 3：`references/animation.md`** —— 提炼 DESIGN.md 四节 + dc SKILL.md 二节：总原则（手动推进、无自动循环、不写操作提示）；build/layer/SMIL 三机制完整写法与属性表；「外层背景框也要挂 build」「勿用 :has() 控 opacity」「SVG transform 放非 build 外层 g」三条铁律；放映键位（点击空白/空格/→ 前进、← 回退）；验证用 `scripts/verify/steps.mjs`。
 - [ ] **步骤 4：`references/page-snippets.md`** —— 以 `dc-slide-deck/page-templates.md` 为底，逐片段核对与模板 deck 实页一致后收录，并补齐模板 deck 有而片段库缺的页型（对照 template-pages.md，至少补：议程、研讨、金框题卡、SMIL 图解骨架）。
 - [ ] **步骤 5：`references/editing-guide.md`** —— 提炼 dc SKILL.md 三~六节 + html2pptx/README：独立版结构与安全编码铁律；edit-bundle.py 典型用法（insert/delete/move/embed_image/verify 各一段可复制代码）；三处同步铁律；踩坑表（照搬 dc SKILL.md 五节表格）；验证清单（overflow/steps/截图）；html2pptx 用法 + layer 展开语义 + 已知例外（React 内部 state 页不可展开）；性能守则（不删内联 React、iframe lazy、不在 rAF 读布局）。
-- [ ] **步骤 6：`SKILL.md`** —— frontmatter：`name: huawei-deck`；`description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTML slide deck from the bundled template (华为风红色品牌网页 PPT), editing such a deck (pages/animations/branding), or converting it to PPTX via the bundled html2pptx — template gallery, click/arrow-key present mode, offline single file.`（措辞与 dc-slide-deck 区分：本 skill 管「从模板新建」，dc 管「维护训练Infra课程」。）正文 ≤120 行：① 这是什么（一段）；② 快速上手 5 步工作流（cp 模板→照 template-pages.md 改页→增删页用 edit-bundle→verify 工具→convert.sh）；③ 设计铁律 6 条摘要（各一行，指向 references 细读）；④ 文件导航表；⑤ 预期性能一句话（体积/首开秒数，任务 7 实测值）。
+- [ ] **步骤 6：`SKILL.md`** —— frontmatter：`name: huawei-deck`；`description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTML slide deck from the bundled template (华为风红色品牌网页 PPT), editing such a deck (pages/animations/branding), or converting it to PPTX via the bundled html2pptx — template gallery, click/arrow-key present mode, offline single file.`（措辞与 dc-slide-deck 区分：本 skill 管「从模板新建」，dc 管「维护训练Infra课程」。）正文 ≤120 行：① 这是什么（一段）；② 快速上手 5 步工作流（cp 模板→照 template-pages.md 改页→增删页用 edit-bundle→verify 工具→convert.py）；③ 设计铁律 6 条摘要（各一行，指向 references 细读）；④ 文件导航表；⑤ 预期性能一句话（体积/首开秒数，任务 7 实测值）。
 - [ ] **步骤 7：文档自检** —— 逐份检查：无课程专有名词残留（「训练Infra」「950PR」等只允许出现在示例注释里）、所有相对路径真实存在、代码段可直接复制运行。
 
 ---
@@ -431,11 +431,11 @@ chmod +x huawei-deck/scripts/html2pptx/convert.sh
 
 - [ ] **步骤 1：安装** —— `cp -R "$ROOT/huawei-deck" ~/.claude/skills/huawei-deck`。
 - [ ] **步骤 2：模拟新用户全流程**（在 `$SCRATCH/e2e/` 下，全程只用 skill 内文件与文档所写命令）：
-  1. `cp ~/.claude/skills/huawei-deck/assets/template-deck.html demo.html`
+  1. `cp ~/.claude/skills/huawei-deck/assets/training-deck.html demo.html`
   2. 照 template-pages.md 改「版式·卡片网格」页一张卡的占位文字（Python section 切片）。
   3. 用 `scripts/edit-bundle.py` 的 `delete_page` 删「版式·截图对照」页 → verify 通过（22 页、chapters start 正确 -1）。
   4. `measure_overflow.mjs --all` 全 Y=0；`steps.mjs` 验改过的页动画未破。
-  5. `convert.sh demo.html` 出 pptx，张数正确。
+  5. `python3 scripts/html2pptx/convert.py demo.html` 出 pptx，张数正确（Windows 用 `py -3`）。
 - [ ] **步骤 3：收尾** —— e2e 产物留在 `$SCRATCH`；向用户报告：skill 位置（项目内 + ~/.claude/skills）、模板 deck 页数/体积、验证结论、分发方式（打包 huawei-deck/ 目录）。
 
 ---

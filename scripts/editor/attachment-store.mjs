@@ -10,8 +10,13 @@ import {
   validateAttachmentMetadata,
 } from './attachment-protocol.mjs';
 import { resolveAttachmentPath } from './attachment-paths.mjs';
+import { pythonUtf8SpawnOptions } from './python-utf8.mjs';
 
-const WRITER = join(dirname(fileURLToPath(import.meta.url)), 'attachment_writer.py');
+const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_WRITER = join(
+  EDITOR_DIR,
+  process.platform === 'win32' ? 'attachment_writer_windows.py' : 'attachment_writer.py',
+);
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SUFFIX = /^\.[a-z0-9]{1,16}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -220,14 +225,14 @@ function parseWriterOutput(stdout) {
 
 function runWriter({
   stream, config, expectedPath, spawnAttachmentWriter, timeoutMs, killGraceMs,
-  hardTerminationTimeoutMs, register, unregister,
+  hardTerminationTimeoutMs, register, unregister, pythonExecutable, writerPath,
 }) {
   return new Promise((resolvePromise, rejectPromise) => {
     let child;
     try {
-      child = spawnAttachmentWriter('python3', [
-        '-u', WRITER, '--config', JSON.stringify(config),
-      ], { stdio:['pipe', 'pipe', 'pipe'] });
+      child = spawnAttachmentWriter(pythonExecutable, [
+        '-u', writerPath, '--config', JSON.stringify(config),
+      ], pythonUtf8SpawnOptions({ stdio:['pipe', 'pipe', 'pipe'] }));
     } catch (error) {
       rejectPromise(attachmentError(
         'ATTACHMENT_WRITE_FAILED', 500,
@@ -568,6 +573,8 @@ class AttachmentUpload {
         timeoutMs:this.store.timeoutMs,
         killGraceMs:this.store.killGraceMs,
         hardTerminationTimeoutMs:this.store.hardTerminationTimeoutMs,
+        pythonExecutable:this.store.pythonExecutable,
+        writerPath:this.store.writerPath,
         register:record => {
           this.active.add(record);
           this.store.activeWriters.add(record);
@@ -800,6 +807,8 @@ export class AttachmentStore {
     timeoutMs=DEFAULT_TIMEOUT_MS,
     killGraceMs=DEFAULT_KILL_GRACE_MS,
     hardTerminationTimeoutMs=DEFAULT_HARD_TERMINATION_TIMEOUT_MS,
+    pythonExecutable='python3',
+    writerPath=DEFAULT_WRITER,
     randomUUID=systemRandomUUID,
     now=() => new Date(),
   } = {}) {
@@ -814,6 +823,12 @@ export class AttachmentStore {
     }
     if (typeof spawnAttachmentWriter !== 'function') {
       throw new TypeError('spawnAttachmentWriter 必须是函数');
+    }
+    if (typeof pythonExecutable !== 'string' || !pythonExecutable.trim()) {
+      throw new TypeError('attachment writer Python 路径无效');
+    }
+    if (typeof writerPath !== 'string' || !writerPath || resolve(writerPath) !== writerPath) {
+      throw new TypeError('attachment writer 脚本必须是绝对路径');
     }
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) {
       throw new RangeError('attachment writer timeout 必须在 1–120000ms');
@@ -832,6 +847,8 @@ export class AttachmentStore {
     this.sidecarBoundary = sidecarBoundary;
     this.sidecarIO = sidecarIO;
     this.spawnAttachmentWriter = spawnAttachmentWriter;
+    this.pythonExecutable = pythonExecutable;
+    this.writerPath = writerPath;
     this.timeoutMs = timeoutMs;
     this.killGraceMs = killGraceMs;
     this.hardTerminationTimeoutMs = hardTerminationTimeoutMs;

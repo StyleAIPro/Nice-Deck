@@ -8,6 +8,7 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadChromium } from '../verify/load-playwright.mjs';
+import { deckFileUrl } from './path-url.mjs';
 
 let chromium;
 try { chromium = await loadChromium(); }
@@ -26,7 +27,7 @@ mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: scale });
 console.error('载入 HTML（大文件，请稍候）…');
-await page.goto('file://' + encodeURI(resolve(inFile)), { waitUntil: 'load', timeout: 180000 });
+await page.goto(deckFileUrl(resolve(inFile)), { waitUntil: 'load', timeout: 180000 });
 await page.waitForTimeout(3000);
 
 // 隐藏所有 UI 外壳（导航条 / 预览栏 / 提示条 / 记笔记 / 模式钮），保留华为 LOGO 水印

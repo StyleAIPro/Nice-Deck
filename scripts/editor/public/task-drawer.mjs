@@ -1,3 +1,5 @@
+import { applyPill, setPillLabel } from './pill-nav.mjs';
+
 const STATUS_LABELS = {
   pending: '待处理',
   processing: '处理中',
@@ -27,6 +29,14 @@ function formatSize(size) {
   return `${value.toFixed(1).replace(/\.0$/, '')} ${unit}`;
 }
 
+function taskRecency(task) {
+  for (const value of [task?.updatedAt, task?.createdAt]) {
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
 function runMessage(run) {
   if (!run || run.status === 'idle') return '';
   const defaults = {
@@ -39,14 +49,31 @@ function runMessage(run) {
   return run.message || defaults[run.status] || '';
 }
 
+export function setTaskDrawerOpen(root, open) {
+  const next = open === true;
+  root.dataset.open = String(next);
+  const toggle = root.querySelector('[data-task-drawer-toggle]');
+  toggle?.setAttribute('aria-expanded', String(next));
+  const chevron = toggle?.querySelector('.task-drawer-chevron');
+  if (chevron) chevron.textContent = next ? '收起' : '展开';
+}
+
 export function renderTaskDrawer(root, {
-  tasks, agentRun = { status:'idle' }, onLocate, onProcessAll, onUndo, onEdit, onDelete,
+  tasks, agentRun = { status:'idle' },
+  onLocate, onProcessAll, onUndo, onEdit, onDelete,
 }) {
+  const completedCount = tasks.filter(task => task.status === 'completed').length;
+  const pendingCount = tasks.length - completedCount;
+  const needsConfirmationCount = tasks.filter(
+    task => task.status === 'needs-confirmation',
+  ).length;
+  const targetMissingCount = tasks.filter(task => task.targetMissing === true).length;
   const wasOpen = root.dataset.open === 'true';
   const previousCount = Number(root.dataset.taskCount ?? 0);
   const shouldOpen = wasOpen || (previousCount === 0 && tasks.length > 0);
   root.dataset.rendered = 'true';
   root.dataset.taskCount = String(tasks.length);
+  root.dataset.needsConfirmationCount = String(needsConfirmationCount);
   root.dataset.open = String(shouldOpen);
   root.replaceChildren();
 
@@ -54,14 +81,29 @@ export function renderTaskDrawer(root, {
   toggle.type = 'button';
   toggle.dataset.taskDrawerToggle = '';
   toggle.setAttribute('aria-expanded', String(shouldOpen));
+  toggle.setAttribute(
+    'aria-label',
+    `Agent 修改任务：待完成 ${pendingCount}，`
+      + `其中待确认 ${needsConfirmationCount}，已完成 ${completedCount}`,
+  );
   toggle.append(element('span', 'task-drawer-agent', 'AGENT'));
-  toggle.append(element('strong', '', `修改任务 ${tasks.length}`));
+  const counts = element('span', 'task-drawer-counts');
+  const pending = element('span', 'task-drawer-count task-drawer-count-pending', `待完成 ${pendingCount}`);
+  pending.dataset.taskPendingCount = String(pendingCount);
+  if (needsConfirmationCount > 0) {
+    pending.classList.add('task-drawer-count-attention');
+    pending.title = `${needsConfirmationCount} 条任务需要补充信息`;
+  }
+  const completed = element(
+    'span',
+    'task-drawer-count task-drawer-count-completed',
+    `已完成 ${completedCount}`,
+  );
+  completed.dataset.taskCompletedCount = String(completedCount);
+  counts.append(pending, completed);
+  toggle.append(counts);
   toggle.append(element('span', 'task-drawer-chevron', shouldOpen ? '收起' : '展开'));
-  const setOpen = open => {
-    root.dataset.open = String(open);
-    toggle.setAttribute('aria-expanded', String(open));
-    toggle.querySelector('.task-drawer-chevron').textContent = open ? '收起' : '展开';
-  };
+  const setOpen = open => setTaskDrawerOpen(root, open);
   toggle.addEventListener('click', () => setOpen(root.dataset.open !== 'true'));
   root.append(toggle);
 
@@ -75,6 +117,7 @@ export function renderTaskDrawer(root, {
   const close = element('button', 'deck-panel-close', '✕');
   close.type = 'button';
   close.setAttribute('aria-label', '关闭 Agent 修改任务面板');
+  applyPill(close, { variant:'neutral', size:'sm', kind:'icon' });
   close.addEventListener('click', () => {
     setOpen(false);
     toggle.focus();
@@ -83,32 +126,81 @@ export function renderTaskDrawer(root, {
   panel.append(panelHeader);
   const list = element('div', 'task-list');
   const activeRun = ['queued', 'running'].includes(agentRun.status);
+  const completedRows = [];
   if (!tasks.length) {
     list.append(element('p', 'task-empty', '拉框标记页面区域后，任务会记录在这里。'));
   }
   for (const [taskIndex, task] of tasks.entries()) {
     const row = element('article', 'task-row');
     row.dataset.taskRow = task.id;
+    const needsConfirmation = task.status === 'needs-confirmation';
+    const targetMissing = task.targetMissing === true;
+    if (needsConfirmation) row.dataset.needsConfirmation = '';
+    if (targetMissing) row.dataset.targetMissing = '';
     const locate = element('button', 'task-locate');
     locate.type = 'button';
     locate.dataset.taskLocate = task.id;
-    locate.setAttribute('aria-label', `定位第 ${task.pageIndex} 页：${task.instruction}`);
+    locate.disabled = targetMissing;
+    locate.setAttribute('aria-label', targetMissing
+      ? `目标页面已删除：${task.instruction}`
+      : `定位第 ${task.pageIndex} 页：${task.instruction}`);
     const meta = element('div', 'task-meta');
     meta.append(element('span', 'task-page', `${String(task.pageIndex).padStart(2, '0')} · ${task.pageLabel}`));
-    const status = element('span', `task-status task-status-${task.status}`, STATUS_LABELS[task.status] ?? task.status);
+    const status = element(
+      'span',
+      `task-status ${targetMissing ? 'task-status-target-missing' : `task-status-${task.status}`}`,
+      targetMissing ? '页面已删除' : (STATUS_LABELS[task.status] ?? task.status),
+    );
     meta.append(status);
     locate.append(meta, element('p', 'task-instruction', task.instruction));
-    locate.addEventListener('click', () => onLocate?.(task));
+    locate.addEventListener('click', () => {
+      if (!targetMissing) onLocate?.(task);
+    });
     row.append(locate);
-    const mutable = ['pending', 'failed', 'needs-confirmation'].includes(task.status)
+    if (targetMissing) {
+      const notice = element('aside', 'task-target-missing-notice');
+      notice.dataset.taskTargetMissing = task.id;
+      notice.setAttribute('role', 'status');
+      notice.append(
+        element('strong', '', '这个任务的目标页面已删除。'),
+        element('span', '', task.groupId
+          ? '撤销本次删页即可恢复页面和任务。'
+          : '可以删除任务记录，或在页面恢复后重新标记。'),
+      );
+      row.append(notice);
+    } else if (needsConfirmation) {
+      const notice = element('aside', 'task-confirmation-notice');
+      notice.dataset.taskConfirmationNotice = task.id;
+      notice.setAttribute('role', 'alert');
+      const indicator = element('span', 'task-confirmation-indicator');
+      indicator.setAttribute('aria-hidden', 'true');
+      const copy = element('span', 'task-confirmation-copy');
+      copy.append(
+        element('strong', '', '检测到多个可能目标，Agent 无法安全确定修改对象。'),
+        element('span', '', '请点击“补充说明”，写清具体位置或对象后重新提交。'),
+      );
+      notice.append(indicator, copy);
+      row.append(notice);
+    }
+    const mutable = !targetMissing
+      && ['pending', 'failed', 'needs-confirmation'].includes(task.status)
       && !task.groupId;
-    if (mutable && (onEdit || onDelete)) {
+    const solidified = task.status === 'completed' && !task.groupId;
+    const missingTargetDeletable = targetMissing && !task.groupId
+      && ['pending', 'failed', 'needs-confirmation', 'completed'].includes(task.status);
+    const deletable = mutable || solidified || missingTargetDeletable;
+    if ((mutable && onEdit) || (deletable && onDelete)) {
       const actions = element('div', 'task-row-actions');
-      if (onEdit) {
-        const edit = element('button', 'task-edit', '编辑');
+      if (mutable && onEdit) {
+        const edit = element(
+          'button',
+          `task-edit${needsConfirmation ? ' task-edit-attention' : ''}`,
+          needsConfirmation ? '补充说明' : '编辑',
+        );
         edit.type = 'button';
         edit.dataset.taskEdit = task.id;
         edit.disabled = activeRun;
+        applyPill(edit, { variant:'neutral', size:'sm', kind:'action' });
         edit.addEventListener('click', () => {
           const originalChildren = [...row.childNodes];
           const form = element('form', 'task-edit-form');
@@ -129,6 +221,8 @@ export function renderTaskDrawer(root, {
           const save = element('button', 'task-edit-save', '保存');
           save.type = 'submit';
           save.dataset.taskEditSave = task.id;
+          applyPill(cancel, { variant:'secondary', size:'sm', kind:'action' });
+          applyPill(save, { variant:'primary', size:'sm', kind:'action' });
           controls.append(cancel, save);
           form.append(input, note, controls);
           const restore = () => row.replaceChildren(...originalChildren);
@@ -162,16 +256,19 @@ export function renderTaskDrawer(root, {
         });
         actions.append(edit);
       }
-      if (onDelete) {
-        const remove = element('button', 'task-delete', '删除');
+      if (deletable && onDelete) {
+        const remove = element('button', 'task-delete', solidified ? '删除记录' : '删除');
         remove.type = 'button';
         remove.dataset.taskDelete = task.id;
         remove.disabled = activeRun;
+        applyPill(remove, { variant:'danger', size:'sm', kind:'action' });
         remove.addEventListener('click', () => {
           if (row.querySelector('[data-task-delete-confirmation]')) return;
           const confirmation = element('div', 'task-delete-confirmation');
           confirmation.dataset.taskDeleteConfirmation = task.id;
-          confirmation.append(element('p', '', '确定删除这条任务？区域截图和附件也会一并清理。'));
+          confirmation.append(element('p', '', solidified
+            ? '确定删除这条已固化任务记录？Deck 中已固化的修改不会改变，区域截图和附件会一并清理。'
+            : '确定删除这条任务？区域截图和附件也会一并清理。'));
           const controls = element('div', 'task-delete-controls');
           const cancel = element('button', 'task-delete-cancel', '取消');
           cancel.type = 'button';
@@ -179,18 +276,20 @@ export function renderTaskDrawer(root, {
           const confirm = element('button', 'task-delete-confirm', '确认删除');
           confirm.type = 'button';
           confirm.dataset.taskDeleteConfirm = task.id;
+          applyPill(cancel, { variant:'secondary', size:'sm', kind:'action' });
+          applyPill(confirm, { variant:'danger', size:'sm', kind:'action' });
           cancel.addEventListener('click', () => confirmation.remove());
           confirm.addEventListener('click', async () => {
             cancel.disabled = true;
             confirm.disabled = true;
-            confirm.textContent = '正在删除…';
+            setPillLabel(confirm, '正在删除…');
             try {
               await onDelete(task);
             } catch (error) {
               if (!confirmation.isConnected) return;
               cancel.disabled = false;
               confirm.disabled = false;
-              confirm.textContent = '确认删除';
+              setPillLabel(confirm, '确认删除');
               confirmation.querySelector('p').textContent = `删除失败：${error?.message || '未知错误'}`;
             }
           });
@@ -207,6 +306,7 @@ export function renderTaskDrawer(root, {
       const undo = element('button', 'task-undo', '撤销');
       undo.type = 'button';
       undo.dataset.taskUndo = task.id;
+      applyPill(undo, { variant:'neutral', size:'sm', kind:'action' });
       undo.addEventListener('click', () => onUndo(task));
       row.append(undo);
     }
@@ -239,18 +339,19 @@ export function renderTaskDrawer(root, {
         const copy = element('button', 'task-copy-attachment', '复制路径');
         copy.type = 'button';
         copy.dataset.copyAttachmentPath = '';
+        applyPill(copy, { variant:'neutral', size:'sm', kind:'action' });
         copy.addEventListener('click', async () => {
           copy.disabled = true;
           try {
             if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
             await navigator.clipboard.writeText(attachment.path);
-            copy.textContent = '已复制';
+            setPillLabel(copy, '已复制');
           } catch {
-            copy.textContent = '复制失败，请手动选择路径';
+            setPillLabel(copy, '复制失败，请手动选择路径');
           }
           window.setTimeout(() => {
             if (!copy.isConnected) return;
-            copy.textContent = '复制路径';
+            setPillLabel(copy, '复制路径');
             copy.disabled = false;
           }, 1_500);
         });
@@ -264,25 +365,69 @@ export function renderTaskDrawer(root, {
       });
       row.append(attachmentsToggle, attachments);
     }
-    list.append(row);
+    if (task.status === 'completed') completedRows.push({ row, task, taskIndex });
+    else list.append(row);
+  }
+  if (completedRows.length > 0) {
+    const orderedCompletedRows = [...completedRows]
+      .sort((left, right) => (
+        taskRecency(right.task) - taskRecency(left.task)
+        || right.taskIndex - left.taskIndex
+      ))
+      .map(item => item.row);
+    const completedGroup = element('details', 'task-completed-group');
+    completedGroup.dataset.taskCompletedGroup = '';
+    completedGroup.open = root.dataset.completedOpen === 'true';
+    const completedSummary = element('summary', 'task-completed-summary');
+    const undoableCompleted = orderedCompletedRows.some(
+      row => row.querySelector('[data-task-undo]'),
+    );
+    completedSummary.append(
+      element('strong', '', `已完成 ${completedRows.length} 条`),
+      element('span', '', undoableCompleted ? '可展开查看与撤销' : '已固化，可删除记录'),
+    );
+    const completedList = element('div', 'task-completed-list');
+    completedList.append(...orderedCompletedRows);
+    completedGroup.append(completedSummary, completedList);
+    completedGroup.addEventListener('toggle', () => {
+      root.dataset.completedOpen = String(completedGroup.open);
+    });
+    list.append(completedGroup);
+  } else {
+    root.dataset.completedOpen = 'false';
   }
   panel.append(list);
 
   const footer = element('div', 'task-drawer-footer');
-  const actionableTasks = tasks.filter(task => ['pending', 'failed'].includes(task.status));
+  const actionableTasks = tasks.filter(task => (
+    task.targetMissing !== true && ['pending', 'failed'].includes(task.status)
+  ));
   const buttonText = activeRun
     ? `Agent 正在处理 ${agentRun.taskCount ?? actionableTasks.length} 条`
+    : actionableTasks.length === 0 && targetMissingCount > 0
+      ? `有 ${targetMissingCount} 条任务的页面已删除`
+    : actionableTasks.length === 0 && needsConfirmationCount > 0
+      ? `有 ${needsConfirmationCount} 条任务需要补充说明`
     : `交给 Agent 处理全部 ${actionableTasks.length} 条`;
   const process = element('button', 'task-process-all', buttonText);
   process.type = 'button';
   process.dataset.processAll = '';
   process.disabled = actionableTasks.length === 0 || activeRun;
   process.setAttribute('aria-busy', String(activeRun));
+  applyPill(process, { variant:'primary', size:'md', kind:'action' });
   const note = element('p', 'task-process-note');
   note.dataset.processNote = '';
   note.setAttribute('role', 'status');
   note.setAttribute('aria-live', 'polite');
-  note.textContent = runMessage(agentRun);
+  const confirmationMessage = needsConfirmationCount > 0
+    ? `${needsConfirmationCount} 条任务因修改目标定位不唯一而暂停，补充说明后可重新提交。`
+    : '';
+  const targetMissingMessage = targetMissingCount > 0
+    ? `${targetMissingCount} 条任务的页面已删除；请删除任务记录或撤销删页。`
+    : '';
+  note.textContent = [runMessage(agentRun), targetMissingMessage, confirmationMessage]
+    .filter(Boolean).join('；');
+  if (needsConfirmationCount > 0 || targetMissingCount > 0) note.dataset.attention = '';
   process.addEventListener('click', () => {
     process.disabled = true;
     note.textContent = '正在把本批反馈交给 Agent…';

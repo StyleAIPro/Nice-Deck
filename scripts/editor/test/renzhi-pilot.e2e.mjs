@@ -200,7 +200,7 @@ function assertBundleIsClean(template) {
   }
 }
 
-test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重开', {
+test('renzhi 工作副本完成 21 页、跨页任务、检查点、固化与重开', {
   timeout:180_000,
 }, async t => {
   const sourceDeck = await locateSourceDeck();
@@ -277,18 +277,28 @@ test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重
   assert.equal(completedTask.status, 'completed');
   assert.equal(completedTask.groupId, beforeWrite.groups[0].id);
 
-  const write = await requestJson(resources.app, '/api/write-deck', {
+  const checkpoint = await requestJson(resources.app, '/api/write-deck', {
+    method:'POST',
+    headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:beforeWrite.revision }),
+  });
+  assert.equal(await sha256File(deckPath), copyBefore, '检查点不得改写真正的 Deck');
+  assert.equal(checkpoint.revision, beforeWrite.revision);
+
+  const solidified = await requestJson(resources.app, '/api/solidify-deck', {
     method:'POST',
     headers:{ 'content-type':'application/json' },
     body:JSON.stringify({ expectedRevision:beforeWrite.revision }),
   });
   const copyAfter = await sha256File(deckPath);
-  assert.notEqual(copyAfter, copyBefore, '正式写回必须改变工作副本');
-  assert.equal(write.fingerprint, copyAfter);
-  assert.match(write.fingerprint, /^[0-9a-f]{64}$/);
-  assert.equal(write.revision, beforeWrite.revision);
-  assert.match(write.backup, /backups\/renzhi-deck-[0-9a-f]{64}\.html$/);
+  assert.notEqual(copyAfter, copyBefore, '固化必须原子发布托管工作副本');
+  assert.equal(solidified.fingerprint, copyAfter);
+  assert.match(solidified.fingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(solidified.revision, beforeWrite.revision + 1);
+  assert.equal(solidified.solidified, true);
+  assert.match(solidified.backup, /backups[\\/]renzhi-deck-[0-9a-f]{64}\.html$/);
   assert.equal(await sha256File(sourceDeck), sourceBefore);
+  const solidifiedActionsAfter = structuredClone(resources.app.session.solidifiedActions);
 
   if (KEEP_TEMP) {
     await opened.page.screenshot({ path:join(root, 'editor-pilot.png'), fullPage:false });
@@ -324,14 +334,14 @@ test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重
     '重开后等待诊断与 session 恢复超时',
   );
   assert.equal(restored.sessionId, beforeWrite.sessionId);
-  assert.equal(restored.revision, beforeWrite.revision);
-  assert.equal(restored.deckFingerprint, write.fingerprint);
+  assert.equal(restored.revision, solidified.revision);
+  assert.equal(restored.deckFingerprint, solidified.fingerprint);
   assert.equal(restored.tasks.length, 5);
-  assert.equal(restored.groups.length, 1);
-  assert.ok(restored.groups.every(group => group.active));
+  assert.equal(restored.groups.length, 0);
+  assert.deepEqual(restored.solidifiedActions, solidifiedActionsAfter);
   const restoredTask = restored.tasks.find(task => task.id === pilotTask.id);
   assert.equal(restoredTask.status, 'completed');
-  assert.equal(restoredTask.groupId, restored.groups[0].id);
+  assert.equal('groupId' in restoredTask, false);
   await assertPilotEffects(reopened.page, actionEvidence);
   assert.deepEqual(reopened.browserProblems, []);
   assert.deepEqual(reopened.resourceProblems, []);
@@ -340,4 +350,285 @@ test('renzhi 工作副本完成 21 页、跨页任务、实时动作与写回重
     assert.match(cancellation, /^document blob:http:\/\/127\.0\.0\.1:\d+\/.+ net::ERR_ABORTED$/);
   }
   assert.equal(await sha256File(sourceDeck), sourceBefore);
+});
+
+test('renzhi 封面文字连续格式、混合态、历史合并与重开恢复', {
+  timeout:60_000,
+}, async t => {
+  const sourceDeck = await locateSourceDeck();
+  const sourceBefore = await sha256File(sourceDeck);
+  const root = await mkdtemp(join(tmpdir(), 'huawei-deck-renzhi-format-'));
+  const deckPath = join(root, 'renzhi-deck.html');
+  await copyFile(sourceDeck, deckPath);
+  const app = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    token:'renzhi-format', editorToken:'renzhi-format-editor',
+  });
+  let opened;
+  t.after(async () => {
+    await opened?.browser.close();
+    await app.close();
+    assert.equal(await sha256File(sourceDeck), sourceBefore, '真实源 Deck 必须保持不变');
+    await rm(root, { recursive:true, force:true });
+  });
+  // 显式 page.reload 后，undo/redo 还会各触发一次 authoritative iframe
+  // reload；旧 blob document 被 Chromium 取消属于预期，最多接纳两次。
+  opened = await openEditor(app, { maxPilotDocumentBlobAborts:2 });
+  const { page } = opened;
+  page.setDefaultTimeout(12_000);
+  await waitForPages(page);
+  const frame = page.frameLocator('#deck-frame');
+  const title = frame.locator(
+    '.slide-fit[data-idx="0"] .slide-canvas section > div:nth-child(3) > div:nth-child(1)',
+  );
+
+  await page.locator('[data-page-index="1"]').click();
+  await page.locator('[data-mode="edit"]').click();
+  await title.click();
+  await frame.locator('[data-transform-selection]').waitFor();
+  const initialFontSize = await title.evaluate(element => element.style.fontSize);
+  assert.equal(await title.evaluate(element => {
+    const red = element.ownerDocument.querySelector('[data-transform-selection]').getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    return ['left', 'top', 'width', 'height'].every(key => Math.abs(red[key] - box[key]) < 1);
+  }), true);
+
+  await title.dblclick();
+  await title.evaluate(element => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 1);
+    range.setEnd(element.firstChild, 9);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() => document.querySelector('[data-selection-state]')?.textContent
+    === '选中文字');
+  await page.locator('[data-style-property="font-weight"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.getSelection()?.toString() === '&Q Prese');
+  await page.locator('[data-style-property="color"]').evaluate(input => {
+    input.value = '#c7000b';
+    input.dispatchEvent(new Event('change', { bubbles:true }));
+  });
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+  await title.press('Control+i');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '3');
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.getSelection()?.toString() === '&Q Prese');
+  assert.equal(await title.getAttribute('data-direct-editing'), '');
+  assert.equal(await frame.locator('[data-text-format-toolbar]').count(), 1);
+
+  await title.evaluate(element => {
+    const nodes = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    const point = absolute => {
+      let consumed = 0;
+      for (const node of nodes) {
+        if (absolute <= consumed + node.data.length) return { node, offset:absolute - consumed };
+        consumed += node.data.length;
+      }
+      throw new Error('封面标题选区越界');
+    };
+    const start = point(0);
+    const end = point(element.textContent.length);
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() => document.querySelector('[data-style-property="font-weight"]')
+    ?.getAttribute('aria-pressed') === 'mixed');
+  const mixedToolbar = frame.locator('[data-text-format-toolbar]');
+  await mixedToolbar.waitFor();
+  assert.equal(
+    await mixedToolbar.locator('button[aria-label="加粗"]').getAttribute('aria-pressed'),
+    'mixed',
+  );
+  assert.equal(
+    await mixedToolbar.locator('button[aria-label="斜体"]').getAttribute('aria-pressed'),
+    'mixed',
+  );
+  await mixedToolbar.getByRole('combobox', { name:'字体' }).click();
+  await frame.getByRole('option', { name:'Arial' }).click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '4');
+  await mixedToolbar.locator('button[aria-label="加粗"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '5');
+  await mixedToolbar.locator('button[aria-label="斜体"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '6');
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.getSelection()?.toString() === 'C&Q Presentation for the ICT Network Technology Category');
+  const unifiedMixedRange = await title.evaluate(element => {
+    const values = { families:new Set(), weights:new Set(), styles:new Set() };
+    const selection = document.getSelection();
+    const range = selection.rangeCount ? selection.getRangeAt(0) : null;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!range?.intersectsNode(node)) continue;
+      const style = getComputedStyle(node.parentElement ?? element);
+      values.families.add(style.fontFamily.split(',')[0].replaceAll('"', '').trim());
+      values.weights.add(style.fontWeight);
+      values.styles.add(style.fontStyle);
+    }
+    return Object.fromEntries(Object.entries(values).map(([key, set]) => [key, [...set]]));
+  });
+  assert.deepEqual(unifiedMixedRange, {
+    families:['Arial'], weights:['700'], styles:['italic'],
+  });
+
+  await title.press('Escape');
+  await title.click();
+  await page.waitForFunction(() => document.querySelector('[data-selection-state]')?.textContent
+    === '文字');
+  await page.locator('[data-style-property="color"]').evaluate(input => {
+    input.value = '#123456';
+    input.dispatchEvent(new Event('change', { bubbles:true }));
+  });
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '7');
+  await page.waitForFunction(() => document.querySelector('.inspector-body')?.dataset.busy === 'false');
+  for (const [offset, size] of ['53', '52', '51'].entries()) {
+    await page.locator('[data-value-property="font-size"]').evaluate((input, value) => {
+      input.value = value;
+      input.dispatchEvent(new Event('change', { bubbles:true }));
+    }, size);
+    await page.waitForFunction(expected => (
+      document.querySelector('[data-revision]')?.textContent === String(expected)
+    ), offset + 8);
+    await page.waitForFunction(() => document.querySelector('.inspector-body')?.dataset.busy === 'false');
+  }
+  const afterFormatting = await requestJson(app, '/api/session');
+  assert.deepEqual({
+    groups:afterFormatting.groups.length,
+    sizeActions:afterFormatting.groups.at(-1).actions.length,
+  }, { groups:8, sizeActions:3 });
+
+  await page.reload();
+  await waitForPages(page);
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '10');
+  assert.deepEqual(await title.evaluate(element => {
+    const nodes = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) if (walker.currentNode.data.length) nodes.push(walker.currentNode);
+    return {
+      text:element.textContent,
+      fontSizes:[...new Set(nodes.map(node => (
+        getComputedStyle(node.parentElement ?? element).fontSize
+      )))],
+      colors:[...new Set(nodes.map(node => (
+        getComputedStyle(node.parentElement ?? element).color
+      )))],
+      properties:[...element.querySelectorAll('[data-deck-text-range-style]')]
+        .map(wrapper => wrapper.dataset.deckTextRangeProperty).sort(),
+    };
+  }), {
+    text:'C&Q Presentation for the ICT Network Technology Category',
+    fontSizes:['51px'],
+    colors:['rgb(18, 52, 86)'],
+    properties:['color', 'font-family', 'font-size', 'font-style', 'font-weight'],
+  });
+  await title.click();
+  await title.press('Control+z');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '11');
+  assert.deepEqual(await title.evaluate(element => {
+    const values = new Set();
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      if (walker.currentNode.data.length) {
+        values.add(getComputedStyle(walker.currentNode.parentElement ?? element).fontSize);
+      }
+    }
+    return [...values];
+  }), [initialFontSize]);
+  await page.locator('[data-history-redo]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '12');
+  assert.deepEqual(await title.evaluate(element => {
+    const values = new Set();
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      if (walker.currentNode.data.length) {
+        values.add(getComputedStyle(walker.currentNode.parentElement ?? element).fontSize);
+      }
+    }
+    return [...values];
+  }), ['51px']);
+  assert.deepEqual(opened.browserProblems, []);
+  assert.deepEqual(opened.resourceProblems, []);
+  assert.ok(opened.resourceCancellations.length <= 2, JSON.stringify(opened.resourceCancellations));
+  for (const cancellation of opened.resourceCancellations) {
+    assert.match(cancellation, /^document blob:http:\/\/127\.0\.0\.1:\d+\/.+ net::ERR_ABORTED$/);
+  }
+});
+
+test('renzhi 封面红框文字全选删除后保持空内容并可撤销', {
+  timeout:60_000,
+}, async t => {
+  const sourceDeck = await locateSourceDeck();
+  const sourceBefore = await sha256File(sourceDeck);
+  const root = await mkdtemp(join(tmpdir(), 'huawei-deck-renzhi-empty-text-'));
+  const deckPath = join(root, 'renzhi-deck.html');
+  await copyFile(sourceDeck, deckPath);
+  const app = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    token:'renzhi-empty-text', editorToken:'renzhi-empty-text-editor',
+  });
+  let opened;
+  t.after(async () => {
+    await opened?.browser.close();
+    await app.close();
+    assert.equal(await sha256File(sourceDeck), sourceBefore, '真实源 Deck 必须保持不变');
+    await rm(root, { recursive:true, force:true });
+  });
+  // 本用例同时触发显式 page.reload 与 undo 的 authoritative reload；Chrome
+  // 可能各取消一次已被新导航替代的同源 blob document。仅豁免这两个精确事件。
+  opened = await openEditor(app, { maxPilotDocumentBlobAborts:2 });
+  const { page } = opened;
+  page.setDefaultTimeout(12_000);
+  await waitForPages(page);
+  const frame = page.frameLocator('#deck-frame');
+  const title = frame.locator(
+    '.slide-fit[data-idx="0"] .slide-canvas section > div:nth-child(3) > div:nth-child(1)',
+  );
+  const originalText = await title.textContent();
+  assert.ok(originalText.length > 0);
+
+  await page.locator('[data-page-index="1"]').click();
+  await page.locator('[data-mode="edit"]').click();
+  await title.click();
+  await title.dblclick();
+  await title.evaluate(element => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await title.press('Backspace');
+  await page.locator('[data-current-page]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  assert.equal(await title.textContent(), '');
+
+  const changed = await requestJson(app, '/api/session');
+  assert.equal(changed.groups.length, 1);
+  assert.equal(changed.groups[0].actions.at(-1).kind, 'setText');
+  assert.equal(changed.groups[0].actions.at(-1).payload.text, '');
+
+  await page.reload();
+  await waitForPages(page);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.querySelector('.slide-fit[data-idx="0"] .slide-canvas section > div:nth-child(3) > div:nth-child(1)')
+    ?.textContent === '');
+  await page.locator('[data-history-undo]').click();
+  await page.waitForFunction(expected => document.querySelector('#deck-frame')?.contentDocument
+    ?.querySelector('.slide-fit[data-idx="0"] .slide-canvas section > div:nth-child(3) > div:nth-child(1)')
+    ?.textContent === expected, originalText);
+  assert.deepEqual(opened.browserProblems, []);
+  assert.deepEqual(opened.resourceProblems, []);
+  assert.ok(opened.resourceCancellations.length <= 2, JSON.stringify(opened.resourceCancellations));
 });

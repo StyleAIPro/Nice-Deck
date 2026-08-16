@@ -4,13 +4,28 @@ import { constants as fsConstants } from 'node:fs';
 import { open, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { syncDirectory } from './durable-fs.mjs';
+import { pythonUtf8SpawnOptions } from './python-utf8.mjs';
 
-const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'sidecar_io.py');
+const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
+const HELPER = join(
+  EDITOR_DIR,
+  process.platform === 'win32' ? 'sidecar_io_windows.py' : 'sidecar_io.py',
+);
 const ATTACHMENT_MUTATION_COMMANDS = new Set([
   'publish-attachments',
   'discard-attachment-upload',
   'delete-task-attachments',
   'reconcile-attachments',
+]);
+const MUTATION_COMMIT_SCOPES = new Map([
+  ...[...ATTACHMENT_MUTATION_COMMANDS].map(command => [command, 'attachments']),
+  ['write-agent-workspace', 'agent-workspace'],
+  ['write-working-deck', 'working-deck'],
+  ['archive-working-deck', 'working-deck'],
+  ['restore-working-deck', 'working-deck'],
+  ['rebind-deck', 'binding'],
+  ['publish-working-deck', 'deck'],
 ]);
 const ATTACHMENT_LONG_COMMANDS = new Set([
   ...ATTACHMENT_MUTATION_COMMANDS,
@@ -19,6 +34,12 @@ const ATTACHMENT_LONG_COMMANDS = new Set([
 // 最坏 8×25MiB 需要前后两轮 SHA-256 和 fsync；90s 允许约 5MiB/s 的保守吞吐。
 const DEFAULT_ATTACHMENT_TIMEOUT_MS = 90_000;
 const MAX_ATTACHMENT_TIMEOUT_MS = 120_000;
+const DEFAULT_WORKING_DECK_TIMEOUT_MS = 30_000;
+const MAX_WORKING_DECK_TIMEOUT_MS = 120_000;
+const WORKING_DECK_COMMANDS = new Set([
+  'read-working-deck', 'write-working-deck', 'archive-working-deck',
+  'restore-working-deck', 'publish-working-deck',
+]);
 const plainIdentity = identity => Object.fromEntries(
   ['path', 'realPath', 'dev', 'ino'].map(key => [key, identity[key]]),
 );
@@ -51,12 +72,13 @@ function undispatchedLifecycleError(error) {
 }
 
 function activeLifecycleError(error, request) {
-  if (!request?.dispatched || !ATTACHMENT_MUTATION_COMMANDS.has(request.command)) {
+  const commitScope = MUTATION_COMMIT_SCOPES.get(request?.command);
+  if (!request?.dispatched || !commitScope) {
     return undispatchedLifecycleError(error);
   }
-  return Object.assign(new Error(error?.message ?? '附件命令未收到可信 ACK'), error, {
+  return Object.assign(new Error(error?.message ?? 'sidecar 写命令未收到可信 ACK'), error, {
     committed:true,
-    commitScope:'attachments',
+    commitScope,
     cause:error,
   });
 }
@@ -64,7 +86,10 @@ function activeLifecycleError(error, request) {
 class PersistentSidecarIO {
   constructor(child, {
     timeoutMs, maxInputBytes, maxOutputBytes,
-    maxSessionInputBytes, maxSessionOutputBytes, attachmentTimeoutMs,
+    maxSessionInputBytes, maxSessionOutputBytes,
+    maxWorkingDeckInputBytes, maxWorkingDeckOutputBytes,
+    maxAgentWorkspaceInputBytes, maxAgentWorkspaceOutputBytes,
+    attachmentTimeoutMs, workingDeckTimeoutMs,
   }) {
     this.child = child;
     this.timeoutMs = timeoutMs;
@@ -72,8 +97,15 @@ class PersistentSidecarIO {
     this.maxOutputBytes = maxOutputBytes;
     this.maxSessionInputBytes = maxSessionInputBytes;
     this.maxSessionOutputBytes = maxSessionOutputBytes;
+    this.maxWorkingDeckInputBytes = maxWorkingDeckInputBytes;
+    this.maxWorkingDeckOutputBytes = maxWorkingDeckOutputBytes;
+    this.maxAgentWorkspaceInputBytes = maxAgentWorkspaceInputBytes;
+    this.maxAgentWorkspaceOutputBytes = maxAgentWorkspaceOutputBytes;
     this.attachmentTimeoutMs = Math.min(
       attachmentTimeoutMs, MAX_ATTACHMENT_TIMEOUT_MS,
+    );
+    this.workingDeckTimeoutMs = Math.min(
+      workingDeckTimeoutMs, MAX_WORKING_DECK_TIMEOUT_MS,
     );
     this.queue = [];
     this.active = null;
@@ -98,6 +130,12 @@ class PersistentSidecarIO {
 
   #finish(error = lifecycleError('SIDECAR_HELPER_CLOSED', 'sidecar helper 已关闭')) {
     if (this.finished) return;
+    if (error?.code === 'SIDECAR_HELPER_CLOSED' && this.stderr.trim()) {
+      error = lifecycleError(
+        'SIDECAR_HELPER_CLOSED',
+        `sidecar helper 已关闭：${this.stderr.trim().slice(-1600)}`,
+      );
+    }
     this.finished = true;
     this.aborting = true;
     clearTimeout(this.reapTimer);
@@ -148,8 +186,13 @@ class PersistentSidecarIO {
   #onStdout(chunk) {
     if (this.finished || this.aborting) return;
     this.stdout += chunk;
-    const activeLimit = this.active?.command === 'read-session'
-      ? this.maxSessionOutputBytes : this.maxOutputBytes;
+    const activeLimit = this.active?.command === 'read-working-deck'
+      ? this.maxWorkingDeckOutputBytes
+      : this.active?.command === 'read-session'
+        ? this.maxSessionOutputBytes
+      : this.active?.command === 'read-agent-workspace'
+        ? this.maxAgentWorkspaceOutputBytes
+        : this.maxOutputBytes;
     if (Buffer.byteLength(this.stdout) > activeLimit) {
       this.#abort(lifecycleError(
         'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 输出超过上限',
@@ -173,8 +216,13 @@ class PersistentSidecarIO {
         ));
         return;
       }
-      const responseLimit = active.command === 'read-session'
-        ? this.maxSessionOutputBytes : this.maxOutputBytes;
+      const responseLimit = active.command === 'read-working-deck'
+        ? this.maxWorkingDeckOutputBytes
+        : active.command === 'read-session'
+          ? this.maxSessionOutputBytes
+        : active.command === 'read-agent-workspace'
+          ? this.maxAgentWorkspaceOutputBytes
+          : this.maxOutputBytes;
       if (Buffer.byteLength(line) > responseLimit) {
         this.#abort(lifecycleError(
           'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 命令输出超过上限',
@@ -238,7 +286,10 @@ class PersistentSidecarIO {
     request.dispatched = true;
     request.state = 'active';
     const requestTimeoutMs = ATTACHMENT_LONG_COMMANDS.has(request.command)
-      ? this.attachmentTimeoutMs : this.timeoutMs;
+      ? this.attachmentTimeoutMs
+      : WORKING_DECK_COMMANDS.has(request.command)
+        ? this.workingDeckTimeoutMs
+        : this.timeoutMs;
     request.timer = setTimeout(() => {
       if (this.active !== request || request.settled) return;
       this.#abort(lifecycleError('SIDECAR_HELPER_TIMEOUT', 'sidecar helper 请求超时'));
@@ -260,8 +311,13 @@ class PersistentSidecarIO {
         { cause:error },
       )));
     }
-    const inputLimit = command === 'write-session'
-      ? this.maxSessionInputBytes : this.maxInputBytes;
+    const inputLimit = command === 'write-working-deck'
+      ? this.maxWorkingDeckInputBytes
+      : command === 'write-session'
+        ? this.maxSessionInputBytes
+      : command === 'write-agent-workspace'
+        ? this.maxAgentWorkspaceInputBytes
+        : this.maxInputBytes;
     if (Buffer.byteLength(line) > inputLimit) {
       const error = lifecycleError(
         'SIDECAR_HELPER_INPUT_LIMIT', 'sidecar helper 输入超过上限',
@@ -299,6 +355,12 @@ class PersistentSidecarIO {
   readSession({ missingOk=false } = {}) {
     return this.#request('read-session', { missingOk });
   }
+  readAgentWorkspace({ missingOk=false } = {}) {
+    return this.#request('read-agent-workspace', { missingOk });
+  }
+  readWorkingDeck({ missingOk=false } = {}) {
+    return this.#request('read-working-deck', { missingOk });
+  }
   assertBound() { return this.#request('assert-bound', {}); }
   publishAttachments(payload) { return this.#request('publish-attachments', payload); }
   discardAttachmentUpload({ uploadId, uploadIdentity, files }) {
@@ -323,9 +385,37 @@ class PersistentSidecarIO {
     return this.#request('verify-backup', { backupName, expectedFingerprint });
   }
   hashDeck() { return this.#request('hash-deck', {}); }
+  rebindDeck({ deckName, expectedWitness }) {
+    return this.#request('rebind-deck', { deckName, expectedWitness });
+  }
   writeSession({ sessionId, bytes }) {
     return this.#request('write-session', {
       sessionId, bytes:Buffer.from(bytes).toString('base64'),
+    });
+  }
+  writeAgentWorkspace({ sessionId, bytes }) {
+    return this.#request('write-agent-workspace', {
+      sessionId, bytes:Buffer.from(bytes).toString('base64'),
+    });
+  }
+  writeWorkingDeck({ sessionId, bytes, expectedFingerprint=null }) {
+    return this.#request('write-working-deck', {
+      sessionId,
+      bytes:Buffer.from(bytes).toString('base64'),
+      expectedFingerprint,
+    });
+  }
+  archiveWorkingDeck({ expectedFingerprint }) {
+    return this.#request('archive-working-deck', { expectedFingerprint });
+  }
+  restoreWorkingDeck({ fingerprint, expectedFingerprint }) {
+    return this.#request('restore-working-deck', { fingerprint, expectedFingerprint });
+  }
+  publishWorkingDeck({
+    sessionId, transactionId, expectedDeckFingerprint, expectedWorkingFingerprint,
+  }) {
+    return this.#request('publish-working-deck', {
+      sessionId, transactionId, expectedDeckFingerprint, expectedWorkingFingerprint,
     });
   }
   writeSnapshot({ snapshotId, bytes }) {
@@ -356,7 +446,7 @@ class PersistentSidecarIO {
     const active = this.active;
     if (
       active?.dispatched
-      && ATTACHMENT_MUTATION_COMMANDS.has(active.command)
+      && MUTATION_COMMIT_SCOPES.has(active.command)
     ) {
       await this.#waitForRequest(active);
     }
@@ -371,20 +461,30 @@ export async function createPersistentSidecarIO({
   project,
   root,
   spawnHelper=spawn,
+  pythonExecutable='python3',
+  helperPath=HELPER,
   timeoutMs=1_000,
   maxInputBytes=1024 * 1024,
   maxOutputBytes=1024 * 1024,
   maxSessionInputBytes=64 * 1024 * 1024,
   maxSessionOutputBytes=64 * 1024 * 1024,
+  maxWorkingDeckInputBytes=72 * 1024 * 1024,
+  maxWorkingDeckOutputBytes=72 * 1024 * 1024,
+  maxAgentWorkspaceInputBytes=4 * 1024 * 1024,
+  maxAgentWorkspaceOutputBytes=4 * 1024 * 1024,
   attachmentTimeoutMs=DEFAULT_ATTACHMENT_TIMEOUT_MS,
+  workingDeckTimeoutMs=DEFAULT_WORKING_DECK_TIMEOUT_MS,
   skipReadyHandshake=false,
 } = {}) {
-  const child = spawnHelper('python3', ['-u', HELPER, '--serve'], {
+  const child = spawnHelper(pythonExecutable, ['-u', helperPath, '--serve'], pythonUtf8SpawnOptions({
     stdio:['pipe', 'pipe', 'pipe'],
-  });
+  }));
   const io = new PersistentSidecarIO(child, {
     timeoutMs, maxInputBytes, maxOutputBytes,
-    maxSessionInputBytes, maxSessionOutputBytes, attachmentTimeoutMs,
+    maxSessionInputBytes, maxSessionOutputBytes,
+    maxWorkingDeckInputBytes, maxWorkingDeckOutputBytes,
+    attachmentTimeoutMs, workingDeckTimeoutMs,
+    maxAgentWorkspaceInputBytes, maxAgentWorkspaceOutputBytes,
   });
   if (!skipReadyHandshake) {
     try { await io.initialize(root ? { project:plainIdentity(project), root:plainIdentity(root) } : {
@@ -415,8 +515,7 @@ export const localDurableIO = {
       handle = null;
       await rename(temporary, path);
       renamed = true;
-      const parent = await open(directory, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
-      try { await parent.sync(); } finally { await parent.close(); }
+      await syncDirectory(directory);
     } catch (error) {
       throw Object.assign(error, {
         code:`${String(commitScope ?? 'sidecar').toUpperCase()}_WRITE_FAILED`,
@@ -433,7 +532,6 @@ export const localDurableIO = {
     await unlink(join(directory, name)).catch(error => {
       if (error.code !== 'ENOENT') throw error;
     });
-    const parent = await open(directory, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
-    try { await parent.sync(); } finally { await parent.close(); }
+    await syncDirectory(directory);
   },
 };

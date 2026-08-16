@@ -1,14 +1,18 @@
+import os
+import unittest
+
+if os.name == "nt":
+    raise unittest.SkipTest("attachment_writer 的 dirfd/锁语义由 Windows sidecar 集成测试覆盖")
+
 import fcntl
 import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
-import unittest
 from unittest import mock
 
 

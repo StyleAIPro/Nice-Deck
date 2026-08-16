@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { PatchJournal } from './patch-journal.mjs';
+import { sourceRebaseActionIds } from './action-compiler.mjs';
 import { hasCanonicalValues, validateAction } from './protocol.mjs';
 import { RevisionConflict } from './session-store.mjs';
 
@@ -11,12 +12,18 @@ function serviceError(code, statusCode, message = code, details = {}) {
 
 const isCommittedSession = error => error?.committed === true
   && error?.commitScope === 'session';
+const MANUAL_COALESCE_WINDOW_MS = 3_000;
 
 function copyJournalState(state) {
   return {
     groups: structuredClone(state.groups ?? []),
     redo: structuredClone(state.redo ?? []),
   };
+}
+
+function sourceGroupById(state, groupId) {
+  const group = state.groups?.find(candidate => candidate?.id === groupId);
+  return group?.mutationType === 'source' ? group : null;
 }
 
 function taskById(state, taskId) {
@@ -40,6 +47,7 @@ function reopenTask(state, taskId) {
   if (!task) return undefined;
   task.status = 'pending';
   delete task.groupId;
+  delete task.targetMissing;
   task.updatedAt = new Date().toISOString();
   return task;
 }
@@ -47,9 +55,13 @@ function reopenTask(state, taskId) {
 function runtimeWriteActions(actions) {
   return actions.map(action => ({
     id:action.id,
+    taskId:action.taskId ?? null,
     target:structuredClone(action.target),
     kind:action.kind,
     payload:structuredClone(action.payload),
+    before:structuredClone(action.before),
+    after:structuredClone(action.after),
+    ...(action.appliedAt === undefined ? {} : { appliedAt:action.appliedAt }),
   }));
 }
 
@@ -151,10 +163,22 @@ export function compareDiagnostics(baselineByPage, currentByPage, pageKeys) {
 }
 
 export class BridgeService {
-  constructor({ sessionStore, timeoutMs = 10_000, beforeSessionPersist = async () => {} }) {
+  constructor({
+    sessionStore,
+    timeoutMs = 10_000,
+    beforeSessionPersist = async () => {},
+    getPageIds = () => null,
+    reconcileSession = state => state,
+  }) {
+    if (typeof getPageIds !== 'function') throw new TypeError('getPageIds 必须是函数');
+    if (typeof reconcileSession !== 'function') {
+      throw new TypeError('reconcileSession 必须是函数');
+    }
     this.sessionStore = sessionStore;
     this.timeoutMs = timeoutMs;
     this.beforeSessionPersist = beforeSessionPersist;
+    this.getPageIds = getPageIds;
+    this.reconcileSession = reconcileSession;
     this.editorSocket = null;
     this.pending = new Map();
     this.socketWaiters = new Set();
@@ -165,6 +189,7 @@ export class BridgeService {
     this.editorPageKeys = [];
     this.readyPromise = null;
     this.recoveryRequired = null;
+    this.manualCoalesce = null;
   }
 
   #recoveryError() {
@@ -232,6 +257,66 @@ export class BridgeService {
     }
   }
 
+  #assertSourceEditInactive() {
+    const active = this.sessionStore.state.sourceEdit;
+    if (!active) return;
+    throw serviceError('SOURCE_EDIT_ACTIVE', 409, '源码事务正在修改工作副本，请等待提交或取消', {
+      sourceEditId:active.id,
+      taskId:active.taskId,
+      startedAt:active.startedAt,
+    });
+  }
+
+  #requireSourceEdit(sourceEditId) {
+    const active = this.sessionStore.state.sourceEdit;
+    if (!active) throw serviceError('SOURCE_EDIT_NOT_FOUND', 404, '找不到活动源码事务');
+    if (active.id !== sourceEditId) {
+      throw serviceError('SOURCE_EDIT_MISMATCH', 409, '源码事务标识与当前活动事务不一致', {
+        sourceEditId:active.id,
+      });
+    }
+    return active;
+  }
+
+  sourceEditSnapshot() {
+    return this.sessionStore.state.sourceEdit
+      ? structuredClone(this.sessionStore.state.sourceEdit) : null;
+  }
+
+  beginSourceEdit({ expectedRevision, taskId = null, beforeFingerprint }) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      this.assertRevision(expectedRevision);
+      this.#assertSourceEditInactive();
+      if (typeof beforeFingerprint !== 'string'
+        || beforeFingerprint !== this.sessionStore.state.workingDeckFingerprint) {
+        throw serviceError('WORKING_DECK_CHANGED', 409, '源码事务起始工作副本版本不一致');
+      }
+      const linkedTask = taskId === null ? null : taskById(this.sessionStore.state, taskId);
+      if (taskId !== null && !linkedTask) {
+        throw serviceError('TASK_NOT_FOUND', 404, '找不到结构任务');
+      }
+      if (linkedTask?.groupId || linkedTask?.status === 'completed') {
+        throw serviceError('TASK_ALREADY_COMPLETED', 409, '结构任务已经完成，请先撤销后再处理');
+      }
+      const sourceEdit = {
+        id:randomUUID(), taskId, beforeFingerprint,
+        startedAt:new Date().toISOString(),
+      };
+      const candidate = structuredClone(this.sessionStore.state);
+      candidate.sourceEdit = sourceEdit;
+      candidate.revision += 1;
+      await this.#persistCandidate(candidate, { operation:'source-edit-begin' });
+      this.manualCoalesce = null;
+      return {
+        sourceEditId:sourceEdit.id,
+        taskId,
+        beforeFingerprint,
+        revision:this.sessionStore.state.revision,
+      };
+    });
+  }
+
   setEditorSocket(socket) {
     this.editorSocket = socket;
     this.editorReady = false;
@@ -244,6 +329,25 @@ export class BridgeService {
     this.socketWaiters.clear();
   }
   hasEditorSocket() { return this.editorSocket?.readyState === 1; }
+
+  async waitUntilReady({ timeoutMs = this.timeoutMs } = {}) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+      throw new TypeError('timeoutMs 必须为正整数');
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (!this.closed) {
+      if (this.hasEditorSocket() && this.editorReady) {
+        await this.readyPromise;
+        this.#throwIfClosed();
+        return { pageKeys:[...this.editorPageKeys] };
+      }
+      if (Date.now() >= deadline) {
+        throw serviceError('EDITOR_OFFLINE', 409, '等待编辑器页面就绪超时');
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+    }
+    throw this.#closedError();
+  }
 
   clearEditorSocket(socket) {
     if (this.editorSocket === socket) {
@@ -307,6 +411,14 @@ export class BridgeService {
       ));
       return true;
     }
+    if (message.type === 'text-locations-rejected'
+      && pending.expectedType === 'text-locations') {
+      this.#settle(message.commandId, 'reject', serviceError(
+        message.code ?? 'TEXT_LOCATION_FAILED', 409,
+        message.message ?? '编辑器无法定位文字',
+      ));
+      return true;
+    }
     if (message.type === 'actions-rejected' && pending.expectedType === 'actions-prepared') {
       const allowed = new Set(['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND', 'TARGET_AMBIGUOUS', 'INVALID_ACTION']);
       const code = allowed.has(message.code) ? message.code : 'ACTION_REJECTED';
@@ -353,6 +465,22 @@ export class BridgeService {
       }
       return true;
     }
+    if (message.type === 'text-locations') {
+      if (!Array.isArray(message.results) || message.results.length > 100
+        || message.results.some(item => !item || typeof item.text !== 'string'
+          || !Number.isSafeInteger(item.occurrences) || item.occurrences < 1
+          || typeof item.pageKey !== 'string' || !item.target
+          || item.target.pageKey !== item.pageKey)) {
+        this.#settle(message.commandId, 'reject', serviceError(
+          'INVALID_TEXT_LOCATION_ACK', 502, '编辑器文字定位回执无效',
+        ));
+      } else {
+        this.#settle(message.commandId, 'resolve', {
+          results:structuredClone(message.results),
+        });
+      }
+      return true;
+    }
     const booleanFields = {
       'actions-committed': 'committed',
       'actions-rolled-back': 'rolledBack',
@@ -369,6 +497,7 @@ export class BridgeService {
   createTask(input, expectedRevision, options) {
     return this.#enqueue(async () => {
       this.#assertMutable();
+      this.#assertSourceEditInactive();
       const state = this.sessionStore.state;
       const snapshot = { revision: state.revision, tasks: structuredClone(state.tasks ?? []) };
       try {
@@ -443,13 +572,18 @@ export class BridgeService {
     );
   }
 
-  applyActions({ taskId, actions, expectedRevision }) {
+  applyActions({ taskId, actions, expectedRevision, coalesceKey = null }) {
     return this.#enqueue(async () => {
       this.#assertMutable();
+      this.#assertSourceEditInactive();
       this.assertRevision(expectedRevision);
       if (!Array.isArray(actions)
         || actions.some(action => action?.taskId !== taskId)) {
         throw serviceError('INVALID_INPUT', 400, '每个 action.taskId 必须与批次 taskId 严格一致');
+      }
+      if (coalesceKey !== null && (taskId !== null || typeof coalesceKey !== 'string'
+        || coalesceKey.length === 0 || coalesceKey.length > 256)) {
+        throw serviceError('INVALID_INPUT', 400, 'coalesceKey 只允许人工动作使用非空短字符串');
       }
       const linkedTask = taskId === null ? undefined : taskById(this.sessionStore.state, taskId);
       if (taskId !== null && !linkedTask) {
@@ -469,9 +603,16 @@ export class BridgeService {
         throw error;
       }
       let group;
+      const coalesceNow = Date.now();
+      const previousCoalesce = this.manualCoalesce;
+      const canCoalesce = coalesceKey !== null
+        && previousCoalesce?.key === coalesceKey
+        && coalesceNow - previousCoalesce.at <= MANUAL_COALESCE_WINDOW_MS;
       try {
         group = await this.#commitJournal(journal => {
-          const appended = journal.appendGroup(taskId, prepared.results);
+          const appended = (canCoalesce
+            ? journal.appendToLatestGroup(previousCoalesce.groupId, prepared.results) : null)
+            ?? journal.appendGroup(taskId, prepared.results);
           completeTask(journal.state, taskId, appended.id);
           return appended;
         });
@@ -498,6 +639,11 @@ export class BridgeService {
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         return true;
       });
+      // 合并窗口描述的是用户两次控件操作之间的空闲时间。prepare、commit ACK
+      // 与诊断刷新都是内部保存耗时，不能在 UI 尚处于 busy 时提前消耗这 3 秒。
+      this.manualCoalesce = coalesceKey === null ? null : {
+        key:coalesceKey, groupId:group.id, at:Date.now(),
+      };
       return { ...result, ...confirmation, diagnosticsPending };
     });
   }
@@ -505,13 +651,228 @@ export class BridgeService {
   undoGroup(groupId, expectedRevision) { return this.#changeGroup('undo', groupId, expectedRevision); }
   redoGroup(groupId, expectedRevision) { return this.#changeGroup('redo', groupId, expectedRevision); }
   compiledActions() { return this.journal.compile(); }
+  sourceRebaseActionIds(actions = this.compiledActions()) {
+    return sourceRebaseActionIds(this.journal.state.groups, actions);
+  }
+  compiledWriteActions() { return this.journal.compileForWrite(); }
+  compiledRuntimeWriteActions() { return runtimeWriteActions(this.compiledWriteActions()); }
 
-  writeDeck(expectedRevision, {
-    fingerprint, writer, restore, finalize = async () => {},
+  locateText(text, { pageKey=null } = {}) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      if (!this.hasEditorSocket() || !this.editorReady) {
+        throw serviceError('EDITOR_OFFLINE', 409, '编辑器未连接或页面尚未就绪');
+      }
+      const commandId = randomUUID();
+      const result = await this.#send(
+        commandId,
+        { type:'locate-text', commandId, text, ...(pageKey ? { pageKey } : {}) },
+        { expectedType:'text-locations' },
+      );
+      return { revision:this.sessionStore.state.revision, ...result };
+    });
+  }
+
+  recordSourceMutation(source, { restore, taskId = null } = {}) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      this.#assertSourceEditInactive();
+      return this.#recordSourceMutation(source, { restore, taskId });
+    });
+  }
+
+  commitSourceEdit({
+    sourceEditId, expectedRevision, source, restore, finalize = async () => {},
   }) {
     return this.#enqueue(async () => {
       this.#assertMutable();
       this.assertRevision(expectedRevision);
+      const active = this.#requireSourceEdit(sourceEditId);
+      if (source?.beforeFingerprint !== active.beforeFingerprint) {
+        throw serviceError('WORKING_DECK_CHANGED', 409, '源码事务提交的起始版本与预留版本不一致');
+      }
+      return this.#recordSourceMutation(source, {
+        restore,
+        taskId:active.taskId,
+        clearSourceEditId:active.id,
+        finalize,
+      });
+    });
+  }
+
+  cancelSourceEdit({ sourceEditId, expectedRevision, discard = async () => {} }) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      this.assertRevision(expectedRevision);
+      const active = this.#requireSourceEdit(sourceEditId);
+      await discard(active.beforeFingerprint);
+      const candidate = structuredClone(this.sessionStore.state);
+      delete candidate.sourceEdit;
+      candidate.revision += 1;
+      await this.#persistCandidate(candidate, { operation:'source-edit-cancel' });
+      this.manualCoalesce = null;
+      return {
+        sourceEditId, taskId:active.taskId,
+        revision:this.sessionStore.state.revision, cancelled:true,
+      };
+    });
+  }
+
+  async #recordSourceMutation(source, {
+    restore, taskId = null, clearSourceEditId = null, finalize = async () => {},
+  } = {}) {
+    const state = this.sessionStore.state;
+    if (state.workingDeckFingerprint !== source?.beforeFingerprint) {
+      throw serviceError('WORKING_DECK_CHANGED', 409, '结构修改的起始工作副本版本已过期');
+    }
+    const linkedTask = taskId === null ? null : taskById(state, taskId);
+    if (taskId !== null && !linkedTask) {
+      throw serviceError('TASK_NOT_FOUND', 404, '找不到结构任务');
+    }
+    if (linkedTask?.groupId || linkedTask?.status === 'completed') {
+      throw serviceError('TASK_ALREADY_COMPLETED', 409, '结构任务已关联修改组，请先撤销后再处理');
+    }
+    let candidate = structuredClone(state);
+    if (clearSourceEditId !== null) {
+      if (candidate.sourceEdit?.id !== clearSourceEditId) {
+        throw serviceError('SOURCE_EDIT_MISMATCH', 409, '源码事务在提交前已经改变');
+      }
+      delete candidate.sourceEdit;
+    }
+    const journal = new PatchJournal(candidate);
+    const group = journal.appendSourceGroup(source, taskId);
+    completeTask(candidate, taskId, group.id);
+    candidate.revision += 1;
+    candidate.workingDeckFingerprint = source.afterFingerprint;
+    candidate.diagnosticsBaseline = {};
+    candidate.diagnosticsCurrent = {};
+    candidate.diagnosticsRevision = null;
+    candidate = this.reconcileSession(candidate);
+    try {
+      await this.#persistCandidate(candidate, {
+        operation:'source-mutation', groupId:group.id,
+      });
+    } catch (error) {
+      if (error?.code === 'RECOVERY_REQUIRED' || typeof restore !== 'function') throw error;
+      try { await restore(source.beforeFingerprint, source.afterFingerprint); }
+      catch (restoreError) {
+        throw this.#enterRecoveryRequired({
+          operation:'source-mutation-compensation', committed:true,
+          commitScope:'working-deck', cause:restoreError,
+        });
+      }
+      throw serviceError('JOURNAL_PERSIST_FAILED', 500,
+        '结构修改历史持久化失败，工作副本已恢复', { cause:error });
+    }
+    try { await finalize(source.afterFingerprint); }
+    catch (error) {
+      throw this.#enterRecoveryRequired({
+        operation:'source-mutation-finalize', committed:true,
+        commitScope:'session', groupId:group.id, cause:error,
+      });
+    }
+    this.manualCoalesce = null;
+    const completedTask = taskId === null ? null : taskById(candidate, taskId);
+    return {
+      groupId:group.id, revision:candidate.revision, source:group.source,
+      ...(completedTask ? { task:structuredClone(completedTask) } : {}),
+    };
+  }
+
+  changeSourceGroup(method, groupId, expectedRevision, { restore } = {}) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      this.#assertSourceEditInactive();
+      this.assertRevision(expectedRevision);
+      if (!['undo', 'redo'].includes(method) || typeof restore !== 'function') {
+        throw serviceError('INVALID_INPUT', 400, '结构历史变更参数无效');
+      }
+      const state = this.sessionStore.state;
+      const originalGroup = sourceGroupById(state, groupId);
+      if (!originalGroup) throw serviceError('GROUP_NOT_FOUND', 404, '找不到结构修改组');
+      const latestActive = [...state.groups].reverse().find(group => group?.active === true);
+      if ((method === 'undo' && latestActive?.id !== groupId)
+        || (method === 'redo' && state.redo?.at(-1) !== groupId)) {
+        throw serviceError('SOURCE_HISTORY_ORDER', 409, '结构修改必须按历史顺序撤销或重做');
+      }
+      const draftState = copyJournalState(state);
+      const draft = new PatchJournal(draftState);
+      try { draft[method](groupId); }
+      catch { throw serviceError('GROUP_NOT_FOUND', 404, '找不到结构修改组'); }
+      const currentFingerprint = state.workingDeckFingerprint;
+      const targetFingerprint = method === 'undo'
+        ? originalGroup.source.beforeFingerprint
+        : originalGroup.source.afterFingerprint;
+      await restore(targetFingerprint, currentFingerprint);
+      let candidate = {
+        ...structuredClone(state),
+        groups:structuredClone(draftState.groups),
+        redo:structuredClone(draftState.redo),
+        workingDeckFingerprint:targetFingerprint,
+        diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null,
+        revision:state.revision + 1,
+      };
+      let linkedTask = method === 'undo'
+        ? reopenTask(candidate, originalGroup.taskId ?? null)
+        : completeTask(candidate, originalGroup.taskId ?? null, groupId);
+      candidate = this.reconcileSession(candidate);
+      linkedTask = taskById(candidate, originalGroup.taskId ?? null);
+      try {
+        await this.#persistCandidate(candidate, {
+          operation:`source-${method}`, groupId,
+        });
+      } catch (error) {
+        if (error?.code === 'RECOVERY_REQUIRED') throw error;
+        try { await restore(currentFingerprint, targetFingerprint); }
+        catch (restoreError) {
+          throw this.#enterRecoveryRequired({
+            operation:`source-${method}-compensation`, committed:true,
+            commitScope:'working-deck', cause:restoreError,
+          });
+        }
+        throw serviceError('JOURNAL_PERSIST_FAILED', 500,
+          '结构修改历史持久化失败，工作副本已恢复', { cause:error });
+      }
+      this.manualCoalesce = null;
+      return {
+        groupId, revision:candidate.revision, applied:0,
+        mutationType:'source', workingDeckFingerprint:targetFingerprint,
+        ...(linkedTask ? { task:structuredClone(linkedTask) } : {}),
+      };
+    });
+  }
+
+  writeDeck(expectedRevision, {
+    fingerprint, writer, restore, finalize = async () => {}, solidify = false,
+    scope = 'deck',
+  }) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      this.#assertSourceEditInactive();
+      this.assertRevision(expectedRevision);
+      if (solidify && this.sessionStore.state.groups.length === 0) {
+        throw serviceError('NOTHING_TO_SOLIDIFY', 409, '当前没有需要固化的撤销历史');
+      }
+      if (solidify) {
+        const pageIds = this.getPageIds();
+        if (Array.isArray(pageIds)) {
+          const known = new Set(pageIds);
+          const missingPageKeys = [...new Set(this.compiledWriteActions()
+            .map(action => action?.target?.pageKey)
+            .filter(pageKey => typeof pageKey === 'string' && !known.has(pageKey)))];
+          if (missingPageKeys.length > 0) {
+            throw serviceError(
+              'MISSING_PAGE_TARGETS', 409,
+              '已有修改指向当前不存在的页面，请先撤销删页或清理对应修改',
+              {
+                stage:'page-targets',
+                recovery:'撤销删除页面的结构修改，或先撤销该页面上的历史动作再重新删除',
+                missingPageKeys,
+              },
+            );
+          }
+        }
+      }
       if (!this.hasEditorSocket() || !this.editorReady) {
         throw diagnosticFailure('EDITOR_OFFLINE', '编辑器未连接或页面尚未就绪');
       }
@@ -561,7 +922,7 @@ export class BridgeService {
       }
       let result;
       try {
-        result = await writer(runtimeWriteActions(this.compiledActions()), diskFingerprint);
+        result = await writer(runtimeWriteActions(this.compiledWriteActions()), diskFingerprint);
         this.#throwIfClosed();
       } catch (error) {
         this.#throwIfClosed();
@@ -591,10 +952,12 @@ export class BridgeService {
       }
       const snapshot = {
         deckFingerprint:state.deckFingerprint,
+        workingDeckFingerprint:state.workingDeckFingerprint,
       };
       const candidate = {
         ...structuredClone(state),
-        deckFingerprint:result.fingerprint,
+        deckFingerprint:scope === 'working' ? state.deckFingerprint : result.fingerprint,
+        workingDeckFingerprint:result.fingerprint,
         conflict:null,
         diagnosticsBaseline:{
           ...structuredClone(state.diagnosticsBaseline),
@@ -606,15 +969,30 @@ export class BridgeService {
         },
         diagnosticsRevision:state.revision,
       };
+      let solidification = null;
+      if (solidify) {
+        const candidateJournal = new PatchJournal(candidate);
+        solidification = candidateJournal.solidify();
+        // session 的固化基线必须与 writer 已写进 bundle 的动作 schema 完全相同。
+        // 不能把 expectedRevision 等请求期字段留在内存里，否则重开后 JSON
+        // 规范化会让同一个已提交状态前后不一致。
+        candidate.solidifiedActions = runtimeWriteActions(solidification.actions);
+        candidate.revision = state.revision + 1;
+        candidate.diagnosticsRevision = candidate.revision;
+        for (const task of candidate.tasks ?? []) delete task.groupId;
+      }
       try {
         await this.#persistCandidate(candidate, {
-          operation:'write-deck', backup:result.backup,
+          operation:solidify ? 'solidify-deck' : 'write-deck', backup:result.backup,
         });
       } catch (error) {
         this.#throwIfClosed();
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         try {
-          await restore(result, snapshot.deckFingerprint);
+          await restore(
+            result,
+            scope === 'working' ? result.previousFingerprint : snapshot.deckFingerprint,
+          );
         } catch (restoreError) {
           this.#throwIfClosed();
           throw this.#enterRecoveryRequired({
@@ -647,7 +1025,15 @@ export class BridgeService {
           cause:error,
         });
       }
-      return result;
+      if (!solidify) return result;
+      this.manualCoalesce = null;
+      return {
+        ...result,
+        revision:this.sessionStore.state.revision,
+        solidified:true,
+        clearedGroupCount:solidification.clearedGroupCount,
+        clearedRedoCount:solidification.clearedRedoCount,
+      };
     });
   }
 
@@ -660,23 +1046,6 @@ export class BridgeService {
       this.#throwIfClosed();
       if (fingerprint === this.sessionStore.state.deckFingerprint) return false;
       return this.#recordDeckConflict(fingerprint);
-    });
-  }
-
-  setAgentConnection(connection, expectedRevision = this.sessionStore.state.revision) {
-    return this.#enqueue(async () => {
-      this.#assertMutable();
-      this.assertRevision(expectedRevision);
-      const candidate = {
-        ...structuredClone(this.sessionStore.state),
-        revision:this.sessionStore.state.revision + 1,
-        agentConnection:structuredClone(connection),
-      };
-      await this.#persistCandidate(candidate, { operation:'agent-connection' });
-      return {
-        revision:this.sessionStore.state.revision,
-        connection:structuredClone(this.sessionStore.state.agentConnection),
-      };
     });
   }
 
@@ -717,6 +1086,7 @@ export class BridgeService {
   #mutateTask(operation, mutation) {
     return this.#enqueue(async () => {
       this.#assertMutable();
+      this.#assertSourceEditInactive();
       try {
         const result = await mutation();
         if (this.closed) {
@@ -757,7 +1127,9 @@ export class BridgeService {
   async #changeGroup(method, groupId, expectedRevision) {
     return this.#enqueue(async () => {
       this.#assertMutable();
+      this.#assertSourceEditInactive();
       this.assertRevision(expectedRevision);
+      this.manualCoalesce = null;
       const draftState = copyJournalState(this.sessionStore.state);
       const draft = new PatchJournal(draftState);
       try { draft[method](groupId); }
@@ -804,7 +1176,10 @@ export class BridgeService {
     const commandId = randomUUID();
     try {
       return await this.#send(
-        commandId, { type:'apply-actions', commandId, actions, tentative:true, replace },
+        commandId, {
+          type:'apply-actions', commandId, actions, tentative:true, replace,
+          ...(replace ? { rebaseActionIds:this.sourceRebaseActionIds(actions) } : {}),
+        },
         { expectedType:'actions-prepared', actions },
       );
     } catch (error) {
@@ -861,7 +1236,13 @@ export class BridgeService {
     const commandId = randomUUID();
     await this.#send(
       commandId,
-      { type:'sync-actions', commandId, actions:this.compiledActions() },
+      (() => {
+        const actions = this.compiledActions();
+        return {
+          type:'sync-actions', commandId, actions,
+          rebaseActionIds:this.sourceRebaseActionIds(actions),
+        };
+      })(),
       { expectedType:'actions-synced' },
     );
   }

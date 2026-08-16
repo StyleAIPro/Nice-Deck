@@ -12,49 +12,15 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("eb", ROOT / "scripts/edit-bundle.py")
 eb = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(eb)
+PATCH_SPEC = importlib.util.spec_from_file_location(
+    "huawei_deck_patch_bundle", ROOT / "scripts/editor/patch_bundle.py"
+)
+patch_bundle = importlib.util.module_from_spec(PATCH_SPEC)
+PATCH_SPEC.loader.exec_module(patch_bundle)
 
-BEGIN = "<!-- huawei-deck-editor:begin -->"
-END = "<!-- huawei-deck-editor:end -->"
-
-
-def _block(patches):
-    runtime = (ROOT / "scripts/editor/runtime/patch-runtime.js").read_text(
-        encoding="utf-8"
-    )
-    data = json.dumps(
-        patches, ensure_ascii=False, separators=(",", ":")
-    ).replace("</", "<\\u002F")
-    return (
-        f'{BEGIN}\n<script type="application/json" '
-        f'id="huawei-deck-editor-patches">{data}</script>\n'
-        f"<script>{runtime}\n"
-        ";(() => {\n"
-        "  const deckEditorApplyWhenStable=()=>{\n"
-        "    const patches=JSON.parse(document.getElementById("
-        "\"huawei-deck-editor-patches\").textContent);\n"
-        "    let previous=null;\n"
-        "    const check=()=>{\n"
-        "      const canvases=[...document.querySelectorAll("
-        "\".stage .slide-canvas\")];\n"
-        "      const signature=JSON.stringify(canvases.map((canvas,index)=>{\n"
-        "        const section=canvas.querySelector(\"section[data-label]\");\n"
-        "        return [index,section?.dataset.label??\"\",section?.outerHTML??\"\"];\n"
-        "      }));\n"
-        "      if(canvases.length&&signature===previous){\n"
-        "        window.HuaweiDeckPatchRuntime.applyAll?.(patches);\n"
-        "        return;\n"
-        "      }\n"
-        "      previous=signature;\n"
-        "      setTimeout(check,100);\n"
-        "    };\n"
-        "    check();\n"
-        "  };\n"
-        "  if(document.readyState===\"loading\")document.addEventListener("
-        "\"DOMContentLoaded\",deckEditorApplyWhenStable,{once:true});\n"
-        "  else deckEditorApplyWhenStable();\n"
-        "})();</script>\n"
-        f"{END}"
-    )
+BEGIN = patch_bundle.BEGIN
+END = patch_bundle.END
+_block = patch_bundle.build_block
 
 
 def _absolute_path(path):
@@ -351,26 +317,7 @@ def write_patches(
             work_path.write_bytes(original_bytes)
             lines = eb.load(work_path)
             template = eb.get_template(lines)
-            block = _block(patches)
-            begin_count = template.count(BEGIN)
-            end_count = template.count(END)
-            if begin_count or end_count:
-                if (
-                    begin_count != 1
-                    or end_count != 1
-                    or template.index(BEGIN) >= template.index(END)
-                ):
-                    raise ValueError("Deck 补丁标记必须各恰好出现一次且顺序正确")
-                start = template.index(BEGIN)
-                end = template.index(END) + len(END)
-                template = template[:start] + block + template[end:]
-            else:
-                if template.count("</body>") != 1:
-                    raise ValueError("Deck 模板必须恰好包含一个精确 </body> 插入点")
-                template = template.replace("</body>", block + "\n</body>", 1)
-
-            if template.count(BEGIN) != 1 or template.count(END) != 1:
-                raise ValueError("构造后的 Deck 补丁标记必须各恰好出现一次")
+            template = patch_bundle.replace_block(template, patches)
             eb.set_template(lines, template)
 
             phase = "temp-write"

@@ -21,6 +21,9 @@ def load_module(name, path):
 
 eb = load_module("edit_bundle_test", REPO / "scripts" / "edit-bundle.py")
 up = load_module("upgrade_deck_test", REPO / "scripts" / "upgrade_deck.py")
+patch_bundle = load_module(
+    "patch_bundle_upgrade_test", REPO / "scripts" / "editor" / "patch_bundle.py"
+)
 
 
 class UpgradeDeckProfileTest(unittest.TestCase):
@@ -59,9 +62,8 @@ class UpgradeDeckProfileTest(unittest.TestCase):
         )
         self.assertIn(custom_profile, upgraded)
         self.assertIn("用户课程标题", upgraded)
-        self.assertIn(".railpage-current {", upgraded)
-        self.assertNotIn(".railpage-current-legacy {", upgraded)
-        self.assertEqual(target_hash, up.runtime_hash(upgraded))
+        self.assertIn(".railpage-current-legacy {", upgraded)
+        self.assertNotEqual(target_hash, up.runtime_hash(upgraded))
         for uid, entry in eb.get_manifest(old_lines).items():
             self.assertEqual(entry, manifest[uid])
 
@@ -99,6 +101,54 @@ class UpgradeDeckProfileTest(unittest.TestCase):
         self.assertIn('id="panlock"', upgraded)
         self.assertIn("this._presentWheelH = (e) =>", upgraded)
         self.assertEqual(up.HASH_RE.search(upgraded).group(1), target_hash)
+
+    def test_recompose_preserves_patches_and_rebuilds_current_runtime(self):
+        action = {
+            "id": "patch-a",
+            "taskId": None,
+            "target": {
+                "pageKey": "page-001-test",
+                "path": "0",
+                "tag": "DIV",
+                "fingerprint": "01234567",
+                "rect": {"x": 10, "y": 20, "w": 30, "h": 40},
+            },
+            "kind": "setText",
+            "payload": {"text": "升级后仍保留"},
+        }
+        old = patch_bundle.replace_block(
+            self.latest, [action], runtime_source="/* deliberately-old-runtime */"
+        )
+        old_lines = list(self.latest_lines)
+        eb.set_template(old_lines, old)
+
+        upgraded, _, _ = up.build_upgrade(old_lines, self.latest_lines, "teaching")
+
+        self.assertEqual([action], patch_bundle.extract_patches(upgraded))
+        self.assertEqual(1, upgraded.count(patch_bundle.BEGIN))
+        self.assertNotIn("deliberately-old-runtime", upgraded)
+        self.assertIn("com.huawei.deck.visual-editor.patch-runtime", upgraded)
+        self.assertIn("HuaweiDeckEditorPatchStatus", upgraded)
+        self.assertEqual(up.runtime_hash(self.latest), up.runtime_hash(upgraded))
+
+    def test_only_known_toc_shell_conflict_prefers_business_renderer(self):
+        conflict_head = "<" * 7
+        conflict_split = "=" * 7
+        conflict_tail = ">" * 7
+        conflict = f"""{conflict_head} user
+    const tocRender = () => {{ return 'business'; }};
+    this._tocRender = tocRender;
+    this._tocH = (e) => {{ return e; }};
+{conflict_split}
+    const tocBuilders = [animNN];
+    if (!hasStandardToc) {{ useLegacyToc(); }}
+{conflict_tail} latest
+"""
+        resolved = up.resolve_known_shell_conflicts(conflict)
+        self.assertNotIn(conflict_head, resolved)
+        self.assertIn("return 'business'", resolved)
+        unknown = conflict.replace("const tocRender = () =>", "const other = () =>")
+        self.assertIn(conflict_head, up.resolve_known_shell_conflicts(unknown))
 
 
 if __name__ == "__main__":

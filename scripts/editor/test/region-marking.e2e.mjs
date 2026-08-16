@@ -4,86 +4,309 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { startFixtureServer, openEditor, dragInFrame } from './test-helpers.mjs';
 
-test('Agent 连接设置可发现并选择会话，并在页面重开后恢复', async t => {
-  const threadId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
+function inertAgentPty() {
+  return {
+    pid:4321,
+    onData() { return { dispose() {} }; },
+    onExit() { return { dispose() {} }; },
+    write() {}, resize() {}, kill() {},
+  };
+}
+
+test('鼠标位于 Deck 时 R 快捷键优先于仍持有焦点的 Agent 终端', async t => {
+  const terminalWrites = [];
   const app = await startFixtureServer({
-    agentSessionCatalog:{
-      async list() {
-        return {
-          version:1,
-          providers:[
-            { id:'codex', name:'Codex', available:true },
-            { id:'claude-code', name:'Claude Code', available:true },
-          ],
-          sessions:[
-            {
-              provider:'codex', id:threadId, title:'Huawei Deck 第一版',
-              cwd:'/tmp/huawei-deck-project',
-              updatedAt:'2026-08-04T00:00:00.000Z', skillStatus:'detected',
-            },
-            {
-              provider:'claude-code', id:'019fc842-816b-7413-bb23-10b0f87e1d4e',
-              title:'Claude 修改会话', cwd:'/tmp/claude-project',
-              updatedAt:'2026-08-03T00:00:00.000Z', skillStatus:'not-detected',
-            },
-          ],
-        };
+    spawnAgentTerminal:() => ({
+      pid:4322,
+      onData(listener) {
+        queueMicrotask(() => listener('\r\ncodex READY\r\n'));
+        return { dispose() {} };
       },
-      async inspectSkill() {
-        return { provider:'codex', sessionId:threadId, skillStatus:'detected' };
-      },
-    },
+      onExit() { return { dispose() {} }; },
+      write(data) { terminalWrites.push(data); },
+      resize() {}, kill() {},
+    }),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.locator('[data-mode="region"]').click();
+  await page.locator('[data-agent-status]').click();
+  await page.locator('[data-agent-terminal-panel]').waitFor({ state:'visible' });
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-terminal-panel]')?.dataset.terminalState === 'running'
+  ));
+  const terminalHost = page.locator('[data-agent-terminal-host]');
+  const terminalInput = page.locator('[data-agent-terminal-host] .xterm-helper-textarea');
+  await page.waitForTimeout(260);
+  await terminalHost.click();
+  await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'));
+
+  await frame.locator('h2').first().hover();
+  const writesBeforeShortcut = terminalWrites.join('');
+  await page.keyboard.down('r');
+  await page.waitForFunction(() => (
+    document.querySelector('.mode-tools')?.dataset.temporaryMode === 'preview'
+      && document.querySelector('.mode-tools')?.dataset.activeMode === 'preview'
+      && document.querySelector('#deck-frame')?.contentDocument?.documentElement
+        ?.dataset.deckEditorMode === 'preview'
+  ));
+  assert.equal(await frame.locator('html').getAttribute('data-deck-editor-mode'), 'preview');
+  await page.waitForTimeout(100);
+  assert.equal(terminalWrites.join(''), writesBeforeShortcut);
+
+  await page.keyboard.up('r');
+  await page.waitForFunction(() => (
+    !document.querySelector('.mode-tools')?.dataset.temporaryMode
+      && document.querySelector('.mode-tools')?.dataset.activeMode === 'region'
+      && document.querySelector('#deck-frame')?.contentDocument?.documentElement
+        ?.dataset.deckEditorMode === 'region'
+  ));
+  assert.equal(await frame.locator('html').getAttribute('data-deck-editor-mode'), 'region');
+
+  await terminalHost.click();
+  const writesBeforeTerminalInput = terminalWrites.join('');
+  await page.keyboard.down('r');
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('.mode-tools').getAttribute('data-temporary-mode'), null);
+  assert.equal(terminalWrites.join(''), `${writesBeforeTerminalInput}r`);
+  await page.keyboard.up('r');
+  assert.equal(await page.locator('.mode-tools').getAttribute('data-active-mode'), 'region');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('编辑模式按住 R 临时拉框，松开后返回编辑并保留标注输入框', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.click('[data-mode="edit"]');
+  await page.keyboard.down('r');
+  await page.waitForFunction(() => (
+    document.querySelector('.mode-tools')?.dataset.temporaryMode === 'region'
+    && document.querySelector('.mode-tools')?.dataset.activeMode === 'region'
+  ));
+  assert.equal(await frame.locator('html').getAttribute('data-deck-editor-mode'), 'region');
+  await page.waitForTimeout(100);
+
+  await dragInFrame(page, { x:100, y:100 }, { x:320, y:240 });
+  await frame.locator('[data-region-popover]').waitFor({ state:'visible' });
+  await page.keyboard.up('r');
+  await page.waitForFunction(() => (
+    !document.querySelector('.mode-tools')?.dataset.temporaryMode
+    && document.querySelector('.mode-tools')?.dataset.activeMode === 'edit'
+  ));
+  assert.equal(await frame.locator('html').getAttribute('data-deck-editor-mode'), 'edit');
+  await frame.locator('[data-region-popover]').waitFor({ state:'visible' });
+
+  const textarea = frame.locator('[data-region-popover] textarea');
+  await textarea.press('r');
+  assert.equal(await textarea.inputValue(), 'r');
+  assert.equal(await page.locator('.mode-tools').getAttribute('data-active-mode'), 'edit');
+  await textarea.press('Escape');
+
+  const heading = frame.locator('h2').first();
+  await heading.dblclick();
+  await heading.press('r');
+  assert.match(await heading.textContent(), /r/);
+  assert.equal(await page.locator('.mode-tools').getAttribute('data-active-mode'), 'edit');
+  await heading.press('Escape');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('区域标记模式按住 R 临时预览，松开后恢复且模式按钮没有红色焦点框', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.locator('[data-mode="region"]').click();
+  await page.keyboard.down('r');
+  await page.waitForFunction(() => (
+    document.querySelector('.mode-tools')?.dataset.temporaryMode === 'preview'
+    && document.querySelector('.mode-tools')?.dataset.activeMode === 'preview'
+    && document.querySelector('#deck-frame')?.contentDocument?.documentElement
+      ?.dataset.deckEditorMode === 'preview'
+  ));
+  assert.equal(await frame.locator('html').getAttribute('data-deck-editor-mode'), 'preview');
+  assert.equal(await page.locator('[data-mode="region"]').evaluate(button => (
+    getComputedStyle(button).outlineStyle
+  )), 'none');
+
+  await page.keyboard.up('r');
+  await page.waitForFunction(() => (
+    !document.querySelector('.mode-tools')?.dataset.temporaryMode
+    && document.querySelector('.mode-tools')?.dataset.activeMode === 'region'
+    && document.querySelector('#deck-frame')?.contentDocument?.documentElement
+      ?.dataset.deckEditorMode === 'region'
+  ));
+  assert.equal(await frame.locator('html').getAttribute('data-deck-editor-mode'), 'region');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('区域标记悬停小手时提示按 R 点击，临时预览后隐藏', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace(
+      '<h2>第一页标题</h2>',
+      `<h2>第一页标题</h2>
+        <button data-pointer-hint-test type="button"
+          style="position:absolute;left:460px;top:280px;cursor:pointer">交互按钮</button>`,
+    ),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.locator('[data-mode="region"]').click();
+  await frame.locator('[data-pointer-hint-test]').hover();
+  await frame.locator('[data-region-click-hint][data-visible]').waitFor({ state:'visible' });
+  assert.equal(
+    (await frame.locator('[data-region-click-hint]').textContent()).replace(/\s+/g, ''),
+    '按R键，即可点击',
+  );
+
+  await page.keyboard.down('r');
+  await frame.locator('[data-region-click-hint]').waitFor({ state:'detached' });
+  await page.keyboard.up('r');
+  await frame.locator('h2').first().hover();
+  assert.equal(await frame.locator('[data-region-click-hint]').count(), 0);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('同页 layer 画面分别写入任务状态，定位任务时恢复对应画面', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture
+      .replace('<h2>第一页标题</h2>', `<h2>第一页标题</h2>
+        <div data-test-layers style="position:absolute;left:120px;top:260px">
+          <button data-layer-btn="capacity" data-layer-group="test-state" data-active>容量</button>
+          <button data-layer-btn="performance" data-layer-group="test-state">性能</button>
+          <div data-layer-panel="capacity" data-layer-group="test-state" data-active>容量画面</div>
+          <div data-layer-panel="performance" data-layer-group="test-state">性能画面</div>
+        </div>`)
+      .replace('</body>', `<script>
+        document.querySelector('[data-test-layers]').addEventListener('click', event => {
+          const button = event.target.closest('[data-layer-btn]');
+          if (!button) return;
+          const key = button.dataset.layerBtn;
+          document.querySelectorAll('[data-layer-btn]').forEach(node => {
+            node.toggleAttribute('data-active', node.dataset.layerBtn === key);
+          });
+          document.querySelectorAll('[data-layer-panel]').forEach(node => {
+            node.toggleAttribute('data-active', node.dataset.layerPanel === key);
+          });
+        });
+      </script></body>`),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const frame = page.frameLocator('#deck-frame');
+  const mark = async (instruction, count) => {
+    await page.locator('[data-mode="region"]').click();
+    await dragInFrame(page, { x:160, y:380 }, { x:420, y:560 });
+    await frame.locator('[data-region-popover] textarea').fill(instruction);
+    await frame.locator('[data-region-submit]').click();
+    await page.waitForFunction(expected => (
+      document.querySelectorAll('[data-task-row]').length === expected
+      || document.querySelector('#deck-frame')?.contentDocument
+        .querySelector('[data-region-status][data-state="error"]')
+    ), count);
+    assert.equal(
+      await page.locator('[data-task-row]').count(),
+      count,
+      await frame.locator('[data-region-status]').textContent().catch(() => '任务未创建'),
+    );
+  };
+
+  await mark('容量状态任务', 1);
+  await page.locator('[data-mode="preview"]').click();
+  await frame.locator('[data-layer-btn="performance"]').click();
+  assert.equal(await frame.locator('[data-layer-btn="performance"]').getAttribute('data-active'), '');
+  await mark('性能状态任务', 2);
+
+  const tasks = await fetch(`${app.url}/api/tasks?token=${app.token}`).then(response => response.json());
+  assert.ok(tasks.every(task => task.pageState?.schema === 1), JSON.stringify(tasks));
+  assert.notDeepEqual(tasks[0].pageState, tasks[1].pageState);
+
+  if (await page.locator('[data-task-drawer]').getAttribute('data-open') !== 'true') {
+    await page.locator('[data-task-drawer-toggle]').click();
+  }
+  await page.locator('[data-task-row]').filter({ hasText:'容量状态任务' })
+    .locator('[data-task-locate]').click();
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument
+      .querySelector('[data-layer-btn="capacity"]')?.hasAttribute('data-active') === true
+  ));
+
+  if (await page.locator('[data-task-drawer]').getAttribute('data-open') !== 'true') {
+    await page.locator('[data-task-drawer-toggle]').click();
+  }
+  await page.locator('[data-task-row]').filter({ hasText:'性能状态任务' })
+    .locator('[data-task-locate]').click();
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument
+      .querySelector('[data-layer-btn="performance"]')?.hasAttribute('data-active') === true
+  ));
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('Agent 终端不加载历史会话目录或高级设置', async t => {
+  const app = await startFixtureServer({
+    spawnAgentTerminal:inertAgentPty,
   });
   t.after(() => app.close());
   const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
   t.after(() => browser.close());
 
-  await page.waitForFunction(() => (
-    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'offline'
-  ));
-  assert.match(await page.locator('[data-agent-status]').innerText(), /离线/);
-  assert.equal(
-    await page.locator('[data-agent-status] .status-dot').evaluate(node => getComputedStyle(node).backgroundColor),
-    'rgb(199, 0, 11)',
-  );
   await page.click('[data-agent-status]');
-  await page.waitForSelector('[data-agent-connection-panel]:not([hidden])');
-  assert.equal(await page.locator('[data-agent-connection]').count(), 0, '任务抽屉不再承载连接设置');
-  await page.click('[data-agent-connection-panel] [data-provider="claude-code"]');
-  assert.match(await page.locator('[data-agent-connection-panel]').innerText(), /claude-project/);
-  assert.match(await page.locator('[data-agent-connection-panel]').innerText(), /Claude 修改会话/);
-  await page.click('[data-agent-connection-panel] [data-provider="codex"]');
-  await page.waitForSelector(`[data-agent-session="${threadId}"]`);
-  const projectSummary = page.locator('[data-project-path="/tmp/huawei-deck-project"] > summary');
-  const sessionRow = page.locator(`[data-agent-session="${threadId}"]`);
-  assert.notEqual(
-    await projectSummary.evaluate(node => getComputedStyle(node).backgroundColor),
-    await sessionRow.evaluate(node => getComputedStyle(node).backgroundColor),
-  );
-  assert.ok((await sessionRow.boundingBox()).x > (await projectSummary.boundingBox()).x);
-  assert.match(await page.locator(`[data-agent-session="${threadId}"]`).innerText(), /检测到 Skill/);
-  await page.click(`[data-agent-session="${threadId}"]`);
-  await page.waitForFunction(() => (
-    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
-  ));
-  await page.waitForFunction(() => (
-    getComputedStyle(document.querySelector('[data-agent-status] .status-dot')).backgroundColor
-      === 'rgb(22, 163, 74)'
-  ));
-  assert.match(await page.locator('[data-agent-status]').innerText(), /Codex 在线/);
-  assert.equal(
-    await page.locator('[data-agent-status] .status-dot').evaluate(node => getComputedStyle(node).backgroundColor),
-    'rgb(22, 163, 74)',
-  );
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('[data-agent-chat-advanced]').count(), 0);
+  assert.equal(await page.locator('[data-agent-connection-panel]').count(), 0);
+  assert.equal(await page.locator('[data-agent-terminal-panel]').isVisible(), true);
+  assert.equal(await page.locator('[data-agent-chat-input], .agent-chat-tabs').count(), 0);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
 
-  await page.reload();
-  await page.waitForFunction(() => (
-    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
-  ));
-  const configuration = await fetch(
-    `${app.url}/api/agent-connection?token=${app.token}`,
-  ).then(response => response.json());
-  assert.equal(configuration.connection.threadId, threadId);
+test('已移除的历史会话面板不再出现在默认页面', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  assert.equal(await page.locator('[data-agent-connection-panel]').count(), 0);
+  assert.equal(await page.locator('[data-agent-chat-advanced]').count(), 0);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('Editor 不提供历史会话绑定、外部会话跳转或对话输入入口', async t => {
+  const app = await startFixtureServer({ spawnAgentTerminal:inertAgentPty });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  await page.click('[data-agent-status]');
+  assert.equal(await page.locator('[data-agent-connection-panel]').count(), 0);
+  assert.equal(await page.locator('[data-agent-chat-advanced]').count(), 0);
+  assert.equal(await page.locator('[data-agent-open-thread], .task-open-thread').count(), 0);
+  assert.equal(await page.locator('[data-agent-chat-input], .agent-chat-tabs').count(), 0);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
@@ -91,7 +314,7 @@ test('Agent 连接设置可发现并选择会话，并在页面重开后恢复',
 test('拉框弹输入框并跨页持久化两条任务', async t => {
   let submittedTaskIds = [];
   const app = await startFixtureServer({
-    agentAdapter:{
+    agentRunAdapter:{
       id:'codex',
       async run({ taskIds }) {
         submittedTaskIds = taskIds;
@@ -168,10 +391,17 @@ test('拉框弹输入框并跨页持久化两条任务', async t => {
   await page.waitForTimeout(1_100);
   assert.equal(await frame.locator('[data-task-highlight]').count(), 1);
   await frame.locator('[data-task-highlight]').waitFor({ state: 'detached', timeout: 1_200 });
-  assert.equal(await page.locator('[data-process-all]').innerText(), '交给 Agent 处理全部 2 条');
+  assert.equal(
+    await page.locator('[data-process-all] .pill-nav-label-default').innerText(),
+    '交给 Agent 处理全部 2 条',
+  );
   await page.locator('[data-process-all]').click();
   await page.waitForFunction(() => (
-    document.querySelector('[data-process-note]')?.textContent.includes('Agent 已完成测试批次')
+    document.querySelector('.editor-shell')?.dataset.agentTerminalOpen === 'true'
+  ));
+  assert.equal(await page.locator('[data-agent-terminal-panel]').isVisible(), true);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-process-note]')?.textContent.includes('2 个任务仍未处理')
   ));
   assert.equal(submittedTaskIds.length, 2);
   assert.deepEqual(browserProblems, []);
@@ -206,6 +436,136 @@ test('待处理任务可二次编辑说明并确认删除', async t => {
   tasks = await fetch(`${app.url}/api/tasks?token=${app.token}`).then(response => response.json());
   assert.deepEqual(tasks, []);
   assert.equal(await page.locator('[data-page-badge]').count(), 0);
+});
+
+test('区域弹窗可继续累计任务或直接执行全部待完成任务', async t => {
+  let submittedTaskIds = [];
+  const app = await startFixtureServer({
+    agentRunAdapter:{
+      id:'codex',
+      async run({ taskIds }) {
+        submittedTaskIds = taskIds;
+        await new Promise(resolve => setTimeout(resolve, 800));
+        return { summary:'Agent 已接收测试批次' };
+      },
+    },
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.locator('[data-mode="region"]').click();
+  await dragInFrame(page, { x:100, y:100 }, { x:320, y:240 });
+  await frame.locator('[data-region-popover] textarea').fill('第一条继续累计');
+  assert.equal(
+    await frame.locator('[data-region-submit] .pill-nav-label-default').innerText(),
+    '继续添加任务',
+  );
+  assert.equal(
+    await frame.locator('[data-region-submit-now] .pill-nav-label-default').innerText(),
+    '直接执行',
+  );
+  assert.deepEqual(await frame.locator('[data-region-actions]').evaluate(actions => (
+    [...actions.children].map(button => (
+      button.querySelector('.pill-nav-label-default')?.textContent ?? button.textContent
+    ))
+  )), ['取消', '直接执行', '继续添加任务']);
+  assert.deepEqual(await frame.locator('[data-region-actions]').evaluate(actions => (
+    [...actions.children].map(button => {
+      const stack = button.querySelector('.pill-nav-label-stack');
+      const defaultLabel = button.querySelector('.pill-nav-label-default');
+      const hoverLabel = button.querySelector('.pill-nav-label-hover');
+      return {
+        stack:getComputedStyle(stack).display,
+        defaultOpacity:getComputedStyle(defaultLabel).opacity,
+        hoverOpacity:getComputedStyle(hoverLabel).opacity,
+      };
+    })
+  )), Array.from({ length:3 }, () => ({
+    stack:'grid', defaultOpacity:'1', hoverOpacity:'0',
+  })), 'PillNav 默认态只能显示一层文案');
+  assert.deepEqual(await frame.locator('[data-region-submit]').evaluate(button => ({
+    background:getComputedStyle(button).backgroundColor,
+    color:getComputedStyle(button).color,
+  })), { background:'rgb(199, 0, 11)', color:'rgb(255, 255, 255)' });
+  assert.deepEqual(await frame.locator('[data-region-actions]').evaluate(actions => {
+    const style = button => ({
+      background:getComputedStyle(button).backgroundColor,
+      border:getComputedStyle(button).borderColor,
+      color:getComputedStyle(button).color,
+    });
+    return {
+      cancel:style(actions.querySelector('[data-region-cancel]')),
+      execute:style(actions.querySelector('[data-region-submit-now]')),
+    };
+  }), {
+    cancel:{
+      background:'rgba(255, 255, 255, 0.88)', border:'rgba(20, 22, 28, 0.12)',
+      color:'rgb(95, 98, 104)',
+    },
+    execute:{
+      background:'rgba(255, 255, 255, 0.88)', border:'rgba(20, 22, 28, 0.12)',
+      color:'rgb(95, 98, 104)',
+    },
+  });
+  await frame.locator('[data-region-submit]').click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-task-row]').length === 1);
+  await frame.locator('[data-region-popover]').waitFor({ state:'detached' });
+  assert.deepEqual(submittedTaskIds, [], '继续添加不得提前启动 Agent');
+
+  await dragInFrame(page, { x:360, y:120 }, { x:580, y:260 });
+  await frame.locator('[data-region-popover] textarea').fill('第二条并直接执行');
+  await frame.locator('[data-region-submit-now]').click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-task-row]').length === 2);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'busy'
+  ));
+  await page.waitForFunction(() => (
+    document.querySelector('.editor-shell')?.dataset.agentTerminalOpen === 'true'
+  ));
+  assert.equal(await page.locator('[data-agent-terminal-panel]').isVisible(), true);
+  const deadline = Date.now() + 3_000;
+  while (submittedTaskIds.length !== 2 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(submittedTaskIds.length, 2);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('单文件 bundle 重建文档后区域弹窗仍保留 PillNav 样式', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app, {
+    allowPilotDocumentBlobAbort:true,
+  });
+  t.after(() => browser.close());
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.locator('#deck-frame').evaluate(node => {
+    node.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  await page.locator('[data-mode="region"]').click();
+  await dragInFrame(page, { x:100, y:100 }, { x:320, y:240 });
+  const actions = frame.locator('[data-region-actions]');
+  await actions.waitFor({ state:'visible' });
+  const layout = await actions.evaluate(node => ({
+    styleLinks:[...document.querySelectorAll('link[rel="stylesheet"]')]
+      .map(link => link.getAttribute('href')),
+    buttons:[...node.querySelectorAll('button')].map(button => ({
+      radius:getComputedStyle(button).borderRadius,
+      stack:getComputedStyle(button.querySelector('.pill-nav-label-stack')).display,
+      defaultOpacity:getComputedStyle(button.querySelector('.pill-nav-label-default')).opacity,
+      hoverOpacity:getComputedStyle(button.querySelector('.pill-nav-label-hover')).opacity,
+    })),
+  }));
+  assert.ok(layout.styleLinks.includes('/editor/pill-nav.css'), JSON.stringify(layout));
+  assert.deepEqual(layout.buttons, Array.from({ length:3 }, () => ({
+    radius:'999px', stack:'grid', defaultOpacity:'1', hoverOpacity:'0',
+  })));
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
 });
 
 test('区域截图失败时以 snapshot=null 非阻断提交任务', async t => {
@@ -369,16 +729,20 @@ test('邻近输入框按右侧、左侧、选区内右下顺序降级且 pagehid
   t.after(() => browser.close());
   const frame = page.frameLocator('#deck-frame');
   await page.click('[data-mode="region"]');
+  const frameBox = await page.locator('#deck-frame').boundingBox();
+  assert.ok(frameBox?.width > 700);
 
   await dragInFrame(page, { x: 100, y: 100 }, { x: 250, y: 200 });
   assert.equal(await frame.locator('[data-region-popover]').getAttribute('data-placement'), 'right');
   await frame.locator('[data-region-popover] textarea').press('Escape');
 
-  await dragInFrame(page, { x: 650, y: 100 }, { x: 790, y: 200 });
+  await dragInFrame(page,
+    { x: frameBox.width - 210, y: 100 },
+    { x: frameBox.width - 40, y: 200 });
   assert.equal(await frame.locator('[data-region-popover]').getAttribute('data-placement'), 'left');
   await frame.locator('[data-region-popover] textarea').press('Escape');
 
-  await dragInFrame(page, { x: 10, y: 40 }, { x: 830, y: 400 });
+  await dragInFrame(page, { x: 10, y: 40 }, { x: frameBox.width - 10, y: 400 });
   assert.equal(await frame.locator('[data-region-popover]').getAttribute('data-placement'), 'inside');
   const selectionBox = await frame.locator('[data-region-selection]').boundingBox();
   const insideBox = await frame.locator('[data-region-popover]').boundingBox();

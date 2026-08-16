@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import hashlib
 import json
 import os
@@ -7,6 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+
+if os.name == "nt":
+    raise unittest.SkipTest("完整 POSIX sidecar 故障注入由 Windows sidecar 集成测试替代")
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "sidecar_io.py"
@@ -95,6 +100,164 @@ class SidecarAtomicWriteTest(unittest.TestCase):
 
         with self.assertRaises(sidecar_io.SidecarIOError):
             sidecar_io._linux_mount_id(42, statx_call=missing_mount_id)
+
+
+class SidecarAgentWorkspaceIOTest(unittest.TestCase):
+    def make_bound_helper(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        project = Path(temporary.name)
+        root = project / ".huawei-deck-editor"
+        root.mkdir()
+        deck = project / "deck.html"
+        deck.write_bytes(b"deck")
+        fingerprint = hashlib.sha256(deck.read_bytes()).hexdigest()
+        session_name = f"deck-{fingerprint[:8]}"
+        session = root / session_name
+        for name in ("snapshots", "backups", "transactions", "write-errors"):
+            (session / name).mkdir(parents=True, exist_ok=True)
+        (session / "session.json").write_text(json.dumps({
+            "version": 1,
+            "sessionId": SESSION_ID,
+            "deckPath": str(deck.resolve()),
+            "deckFingerprint": fingerprint,
+            "revision": 0,
+            "tasks": [],
+            "groups": [],
+            "redo": [],
+        }))
+        (root / "sessions.json").write_text(json.dumps({
+            "version": 1,
+            "sessions": {
+                SESSION_ID: {
+                    "sessionId": SESSION_ID,
+                    "deckRealPath": str(deck.resolve()),
+                    "initialFingerprint": fingerprint,
+                    "sessionName": session_name,
+                    "mode": "legacy",
+                    "status": "active",
+                }
+            },
+        }))
+        helper = sidecar_io.PersistentHelper()
+        helper.initialize({
+            "project": directory_identity(project),
+            "root": directory_identity(root),
+        })
+        self.addCleanup(helper.close)
+        helper.bind_session({
+            "deckName": "deck.html",
+            "sessionId": SESSION_ID,
+            "sessionName": session_name,
+            "create": False,
+        })
+        return helper, session, project
+
+    @staticmethod
+    def encoded(state):
+        import base64
+        return base64.b64encode(json.dumps(state).encode("utf-8")).decode("ascii")
+
+    def test_missing_round_trip_and_mismatched_session_rejected(self):
+        helper, session, project = self.make_bound_helper()
+        state = {
+            "version": 1,
+            "workspaceRevision": 0,
+            "deckSessionId": SESSION_ID,
+            "projectRoot": str(project),
+        }
+        self.assertIsNone(helper.read_agent_workspace({"missingOk": True}))
+        self.assertEqual(
+            helper.write_agent_workspace({
+                "sessionId": SESSION_ID,
+                "bytes": self.encoded(state),
+            }),
+            {"committed": True, "commitScope": "agent-workspace"},
+        )
+        self.assertEqual(helper.read_agent_workspace({"missingOk": False}), state)
+
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.write_agent_workspace({
+                "sessionId": "223e4567-e89b-42d3-a456-426614174000",
+                "bytes": self.encoded({**state, "deckSessionId": "wrong"}),
+            })
+        self.assertEqual(json.loads((session / "agent-workspace.json").read_text()), state)
+
+    def test_publish_does_not_recreate_old_path_when_deck_is_renamed_at_exchange(self):
+        helper, session, project = self.make_bound_helper()
+        deck = project / "deck.html"
+        moved = project / "renamed.html"
+        original = deck.read_bytes()
+        working = b"published-working-deck"
+        working_fingerprint = hashlib.sha256(working).hexdigest()
+        helper.write_working_deck({
+            "sessionId": SESSION_ID,
+            "bytes": base64.b64encode(working).decode("ascii"),
+            "expectedFingerprint": None,
+        })
+        real_exchange = sidecar_io._exchange_file_entries
+
+        def rename_before_exchange(directory_fd, left, right):
+            deck.rename(moved)
+            return real_exchange(directory_fd, left, right)
+
+        transaction_id = "823e4567-e89b-42d3-a456-426614174000"
+        with mock.patch.object(
+            sidecar_io, "_exchange_file_entries", side_effect=rename_before_exchange
+        ):
+            with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+                helper.publish_working_deck({
+                    "sessionId": SESSION_ID,
+                    "transactionId": transaction_id,
+                    "expectedDeckFingerprint": hashlib.sha256(original).hexdigest(),
+                    "expectedWorkingFingerprint": working_fingerprint,
+                })
+
+        self.assertEqual(caught.exception.code, "DECK_CHANGED")
+        self.assertFalse(deck.exists(), "固化失败不得把旧路径重新创建出来")
+        self.assertEqual(moved.read_bytes(), original)
+        self.assertFalse(
+            (session / "transactions" / f"{transaction_id}.json").exists(),
+            "未交换成功的事务必须清理，避免重启误判为已发布",
+        )
+
+    def test_symlink_directory_fifo_and_oversize_are_rejected(self):
+        helper, session, project = self.make_bound_helper()
+        outside = project / "outside.json"
+        outside.write_text("{}")
+        workspace = session / "agent-workspace.json"
+        workspace.symlink_to(outside)
+        with self.assertRaises((sidecar_io.SidecarIOError, OSError)):
+            helper.read_agent_workspace({"missingOk": False})
+        with self.assertRaises(sidecar_io.SidecarIOError):
+            helper.write_agent_workspace({
+                "sessionId": SESSION_ID,
+                "bytes": self.encoded({"version": 1, "deckSessionId": SESSION_ID}),
+            })
+        self.assertTrue(workspace.is_symlink())
+
+        workspace.unlink()
+        workspace.mkdir()
+        with self.assertRaises((sidecar_io.SidecarIOError, OSError)):
+            helper.read_agent_workspace({"missingOk": False})
+        workspace.rmdir()
+
+        os.mkfifo(workspace)
+        with self.assertRaises((sidecar_io.SidecarIOError, OSError)):
+            helper.read_agent_workspace({"missingOk": False})
+        workspace.unlink()
+
+        oversized = b"{" + b'"payload":"' + b"x" * (
+            sidecar_io.MAX_AGENT_WORKSPACE_BYTES + 1
+        ) + b'"}'
+        import base64
+        with self.assertRaises(sidecar_io.SidecarIOError) as caught:
+            helper.write_agent_workspace({
+                "sessionId": SESSION_ID,
+                "bytes": base64.b64encode(oversized).decode("ascii"),
+            })
+        self.assertEqual(caught.exception.code, "SIDECAR_AGENT_WORKSPACE_TOO_LARGE")
+        self.assertFalse(workspace.exists())
 
 
 class SidecarAttachmentIOTest(unittest.TestCase):

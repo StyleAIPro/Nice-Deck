@@ -13,6 +13,8 @@ const PNG_BYTES = Buffer.from([
 ]);
 const TASK_ID = '11111111-1111-4111-8111-111111111111';
 const ATTACHMENT_ID = '22222222-2222-4222-8222-222222222222';
+const SOURCE_EDIT_ID = '33333333-3333-4333-8333-333333333333';
+const WORKING_FINGERPRINT = 'a'.repeat(64);
 const TASK_INPUT = {
   pageKey:'page-001-a', pageIndex:1, pageLabel:'A',
   rect:{ x:1, y:2, w:30, h:40 }, instruction:'改 A',
@@ -61,6 +63,60 @@ test('跨页任务写入后可恢复且 revision 单调递增', async () => {
   assert.match(await readFile(reopened.sessionPath, 'utf8'), /改 B/);
 });
 
+test('活动源码事务严格持久化并在重开后恢复', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-source-edit-'));
+  const deck = join(root, 'deck.html');
+  const rootDir = join(root, '.huawei-deck-editor');
+  await writeFile(deck, 'deck-v1');
+  const store = await SessionStore.open({ deckPath:deck, rootDir });
+  const candidate = structuredClone(store.state);
+  candidate.workingDeckFingerprint = WORKING_FINGERPRINT;
+  candidate.sourceEdit = {
+    id:SOURCE_EDIT_ID,
+    taskId:null,
+    beforeFingerprint:WORKING_FINGERPRINT,
+    startedAt:'2026-08-16T00:00:00.000Z',
+  };
+  candidate.revision = 1;
+  await store.persistState(candidate);
+
+  const reopened = await SessionStore.open({ deckPath:deck, rootDir });
+  assert.deepEqual(reopened.state.sourceEdit, candidate.sourceEdit);
+  assert.equal(reopened.state.workingDeckFingerprint, WORKING_FINGERPRINT);
+  assert.equal(reopened.state.revision, 1);
+});
+
+test('持久化源码事务拒绝未知字段和无效身份', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-invalid-source-edit-'));
+  const deck = join(root, 'deck.html');
+  await writeFile(deck, 'deck-v1');
+  const base = await SessionStore.open({
+    deckPath:deck,
+    rootDir:join(root, '.huawei-deck-editor'),
+  });
+  const valid = {
+    id:SOURCE_EDIT_ID,
+    taskId:null,
+    beforeFingerprint:WORKING_FINGERPRINT,
+    startedAt:'2026-08-16T00:00:00.000Z',
+  };
+  for (const sourceEdit of [
+    { ...valid, id:'not-a-uuid' },
+    { ...valid, beforeFingerprint:'bad' },
+    { ...valid, unexpected:true },
+  ]) {
+    await assert.rejects(
+      SessionStore.open({
+        deckPath:deck,
+        sessionDir:base.sessionDir,
+        sessionId:base.state.sessionId,
+        persistedState:{ ...base.state, sourceEdit },
+      }),
+      /持久化源码事务格式无效/,
+    );
+  }
+});
+
 test('待处理任务可改说明、删除并清理快照', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-task-edit-'));
   const deck = join(root, 'deck.html');
@@ -73,6 +129,32 @@ test('待处理任务可改说明、删除并清理快照', async () => {
   const deleted = await store.deleteTask(created.task.id, 2);
   assert.equal(deleted.revision, 3);
   assert.equal(deleted.cleanupPending, false);
+  assert.deepEqual(store.state.tasks, []);
+  assert.deepEqual(await readdir(join(store.sessionDir, 'snapshots')), []);
+});
+
+test('已固化完成任务可删除记录，仍关联撤销组的完成任务保持锁定', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-solidified-task-delete-'));
+  const deck = join(root, 'deck.html');
+  await writeFile(deck, 'deck-v1');
+  const store = await SessionStore.open({
+    deckPath:deck,
+    rootDir:join(root, '.huawei-deck-editor'),
+  });
+  const created = await store.createTask({ ...TASK_INPUT, snapshot:PNG_DATA_URL }, 0);
+  const task = store.state.tasks.find(item => item.id === created.task.id);
+  task.status = 'completed';
+  task.groupId = 'group-still-undoable';
+
+  await assert.rejects(
+    () => store.deleteTask(task.id, 1),
+    error => error.code === 'TASK_LOCKED' && /撤销或固化/.test(error.message),
+  );
+  assert.equal(store.state.tasks.length, 1);
+
+  delete task.groupId;
+  const deleted = await store.deleteTask(task.id, 1);
+  assert.equal(deleted.revision, 2);
   assert.deepEqual(store.state.tasks, []);
   assert.deepEqual(await readdir(join(store.sessionDir, 'snapshots')), []);
 });

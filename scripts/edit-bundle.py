@@ -19,7 +19,8 @@ edit-bundle.py — 安全编辑「独立版」单文件 deck 的工具函数。
   s = insert_page(s, new_block, before_label='LoRA 原理')   # 或 before_idx
   set_template(bundle, s); save(PATH, bundle); verify(PATH)
 """
-import json, base64, gzip, zlib, uuid, re
+import argparse, json, base64, gzip, zlib, uuid, re, os, tempfile
+from os import replace as atomic_replace
 
 # ---------------- 读写 ----------------
 def load(path):
@@ -27,8 +28,39 @@ def load(path):
         return stream.read().split('\n')
 
 def save(path, lines):
-    with open(path, 'w', encoding='utf-8') as stream:
-        stream.write('\n'.join(lines))
+    _verify_lines(lines)
+    target = os.path.abspath(os.fspath(path))
+    directory = os.path.dirname(target)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix='.%s.' % os.path.basename(target), suffix='.tmp', dir=directory
+    )
+    replaced = False
+    try:
+        try:
+            os.chmod(temporary, os.stat(target).st_mode & 0o777)
+        except FileNotFoundError:
+            pass
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            descriptor = None
+            stream.write('\n'.join(lines))
+            stream.flush()
+            os.fsync(stream.fileno())
+        atomic_replace(temporary, target)
+        replaced = True
+        if os.name != 'nt':
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if not replaced:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
 def _tpl_idx(lines):
     for i, ln in enumerate(lines):
@@ -45,8 +77,19 @@ def _man_idx(lines):
 def get_template(lines):
     return json.loads(lines[_tpl_idx(lines)].strip())
 
+def _escape_json_surrogates(raw):
+    # ensure_ascii=False 保留 CJK，但 Python 不允许把 JSON 内存中的
+    # lone surrogate 直接编码为 UTF-8。只把 surrogate code unit 还原为
+    # JSON \uXXXX 转义；其他中文、URL 与 / 均不变。
+    return ''.join(
+        '\\u%04x' % ord(char) if 0xD800 <= ord(char) <= 0xDFFF else char
+        for char in raw
+    )
+
 def dump_template(s):
-    raw = json.dumps(s, ensure_ascii=False).replace('</', '<\\u002F')
+    raw = _escape_json_surrogates(
+        json.dumps(s, ensure_ascii=False)
+    ).replace('</', '<\\u002F')
     assert '\n' not in raw and '</' not in raw and json.loads(raw) == s, 'template encode invariant failed'
     return raw
 
@@ -57,7 +100,9 @@ def get_manifest(lines):
     return json.loads(lines[_man_idx(lines)].strip())
 
 def set_manifest(lines, manifest):
-    raw = json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))
+    raw = _escape_json_surrogates(
+        json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))
+    )
     assert '\n' not in raw and json.loads(raw) == manifest, 'manifest encode invariant failed'
     lines[_man_idx(lines)] = raw
 
@@ -122,16 +167,232 @@ def _slide_bounds(s, label):
     end = s.find('</div></div>', s.find('</section>', i)) + len('</div></div>')
     return st, end
 
+PAGE_ID_RE = re.compile(r'\bdata-page-id="(page-[0-9a-f]{32})"')
+SECTION_OPEN_RE = re.compile(r'<section\b(?=[^>]*\bdata-label="[^"]+")[^>]*>')
+EDITOR_ID_RE = re.compile(r'\bdata-editor-id="(element-[0-9a-f]{32})"')
+_EDITOR_ID_ATTRIBUTE_RE = re.compile(r'\bdata-editor-id\b', re.IGNORECASE)
+_PAGE_SECTION_ATTRIBUTE_RE = re.compile(
+    r'\bdata-label\s*=\s*(?:"[^"]+"|\'[^\']+\')', re.IGNORECASE
+)
+_EDITOR_ID_SKIP_TAGS = {
+    'script', 'style', 'link', 'meta', 'title', 'base', 'br', 'wbr',
+    'source', 'track', 'area', 'col', 'embed', 'param',
+}
+
+def page_ids(s):
+    """按页面顺序读取持久 pageId；缺失或格式错误的页面返回 None。"""
+    result = []
+    for match in SECTION_OPEN_RE.finditer(s):
+        found = PAGE_ID_RE.search(match.group(0))
+        result.append(found.group(1) if found else None)
+    return result
+
+def ensure_page_ids(s, id_factory=None):
+    """为缺失持久 ID 的页面补齐 UUID；已有合法 ID 原样保留。
+
+    pageId 是页面身份，不包含页序、标题或 DOM 内容，因此改文案、模板升级和
+    move_page 都不会改变它。重复或畸形 ID 直接拒绝，避免定位静默串页。
+    """
+    make_id = id_factory or (lambda: 'page-' + uuid.uuid4().hex)
+    seen = set()
+
+    def replace(match):
+        tag = match.group(0)
+        any_id = re.search(r'\bdata-page-id=(?:"[^"]*"|\'[^\']*\')', tag)
+        if any_id:
+            valid = PAGE_ID_RE.search(tag)
+            if not valid:
+                raise ValueError('data-page-id 格式无效，必须为 page- 加 32 位小写十六进制')
+            value = valid.group(1)
+        else:
+            value = make_id()
+            if not re.fullmatch(r'page-[0-9a-f]{32}', value):
+                raise ValueError('id_factory 返回了无效 pageId')
+            tag = tag[:-1] + f' data-page-id="{value}">'
+        if value in seen:
+            raise ValueError(f'data-page-id 重复：{value}')
+        seen.add(value)
+        return tag
+
+    result = SECTION_OPEN_RE.sub(replace, s)
+    if not seen:
+        raise ValueError('未找到任何 section[data-label] 页面')
+    return result
+
+
+def _html_tag_end(source, start):
+    """返回 quote-aware HTML start/end tag 的 ``>`` 位置；找不到则返回 -1。"""
+    quote = None
+    index = start + 1
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in ('"', "'"):
+            quote = char
+        elif char == '>':
+            return index
+        index += 1
+    return -1
+
+
+def _inject_editor_id(tag, value):
+    body = tag[:-1]
+    stripped = body.rstrip()
+    whitespace = body[len(stripped):]
+    if stripped.endswith('/'):
+        return stripped[:-1] + f' data-editor-id="{value}" /' + whitespace + '>'
+    return body + f' data-editor-id="{value}">'
+
+
+def _transform_editor_ids(source, id_factory=None, create=False):
+    """只扫描页面 section 的真实 start tag，并保持其他字节原样。
+
+    不使用通用 HTML serializer：Deck 模板包含 raw-text script/style、内联 SVG 和
+    对空白敏感的代码片段。这里的词法扫描只给可编辑后代 start tag 追加一个属性，
+    不重排属性、不改变大小写，也不会把 script/style 内的 HTML 字符串当成节点。
+    """
+    make_id = id_factory or (lambda: 'element-' + uuid.uuid4().hex)
+    output = []
+    ids = []
+    seen = set()
+    cursor = 0
+    page_section_depth = 0
+    raw_text_tag = None
+
+    while cursor < len(source):
+        if raw_text_tag:
+            closing = re.search(
+                rf'</\s*{re.escape(raw_text_tag)}\b', source[cursor:], re.IGNORECASE
+            )
+            if not closing:
+                output.append(source[cursor:])
+                cursor = len(source)
+                break
+            position = cursor + closing.start()
+            output.append(source[cursor:position])
+            cursor = position
+            raw_text_tag = None
+
+        position = source.find('<', cursor)
+        if position < 0:
+            output.append(source[cursor:])
+            break
+        output.append(source[cursor:position])
+
+        if source.startswith('<!--', position):
+            end = source.find('-->', position + 4)
+            end = len(source) if end < 0 else end + 3
+            output.append(source[position:end])
+            cursor = end
+            continue
+        if source.startswith('<![CDATA[', position):
+            end = source.find(']]>', position + 9)
+            end = len(source) if end < 0 else end + 3
+            output.append(source[position:end])
+            cursor = end
+            continue
+
+        end = _html_tag_end(source, position)
+        if end < 0:
+            output.append(source[position:])
+            break
+        tag = source[position:end + 1]
+        match = re.match(r'<\s*(/?)\s*([A-Za-z][\w:-]*)', tag)
+        if not match:
+            output.append(tag)
+            cursor = end + 1
+            continue
+        closing = bool(match.group(1))
+        name = match.group(2).lower()
+        self_closing = bool(re.search(r'/\s*>$', tag))
+
+        if closing:
+            if name == 'section' and page_section_depth:
+                page_section_depth -= 1
+            output.append(tag)
+            cursor = end + 1
+            continue
+
+        enters_page = name == 'section' and not page_section_depth \
+            and bool(_PAGE_SECTION_ATTRIBUTE_RE.search(tag))
+        editable = page_section_depth > 0 and name not in _EDITOR_ID_SKIP_TAGS \
+            and name != 'section'
+        if editable:
+            any_id = _EDITOR_ID_ATTRIBUTE_RE.search(tag)
+            valid = EDITOR_ID_RE.search(tag)
+            if any_id and not valid:
+                raise ValueError(
+                    'data-editor-id 格式无效，必须为 element- 加 32 位小写十六进制'
+                )
+            if valid:
+                value = valid.group(1)
+            elif create:
+                value = make_id()
+                if not re.fullmatch(r'element-[0-9a-f]{32}', value):
+                    raise ValueError('id_factory 返回了无效 editorId')
+                tag = _inject_editor_id(tag, value)
+            else:
+                value = None
+            ids.append(value)
+            if value is not None:
+                if value in seen:
+                    raise ValueError(f'data-editor-id 重复：{value}')
+                seen.add(value)
+
+        if name == 'section' and not self_closing:
+            if enters_page:
+                page_section_depth = 1
+            elif page_section_depth:
+                page_section_depth += 1
+        if name in ('script', 'style') and not self_closing:
+            raw_text_tag = name
+        output.append(tag)
+        cursor = end + 1
+
+    return ''.join(output), ids
+
+
+def editor_ids(s):
+    """按页面 DOM 顺序读取可编辑元素身份；缺失身份返回 None。"""
+    _, ids = _transform_editor_ids(s, create=False)
+    return ids
+
+
+def ensure_editor_ids(s, id_factory=None):
+    """为页面内可编辑元素补齐持久身份，已有合法身份原样保留。"""
+    result, _ = _transform_editor_ids(s, id_factory=id_factory, create=True)
+    return result
+
+def _fresh_page_id(block, existing_ids, id_factory=None):
+    """插入页始终获得新身份；复制页面时不能沿用源页 pageId。"""
+    make_id = id_factory or (lambda: 'page-' + uuid.uuid4().hex)
+    matches = list(SECTION_OPEN_RE.finditer(block))
+    if len(matches) != 1:
+        raise ValueError('插入页块必须恰好包含一个 section[data-label]')
+    value = make_id()
+    while value in existing_ids:
+        value = make_id()
+    if not re.fullmatch(r'page-[0-9a-f]{32}', value):
+        raise ValueError('id_factory 返回了无效 pageId')
+    match = matches[0]
+    tag = re.sub(r'\s+data-page-id=(?:"[^"]*"|\'[^\']*\')', '', match.group(0))
+    tag = tag[:-1] + f' data-page-id="{value}">'
+    return block[:match.start()] + tag + block[match.end():]
+
 # ---------------- 增 / 删 / 移 页（自动同步三处）----------------
 SEP = '\n\n    '
 
-def insert_page(s, new_block, before_label, nav_code, nav_label):
+def insert_page(s, new_block, before_label, nav_code, nav_label, id_factory=None):
     """在 before_label 页之前插入 new_block。new_block 是完整 '<div class="slide-fit"...>...</div></div>'。
     自动：插 DOM、nav 在该页前插入并重编号、其后章节 start+1。
     章归属约定：插到某章首页之前 = 新页成为该章新首页（该章 start 不动）；
     插到章中/章尾页之前 = 新页属该章，下一章起各章 start+1。
     注意：必须在改动 DOM/nav 之前用 before 页的原索引定章——插入后 before 页索引 +1，
     若它原是章尾页，新索引会撞上下一章 start，导致下一章漏 +1。"""
+    s = ensure_page_ids(s, id_factory=id_factory)
+    new_block = _fresh_page_id(new_block, set(page_ids(s)), id_factory=id_factory)
     ns, ne, codes, lbls = _nav_entries(s)
     pos = lbls.index(before_label)
     starts = [int(m) for m in re.findall(r"start:(\d+)", s)]
@@ -154,6 +415,30 @@ def delete_page(s, label):
     pos = lbls.index(label); codes.pop(pos); lbls.pop(pos)
     s = _write_nav(s, codes, lbls)
     return s
+
+def delete_page_by_id(s, page_id):
+    """按稳定 data-page-id 删除页面；区域任务必须优先使用本函数。
+
+    pageId 不随页序和标题变化，可避免重复 data-label 或 Agent 读取旧页序时删错页。
+    实际三处同步仍复用 delete_page() 的同一实现。
+    """
+    if not re.fullmatch(r'page-[0-9a-f]{32}', page_id or ''):
+        raise ValueError('page_id 必须为 page- 加 32 位小写十六进制')
+    matches = [
+        match for match in SECTION_OPEN_RE.finditer(s)
+        if PAGE_ID_RE.search(match.group(0))
+        and PAGE_ID_RE.search(match.group(0)).group(1) == page_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f'page_id 必须唯一命中一页：{page_id}')
+    label_match = re.search(r'\bdata-label="([^"]+)"', matches[0].group(0))
+    if not label_match:
+        raise ValueError(f'page_id 对应页面缺少 data-label：{page_id}')
+    label = label_match.group(1)
+    if sum(1 for match in SECTION_OPEN_RE.finditer(s)
+           if re.search(r'\bdata-label="([^"]+)"', match.group(0)).group(1) == label) != 1:
+        raise ValueError(f'data-label 重复，无法安全同步 nav：{label}')
+    return delete_page(s, label)
 
 def move_page(s, label, after_label):
     """把 label 页移到 after_label 页之后（同章内移动：章节 start 不变；只动 DOM + nav 顺序）。"""
@@ -198,21 +483,41 @@ def grid(rows, red=None, cell=30, fs=15):
     return h + '</table>'
 
 # ---------------- 验证 ----------------
-def verify(path):
-    lines = load(path)
+def _verify_lines(lines, verbose=False):
     s = get_template(lines)
     nslide = s.count('class="slide-fit"')
     nsec = s.count('<section data-label=')
     nums = [int(x) for x in re.findall(r'\{ i:(\d+),', s)]
+    ids = page_ids(s)
     ok_seq = nums == list(range(len(nums)))
-    print('slide-fit=%d  sections=%d  nav=%d  nav_seq_ok=%s' % (nslide, nsec, len(nums), ok_seq))
-    print('chapters:', re.findall(r"name:'[^']+', start:\d+", s))
+    if verbose:
+        print('slide-fit=%d  sections=%d  nav=%d  nav_seq_ok=%s' % (nslide, nsec, len(nums), ok_seq))
+        print('page_ids=%d  page_ids_unique=%s' % (
+            len([value for value in ids if value]),
+            len(ids) == len(set(ids)) and all(ids),
+        ))
+        print('chapters:', re.findall(r"name:'[^']+', start:\d+", s))
+    assert nslide == nsec == len(nums), 'slide / section / nav 三处同步失败'
     assert ok_seq, 'nav i: not sequential — 三处同步没做全'
+    if any(ids):
+        assert len(ids) == nsec and all(ids), 'data-page-id 必须覆盖全部页面'
+        assert len(set(ids)) == len(ids), 'data-page-id 必须全局唯一'
     return True
 
+def verify(path):
+    return _verify_lines(load(path), verbose=True)
+
 if __name__ == '__main__':
-    import sys
-    if len(sys.argv) > 1:
-        verify(sys.argv[1])
-    else:
+    parser = argparse.ArgumentParser(description='安全编辑或验证 Huawei Deck bundle')
+    parser.add_argument('deck', nargs='?')
+    parser.add_argument('--ensure-page-ids', action='store_true', help='补齐持久 pageId 后写回')
+    args = parser.parse_args()
+    if not args.deck:
         print(__doc__)
+    elif args.ensure_page_ids:
+        bundle = load(args.deck)
+        set_template(bundle, ensure_page_ids(get_template(bundle)))
+        save(args.deck, bundle)
+        verify(args.deck)
+    else:
+        verify(args.deck)

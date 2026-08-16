@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile, writeFile } from 'node:fs/promises';
 import { startFixtureServer, openEditor } from './test-helpers.mjs';
 
 async function readSession(app) {
@@ -27,9 +28,22 @@ async function waitForHistoryReady(page) {
   ));
 }
 
+async function openCompletedTasks(page) {
+  const drawer = page.locator('[data-task-drawer]');
+  if (await drawer.getAttribute('data-open') !== 'true') {
+    await page.locator('[data-task-drawer-toggle]').click();
+  }
+  const group = page.locator('[data-task-completed-group]');
+  await group.waitFor();
+  if (!await group.evaluate(element => element.open)) {
+    await group.locator('summary').click();
+  }
+}
+
 async function createManualTextAction(page, text) {
   const heading = page.frameLocator('#deck-frame').locator('h2').first();
   await page.locator('[data-mode="edit"]').click();
+  await heading.click();
   await heading.dblclick();
   await heading.fill(text);
   await heading.press('Meta+Enter');
@@ -39,9 +53,10 @@ async function createManualMoveAction(page) {
   const heading = page.frameLocator('#deck-frame').locator('h2').first();
   await page.locator('[data-mode="edit"]').click();
   const box = await heading.boundingBox();
-  await page.mouse.move(box.x + 10, box.y + 10);
+  const startX = Math.max(box.x, 0) + Math.min(100, box.width / 2);
+  await page.mouse.move(startX, box.y + box.height / 2);
   await page.mouse.down();
-  await page.mouse.move(box.x + 50, box.y + 30);
+  await page.mouse.move(startX + 40, box.y + box.height / 2 + 20, { steps:8 });
   await page.mouse.up();
 }
 
@@ -53,8 +68,18 @@ async function createManualResizeAction(page) {
   const box = await handle.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2 + 30, box.y + box.height / 2 + 20);
+  await page.mouse.move(
+    box.x + box.width / 2 + 30, box.y + box.height / 2 + 20, { steps:8 },
+  );
   await page.mouse.up();
+}
+
+async function dispatchBeforeUnload(page) {
+  return page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable:true });
+    const dispatched = window.dispatchEvent(event);
+    return { dispatched, defaultPrevented:event.defaultPrevented };
+  });
 }
 
 async function reloadWithoutHistoryEvents(page) {
@@ -70,6 +95,521 @@ async function reloadWithoutHistoryEvents(page) {
   await page.reload();
   await page.waitForSelector('[data-page-key]');
   await page.waitForFunction(() => document.querySelector('[data-ws-state]')?.dataset.wsState === 'online');
+}
+
+test('历史已恢复但画布尚未 ready 时仍可固化', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(5_000);
+
+  await createManualTextAction(page, '重开后仍未固化的标题');
+  await waitForRevision(page, 1);
+  await waitForHistoryReady(page);
+  assert.equal(await page.locator('[data-history-undo]').isEnabled(), true);
+  assert.equal(await page.locator('[data-solidify]').isEnabled(), true);
+
+  await page.locator('#deck-frame').dispatchEvent('load');
+  assert.equal(await page.locator('[data-history-undo]').isEnabled(), true,
+    '画布重连期间不能破坏已经恢复的撤销历史');
+  assert.equal(await page.locator('[data-solidify]').isEnabled(), true,
+    '固化只依赖权威历史与服务端写盘，不应被画布 ready 状态锁死');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('固化修改永久写盘，退出编辑时显示自定义未固化清单且不触发原生离开确认', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const {
+    browser, page, browserProblems, resourceProblems,
+  } = await openEditor(app, {
+    allowPilotDocumentBlobAbort:true,
+    workspaceUrl:`${app.url}/workbench?token=${encodeURIComponent(app.token)}`,
+  });
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+  const solidify = page.locator('[data-solidify]');
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+
+  assert.equal(await page.locator('.brand-block > [data-exit-editor]').count(), 1,
+    '退出编辑器必须作为左上角独立入口');
+  assert.equal(
+    await page.locator('[data-exit-editor] .pill-nav-label-default').innerText(),
+    '退出编辑器',
+  );
+  assert.equal(await page.locator('[data-exit-editor] .exit-editor-icon').count(), 2,
+    'PillNav 默认态和悬浮态都必须使用门框向右箭头退出图标');
+  assert.equal(await page.locator('[data-exit-editor] .exit-editor-icon').first()
+    .locator('path').count(), 5);
+  assert.deepEqual(await page.locator('[data-exit-editor] .exit-editor-icon').first()
+    .evaluate(element => ({
+      color:getComputedStyle(element).color,
+      background:getComputedStyle(element).backgroundColor,
+    })), { color:'rgb(199, 0, 11)', background:'rgba(0, 0, 0, 0)' });
+  assert.equal(await page.locator('[data-exit-editor] .pill-nav-label-default > :last-child')
+    .evaluate(element => element.tagName), 'svg', '退出图标必须位于文字右侧');
+  assert.equal(await page.locator('[data-exit-editor]').evaluate(button => (
+    button.textContent.includes('←') || button.textContent.includes('×')
+  )), false, '退出编辑器不再使用返回箭头或圆圈叉');
+  assert.equal(
+    await page.locator('[data-workspace-navigation] [data-workspace-home]').count(),
+    1,
+    '右上角工作台导航必须保留初始页入口',
+  );
+
+  assert.equal(await solidify.isDisabled(), true);
+  assert.equal(await solidify.locator('.solidify-dot').first().evaluate(element => (
+    getComputedStyle(element).backgroundColor
+  )), 'rgb(22, 163, 74)');
+  assert.deepEqual(await dispatchBeforeUnload(page), {
+    dispatched:true, defaultPrevented:false,
+  });
+
+  await createManualTextAction(page, '已经固化的标题');
+  await waitForRevision(page, 1);
+  await waitForHistoryReady(page);
+  assert.equal(await solidify.isEnabled(), true);
+  assert.equal(await solidify.locator('.solidify-dot').first().evaluate(element => (
+    getComputedStyle(element).backgroundColor
+  )), 'rgb(199, 0, 11)');
+  assert.deepEqual(await dispatchBeforeUnload(page), {
+    dispatched:true, defaultPrevented:false,
+  });
+  const closeWarning = page.locator('[data-solidify-dialog]');
+  assert.equal(await closeWarning.getAttribute('open'), null);
+  await page.getByRole('button', { name:'退出编辑器' }).click();
+  await expectDialogOpen(closeWarning);
+  assert.match(await closeWarning.textContent(), /退出前还有修改没有固化/);
+  assert.match(await closeWarning.locator('[data-solidify-task="direct"]').textContent(),
+    /直接编辑与结构调整/);
+  assert.equal(
+    await closeWarning.locator('[data-solidify-task="direct"] .solidify-task-details').count(),
+    0,
+    '任务详情默认不得提前渲染',
+  );
+  await closeWarning.locator('[data-solidify-task="direct"] summary').click();
+  await closeWarning.locator('[data-solidify-task="direct"] .solidify-task-details').waitFor();
+  assert.match(await closeWarning.locator('[data-solidify-task="direct"]').textContent(),
+    /文字修改/);
+  assert.equal(
+    await closeWarning.locator('[data-solidify-confirm] .pill-nav-label-default').innerText(),
+    '固化并退出',
+  );
+  assert.equal(
+    await closeWarning.locator('[data-solidify-exit-without] .pill-nav-label-default').innerText(),
+    '暂不固化，退出',
+  );
+  await closeWarning.locator('[data-solidify-cancel]').click();
+
+  await solidify.click();
+  const dialog = page.locator('[data-solidify-dialog]');
+  await expectDialogOpen(dialog);
+  assert.match(await dialog.textContent(), /永久写入这个 Deck/);
+  assert.match(await dialog.textContent(), /清空全部撤销和重做记录/);
+  await page.locator('[data-solidify-cancel]').click();
+  assert.equal(await dialog.getAttribute('open'), null);
+  assert.equal(await solidify.isEnabled(), true);
+  assert.equal(await page.locator('[data-history-undo]').isEnabled(), true);
+
+  await solidify.click();
+  let releaseSolidifyRequest;
+  let markSolidifyRequestSeen;
+  const solidifyRequestGate = new Promise(resolve => { releaseSolidifyRequest = resolve; });
+  const solidifyRequestSeen = new Promise(resolve => { markSolidifyRequestSeen = resolve; });
+  await page.route('**/api/solidify-deck*', async route => {
+    markSolidifyRequestSeen();
+    await solidifyRequestGate;
+    await route.continue();
+  }, { times:1 });
+  await page.locator('[data-solidify-confirm]').click();
+  await solidifyRequestSeen;
+  const progress = page.locator('[data-solidify-progress]');
+  const progressBar = page.locator('[data-solidify-progressbar]');
+  assert.equal(await progress.isVisible(), true);
+  assert.equal(await progress.getAttribute('data-state'), 'indeterminate');
+  assert.match(await progress.textContent(), /正在校验并写入 Deck/);
+  assert.equal(await progressBar.getAttribute('aria-valuenow'), null);
+  assert.equal(await page.locator('[data-solidify-cancel]').isDisabled(), true);
+  if (process.env.SOLIDIFY_PROGRESS_SCREENSHOT) {
+    await page.screenshot({ path:process.env.SOLIDIFY_PROGRESS_SCREENSHOT, fullPage:true });
+  }
+  releaseSolidifyRequest();
+  await waitForRevision(page, 2);
+  await waitForHistoryReady(page);
+  await page.waitForFunction(() => document.querySelector('[data-solidify]')?.disabled === true);
+  assert.equal(await solidify.locator('.solidify-dot').first().evaluate(element => (
+    getComputedStyle(element).backgroundColor
+  )), 'rgb(22, 163, 74)');
+  assert.equal(await page.locator('[data-history-undo]').isDisabled(), true);
+  assert.equal(await page.locator('[data-history-redo]').isDisabled(), true);
+  assert.deepEqual(await dispatchBeforeUnload(page), {
+    dispatched:true, defaultPrevented:false,
+  });
+
+  const state = await readSession(app);
+  assert.equal(state.revision, 2);
+  assert.deepEqual(state.groups, []);
+  assert.deepEqual(state.redo, []);
+  assert.equal(state.solidifiedActions.length, 1);
+  assert.equal(state.solidifiedActions[0].payload.text, '已经固化的标题');
+
+  await page.reload();
+  await waitForRevision(page, 2);
+  await page.waitForSelector('[data-page-key]');
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent
+      === '已经固化的标题'
+  ));
+  assert.equal(await solidify.isDisabled(), true);
+  assert.equal(await heading.textContent(), '已经固化的标题');
+
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  await createManualTextAction(page, '第二轮固化标题');
+  await waitForRevision(page, 3);
+  assert.deepEqual(await dispatchBeforeUnload(page), {
+    dispatched:true, defaultPrevented:false,
+  });
+  await solidify.click();
+  await page.locator('[data-solidify-confirm]').click();
+  await waitForRevision(page, 4);
+  await waitForHistoryReady(page);
+  const secondState = await readSession(app);
+  assert.deepEqual(secondState.groups, []);
+  assert.equal(secondState.solidifiedActions.length, 1, '连续固化应折叠成唯一最终动作');
+  assert.equal(secondState.solidifiedActions[0].payload.text, '第二轮固化标题');
+  await page.reload();
+  await waitForRevision(page, 4);
+  await page.waitForSelector('[data-page-key]');
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent
+      === '第二轮固化标题'
+  ));
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  await createManualTextAction(page, '固化后的未固化标题');
+  await waitForRevision(page, 5);
+  await page.reload();
+  await waitForRevision(page, 5);
+  await page.waitForSelector('[data-page-key]');
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent
+      === '固化后的未固化标题'
+  ));
+  await waitForHistoryReady(page);
+  assert.equal(await page.locator('[data-history-undo]').isEnabled(), true,
+    '重开后仍可撤销的修改必须恢复全局撤销入口');
+  assert.equal(await solidify.isEnabled(), true,
+    '重开后仍可撤销的修改也必须恢复固化入口');
+  await page.locator('[data-history-undo]').click();
+  await waitForRevision(page, 6);
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent
+      === '第二轮固化标题'
+  ));
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+
+  await page.getByRole('button', { name:'退出编辑器' }).click();
+  await expectDialogOpen(page.locator('[data-solidify-dialog]'));
+  await page.route('**/api/shutdown*', route => route.fulfill({
+    status:202, contentType:'application/json', body:'{"status":"shutting-down"}',
+  }), { times:1 });
+  const exited = page.waitForRequest(request => request.url().includes('/api/shutdown'));
+  await page.locator('[data-solidify-confirm]').click();
+  await exited;
+  const exitedState = await readSession(app);
+  assert.deepEqual(exitedState.groups, []);
+  assert.deepEqual(exitedState.redo, []);
+});
+
+test('暂不固化退出会保留工作副本与修改历史', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app, {
+    allowPilotDocumentBlobAbort:true,
+    workspaceUrl:`${app.url}/workbench?token=${encodeURIComponent(app.token)}`,
+  });
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+
+  await createManualTextAction(page, '暂不固化仍会保留');
+  await waitForRevision(page, 1);
+  await waitForHistoryReady(page);
+  await page.getByRole('button', { name:'退出编辑器' }).click();
+  await expectDialogOpen(page.locator('[data-solidify-dialog]'));
+  await page.route('**/api/shutdown*', route => route.fulfill({
+    status:202, contentType:'application/json', body:'{"status":"shutting-down"}',
+  }), { times:1 });
+  const exited = page.waitForRequest(request => request.url().includes('/api/shutdown'));
+  await page.locator('[data-solidify-exit-without]').click();
+  await exited;
+
+  const state = await readSession(app);
+  assert.equal(state.groups.length, 1);
+  assert.equal(state.groups[0].active, true);
+});
+
+test('退出编辑器按任务分组展示全部未固化修改', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app, {
+    allowPilotDocumentBlobAbort:true,
+    workspaceUrl:`${app.url}/workbench?token=${encodeURIComponent(app.token)}`,
+  });
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  const targets = await page.locator('#deck-frame').evaluate(frame => (
+    [...frame.contentDocument.querySelectorAll('h2')].slice(0, 2).map(node => (
+      frame.contentWindow.HuaweiDeckPatchRuntime.makeLocator(node)
+    ))
+  ));
+  const instructions = ['缩短第一页标题', '调整第二页标题颜色'];
+  let expectedRevision = 0;
+  for (let index = 0; index < instructions.length; index += 1) {
+    const created = await postJson(app, '/api/tasks', {
+      expectedRevision,
+      pageKey:targets[index].pageKey,
+      pageIndex:index + 1,
+      pageLabel:'目录页',
+      rect:{ x:20, y:20, w:400, h:120 },
+      instruction:instructions[index],
+    });
+    assert.equal(created.response.status, 201, JSON.stringify(created.body));
+    expectedRevision += 1;
+    const taskId = created.body.task.id;
+    const { textPath:unusedTextPath, ...styleTarget } = targets[index];
+    const applied = await postJson(app, '/api/actions', {
+      expectedRevision,
+      taskId,
+      actions:[index === 0 ? {
+        id:'grouped-exit-text', taskId, target:targets[index],
+        kind:'setText', payload:{ text:'简短标题' },
+      } : {
+        id:'grouped-exit-style', taskId, target:styleTarget,
+        kind:'setStyle', payload:{ property:'color', value:'rgb(0, 0, 0)' },
+      }],
+    });
+    assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+    expectedRevision += 1;
+  }
+  await waitForRevision(page, expectedRevision);
+  await waitForHistoryReady(page);
+  await page.getByRole('button', { name:'退出编辑器' }).click();
+  const dialog = page.locator('[data-solidify-dialog]');
+  await expectDialogOpen(dialog);
+  assert.match(await dialog.textContent(), /2 个任务存在未固化修改/);
+  const sections = dialog.locator('[data-solidify-task-list] [data-solidify-task]');
+  assert.equal(await sections.count(), 2);
+  assert.equal(await sections.locator('.solidify-task-details').count(), 0,
+    '所有任务详情默认保持懒加载');
+  const sectionTexts = await sections.allTextContents();
+  assert.ok(sectionTexts.some(text => text.includes(instructions[0])));
+  assert.ok(sectionTexts.some(text => text.includes(instructions[1])));
+  assert.equal(sectionTexts.some(text => /文字修改|样式修改/.test(text)), false);
+  const textTask = sections.filter({ hasText:instructions[0] });
+  await textTask.locator('summary').click();
+  await textTask.locator('.solidify-task-details').waitFor();
+  assert.match(await textTask.textContent(), /文字修改/);
+  assert.equal(await textTask.locator('.solidify-task-details').count(), 1);
+  assert.equal(await sections.filter({ hasText:instructions[1] })
+    .locator('.solidify-task-details').count(), 0);
+});
+
+test('固化验证失败会显示具体原因并明确原 Deck 未被改动', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app, {
+    allowPilotDocumentBlobAbort:true,
+  });
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  await createManualTextAction(page, '会触发固化验证失败');
+  await waitForRevision(page, 1);
+  await waitForHistoryReady(page);
+  await page.route('**/api/solidify-deck*', route => route.fulfill({
+    status:409,
+    contentType:'application/json',
+    body:JSON.stringify({
+      error:'PATCH_REPLAY_FAILED',
+      code:'PATCH_REPLAY_FAILED',
+      message:'历史修改无法安全重放，已停止固化且原 Deck 未被改动',
+      stage:'patch-replay',
+      recovery:'原 Deck 未被改动；撤销或重新执行冲突修改后再固化',
+      failedActionId:'action-stale-range',
+    }),
+  }), { times:1 });
+
+  await page.locator('[data-solidify]').click();
+  await page.locator('[data-solidify-confirm]').click();
+  const progress = page.locator('[data-solidify-progress]');
+  await progress.waitFor({ state:'visible' });
+  await page.waitForFunction(() => (
+    document.querySelector('[data-solidify-progress]')?.dataset.state === 'error'
+  ));
+  assert.match(await progress.textContent(), /历史修改无法安全重放/);
+  assert.match(await progress.textContent(), /原 Deck 未被改动/);
+  assert.equal(await page.locator('[data-solidify-dialog]').isVisible(), true);
+  assert.equal(await page.locator('[data-solidify-confirm]').isEnabled(), true);
+});
+
+test('已固化 Agent 任务可删除记录且不改变 Deck 固化结果', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app, {
+    allowPilotDocumentBlobAbort:true,
+    workspaceUrl:`${app.url}/workbench?token=${encodeURIComponent(app.token)}`,
+  });
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  const target = await page.locator('#deck-frame').evaluate(frame => (
+    frame.contentWindow.HuaweiDeckPatchRuntime.makeLocator(
+      frame.contentDocument.querySelector('h2'),
+    )
+  ));
+  const created = await postJson(app, '/api/tasks', {
+    expectedRevision:0,
+    pageKey:target.pageKey,
+    pageIndex:1,
+    pageLabel:'目录页',
+    rect:{ x:20, y:20, w:400, h:120 },
+    instruction:'调整推理框内的排版，不要把外部的框缩小，并保持完整的布局层级',
+  });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  const taskId = created.body.task.id;
+  const applied = await postJson(app, '/api/actions', {
+    expectedRevision:1,
+    taskId,
+    actions:[{
+      id:'solidified-task-delete-text', taskId, target,
+      kind:'setText', payload:{ text:'Agent 已固化标题' },
+    }],
+  });
+  assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  await waitForRevision(page, 2);
+  await waitForHistoryReady(page);
+
+  assert.deepEqual(await dispatchBeforeUnload(page), {
+    dispatched:true, defaultPrevented:false,
+  });
+  const closeWarning = page.locator('[data-solidify-dialog]');
+  assert.equal(await closeWarning.getAttribute('open'), null);
+  await page.getByRole('button', { name:'退出编辑器' }).click();
+  await expectDialogOpen(closeWarning);
+  assert.match(await closeWarning.textContent(), /退出前还有 1 个任务存在未固化修改/);
+  const pendingTask = closeWarning.locator(`[data-solidify-task="${taskId}"]`);
+  assert.equal(
+    await pendingTask.locator('.solidify-task-name').innerText(),
+    '调整推理框内的排版，不要把外部的框缩小，并保持完整的布局层级',
+  );
+  assert.equal(await pendingTask.locator('.solidify-task-details').count(), 0);
+  await pendingTask.locator('summary').click();
+  await pendingTask.locator('.solidify-task-details').waitFor();
+  assert.match(await pendingTask.textContent(), /01 · 目录页/);
+  assert.match(await pendingTask.textContent(), /文字修改/);
+  assert.equal(
+    await closeWarning.locator('[data-solidify-cancel] .pill-nav-label-default').innerText(),
+    '继续编辑',
+  );
+  assert.equal(
+    await closeWarning.locator('[data-solidify-confirm] .pill-nav-label-default').innerText(),
+    '固化并退出',
+  );
+  assert.equal(
+    await closeWarning.locator('[data-solidify-confirm] .pill-nav-label-hover').innerText(),
+    '固化并退出',
+  );
+  assert.equal(
+    await closeWarning.locator('[data-solidify-exit-without] .pill-nav-label-default').innerText(),
+    '暂不固化，退出',
+  );
+  if (process.env.SOLIDIFY_CLOSE_SCREENSHOT) {
+    await page.screenshot({ path:process.env.SOLIDIFY_CLOSE_SCREENSHOT, fullPage:true });
+  }
+  await closeWarning.locator('[data-solidify-cancel]').click();
+
+  await page.locator('[data-solidify]').click();
+  await page.locator('[data-solidify-confirm]').click();
+  await waitForRevision(page, 3);
+  await waitForHistoryReady(page);
+  await openCompletedTasks(page);
+  const row = page.locator(`[data-task-row="${taskId}"]`);
+  assert.equal(await row.locator('[data-task-undo]').count(), 0);
+  assert.equal(
+    await row.locator('[data-task-delete] .pill-nav-label-default').textContent(),
+    '删除记录',
+  );
+  const layout = await row.evaluate(node => {
+    const rect = target => {
+      const { left, right, top, bottom, width, height } = target.getBoundingClientRect();
+      return { left, right, top, bottom, width, height };
+    };
+    const locate = rect(node.querySelector('[data-task-locate]'));
+    const remove = rect(node.querySelector('[data-task-delete]'));
+    const card = rect(node);
+    return { locate, remove, card };
+  });
+  assert.ok(layout.remove.left >= layout.locate.right - 1, JSON.stringify(layout));
+  const removeCenter = (layout.remove.top + layout.remove.bottom) / 2;
+  const locateCenter = (layout.locate.top + layout.locate.bottom) / 2;
+  assert.ok(Math.abs(removeCenter - locateCenter) <= 1,
+    `删除记录应在任务卡右侧垂直居中：${JSON.stringify(layout)}`);
+  assert.ok(layout.remove.right <= layout.card.right + 1, JSON.stringify(layout));
+  assert.ok(layout.remove.width >= layout.remove.height * 1.5,
+    `删除记录应是横向胶囊按钮：${JSON.stringify(layout)}`);
+  assert.ok(layout.remove.height <= 34,
+    `删除记录不应随任务卡纵向拉伸：${JSON.stringify(layout)}`);
+  await row.locator('[data-task-delete]').click();
+  assert.match(
+    await row.locator('[data-task-delete-confirmation]').textContent(),
+    /Deck 中已固化的修改不会改变/,
+  );
+  await row.locator('[data-task-delete-confirm]').click();
+  await waitForRevision(page, 4);
+  await row.waitFor({ state:'detached' });
+  const deletedState = await readSession(app);
+  assert.deepEqual(deletedState.tasks, []);
+  assert.deepEqual(deletedState.groups, []);
+  assert.equal(
+    await page.frameLocator('#deck-frame').locator('h2').first().textContent(),
+    'Agent 已固化标题',
+  );
+
+  await page.reload();
+  await waitForRevision(page, 4);
+  await page.waitForSelector('[data-page-key]');
+  assert.equal(
+    await page.frameLocator('#deck-frame').locator('h2').first().textContent(),
+    'Agent 已固化标题',
+  );
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+async function expectDialogOpen(dialog) {
+  await dialog.waitFor({ state:'visible' });
+  await dialog.page().waitForFunction(() => (
+    document.querySelector('[data-solidify-dialog]')?.open === true
+  ));
 }
 
 test('键盘快捷键跨 parent 与画布撤销重做，文字输入保留原生撤销', async t => {
@@ -111,6 +651,44 @@ test('键盘快捷键跨 parent 与画布撤销重做，文字输入保留原生
   await page.keyboard.press('Control+y');
   await waitForRevision(page, 5);
   assert.equal(await heading.textContent(), '快捷键标题');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('打开已有历史后第一次 Ctrl+Z 会等待权威会话就绪并直接撤销', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+
+  await createManualTextAction(page, '首次快捷键标题');
+  await waitForRevision(page, 1);
+  await waitForHistoryReady(page);
+
+  let releaseSession;
+  const sessionGate = new Promise(resolve => { releaseSession = resolve; });
+  let blockedSessionRequest;
+  const sessionRequestStarted = new Promise(resolve => { blockedSessionRequest = resolve; });
+  let blocked = false;
+  await page.route('**/api/session*', async route => {
+    if (blocked) return route.continue();
+    blocked = true;
+    blockedSessionRequest();
+    await sessionGate;
+    return route.continue();
+  });
+
+  await page.reload({ waitUntil:'domcontentloaded' });
+  await sessionRequestStarted;
+  await page.waitForSelector('[data-page-key]');
+  await heading.click();
+  await heading.press('Control+z');
+  releaseSession();
+
+  await waitForRevision(page, 2);
+  assert.equal(await heading.textContent(), '第一页标题');
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
@@ -265,6 +843,7 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
   assert.equal(await heading.textContent(), 'Agent 批次标题');
   assert.equal(await card.evaluate(element => element.style.translate), '60px 30px');
 
+  await openCompletedTasks(page);
   await page.locator(`[data-task-undo="${taskId}"]`).click();
   await waitForRevision(page, 12);
   await waitForHistoryReady(page);
@@ -273,7 +852,9 @@ test('顶栏从权威 session 撤销重做人工与 Agent 历史并拒绝自动�
   assert.match(await redo.getAttribute('title'), /重做 Agent 任务：整体替换标题并移动卡片/);
   await redo.click();
   await waitForRevision(page, 13);
-  await page.waitForSelector(`[data-task-row="${taskId}"] .task-status-completed`);
+  await page.waitForSelector(`[data-task-row="${taskId}"] .task-status-completed`, {
+    state:'attached',
+  });
   assert.equal(await heading.textContent(), 'Agent 批次标题');
 
   await page.reload();
@@ -503,6 +1084,7 @@ test('HTTP 先于 history WebSocket 时人工动作与任务行撤销都先锁�
   assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
   await page.reload();
   await waitForRevision(page, 4);
+  await openCompletedTasks(page);
   await page.waitForSelector(`[data-task-undo="${taskId}"]`);
   assert.equal(await undo.getAttribute('data-group-id'), applied.body.groupId);
 
@@ -773,6 +1355,7 @@ test('任务行撤销已保存但 session 刷新失败时不误报未提交失�
   });
   assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
   await waitForRevision(page, 2);
+  await openCompletedTasks(page);
   await page.waitForSelector(`[data-task-undo="${taskId}"]`);
   let sessionRequests = 0;
   await page.route('**/api/session*', async route => {
@@ -800,6 +1383,97 @@ test('任务行撤销已保存但 session 刷新失败时不误报未提交失�
   assert.ok(browserProblems.every(problem => /503 \(Service Unavailable\)/.test(problem)),
     JSON.stringify(browserProblems));
   browserProblems.splice(0);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('源码改动让旧定位指纹变化后，后续文字修改仍可撤销', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app, {
+    maxPilotDocumentBlobAborts:2,
+  });
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  await createManualTextAction(page, '第一轮文字修改');
+  await waitForRevision(page, 1);
+
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  const workingLines = workingBefore.split('\n');
+  const templateMarker = workingLines.findIndex(line => (
+    line.trim() === '<script type="__bundler/template">'
+  ));
+  assert.ok(templateMarker >= 0, '测试 bundle 缺少 template');
+  const workingTemplate = JSON.parse(workingLines[templateMarker + 1]);
+  const workingTemplateAfter = workingTemplate.replace(
+    /<h2([^>]*)>第一页标题<\/h2>/,
+    '<h2$1 style="font-family:serif">第一页标题</h2>',
+  );
+  assert.notEqual(
+    workingTemplateAfter, workingTemplate,
+    '测试前提失败：未修改工作副本中的标题样式',
+  );
+  workingLines[templateMarker + 1] = JSON.stringify(workingTemplateAfter).replaceAll(
+    '</', '<\\u002F',
+  );
+  await writeFile(app.workingDeckPath, workingLines.join('\n'));
+  await waitForRevision(page, 2);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.querySelector('h2')?.getAttribute('style')?.includes('font-family'));
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.querySelector('h2')?.textContent === '第一轮文字修改');
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+
+  await createManualTextAction(page, '第二轮删字');
+  await waitForRevision(page, 3);
+  await page.locator('[data-history-undo]').click();
+  await waitForRevision(page, 4);
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.querySelector('h2')?.textContent === '第一轮文字修改');
+
+  const state = await readSession(app);
+  assert.deepEqual(state.groups.map(group => [group.mutationType, group.active]), [
+    ['action', true],
+    ['source', true],
+    ['action', false],
+  ]);
+  assert.doesNotMatch(
+    (await page.frameLocator('#deck-frame').locator('[data-direct-status]').allTextContents()).join(' '),
+    /恢复失败|TARGET_AMBIGUOUS/,
+  );
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('runtime 重放冲突会从 frame 明确投影到全局历史提示', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(5_000);
+
+  await page.frameLocator('#deck-frame').locator('body').evaluate(body => {
+    body.ownerDocument.dispatchEvent(new CustomEvent(
+      'huawei-deck-patch-replay-error',
+      { detail:{
+        code:'TARGET_AMBIGUOUS',
+        actionId:'replay-conflict',
+        failedActionId:'replay-conflict',
+      } },
+    ));
+  });
+
+  await page.waitForFunction(() => /历史重放冲突：TARGET_AMBIGUOUS/.test(
+    document.querySelector('[data-history-notice]')?.textContent ?? '',
+  ));
+  assert.equal(await page.locator('[data-history-notice]').getAttribute('data-state'), 'error');
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });

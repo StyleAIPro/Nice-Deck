@@ -14,6 +14,66 @@ const RUNTIME_CONTRACT = {
   features:'textPath,textRangeStyle',
 };
 
+test('细粒度 setText 的目标值包含原文时 MutationObserver 重放仍保持幂等', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    heading.innerHTML = '普通文字 <strong>加粗文字</strong>';
+    const target = { ...runtime.makeLocator(heading), textPath:'0' };
+    runtime.applyAction({
+      id:'idempotent-text', target, kind:'setText',
+      payload:{ text:'更新后的普通文字 ' },
+    });
+    // 触发 runtime 的 childList observer，模拟直接编辑恢复 DOM 与动作提交相邻时序。
+    const marker = document.createElement('i');
+    heading.append(marker);
+    marker.remove();
+  });
+  await page.waitForTimeout(80);
+  assert.equal(
+    await page.locator('h2').first().evaluate(element => element.innerHTML),
+    '更新后的普通文字 <strong>加粗文字</strong>',
+  );
+});
+
+test('固化后的 active action 被收养为新基线，空同步不会恢复旧内容', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    const target = runtime.makeLocator(heading);
+    runtime.applyAll([{
+      id:'solidified-baseline-text', target, kind:'setText', payload:{ text:'固化基线' },
+    }]);
+    const adopted = runtime.adoptActiveAsBaseline();
+    const activeAfterAdopt = runtime.activeActionCount();
+    runtime.applyAll([]);
+    const afterEmptySync = heading.textContent;
+    runtime.applyAll([{
+      id:'post-solidify-text', target, kind:'setText', payload:{ text:'本轮临时修改' },
+    }]);
+    runtime.applyAll([]);
+    return {
+      adopted, activeAfterAdopt, afterEmptySync, afterUndoNewRound:heading.textContent,
+    };
+  });
+  assert.deepEqual(result, {
+    adopted:1,
+    activeAfterAdopt:0,
+    afterEmptySync:'固化基线',
+    afterUndoNewRound:'固化基线',
+  });
+});
+
 test('局部文字样式按字符范围重放、替换并恢复原始结构', async t => {
   const chromium = await loadChromium();
   const browser = await chromium.launch({ channel:'chrome', headless:true });
@@ -64,6 +124,82 @@ test('局部文字样式按字符范围重放、替换并恢复原始结构', as
   assert.deepEqual(result.blue, { count:1, text:'一页', color:'rgb(0, 0, 255)' });
   assert.deepEqual(result.combined, { wrappers:2, color:'rgb(255, 0, 0)', weight:'700' });
   assert.equal(result.restored, '第一页标题');
+});
+
+test('局部格式键被替换或撤销时不让后续细粒度文字动作丢失目标', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const target = await page.evaluate(() => window.HuaweiDeckPatchRuntime.makeLocator(
+    document.querySelector('h2'),
+  ));
+  const range = { start:1, end:3 };
+  const action = (id, value) => ({
+    id, taskId:null, target, kind:'setStyle',
+    payload:{ property:'font-weight', value, textRange:range },
+    before:value === '400' ? '700' : '400', after:value, appliedAt:id,
+  });
+  const journal = new PatchJournal();
+  journal.appendGroup(null, [action('range-original', '700')]);
+  const formatted = journal.appendGroup(null, [action('range-formatted', '400')]);
+  await page.evaluate(actions => window.HuaweiDeckPatchRuntime.applyAll(actions), journal.compile());
+  const textPath = await page.evaluate(() => {
+    const heading = document.querySelector('h2');
+    const text = heading.querySelector('[data-deck-text-range-style]')?.firstChild;
+    if (!text) throw new Error('测试前提失败：局部格式包装未生成');
+    const parts = [];
+    for (let node=text; node && node!==heading; node=node.parentNode) {
+      parts.push([...node.parentNode.childNodes].indexOf(node));
+    }
+    return parts.reverse().join('/');
+  });
+  journal.appendGroup(null, [{
+    id:'granular-text', taskId:null, target:{ ...target, textPath }, kind:'setText',
+    payload:{ text:'两页' }, before:'一页', after:'两页', appliedAt:'granular-text',
+  }]);
+  await page.evaluate(actions => window.HuaweiDeckPatchRuntime.applyAll(actions), journal.compile());
+
+  const changed = new PatchJournal(structuredClone(journal.state));
+  changed.appendGroup(null, [action('range-restored', '700')]);
+  const changedResult = await page.evaluate(actions => {
+    try {
+      window.HuaweiDeckPatchRuntime.applyAll(actions);
+      return { error:null, text:document.querySelector('h2').textContent };
+    }
+    catch (error) { return error.code || error.message; }
+  }, changed.compile());
+
+  const undone = new PatchJournal(structuredClone(journal.state));
+  undone.undo(formatted.id);
+  const undoneResult = await page.evaluate(actions => {
+    try {
+      window.HuaweiDeckPatchRuntime.applyAll(actions);
+      return { error:null, text:document.querySelector('h2').textContent };
+    }
+    catch (error) { return error.code || error.message; }
+  }, undone.compile());
+
+  assert.deepEqual({ changedResult, undoneResult }, {
+    changedResult:{ error:null, text:'第两页标题' },
+    undoneResult:{ error:null, text:'第两页标题' },
+  });
+
+  const ambiguousFallback = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelectorAll('h2')[1];
+    const target = runtime.makeLocator(heading);
+    heading.textContent = '重复重复';
+    try {
+      runtime.applyAction({
+        id:'ambiguous-text', target:{ ...target, textPath:'9' }, kind:'setText',
+        payload:{ text:'更新' }, before:'重复',
+      });
+      return null;
+    } catch (error) { return error.code || error.message; }
+  });
+  assert.equal(ambiguousFallback, 'TARGET_AMBIGUOUS');
 });
 
 test('局部文字样式替换只恢复自己的包装，不覆盖同文本框的其他修改', async t => {
@@ -144,6 +280,209 @@ test('新节点指纹不符时 applyAll 抛出 TARGET_AMBIGUOUS', async t => {
     }
   });
   assert.equal(error, 'TARGET_AMBIGUOUS');
+});
+
+test('源码基线重放只对显式旧动作放宽指纹且仍校验几何位置', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const stableTarget = runtime.makeLocator(document.querySelectorAll('h2')[0]);
+    document.querySelectorAll('h2')[0].outerHTML = '<h2 style="font-family:serif">第一页标题</h2>';
+    const stableAction = {
+      id:'source-rebase-stable', taskId:null, target:stableTarget, kind:'setText',
+      payload:{ text:'重放成功' }, before:'第一页标题', after:'重放成功',
+    };
+    let strict;
+    try { runtime.applyAll([stableAction]); strict=null; }
+    catch (error) { strict=error.code || error.message; }
+    runtime.applyAll([stableAction], { rebaseActionIds:[stableAction.id] });
+
+    const movedTarget = runtime.makeLocator(document.querySelectorAll('h2')[1]);
+    document.querySelectorAll('h2')[1].outerHTML = '<h2 style="position:absolute;left:900px;top:700px">第二页标题</h2>';
+    const movedAction = {
+      id:'source-rebase-moved', taskId:null, target:movedTarget, kind:'setText',
+      payload:{ text:'不应误改' }, before:'第二页标题', after:'不应误改',
+    };
+    let moved;
+    try { runtime.applyAll([movedAction], { rebaseActionIds:[movedAction.id] }); moved=null; }
+    catch (error) { moved=error.code || error.message; }
+    return {
+      strict, stable:document.querySelectorAll('h2')[0].textContent,
+      moved, movedText:document.querySelectorAll('h2')[1].textContent,
+    };
+  });
+  assert.deepEqual(result, {
+    strict:'TARGET_AMBIGUOUS', stable:'重放成功',
+    moved:'TARGET_AMBIGUOUS', movedText:'第二页标题',
+  });
+});
+
+test('持久元素身份允许 Agent 调整 DOM 层级后继续安全重放', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelectorAll('h2')[0];
+    heading.dataset.editorId = 'element-11111111111111111111111111111111';
+    const target = runtime.makeLocator(heading);
+    const action = {
+      id:'stable-editor-id-style', taskId:null, target, kind:'setStyle',
+      payload:{ property:'color', value:'red' }, before:'', after:'red',
+    };
+    heading.outerHTML = [
+      '<div class="agent-layout-wrapper">',
+      '  <h2 data-editor-id="element-11111111111111111111111111111111" style="font-family:serif">第一页标题</h2>',
+      '</div>',
+    ].join('');
+    try {
+      runtime.applyAll([action], { rebaseActionIds:[action.id] });
+      const moved = document.querySelector('[data-editor-id="element-11111111111111111111111111111111"]');
+      return {
+        error:null,
+        editorId:target.editorId ?? null,
+        color:moved.style.color,
+        family:moved.style.fontFamily,
+      };
+    } catch (error) {
+      return { error:error.code || error.message, editorId:target.editorId ?? null };
+    }
+  });
+  assert.deepEqual(result, {
+    error:null,
+    editorId:'element-11111111111111111111111111111111',
+    color:'red',
+    family:'serif',
+  });
+});
+
+test('源码基线把同路径同几何的新语义元素视为冲突而不是旧目标', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelectorAll('h2')[0];
+    heading.dataset.editorId = 'element-22222222222222222222222222222222';
+    const target = runtime.makeLocator(heading);
+    const action = {
+      id:'source-rebase-semantic-replacement', taskId:null, target, kind:'setText',
+      payload:{ text:'人工旧标题' }, before:'第一页标题', after:'人工旧标题',
+    };
+    heading.outerHTML = '<h2 data-editor-id="element-22222222222222222222222222222222">Agent 新语义标题</h2>';
+    try {
+      runtime.applyAll([action], { rebaseActionIds:[action.id] });
+      return { error:null, text:document.querySelectorAll('h2')[0].textContent };
+    } catch (error) {
+      return { error:error.code || error.message, text:document.querySelectorAll('h2')[0].textContent };
+    }
+  });
+  assert.deepEqual(result, {
+    error:'TARGET_AMBIGUOUS', text:'Agent 新语义标题',
+  });
+});
+
+test('Agent 后写同一样式属性时旧人工动作不得覆盖新值', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelectorAll('h2')[0];
+    heading.dataset.editorId = 'element-33333333333333333333333333333333';
+    const target = runtime.makeLocator(heading);
+    const action = {
+      id:'source-style-conflict', taskId:null, target, kind:'setStyle',
+      payload:{ property:'color', value:'red' }, before:'', after:'red',
+    };
+    heading.outerHTML = '<h2 data-editor-id="element-33333333333333333333333333333333" style="color:blue">第一页标题</h2>';
+    try {
+      runtime.applyAll([action], { rebaseActionIds:[action.id] });
+      return { error:null, color:document.querySelectorAll('h2')[0].style.color };
+    } catch (error) {
+      return {
+        error:error.code || error.message,
+        color:document.querySelectorAll('h2')[0].style.color,
+      };
+    }
+  });
+  assert.deepEqual(result, { error:'TARGET_AMBIGUOUS', color:'blue' });
+});
+
+test('Agent 插字后旧局部格式必须冲突关闭而不能漂移到其他字符', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelectorAll('h2')[0];
+    heading.dataset.editorId = 'element-44444444444444444444444444444444';
+    const target = runtime.makeLocator(heading);
+    const action = {
+      id:'source-range-drift', taskId:null, target, kind:'setStyle',
+      payload:{ property:'color', value:'red', textRange:{ start:0, end:1 } },
+      before:'rgb(25, 25, 25)', after:'red',
+    };
+    heading.outerHTML = '<h2 data-editor-id="element-44444444444444444444444444444444">新第一页标题</h2>';
+    try {
+      runtime.applyAll([action], { rebaseActionIds:[action.id] });
+      return { error:null, styled:document.querySelector('[data-deck-text-range-style]')?.textContent ?? '' };
+    } catch (error) {
+      return {
+        error:error.code || error.message,
+        styled:document.querySelector('[data-deck-text-range-style]')?.textContent ?? '',
+      };
+    }
+  });
+  assert.deepEqual(result, { error:'TARGET_AMBIGUOUS', styled:'' });
+});
+
+test('Deck 重绘让 active action 失效时必须发布可观察冲突事件', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelectorAll('h2')[0];
+    const target = runtime.makeLocator(heading);
+    window.__patchReplayFailures = [];
+    document.addEventListener('huawei-deck-patch-replay-error', event => {
+      window.__patchReplayFailures.push(event.detail);
+    });
+    runtime.applyAll([{
+      id:'repaint-conflict-action', taskId:null, target, kind:'setText',
+      payload:{ text:'人工标题' }, before:'第一页标题', after:'人工标题',
+    }]);
+    heading.outerHTML = '<h2>Deck 重绘标题</h2>';
+  });
+  await page.waitForTimeout(100);
+  const result = await page.evaluate(() => ({
+    failures:window.__patchReplayFailures,
+    text:document.querySelectorAll('h2')[0].textContent,
+    active:window.HuaweiDeckPatchRuntime.activeActionCount(),
+  }));
+  assert.deepEqual(result, {
+    failures:[{
+      code:'TARGET_AMBIGUOUS', actionId:'repaint-conflict-action',
+      failedActionId:'repaint-conflict-action',
+    }],
+    text:'Deck 重绘标题',
+    active:1,
+  });
 });
 
 test('hide 和 show 共享 display 状态并以最后一次公开动作为准', async t => {
@@ -407,4 +746,48 @@ test('pageKey 保留 script raw-text 内 blob 字符串差异', async t => {
     return { first, second };
   });
   assert.notEqual(result.first, result.second);
+});
+
+test('持久 data-page-id 不随页面内容、标题和顺序变化', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const canvases = [...document.querySelectorAll('.slide-canvas')];
+    const id = `page-${'a'.repeat(32)}`;
+    canvases[0].querySelector('section').dataset.pageId = id;
+    const before = runtime.pageKey(canvases[0]);
+    canvases[0].querySelector('section').dataset.label = '已经改名';
+    canvases[0].querySelector('h2').textContent = '已经改文案';
+    canvases[0].parentElement.append(canvases[0]);
+    const after = runtime.pageKey(canvases[0]);
+    return { before, after };
+  });
+  assert.deepEqual(result, {
+    before:`page-${'a'.repeat(32)}`,
+    after:`page-${'a'.repeat(32)}`,
+  });
+});
+
+test('重复或畸形 data-page-id 明确拒绝而不是串页', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const canvases = [...document.querySelectorAll('.slide-canvas')];
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const codes = [];
+    canvases[0].querySelector('section').dataset.pageId = 'page-bad';
+    try { runtime.pageKey(canvases[0]); } catch (error) { codes.push(error.code); }
+    const duplicate = `page-${'b'.repeat(32)}`;
+    for (const canvas of canvases) canvas.querySelector('section').dataset.pageId = duplicate;
+    try { runtime.pageKey(canvases[1]); } catch (error) { codes.push(error.code); }
+    return codes;
+  });
+  assert.deepEqual(result, ['PAGE_ID_INVALID', 'PAGE_ID_AMBIGUOUS']);
 });

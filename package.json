@@ -3,14 +3,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:editor:unit": "node --test scripts/editor/test/*.test.mjs",
-    "test:editor:e2e": "node --test --test-concurrency=1 scripts/editor/test/*.e2e.mjs",
-    "test:editor": "npm run test:editor:unit && npm run test:editor:e2e && python3 -m unittest discover -s scripts/editor/test -p 'test_*.py' -v"
+    "test:editor:unit": "node scripts/run-editor-tests.mjs unit",
+    "test:editor:e2e": "node scripts/run-editor-tests.mjs e2e",
+    "test:editor:python": "node scripts/run-editor-tests.mjs python",
+    "test:editor": "node scripts/run-editor-tests.mjs all"
   },
   "dependencies": {
+    "@xterm/xterm": "^5.5.0",
     "busboy": "1.6.0",
     "html2canvas": "1.4.1",
+    "node-pty": "1.2.0-beta.15",
     "playwright-core": "^1.62.1",
+    "three": "^0.185.1",
     "ws": "8.21.1"
   }
 }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { startFixtureServer, openEditor, dragInFrame } from './test-helpers.mjs';
 
 const PNG_BYTES = Buffer.from(
@@ -23,17 +24,25 @@ test('区域任务可连续选择、删除并粘贴 PNG 附件后提交真实 mu
     await browser.close();
     await app.close();
   });
+  await writeFile(join(dirname(app.deckPath), '说明.txt'), 'reference');
+  await writeFile(join(dirname(app.deckPath), '架构.png'), PNG_BYTES);
+  await writeFile(join(dirname(app.deckPath), '补充.md'), '# extra');
   const popover = await openRegionPopover(page);
 
   await popover.locator('textarea').fill('参考附件修改');
-  const input = popover.locator('[data-attachment-input]');
-  await input.setInputFiles([
-    { name:'说明.txt', mimeType:'text/plain', buffer:Buffer.from('reference') },
-    { name:'架构.png', mimeType:'image/png', buffer:PNG_BYTES },
+  let fileChooserPromise = page.waitForEvent('filechooser');
+  await popover.locator('[data-attachment-choose]').click();
+  let fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles([
+    join(dirname(app.deckPath), '说明.txt'),
+    join(dirname(app.deckPath), '架构.png'),
   ]);
-  await input.setInputFiles([
-    { name:'补充.md', mimeType:'text/markdown', buffer:Buffer.from('# extra') },
-  ]);
+  await popover.locator('[data-attachment-item]').nth(1).waitFor();
+  fileChooserPromise = page.waitForEvent('filechooser');
+  await popover.locator('[data-attachment-choose]').click();
+  fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles(join(dirname(app.deckPath), '补充.md'));
+  await popover.locator('[data-attachment-item]').nth(2).waitFor();
   assert.equal(await popover.locator('[data-attachment-item]').count(), 3);
   await popover.locator('[data-attachment-remove]').nth(1).click();
   assert.deepEqual(
@@ -95,13 +104,19 @@ test('区域任务可连续选择、删除并粘贴 PNG 附件后提交真实 mu
     await page.evaluate(() => window.__copiedAttachmentPaths),
     [task.attachments[0].path],
   );
-  assert.equal(await copyButtons.first().textContent(), '已复制');
+  assert.equal(
+    await copyButtons.first().locator('.pill-nav-label-default').textContent(),
+    '已复制',
+  );
 
   await page.evaluate(() => {
     navigator.clipboard.writeText = async () => { throw new Error('clipboard denied'); };
   });
   await copyButtons.nth(1).click();
-  assert.equal(await copyButtons.nth(1).textContent(), '复制失败，请手动选择路径');
+  assert.equal(
+    await copyButtons.nth(1).locator('.pill-nav-label-default').textContent(),
+    '复制失败，请手动选择路径',
+  );
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });

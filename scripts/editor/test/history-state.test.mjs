@@ -24,3 +24,10 @@ test('摘要区分人工动作和 Agent 任务', () => {
 test('无候选时返回 null', () => {
   assert.deepEqual(historyCandidates([], []), { undoGroup:null, redoGroup:null });
 });
+
+test('结构修改显示来源摘要而不是零项动作', () => {
+  assert.equal(historyLabel({
+    mutationType:'source', taskId:null, active:true, actions:[],
+    source:{ summary:'模板升级并保留页面 ID' },
+  }, [], 'undo'), '撤销结构修改：模板升级并保留页面 ID');
+});

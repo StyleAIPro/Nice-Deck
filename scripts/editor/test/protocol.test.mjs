@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { makePageKey, normalizeRect, validateAction, validateTask } from '../protocol.mjs';
+import {
+  makePageKey, normalizeRect, validateAction, validatePageState, validateTask,
+} from '../protocol.mjs';
 
 test('屏幕框换算并约束在 1920×1080', () => {
   const rect = normalizeRect({ left: 100, top: 50, width: 500, height: 250 },
@@ -148,11 +150,56 @@ test('持久化 attachments 拒绝 Object.prototype 污染并清理全局原型'
   }
 });
 
+test('任务页面状态严格绑定同一页并限制字段与容量', () => {
+  const target = {
+    pageKey:'page-001-a', path:'0/1', tag:'BUTTON', fingerprint:'abc12345',
+    rect:{ x:1, y:2, w:30, h:20 },
+  };
+  const pageState = {
+    schema:1,
+    layers:[{ group:'resource-e2e', key:'capacity' }],
+    elements:[{ target, dataActive:true, ariaPressed:'true', dataMod:'1' }],
+  };
+  assert.equal(validatePageState(pageState, target.pageKey), pageState);
+  assert.doesNotThrow(() => validateTask({
+    pageKey:target.pageKey,
+    rect:{ x:1, y:2, w:30, h:20 },
+    instruction:'恢复容量画面',
+    pageState,
+  }));
+  assert.throws(() => validatePageState({
+    ...pageState,
+    elements:[{ ...pageState.elements[0], unknown:true }],
+  }, target.pageKey), /未知字段/);
+  assert.throws(() => validatePageState({
+    ...pageState,
+    elements:[{ ...pageState.elements[0], target:{ ...target, pageKey:'page-002-b' } }],
+  }, target.pageKey), /target 无效/);
+  assert.throws(() => validatePageState({
+    ...pageState,
+    layers:Array.from({ length:65 }, (_, index) => ({ group:`g${index}`, key:null })),
+  }, target.pageKey), /条目过多/);
+});
+
 test('动作 payload 严格拒绝非有限位移、非正缩放和对象污染字段', () => {
   const target = { pageKey: 'page-001-a', path: '0/1' };
   for (const property of ['border-color', 'border-width', 'border-style', 'fill', 'stroke', 'stroke-width']) {
     assert.doesNotThrow(() => validateAction({
       id:`style-${property}`, target, kind:'setStyle', payload:{ property, value:'1px' },
+    }));
+  }
+  for (const property of [
+    'font-family', 'font-style', 'text-decoration-line', 'text-align', 'line-height',
+    'list-style-type', 'list-style-position', 'display',
+  ]) {
+    assert.doesNotThrow(() => validateAction({
+      id:`typography-${property}`, target, kind:'setStyle', payload:{ property, value:'initial' },
+    }));
+  }
+  for (const property of ['font-family', 'font-style', 'text-decoration-line']) {
+    assert.doesNotThrow(() => validateAction({
+      id:`range-${property}`, target, kind:'setStyle',
+      payload:{ property, value:'initial', textRange:{ start:2, end:6 } },
     }));
   }
   assert.throws(() => validateAction({
@@ -172,8 +219,12 @@ test('动作 payload 严格拒绝非有限位移、非正缩放和对象污染�
   }), /白名单/);
   assert.doesNotThrow(() => validateAction({
     id:'text-run', target:{ ...target, textPath:'0/2' },
-    kind:'setText', payload:{ text:'更新片段' },
+    kind:'setText', payload:{ text:'更新片段', sourceRange:{ start:4, end:8 } },
   }));
+  assert.throws(() => validateAction({
+    id:'bad-source-range', target:{ ...target, textPath:'0/2' },
+    kind:'setText', payload:{ text:'更新片段', sourceRange:{ start:8, end:4 } },
+  }), /sourceRange/);
   assert.throws(() => validateAction({
     id:'bad-text-path', target:{ ...target, textPath:'00/2' },
     kind:'setText', payload:{ text:'更新片段' },
@@ -197,4 +248,24 @@ test('动作 payload 严格拒绝非有限位移、非正缩放和对象污染�
   assert.throws(() => validateAction({
     id: 'mixed-resize', target, kind: 'resize', payload: { scale: 1, width: 200, height: 100 },
   }), /正数/);
+});
+
+test('动作与页面状态只接受规范的持久元素身份', () => {
+  const editorId = 'element-11111111111111111111111111111111';
+  const target = {
+    pageKey:'page-001-a', path:'0/1', tag:'H2', fingerprint:'abc12345', editorId,
+  };
+  assert.doesNotThrow(() => validateAction({
+    id:'stable-target', target, kind:'setText', payload:{ text:'稳定标题' },
+  }));
+  assert.throws(() => validateAction({
+    id:'bad-stable-target', target:{ ...target, editorId:'element-bad' },
+    kind:'setText', payload:{ text:'不应接受' },
+  }), /editorId/);
+  assert.doesNotThrow(() => validatePageState({
+    schema:1, layers:[], elements:[{ target }],
+  }, target.pageKey));
+  assert.throws(() => validatePageState({
+    schema:1, layers:[], elements:[{ target:{ ...target, editorId:'element-bad' } }],
+  }, target.pageKey), /target 无效/);
 });

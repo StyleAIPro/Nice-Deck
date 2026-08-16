@@ -9,9 +9,19 @@ export class RevisionConflict extends Error {}
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FINGERPRINT = /^[0-9a-f]{64}$/;
 export const MAX_SNAPSHOT_BYTES = 512 * 1024;
 const MUTABLE_TASK_STATUSES = new Set(['pending', 'failed', 'needs-confirmation']);
 const MAX_TASK_INSTRUCTION_LENGTH = 10_000;
+
+function portableDeckName(path) {
+  return String(path ?? '').replaceAll('\\', '/').split('/').at(-1);
+}
+
+function isDeletableTask(task) {
+  if (task.groupId) return false;
+  return MUTABLE_TASK_STATUSES.has(task.status) || task.status === 'completed';
+}
 
 function snapshotError(code, statusCode, message) {
   return Object.assign(new Error(message), { code, statusCode });
@@ -45,6 +55,23 @@ function normalizePersistedTask(task) {
 
 function normalizePersistedTasks(tasks) {
   return (Array.isArray(tasks) ? tasks : []).map(normalizePersistedTask);
+}
+
+function normalizePersistedSourceEdit(value) {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.keys(value).some(key => ![
+      'id', 'taskId', 'beforeFingerprint', 'startedAt',
+    ].includes(key))
+    || !UUID_V4.test(value.id)
+    || (value.taskId !== null && !UUID_V4.test(value.taskId))
+    || !FINGERPRINT.test(value.beforeFingerprint)
+    || typeof value.startedAt !== 'string'
+    || Number.isNaN(Date.parse(value.startedAt))) {
+    throw new TypeError('持久化源码事务格式无效');
+  }
+  return structuredClone(value);
 }
 
 function compensatedSnapshotError(error) {
@@ -181,7 +208,8 @@ export class SessionStore {
       if (persisted.sessionId !== undefined && persisted.sessionId !== sessionId) {
         throw new Error('session.json 的 sessionId 与 registry 不一致');
       }
-      if (persisted.deckPath !== undefined && persisted.deckPath !== deckPath) {
+      if (persisted.deckPath !== undefined
+        && portableDeckName(persisted.deckPath) !== portableDeckName(deckPath)) {
         throw new Error('session.json 的 deckPath 与当前 Deck 不一致');
       }
       store.state = {
@@ -192,10 +220,13 @@ export class SessionStore {
         tasks:normalizePersistedTasks(persisted.tasks),
         groups:Array.isArray(persisted.groups) ? persisted.groups : [],
         redo:Array.isArray(persisted.redo) ? persisted.redo : [],
+        solidifiedActions:Array.isArray(persisted.solidifiedActions)
+          ? persisted.solidifiedActions : [],
         diagnosticsBaseline:persisted.diagnosticsBaseline ?? {},
         diagnosticsCurrent:persisted.diagnosticsCurrent ?? {},
         conflict:persisted.conflict ?? null,
         agentConnection:persisted.agentConnection ?? null,
+        sourceEdit:normalizePersistedSourceEdit(persisted.sourceEdit),
       };
     };
     await sidecarGuard();
@@ -229,6 +260,7 @@ export class SessionStore {
       tasks: [],
       groups: [],
       redo: [],
+      solidifiedActions: [],
       diagnosticsBaseline: {},
       diagnosticsCurrent: {},
       diagnosticsRevision: null,
@@ -276,6 +308,9 @@ export class SessionStore {
   async persistState(state = this.state) {
     const candidate = structuredClone(state);
     candidate.tasks = normalizePersistedTasks(candidate.tasks);
+    const sourceEdit = normalizePersistedSourceEdit(candidate.sourceEdit);
+    if (sourceEdit) candidate.sourceEdit = sourceEdit;
+    else delete candidate.sourceEdit;
     try {
       await this.#persist(candidate);
     } catch (error) {
@@ -438,6 +473,12 @@ export class SessionStore {
     const candidate = structuredClone(this.state);
     const task = candidate.tasks.find(item => item.id === taskId);
     if (!task) throw snapshotError('TASK_NOT_FOUND', 404, '找不到任务');
+    if (task.targetMissing === true) {
+      throw snapshotError(
+        'TASK_TARGET_MISSING', 409,
+        '任务目标页面已删除；请撤销删页或删除该任务后重新标记',
+      );
+    }
     if (!MUTABLE_TASK_STATUSES.has(task.status) || task.groupId) {
       throw snapshotError('TASK_LOCKED', 409, '处理中或已完成的任务不能编辑；已完成任务请先撤销');
     }
@@ -459,8 +500,8 @@ export class SessionStore {
     const taskIndex = candidate.tasks.findIndex(item => item.id === taskId);
     if (taskIndex < 0) throw snapshotError('TASK_NOT_FOUND', 404, '找不到任务');
     const [task] = candidate.tasks.splice(taskIndex, 1);
-    if (!MUTABLE_TASK_STATUSES.has(task.status) || task.groupId) {
-      throw snapshotError('TASK_LOCKED', 409, '处理中或已完成的任务不能删除；已完成任务请先撤销');
+    if (!isDeletableTask(task)) {
+      throw snapshotError('TASK_LOCKED', 409, '处理中或仍可撤销的已完成任务不能删除；请先撤销或固化修改');
     }
     candidate.revision += 1;
     await this.persistState(candidate);

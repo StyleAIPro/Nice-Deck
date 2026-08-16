@@ -23,29 +23,140 @@ function requireClaims(file, contents, claims) {
   }
 }
 
-test('四份入口文档共享后期微调、安全写回与第一版边界', async () => {
+test('四份入口文档共享后期微调、安全写回与结构编辑边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
       '启动命令': /python3 scripts\/deck-editor\.py <deck\.html>/,
       'macOS 双击入口': /双击[^。\n]{0,100}`Huawei Deck 编辑器\.app`/,
-      '双击先进入网页': /先打开本地网页导入页/,
-      '网页点击后才选择': /网页点击“添加 Deck HTML”后/,
-      '每次只添加一份': /每次应用启动只允许成功添加一份 deck HTML/i,
-      '不允许切换': /不提供切换或再次添加入口/,
+      '启动页提供双入口': /(?:启动页|本地工作台)[\s\S]{0,180}新建 Deck[\s\S]{0,180}打开已有 Deck/,
+      '重复启动不打开第二个工作台页面': /重复(?:双击|启动|派发)[^。\n]{0,300}不会再打开第二个工作台页面/,
+      '新建先确认项目目录': /新建 Deck[\s\S]{0,180}项目目录/,
+      '打开已有 Deck 使用文件选择器': /打开已有 Deck[\s\S]{0,220}(?:系统文件选择器|添加一份 HTML|添加 Deck HTML)/,
       '命令式入口保留': /命令式入口[^。\n]{0,80}(?:保留|保持)[\s\S]{0,180}python3 scripts\/deck-editor\.py <deck\.html>/,
-      'sidecar 目录': /\.huawei-deck-editor\//,
-      '外部 Agent 而非内置聊天': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,180}(?:不是|不内置)[\s\S]{0,80}(?:聊天|聊天机器人)/,
-      '正式写回经 edit-bundle': /(?:正式)?写回[\s\S]{0,260}scripts\/edit-bundle\.py/,
-      '第一版不增删页': /第一版[\s\S]{0,180}(?:不增删页|不支持[^\n]{0,30}增删页)/,
-      '第一版不调整页序': /第一版[\s\S]{0,220}(?:不调整页序|不支持[^\n]{0,30}页序)/,
-      '第一版不重构复杂动画': /第一版[\s\S]{0,260}(?:不重构复杂动画|不支持[^\n]{0,30}复杂动画)/,
+      'sidecar 托管工作副本': /(?:\.huawei-deck-editor\/[\s\S]{0,120})?(?:sidecar[^。\n]{0,120})?working\/deck\.html|sidecar[^。\n]{0,120}工作副本/i,
+      'Skill 不依赖窗口化 Editor': /(?:没有 Editor 窗口也必须|窗口化 Editor[^。\n]{0,80}(?:可选增强|不是使用前提)|无窗口 Managed Workspace)/,
+      '窗口 Agent Host 注册三个 provider': /Codex[\s\S]{0,140}Claude Code[\s\S]{0,140}OpenCode/,
+      '结构修改经 edit-bundle 作用于工作副本': /(?:结构工作|结构修改|结构能力)[\s\S]{0,180}scripts\/edit-bundle\.py[\s\S]{0,180}(?:工作副本|HUAWEI_DECK_WORKING_PATH)/,
+      '只有固化发布真实 Deck': /(?:固化修改|solidify-deck)[\s\S]{0,220}(?:唯一|原子)[^。\n]{0,80}(?:发布|替换)[^。\n]{0,40}(?:真实 Deck|真实文件)/i,
+      '后期动作层不直接增删页': /(?:后期编辑器|后期 iframe|iframe 动作层)[\s\S]{0,80}不直接增删页/,
+      '后期动作层不调整页序': /不直接增删页、调整页序/,
+      '后期动作层不重构复杂动画': /调整页序或重构复杂动画/,
+      '结构修改交给同一 Agent': /(?:结构工作|结构修改|结构能力)[\s\S]{0,120}(?:真实 PTY|Agent)[\s\S]{0,120}scripts\/edit-bundle\.py/,
       'bundle 结构验证': /(?:eb\.verify|python3 scripts\/edit-bundle\.py)/,
       '溢出验证': /measure_overflow\.mjs/,
       '截图验证': /shot\.mjs/,
       '动画逐拍验证': /steps\.mjs/,
     });
   }
+});
+
+test('模板选择文档统一为场景外壳、共享页型目录和受控导入', async () => {
+  const files = [
+    'SKILL.md',
+    'README.md',
+    'references/workflow.md',
+    'references/template-pages.md',
+    'references/editing-guide.md',
+    'docs/architecture.md',
+  ];
+  for (const file of files) {
+    const contents = await readFile(new URL(file, ROOT), 'utf8');
+    requireClaims(file, contents, {
+      '场景外壳与页型库分离': /场景外壳/,
+      '公开当前场景可用页型': /availablePageTypes/,
+      '共享页型受兼容性约束': /compatibleWith|兼容性审核|兼容白名单/,
+      '跨模板页只能受控导入': /deck_factory\.py import-page|`import-page`/,
+      '页面规划控制视觉家族': /视觉家族/,
+    });
+  }
+});
+
+test('入口文档明确质量规范不按新建与修改分支', async () => {
+  const documents = await loadDocuments();
+  requireClaims('SKILL.md', documents['SKILL.md'], {
+    'Skill 只有一份质量契约': /不按新建 Deck 和修改 Deck 维护两套规范/,
+    '入口差异只表示当前状态': /入口差异只决定当前状态/,
+  });
+  requireClaims('README.md', documents['README.md'], {
+    '所有入口原样加载同一契约': /Skill 只有一份质量契约[^。\n]{0,120}全部原样加载/,
+    '入口只表示是否已有 Deck': /两条入口只表示当前是否已有合法 Deck/,
+  });
+  requireClaims('references/editing-guide.md', documents['references/editing-guide.md'], {
+    '双入口不是双规范': /两条只是\*\*初始状态入口\*\*，不是两套 Skill 规范/,
+    '全部质量要求不得分支': /任何设计、文案、字体、卡片、动画、配图和验收要求都不得按“新建 \/ 修改”分支维护/,
+  });
+  requireClaims('docs/architecture.md', documents['docs/architecture.md'], {
+    '质量契约不接受 phase 分支': /单一质量契约入口；不接受新建 \/ 修改 phase 分支/,
+  });
+});
+
+test('设计上下文统一同级卡片、字体层级与语义高亮边界', async () => {
+  const files = [
+    'SKILL.md',
+    'references/design-system.md',
+    'references/workflow.md',
+    'references/artwork.md',
+    'references/huawei-style.md',
+  ];
+  for (const file of files) {
+    const contents = await readFile(new URL(file, ROOT), 'utf8');
+    requireClaims(file, contents, {
+      '同组同级同角色卡片必须一致': /同一组、同一层级、同一语义角色/,
+      '卡片字体层级保持一致': /卡片[^。\n]{0,180}(?:字体|标题 \/ 正文 \/ 标签)[^。\n]{0,100}一致/,
+      '高亮必须对应可读业务语义': /选中、推荐、当前、风险或结论差异/,
+      '禁止为了构图制造默认高亮': /不得为了构图[^。\n]{0,40}(?:默认)?高亮/,
+    });
+  }
+});
+
+test('入口文档统一使用文件驱动里程碑、分层页面身份与当前铁律数量', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '新建页展示四个只读里程碑': /四个(?:\*\*)?只读里程碑/,
+      '里程碑不是可点击导航': /(?:里程碑|节点)[^。\n]{0,80}(?:不可点击|不是导航)/,
+      '前三段没有结构化表单': /(?:没有|不提供)[^。\n]{0,100}(?:中间)?表单/,
+      'Managed Editor 使用持久 pageId': /(?:持久|稳定)[^。\n]{0,80}`data-page-id`|`data-page-id`[^。\n]{0,80}(?:持久|稳定)/,
+    });
+  }
+
+  const architecture = documents['docs/architecture.md'];
+  const editingGuide = documents['references/editing-guide.md'];
+  requireClaims('docs/architecture.md', architecture, {
+    'Skill 导航记录 16 条铁律': /5 步快速上手 \+ 16 条设计铁律/,
+    '正文记录 16 条铁律': /正文给 5 步 \+ 16 条铁律/,
+    '页面身份按 pageId 与 label 分层': /页面身份分层[\s\S]{0,180}`data-page-id`[\s\S]{0,180}`data-label`/,
+  });
+  requireClaims('references/editing-guide.md', editingGuide, {
+    'label 仅是工具侧页名': /`data-label`[^。\n]{0,100}工具侧页名/,
+    'Editor locator 使用 pageId': /Editor[^。\n]{0,100}`data-page-id`[^。\n]{0,100}page key/,
+  });
+
+  const supportingReferences = Object.fromEntries(await Promise.all([
+    'references/template-pages.md',
+    'references/page-snippets.md',
+  ].map(async file => [file, await readFile(new URL(file, ROOT), 'utf8')])));
+  for (const [file, contents] of Object.entries(supportingReferences)) {
+    requireClaims(file, contents, {
+      'label 仅是传统工具侧页名': /`data-label`[^。\n]{0,120}工具侧页名/,
+      'Managed Editor 使用持久 pageId': /Managed Editor[^。\n]{0,120}(?:持久 )?`data-page-id`/,
+    });
+  }
+
+  const skillRules = documents['SKILL.md']
+    .split('## 设计铁律（细则见对应 reference）')[1]
+    ?.split('## 文件导航')[0] ?? '';
+  assert.equal(
+    [...skillRules.matchAll(/^\d+\.\s+\*\*/gm)].length,
+    16,
+    'SKILL.md 的设计铁律数量必须与架构文档一致',
+  );
+  assert.doesNotMatch(
+    Object.values(documents).join('\n'),
+    /(?:四步 UI|中间 Draft 是唯一结构化权威|人工表单|9 条设计铁律|5 步 \+ 9 铁律|data-label` 是所有工具定位页面的唯一手段|`data-label` 是唯一定位手段)/,
+    '入口文档不得重新引入旧版 Creation UI、铁律数量或页面身份表述',
+  );
 });
 
 test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 sidecar 生命周期', async () => {
@@ -56,23 +167,101 @@ test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 side
     '区域拉框旁侧输入': /区域拉框[\s\S]{0,100}旁侧输入/,
     '跨页任务 drawer': /跨页[\s\S]{0,100}(?:task drawer|任务 drawer|Agent drawer)/i,
     '直接文字移动缩放': /(?:直接)?文字[\s\S]{0,80}移动[\s\S]{0,80}缩放/,
-    '外部 Agent 读任务和提交动作': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,180}读取任务[\s\S]{0,180}提交动作/,
-    'sidecar 内容': /\.huawei-deck-editor\/[\s\S]{0,260}会话[\s\S]{0,100}任务[\s\S]{0,100}快照[\s\S]{0,100}动作[\s\S]{0,100}诊断[\s\S]{0,100}备份/,
+    '外部 Agent 读任务和提交动作': /GET \/api\/tasks[\s\S]{0,260}POST \/api\/actions/,
+    'sidecar 内容': /\.huawei-deck-editor\/[\s\S]{0,500}(?:会话|session)[\s\S]{0,220}(?:任务|tasks?)[\s\S]{0,220}(?:ActionMutation|动作)[\s\S]{0,220}(?:SourceMutation|工作版本)[\s\S]{0,220}备份/i,
     'sidecar 不进交付与版本控制': /\.huawei-deck-editor\/[\s\S]{0,300}(?:不进入|不会进入)[^\n]{0,60}(?:交付 deck|最终交付)[\s\S]{0,180}(?:忽略提交|Git 忽略|gitignore)/i,
-    '三重写回闸门': /editor online[\s\S]{0,180}文件指纹[\s\S]{0,180}无新增溢出[\s\S]{0,180}(?:bundle verify|eb\.verify)/i,
-    '预览和自动保存不碰 source deck': /(?:预览|自动会话保存)[\s\S]{0,160}(?:不触碰|不修改)[^\n]{0,50}(?:source deck|原始 deck)/i,
+    '固化发布闸门': /editor online[\s\S]{0,500}(?:文件指纹|双指纹|真实 Deck 指纹)[\s\S]{0,500}(?:无新增溢出|页面诊断|诊断)[\s\S]{0,500}(?:bundle verify|eb\.verify|bundle)[\s\S]{0,500}(?:patch replay|browser replay|补丁重放)/i,
+    '预览和自动保存不碰 source deck': /(?:真实 source deck|source deck|真实 Deck)[^。\n]{0,120}(?:只读|字节保持不变)[\s\S]{0,220}预览[\s\S]{0,220}(?:自动(?:会话)?保存|session)/i,
     'Agent 动作安全字段': /token[\s\S]{0,100}revision[\s\S]{0,100}locator[\s\S]{0,100}事务/i,
     '冲突不静默覆盖': /(?:冲突|验证失败)[\s\S]{0,120}(?:不静默覆盖|拒绝覆盖)/,
-    '恢复与外部变化': /session[\s\S]{0,120}(?:重开|恢复)[\s\S]{0,180}RECOVERY_REQUIRED[\s\S]{0,180}(?:重载|另存副本)/i,
+    '恢复与外部变化': /session[\s\S]{0,180}(?:重开|恢复)[\s\S]{0,240}RECOVERY_REQUIRED[\s\S]{0,240}(?:重启|重载|另存副本)/i,
   });
 
   requireClaims('references/editing-guide.md', documents['references/editing-guide.md'], {
     '三种一级模式': /预览[\s\S]{0,80}编辑[\s\S]{0,80}区域标记/,
     '撤销与重做': /撤销[\s\S]{0,80}重做/,
-    '保存会话与写回有区别': /保存会话[\s\S]{0,180}(?:不同于|不等于|区别)[\s\S]{0,180}(?:正式)?写回/,
+    '保存会话与发布有区别': /保存会话[\s\S]{0,180}(?:不同于|不等于|区别)[\s\S]{0,180}(?:正式)?(?:发布|写回)/,
     '稳定错误码': /DECK_CHANGED[\s\S]{0,120}NEW_OVERFLOW[\s\S]{0,120}EDITOR_OFFLINE[\s\S]{0,120}RECOVERY_REQUIRED/,
     '目标缺失或歧义': /目标[\s\S]{0,40}(?:缺失|不存在)[\s\S]{0,80}(?:歧义|多个候选)/,
   });
+});
+
+test('四份入口文档共享红框文字盒统一编辑契约', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '编辑范围复用红框': /(?:文字编辑|文字双击)[^。\n]{0,100}(?:复用|始终复用)[^。\n]{0,60}红色选框/,
+      '统一编辑整个布局盒': /(?:整个|红框对应的)[^。\n]{0,60}独立布局盒/,
+      '局部格式不拆编辑框': /(?:局部格式|加粗 \/ 着色)[^。\n]{0,100}(?:不会|不应)[^。\n]{0,40}(?:拆成[^。\n]{0,12}|多个)编辑框/,
+      '变化节点使用 textPath': /(?:实际改动|实际变化)[^。\n]{0,80}(?:文本节点)[^。\n]{0,80}`textPath`/,
+      '失效 textPath 只在同框唯一恢复': /`textPath`[^。\n]{0,100}(?:同一|同一个)[^。\n]{0,20}(?:文字盒|红框)[^。\n]{0,60}唯一/,
+    });
+  }
+});
+
+test('四份入口文档共享全选删除与固化修改契约', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '全选删除提交空内容': /全选[^。\n]{0,30}删除[^。\n]{0,100}(?:空字符串|空内容)[^。\n]{0,80}(?:不会|不再)[^。\n]{0,40}(?:恢复|取消)/,
+      '固化修改按钮': /固化修改/,
+      '固化 API': /POST \/api\/solidify-deck/,
+      '固化清空历史': /固化[^。\n]{0,420}(?:清空|清除)[^。\n]{0,80}(?:撤销[^。\n]{0,30}(?:重做|redo)|groups \/ redo)/i,
+      '连续固化保留前一轮': /连续固化[^。\n]{0,100}(?:不会|不)[^。\n]{0,30}(?:丢|覆盖丢失)[^。\n]{0,30}(?:上一轮|前一轮)/,
+      '站内退出按任务显示未固化清单': /退出交互以“退出编辑器”[\s\S]{0,760}按 `taskId` 分组/,
+      '退出会结束全部运行时': /退出(?:会|通过)[^。\n]{0,140}(?:显式|shutdown)[^。\n]{0,140}(?:全部编辑运行时|启动器)/,
+      '任务详情按需展开': /任务默认只显示任务说明与下拉箭头[^。\n]{0,80}首次展开/,
+      '标签页关闭不触发原生确认': /标签页的 `×`[^。\n]{0,100}不触发 Chrome 通用离开提醒/,
+      '未固化历史跨重开保留': /未固化历史[^。\n]{0,80}保留[^。\n]{0,40}下次打开/,
+    });
+  }
+});
+
+test('四份入口文档共享单一 bypass PTY 与自动 CLI 会话契约', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '三个终端 provider': /Codex[\s\S]{0,140}Claude Code[\s\S]{0,140}OpenCode/,
+      '默认后台 CLI 会话': /(?:Editor|编辑服务)[^。\n]{0,80}(?:打开|启动)[^。\n]{0,80}后台[^。\n]{0,40}(?:创建|启动)[^。\n]{0,40}(?:CLI|PTY|终端)[^。\n]{0,20}会话/i,
+      'Skill 只初始化一次': /(?:huawei-deck|Skill)[^。\n]{0,120}(?:只初始化一次|加载一次|初始化一次)/i,
+      '项目根目录确认': /项目根目录[^。\n]{0,100}(?:确认|可见)/,
+      '独立 workspaceRevision': /agent-workspace\.json[\s\S]{0,160}workspaceRevision[\s\S]{0,160}(?:不增加|不改变)[^。\n]{0,40}Deck revision/i,
+      'PTY 是唯一交互界面': /(?:唯一的? Agent 交互终端|唯一交互终端|不再维护结构化对话)/,
+      '不提供已有会话连接入口': /不(?:再)?提供[^。\n]{0,80}连接已有会话/,
+      '刷新重连同一 PTY': /(?:同一编辑服务内)?刷新[^。\n]{0,120}(?:重连|复用)[^。\n]{0,60}(?:(?:同一|原)[^。\n]{0,20})?(?:PTY|终端)/i,
+      '右侧抽屉与属性栏等高': /(?:(?:Agent|终端)抽屉[^。\n]{0,100}属性面板[^。\n]{0,50}(?:同高|相同高度)|(?:它|终端抽屉)与属性面板(?:同高|保持相同高度))/,
+      '终端默认三分之一宽度': /终端抽屉[^。\n]{0,120}(?:三分之一|1\/3)/,
+      '任务面板向内避让': /任务\s*(?:drawer|面板)[^。\n]{0,100}(?:向内|左移|避让)/i,
+    });
+  }
+});
+
+test('四份入口文档共享区域临时预览与任务交互画面绑定契约', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '区域模式按 R 临时预览': /区域标记模式[^。\n]{0,80}按住 `R`[^。\n]{0,80}临时进入预览/,
+      '松开恢复区域标记': /松开[^。\n]{0,40}恢复区域标记/,
+      '交互状态随任务保存': /(?:layer|data-active)[^。\n]{0,120}(?:交互状态|状态)[^。\n]{0,100}(?:任务|pageState)/i,
+      '定位先恢复画面': /定位(?:任务)?[^。\n]{0,80}先恢复[^。\n]{0,30}(?:标记(?:时的)?画面|状态)/,
+      '缩略图不参与页面身份': /缩略图(?:副本| clone)?[^。\n]{0,80}不参与(?:当前页判断|页面身份)/i,
+    });
+  }
+});
+
+test('四份入口文档共享未完成 badge、完成任务折叠和实时终端边界', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '页码 badge 不显示完成任务': /(?:页码|页序)[^。\n]{0,80}badge[^。\n]{0,140}(?:完成项(?:不再|默认)|completed|已完成任务不再)/i,
+      '完成任务默认折叠': /(?:完成项|已完成任务|completed 任务)[^。\n]{0,40}默认[^。\n]{0,40}闭合[^。\n]{0,30}(?:分组|已完成)/i,
+      '完成任务仍可撤销': /(?:完成项|已完成任务|completed 任务)[^。\n]{0,100}(?:展开后)[^。\n]{0,40}撤销/i,
+      '已固化任务可删除且不影响 Deck': /(?:固化后|已固化)[^。\n]{0,120}删除[^。\n]{0,120}(?:不会|不改变)[^。\n]{0,40}Deck/i,
+      'Editor 终端是实时视图': /终端[^。\n]{0,80}Editor[^。\n]{0,80}实时交互视图/i,
+      '任务状态仍以 sidecar 为权威': /任务完成[^。\n]{0,100}sidecar[^。\n]{0,40}权威/i,
+      '没有结构化对话模式': /(?:不(?:再)?(?:提供|维护)|没有)结构化对话/,
+    });
+  }
 });
 
 test('Skill、README 与架构文档各自承担入口、仓库和开发者职责', async () => {
@@ -93,25 +282,74 @@ test('Skill、README 与架构文档各自承担入口、仓库和开发者职�
     '桥和持久化组件': /BridgeService[\s\S]{0,180}SessionStore[\s\S]{0,100}PatchJournal/,
     '可信 sidecar I/O': /persistent dirfd helper/,
     '写回组件': /bundle adapter[\s\S]{0,180}diagnostics[\s\S]{0,100}watch[\s\S]{0,100}write gate/i,
-    '状态与动作模型': /session registry[\s\S]{0,120}transaction record[\s\S]{0,120}revision[\s\S]{0,120}mutation queue[\s\S]{0,120}canonical action[\s\S]{0,120}authoritative reload/i,
+    '状态与动作模型': /session registry[\s\S]{0,220}revision[\s\S]{0,160}mutation queue[\s\S]{0,260}(?:ActionMutation|canonical action)[\s\S]{0,260}(?:SourceMutation|transaction record)[\s\S]{0,260}authoritative reload|session registry[\s\S]{0,600}authoritative reload[\s\S]{0,300}transaction record/i,
     '信任边界': /loopback[\s\S]{0,100}token[\s\S]{0,100}Origin[\s\S]{0,100}dirfd[\s\S]{0,100}fingerprint/i,
-    '任务接口同时列出 list detail create': /tasks[^。\n]{0,80}`GET \/api\/tasks`[^。\n]{0,80}`GET \/api\/tasks\/<TASK_ID>`[^。\n]{0,80}`POST \/api\/tasks`/,
+    '任务接口同时列出 list detail create': /`GET \/api\/tasks`[^。\n]{0,100}`GET \/api\/tasks\/<TASK_ID>`[^。\n]{0,100}`POST \/api\/tasks`/,
   });
+});
+
+test('四份文档统一声明 Windows Python 子进程的 UTF-8 编码边界', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      'Python UTF-8 模式': /Python[^。\n]{0,100}PYTHONUTF8=1/i,
+      'Python 标准流 UTF-8': /PYTHONIOENCODING=utf-8/i,
+      '不继承 Windows GBK/ACP': /(?:不(?:再)?继承|不得继承)[^。\n]{0,80}(?:GBK|ACP)/i,
+    });
+  }
+});
+
+test('四份文档统一声明 Windows Claude Code 长任务提交边界', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '按 UTF-8 字节分块': /Claude(?: Code)?[\s\S]{0,900}UTF-8[^。\n]{0,80}(?:拆成|分块)/i,
+      '单块不超过 512 B': /不超过 512 B/,
+      '使用 bracketed paste': /bracketed[- ]paste/i,
+      '只有真正输入提示符才就绪': /Claude(?: Code)?[^。\n]{0,220}(?:空 `?❯`?|Ink)[^。\n]{0,160}(?:就绪|ready|提示符|光标)/i,
+      '关闭 paste 后才发送 Enter': /关闭 paste[^。\n]{0,80}(?:后才|后再)[^。\n]{0,60}(?:发送|独立发送) Enter/i,
+    });
+  }
+});
+
+test('四份文档统一声明 Codex 与 Claude Code 失效会话自动替换边界', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '同时覆盖 Codex 与 Claude Code': /Codex[^。\n]{0,80}Claude Code/,
+      '只匹配明确不存在': /(?:明确报告|明确命中)[^。\n]{0,100}(?:会话 ID 不存在|会话 ID[^。\n]{0,30}不存在)/,
+      '自动创建替代会话': /(?:自动创建|重启)[^。\n]{0,100}(?:替代(?:会话| ID)|新的?可恢复会话|newConversation:true)/,
+      '保留工作副本和待办': /(?:保留[^。\n]{0,100}工作副本[^。\n]{0,80}待办|工作副本[^。\n]{0,80}待办[^。\n]{0,50}(?:保留|不变))/,
+    });
+  }
+});
+
+test('四份文档统一声明 bypass 目录信任交互闸门', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      'CLI 的目录信任提示': /(?:(?:trust|信任)[^。\n]{0,100}(?:目录|项目)|(?:目录|项目)[^。\n]{0,100}(?:trust|信任))/i,
+      '需要用户确认而不是已就绪': /(?:等待确认|需要用户交互|interactionRequired)/,
+      '自动展开右侧终端': /(?:自动展开|展开或重新展开|自动展开或重新展开)[^。\n]{0,80}右侧终端|右侧终端[^。\n]{0,80}(?:自动展开|重新展开)/,
+      '正常输入框出现后才提交任务': /(?:正常输入框|正常输入屏)[^。\n]{0,100}(?:后才|才继续|才会)[^。\n]{0,100}(?:任务|Prompt|提交|粘贴)/i,
+    });
+  }
 });
 
 test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与写回职责', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
-      'Agent 读取 session/status': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,260}\/api\/session/,
-      'Agent 读取 tasks': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,360}\/api\/tasks/,
-      'Agent 提交 actions': /外部 (?:Codex|Claude Code|Agent)[\s\S]{0,460}\/api\/actions/,
+      'Agent 读取 session/status': /\/api\/session/,
+      'Agent 读取 tasks': /\/api\/tasks/,
+      'Agent 提交 actions': /\/api\/actions/,
       'Agent undo/redo': /\/api\/groups\/<GROUP_ID>\/(?:undo|redo)[\s\S]{0,160}(?:undo|redo)/i,
-      'Agent 正式写回': /\/api\/write-deck/,
+      'Agent 检查点 API': /\/api\/write-deck[\s\S]{0,160}(?:检查点|不发布)/,
+      '用户固化 API': /\/api\/solidify-deck[\s\S]{0,220}(?:用户|确认|固化)[\s\S]{0,160}(?:发布|真实 Deck)/i,
       'observer WS 只订阅 events': /observer WebSocket[\s\S]{0,100}\/events[\s\S]{0,100}(?:只|仅)[^。\n]{0,40}(?:订阅|接收)/i,
       '唯一 editor capability 只传 frame 事务 ACK': /唯一 editor capability WebSocket[\s\S]{0,160}frame[\s\S]{0,100}(?:事务|命令)[\s\S]{0,80}ACK[\s\S]{0,100}(?:不对外|不能用于|不用于)[^。\n]{0,40}(?:提交|动作)/i,
-      'edit-bundle 只操作系统临时工作副本': /scripts\/edit-bundle\.py[\s\S]{0,120}(?:仅|只)[\s\S]{0,80}系统临时工作副本[\s\S]{0,160}load[\s\S]{0,80}get_template[\s\S]{0,80}set_template[\s\S]{0,80}save[\s\S]{0,80}(?:eb\.verify|verify)/,
-      'adapter writer 负责持久写回': /bundle adapter \/ writer[\s\S]{0,180}sidecar 备份[\s\S]{0,120}同目录候选[\s\S]{0,120}transaction[\s\S]{0,120}fingerprint[\s\S]{0,120}os\.replace[\s\S]{0,120}恢复/i,
+      'edit-bundle 只操作托管工作副本': /scripts\/edit-bundle\.py[\s\S]{0,220}(?:托管工作副本|HUAWEI_DECK_WORKING_PATH)/,
+      'sidecar 负责原子发布': /(?:sidecar helper|可信 sidecar|WorkingDeckStore|helper 为真实 Deck)[\s\S]{0,420}(?:备份|transaction|事务)[\s\S]{0,360}(?:os\.replace|原子替换|原子发布)/i,
     });
     assert.doesNotMatch(
       contents,
@@ -157,7 +395,7 @@ test('四份入口文档完整说明全局历史与任务附件边界', async ()
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
       '顶栏全局撤销重做': /顶栏[\s\S]{0,120}撤销[\s\S]{0,40}重做/,
-      '人工与 Agent 共用权威历史': /人工文字[\s\S]{0,80}移动[\s\S]{0,80}缩放[\s\S]{0,120}Agent[^。\n]{0,80}(?:动作组|group)/i,
+      '人工与 Agent 共用权威历史': /ActionMutation[\s\S]{0,220}(?:人工|手工)[\s\S]{0,160}Agent|(?:人工|手工)[\s\S]{0,220}Agent[\s\S]{0,220}ActionMutation|人工文字[\s\S]{0,100}移动[\s\S]{0,100}缩放[\s\S]{0,160}Agent[^。\n]{0,100}(?:动作组|group)/i,
       '任务行定点撤销': /任务行[\s\S]{0,80}定点撤销/,
       '文件与粘贴入口': /选择文件[\s\S]{0,100}粘贴图片/,
       '附件数量与大小限制': /最多 8 个[\s\S]{0,100}25 MiB/,
@@ -170,6 +408,35 @@ test('四份入口文档完整说明全局历史与任务附件边界', async ()
       'session API 与磁盘只含相对路径': /GET \/api\/session[\s\S]{0,120}session\.json[\s\S]{0,100}relativePath[\s\S]{0,120}(?:不保存|不会保存)[\s\S]{0,40}(?:不返回|不会返回)[^。\n]{0,40}绝对路径/i,
       '附件不进入成品': /附件[^。\n]{0,100}不进入最终 deck/i,
       '附件随 sidecar 生命周期管理': /附件[^。\n]{0,120}sidecar[^。\n]{0,80}生命周期/,
+    });
+  }
+});
+
+test('四份入口文档共享 Agent 与人工交错修改的安全重放契约', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      'revision 写操作先登记已写盘源码变化': /(?:带|改变) revision[^。\n]{0,140}(?:先|必须先)[^。\n]{0,100}(?:登记|工作副本检查点)[^。\n]{0,80}(?:SourceMutation|工作副本变化)/i,
+      '旧操作以 revision 冲突停止': /拒绝过期请求|REVISION_CONFLICT[^。\n]{0,80}旧请求|(?:旧请求|旧人工动作|撤销 \/ 重做或固化)[^。\n]{0,180}(?:REVISION_CONFLICT|revision 冲突)/i,
+      '源码重放同时核对语义与前后值': /(?:语义指纹|语义锚点)[^。\n]{0,140}(?:before[^。\n]{0,20}after|`before` \/ `after`)/i,
+      '冲突必须可见而非静默覆盖': /(?:界面|全局历史提示|工作台)[^。\n]{0,100}(?:显示|可见)[^。\n]{0,80}冲突|冲突[^。\n]{0,80}界面[^。\n]{0,40}可见|不能静默覆盖|不能用空 `catch` 隐藏分叉/,
+      '固化与实时重放使用同一规则': /(?:固化|离线补丁)[^。\n]{0,120}(?:同一(?:重放)?契约|同一规则)/,
+      '源码事务显式开始和提交': /begin-source-(?:edit|task)[\s\S]{0,240}sourceEditId[\s\S]{0,240}commit-source-edit/,
+      '源码事务阻断其他修改': /SOURCE_EDIT_ACTIVE[^。\n]{0,160}(?:人工|action|撤销|重做|固化)|(?:人工|action|撤销|重做|固化)[^。\n]{0,160}SOURCE_EDIT_ACTIVE/i,
+      '源码事务重开后继续提交或取消': /源码事务[^。\n]{0,180}(?:重开|重启)[^。\n]{0,180}(?:commit|提交)[^。\n]{0,80}(?:cancel|取消)|(?:重开|重启)[^。\n]{0,180}(?:commit|提交)[^。\n]{0,80}(?:cancel|取消)/i,
+    });
+  }
+});
+
+test('四份入口文档共享持久元素身份与冲突关闭契约', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '持久元素身份': /data-editor-id[^。\n]{0,120}(?:持久|稳定)[^。\n]{0,40}(?:元素身份|身份)/,
+      'Agent 保留既有身份': /Agent[^。\n]{0,100}(?:移动|调整层级|重包)[^。\n]{0,100}(?:保留|不得改写)[^。\n]{0,40}data-editor-id/,
+      '新增元素在 SourceMutation 前归一化': /新增元素[^。\n]{0,120}(?:SourceMutation[^。\n]{0,40}(?:之前|前)|(?:之前|前)[^。\n]{0,40}SourceMutation)[^。\n]{0,80}(?:补齐|归一化)/,
+      '非法或重复身份安全停止': /(?:非法|格式错误)[^。\n]{0,30}(?:或|、)[^。\n]{0,20}重复[^。\n]{0,80}(?:安全停止|fail-closed|拒绝)/i,
+      '身份不放宽前后值和文字范围校验': /data-editor-id[^。\n]{0,180}(?:before[^。\n]{0,20}after|`before` \/ `after`)[^。\n]{0,120}文字范围|文字范围[^。\n]{0,120}data-editor-id[^。\n]{0,180}(?:before[^。\n]{0,20}after|`before` \/ `after`)/i,
     });
   }
 });
@@ -187,6 +454,6 @@ test('浏览器 E2E 使用单并发串行执行', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../../../package.json', import.meta.url), 'utf8'));
   assert.equal(
     packageJson.scripts['test:editor:e2e'],
-    'node --test --test-concurrency=1 scripts/editor/test/*.e2e.mjs',
+    'node scripts/run-editor-tests.mjs e2e',
   );
 });

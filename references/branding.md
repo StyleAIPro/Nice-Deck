@@ -1,11 +1,11 @@
 # branding.md — 品牌可替换点指南
 
-模板 deck（`assets/template-deck.html`）里所有「华为味」的品牌元素都是可替换的。本文说明每个替换点在哪里、怎么换、换完怎么验证。需要华为官方封面 KV / logo / 图标等现成素材时，直接取 `assets/huawei-refs/`（从官方 PPT 提取，内附索引）。
+模板 deck（`assets/training-deck.html`）里所有「华为味」的品牌元素都是可替换的。本文说明每个替换点在哪里、怎么换、换完怎么验证。需要华为官方封面 KV / logo / 图标等现成素材时，直接取 `assets/huawei-refs/`（从官方 PPT 提取，内附索引）。
 
 **先备份再动手**。所有命令都假设你在 skill 根目录（`huawei-deck/`）下执行，且已把模板复制为自己的工作文件：
 
 ```bash
-cp assets/template-deck.html my-deck.html
+cp assets/training-deck.html my-deck.html
 ```
 
 ---

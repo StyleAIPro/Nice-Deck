@@ -27,11 +27,19 @@ APPLESCRIPT
   exit 2
 fi
 
-# LaunchServices 会把长期存活的 shell 主进程当作单实例 App；第二次双击时无法
-# 向它投递 reopen 事件并报 -600。只让 App 主进程负责派发，编辑服务独立运行。
+# LaunchServices 会把长期存活的 shell 主进程当作单实例 App；这里只负责派发。
+# Python 启动器使用原子实例登记表：重复双击会激活既有工作台；若浏览器标签
+# 已关闭，则先结束无页面的旧服务再启动新快照，避免两个入口互相争锁。
 umask 077
 APP_LOG_DIR="${TMPDIR:-/tmp}/huawei-deck-editor"
 /bin/mkdir -p "$APP_LOG_DIR"
-/usr/bin/nohup "$PYTHON_BIN" "$LAUNCHER" --app "$@" \
-  </dev/null >>"$APP_LOG_DIR/launcher.log" 2>&1 &
+if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+  # LaunchServices 可能把脚本型 .app 放进 Rosetta 进程树。显式使用本机 arm64，
+  # 避免已安装的 arm64 Python 扩展在 Editor 诊断中被误报为缺失。
+  /usr/bin/nohup /usr/bin/arch -arm64 "$PYTHON_BIN" "$LAUNCHER" --app "$@" \
+    </dev/null >>"$APP_LOG_DIR/launcher.log" 2>&1 &
+else
+  /usr/bin/nohup "$PYTHON_BIN" "$LAUNCHER" --app "$@" \
+    </dev/null >>"$APP_LOG_DIR/launcher.log" 2>&1 &
+fi
 exit 0

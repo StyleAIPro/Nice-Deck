@@ -116,6 +116,91 @@ export function normalizeRect(rect, canvas) {
   return { x, y, w, h };
 }
 
+const PAGE_STATE_ELEMENT_KEYS = new Set([
+  'target', 'dataActive', 'dataShown', 'dataDemo',
+  'ariaPressed', 'ariaExpanded', 'ariaSelected', 'ariaCurrent',
+  'open', 'checked', 'dataMod', 'selectedIndex',
+]);
+const PAGE_STATE_BOOLEAN_KEYS = [
+  'dataActive', 'dataShown', 'open', 'checked',
+];
+const PAGE_STATE_STRING_KEYS = [
+  'dataDemo', 'dataMod', 'ariaPressed', 'ariaExpanded', 'ariaSelected', 'ariaCurrent',
+];
+const EDITOR_ID_RE = /^element-[0-9a-f]{32}$/;
+
+function requirePlainObject(value, message) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new TypeError(message);
+  }
+  return value;
+}
+
+function validatePageStateTarget(target, pageKey) {
+  requirePlainObject(target, '页面状态 target 必须为普通对象');
+  if (target.pageKey !== pageKey
+    || typeof target.path !== 'string'
+    || !/^(?:|0|[1-9]\d{0,3})(?:\/(?:0|[1-9]\d{0,3})){0,31}$/.test(target.path)
+    || typeof target.tag !== 'string' || !/^[A-Za-z][A-Za-z0-9:-]{0,63}$/.test(target.tag)
+    || typeof target.fingerprint !== 'string' || !/^[0-9a-f]{8}$/.test(target.fingerprint)
+    || (target.editorId !== undefined && !EDITOR_ID_RE.test(target.editorId))) {
+    throw new TypeError('页面状态 target 无效');
+  }
+  if (target.rect !== undefined) {
+    requirePlainObject(target.rect, '页面状态 target.rect 必须为普通对象');
+    if (!['x', 'y', 'w', 'h'].every(key => Number.isFinite(target.rect[key]))) {
+      throw new TypeError('页面状态 target.rect 必须为有限数');
+    }
+  }
+}
+
+export function validatePageState(pageState, pageKey) {
+  requirePlainObject(pageState, '页面状态必须为普通对象');
+  if (pageState.schema !== 1
+    || Object.keys(pageState).some(key => !['schema', 'layers', 'elements'].includes(key))) {
+    throw new TypeError('页面状态 schema 无效');
+  }
+  if (!Array.isArray(pageState.layers) || pageState.layers.length > 64
+    || !Array.isArray(pageState.elements) || pageState.elements.length > 256) {
+    throw new RangeError('页面状态条目过多');
+  }
+  for (const layer of pageState.layers) {
+    requirePlainObject(layer, '页面状态 layer 必须为普通对象');
+    if (Object.keys(layer).some(key => !['group', 'key'].includes(key))
+      || typeof layer.group !== 'string' || !layer.group || layer.group.length > 256
+      || (layer.key !== null && (typeof layer.key !== 'string' || layer.key.length > 256))) {
+      throw new TypeError('页面状态 layer 无效');
+    }
+  }
+  for (const item of pageState.elements) {
+    requirePlainObject(item, '页面状态元素必须为普通对象');
+    if (Object.keys(item).some(key => !PAGE_STATE_ELEMENT_KEYS.has(key))) {
+      throw new TypeError('页面状态元素包含未知字段');
+    }
+    validatePageStateTarget(item.target, pageKey);
+    for (const key of PAGE_STATE_BOOLEAN_KEYS) {
+      if (key in item && typeof item[key] !== 'boolean') {
+        throw new TypeError(`页面状态 ${key} 必须为布尔值`);
+      }
+    }
+    for (const key of PAGE_STATE_STRING_KEYS) {
+      if (key in item && (typeof item[key] !== 'string' || item[key].length > 512)) {
+        throw new TypeError(`页面状态 ${key} 必须为短字符串`);
+      }
+    }
+    if ('selectedIndex' in item
+      && (!Number.isSafeInteger(item.selectedIndex)
+        || item.selectedIndex < -1 || item.selectedIndex > 10_000)) {
+      throw new TypeError('页面状态 selectedIndex 无效');
+    }
+  }
+  if (JSON.stringify(pageState).length > 64 * 1024) {
+    throw new RangeError('页面状态超过 64KB');
+  }
+  return pageState;
+}
+
 export function validateTask(task, { persisted=false } = {}) {
   if (!task || typeof task !== 'object' || Array.isArray(task)
     || Object.getPrototypeOf(task) !== Object.prototype) {
@@ -131,6 +216,13 @@ export function validateTask(task, { persisted=false } = {}) {
   if (!persisted && 'attachments' in task) {
     throw new TypeError('请求任务不得直接提供 attachments');
   }
+  if (!persisted && 'targetMissing' in task) {
+    throw new TypeError('请求任务不得声明 targetMissing');
+  }
+  if (persisted && 'targetMissing' in task && task.targetMissing !== true) {
+    throw new TypeError('持久化 targetMissing 只能为 true');
+  }
+  if ('pageState' in task) validatePageState(task.pageState, task.pageKey);
   if (persisted && 'attachments' in task) {
     const descriptor = Object.getOwnPropertyDescriptor(task, 'attachments');
     if (!descriptor || !descriptor.enumerable || !descriptor.writable || !Object.hasOwn(descriptor, 'value')) {
@@ -169,6 +261,9 @@ export function validateAction(action) {
   if (!action.target?.pageKey || !action.target?.path) {
     throw new TypeError('动作缺少目标定位器');
   }
+  if (action.target.editorId !== undefined && !EDITOR_ID_RE.test(action.target.editorId)) {
+    throw new TypeError('动作 target.editorId 格式无效');
+  }
   if (action.target.textPath !== undefined) {
     const validTextPath = typeof action.target.textPath === 'string'
       && /^(0|[1-9]\d{0,3})(\/(0|[1-9]\d{0,3})){0,31}$/.test(action.target.textPath);
@@ -181,8 +276,24 @@ export function validateAction(action) {
     || Object.getPrototypeOf(payload) !== Object.prototype) {
     throw new TypeError('动作 payload 必须为对象');
   }
-  if (action.kind === 'setText' && typeof payload.text !== 'string') {
-    throw new TypeError('setText.text 必须为字符串');
+  if (action.kind === 'setText') {
+    const sourceRange = payload.sourceRange;
+    const validSourceRange = sourceRange === undefined || (
+      action.target.textPath !== undefined
+      && sourceRange && typeof sourceRange === 'object' && !Array.isArray(sourceRange)
+      && Object.getPrototypeOf(sourceRange) === Object.prototype
+      && Object.keys(sourceRange).length === 2
+      && Object.keys(sourceRange).every(key => ['start', 'end'].includes(key))
+      && Number.isSafeInteger(sourceRange.start) && Number.isSafeInteger(sourceRange.end)
+      && sourceRange.start >= 0 && sourceRange.end > sourceRange.start
+      && sourceRange.end <= 1_000_000
+    );
+    const allowedKeys = sourceRange === undefined ? ['text'] : ['text', 'sourceRange'];
+    if (typeof payload.text !== 'string' || !validSourceRange
+      || Object.keys(payload).length !== allowedKeys.length
+      || Object.keys(payload).some(key => !allowedKeys.includes(key))) {
+      throw new TypeError('setText.text 必须为字符串，sourceRange 必须为有效原字符范围');
+    }
   }
   if (action.kind === 'translate'
     && (![payload.x, payload.y].every(Number.isFinite)
@@ -202,10 +313,14 @@ export function validateAction(action) {
   }
   if (action.kind === 'setStyle') {
     const allowed = new Set([
-      'color', 'background-color', 'font-size', 'font-weight', 'opacity',
+      'color', 'background-color', 'font-family', 'font-size', 'font-style', 'font-weight',
+      'text-decoration-line', 'text-align', 'line-height',
+      'list-style-type', 'list-style-position', 'display', 'opacity',
       'border-color', 'border-width', 'border-style', 'fill', 'stroke', 'stroke-width',
     ]);
-    const rangeAllowed = new Set(['color', 'font-size', 'font-weight']);
+    const rangeAllowed = new Set([
+      'color', 'font-family', 'font-size', 'font-style', 'font-weight', 'text-decoration-line',
+    ]);
     const textRange = payload.textRange;
     const validTextRange = textRange === undefined || (
       textRange && typeof textRange === 'object' && !Array.isArray(textRange)

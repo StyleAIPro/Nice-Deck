@@ -19,6 +19,12 @@ test('resource abort 默认阻断且 pilot opt-in 只豁免同源 document ERR_A
   assert.equal(helpers.classifyResourceFailure(exact, {
     appUrl, allowPilotDocumentBlobAbort:true, cancellationCount:1,
   }), 'problem');
+  assert.equal(helpers.classifyResourceFailure(exact, {
+    appUrl, maxPilotDocumentBlobAborts:2, cancellationCount:1,
+  }), 'pilot-cancellation');
+  assert.equal(helpers.classifyResourceFailure(exact, {
+    appUrl, maxPilotDocumentBlobAborts:2, cancellationCount:2,
+  }), 'problem');
   for (const failure of [
     { ...exact, resourceType:'image' },
     { ...exact, url:'blob:http://127.0.0.1:9999/other-origin' },

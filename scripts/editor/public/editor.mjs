@@ -1,13 +1,25 @@
-import { renderTaskDrawer } from './task-drawer.mjs';
-import { renderAgentConnectionPanel } from './agent-connection-panel.mjs';
+import { renderTaskDrawer, setTaskDrawerOpen } from './task-drawer.mjs';
+import { AgentTerminalPanel } from './agent-terminal-panel.mjs';
+import { WorkspaceSwitcher } from './workspace-switcher.mjs';
 import { renderInspectorPanel } from './inspector-panel.mjs';
+import { AppModal } from './native-controls.mjs';
+import { installPillNav, setPillLabel } from './pill-nav.mjs';
 import { connectEvents } from './ws-client.mjs';
-import { compileActionGroups } from './action-compiler.mjs';
+import { createLauncherLeaseClient } from './launcher-lease-client.mjs';
+import { compileActionGroups, sourceRebaseActionIds } from './action-compiler.mjs';
 import { historyCandidates, historyLabel } from '/editor/history-state.mjs';
 
 const params = new URLSearchParams(location.search);
+installPillNav(document);
 const token = params.get('token') ?? '';
 const editorToken = params.get('editorToken') ?? '';
+const embeddedCreation = params.get('embedded') === 'creation';
+const workspaceNavigation = document.querySelector('[data-workspace-navigation]');
+const switchWorkspaceButton = document.querySelector('[data-workspace-switch]');
+const workspaceHomeButton = document.querySelector('[data-workspace-home]');
+const exitEditorButton = document.querySelector('[data-exit-editor]');
+const workspaceKind = params.get('workspaceKind') === 'creation' ? 'creation' : 'editing';
+if (embeddedCreation) document.documentElement.dataset.embedded = 'creation';
 const deckFrame = document.querySelector('#deck-frame');
 const pageList = document.querySelector('[data-page-list]');
 const pageCount = document.querySelector('[data-page-count]');
@@ -16,21 +28,55 @@ const currentKey = document.querySelector('[data-current-key]');
 const wsState = document.querySelector('[data-ws-state]');
 const wsLabel = document.querySelector('[data-ws-label]');
 const agentStatus = document.querySelector('[data-agent-status]');
-const agentLabel = document.querySelector('[data-agent-label]');
-const agentConnectionAnchor = document.querySelector('[data-agent-connection-anchor]');
-const agentConnectionPanel = document.querySelector('[data-agent-connection-panel]');
+const agentLabels = [document.querySelector('[data-agent-label]')].filter(Boolean);
+const agentTerminalRoot = document.querySelector('[data-agent-terminal-panel]');
+const editorShell = document.querySelector('.editor-shell');
+if (embeddedCreation) editorShell.dataset.embedded = 'creation';
 const frameViewport = document.querySelector('[data-frame-viewport]');
 const frameScene = document.querySelector('[data-frame-scene]');
 const zoomValue = document.querySelector('[data-zoom]');
 const revisionValue = document.querySelector('[data-revision]');
+const exportPptxButton = document.querySelector('[data-export-pptx]');
 const modeTools = document.querySelector('.mode-tools');
 const modeButtons = [...document.querySelectorAll('[data-mode]')];
+const pagePanelToggle = document.querySelector('[data-page-panel-toggle]');
 const taskDrawer = document.querySelector('[data-task-drawer]');
 const historyControls = document.querySelector('.history-controls');
 const undoButton = document.querySelector('[data-history-undo]');
 const redoButton = document.querySelector('[data-history-redo]');
+const solidifyButton = document.querySelector('[data-solidify]');
+const solidifyDialog = document.querySelector('[data-solidify-dialog]');
+const solidifyCancel = document.querySelector('[data-solidify-cancel]');
+const solidifyExitWithout = document.querySelector('[data-solidify-exit-without]');
+const solidifyConfirm = document.querySelector('[data-solidify-confirm]');
+const solidifyCount = document.querySelector('[data-solidify-count]');
+const solidifyMark = document.querySelector('[data-solidify-mark]');
+const solidifyEyebrow = document.querySelector('[data-solidify-eyebrow]');
+const solidifyTitle = document.querySelector('[data-solidify-title]');
+const solidifyDescription = document.querySelector('[data-solidify-description]');
+const solidifyTaskSummary = document.querySelector('[data-solidify-task-summary]');
+const solidifyTaskCount = document.querySelector('[data-solidify-task-count]');
+const solidifyTaskList = document.querySelector('[data-solidify-task-list]');
+const solidifyOtherCount = document.querySelector('[data-solidify-other-count]');
+const solidifyProgress = document.querySelector('[data-solidify-progress]');
+const solidifyProgressBar = document.querySelector('[data-solidify-progressbar]');
+const solidifyProgressLabel = document.querySelector('[data-solidify-progress-label]');
+const solidifyProgressValue = document.querySelector('[data-solidify-progress-value]');
+const deckBindingBanner = document.querySelector('[data-deck-binding-banner]');
+const deckBindingTitle = document.querySelector('[data-deck-binding-title]');
+const deckBindingDetail = document.querySelector('[data-deck-binding-detail]');
+const deckBindingRecheck = document.querySelector('[data-deck-binding-recheck]');
+const deckBindingChoose = document.querySelector('[data-deck-binding-choose]');
+const solidifyModal = new AppModal(solidifyDialog, {
+  panel:solidifyDialog.querySelector('[role="dialog"]'),
+  onRequestClose:() => !solidifyBusy,
+});
+Object.defineProperty(solidifyDialog, 'open', { get:() => solidifyModal.open });
+const inspectorPanel = document.querySelector('.inspector-panel');
 const inspectorContent = document.querySelector('[data-inspector-content]');
 const selectionState = document.querySelector('[data-selection-state]');
+const inspectorCollapseButton = document.querySelector('[data-inspector-collapse]');
+const inspectorReopenButton = document.querySelector('[data-inspector-reopen]');
 let pendingPageKey;
 let tornDown = false;
 let fitFrameRequest;
@@ -38,29 +84,35 @@ let eventsClient;
 let pages = [];
 let tasks = [];
 let agentRun = { status:'idle' };
-let agentConfiguration = null;
-let agentSessions = null;
-let agentSessionsLoading = false;
-let agentSessionsPromise = null;
-let agentSessionsError = '';
-let agentPanelOpen = false;
-let agentPanelProvider = 'codex';
-let agentConnectionBusy = false;
-let agentConnectionNotice = '';
+let agentTerminal;
+let agentTerminalOpen = false;
+let agentTerminalState = { provider:'codex', state:'stopped' };
 let revision = 0;
-let editorMode = 'preview';
+let editorMode = ['preview', 'edit', 'region'].includes(params.get('mode'))
+  ? params.get('mode') : 'region';
+let temporaryRegionShortcut = false;
+let deckSurfacePointerActive = false;
+let inspectorExpanded = false;
 let deckReady = false;
 let deckReadyPayload;
 let activeFrameInstanceId;
 let authoritativeReloadPending;
+let shownStartupRecovery = null;
 const handledAuthoritativeReloads = new Set();
 let sessionGroups = [];
 let sessionRedo = [];
 let historyBusy = false;
+let solidifyBusy = false;
+let solidifyDialogReason = 'toolbar';
+let deckBinding = { state:'locating', reason:'none', revision:0, canPublish:false };
+let deckBindingBusy = false;
+let lastSolidifiedReloadRevision = -1;
+let lastWorkingReloadRevision = -1;
 let loadedSessionRevision = -1;
 let historyRefreshTargetRevision = 0;
 let historySnapshotRequirement = 0;
 let historySnapshotFulfilled = 0;
+let pendingHistoryShortcut = null;
 let sessionRefreshTargetRevision = 0;
 let sessionRefreshPromise;
 let seenOnline = false;
@@ -69,22 +121,131 @@ let inspectorBusy = false;
 let inspectorNotice = '';
 let pendingInspectorRequest = null;
 let historyNoticeTimer;
+let pptxExportBusy = false;
 const createRequests = new Set();
 const manualRequests = new Set();
 const commandReplies = new Map();
 const pendingFrameCommands = new Map();
 const MAX_SNAPSHOT_BYTES = 512 * 1024;
 
+function trustedWorkspaceUrl(value) {
+  try {
+    const url = new URL(value);
+    const loopback = url.hostname === 'localhost' || url.hostname === '::1'
+      || url.hostname.startsWith('127.');
+    return url.protocol === 'http:' && loopback ? url : null;
+  } catch { return null; }
+}
+
+const workspaceUrl = trustedWorkspaceUrl(params.get('workspaceUrl'));
+let navigateToWorkspaceHome;
+let terminateEditorProcess;
+
+function requestProcessShutdown(url) {
+  document.documentElement.dataset.processExiting = 'true';
+  exitEditorButton.disabled = true;
+  switchWorkspaceButton.disabled = true;
+  workspaceHomeButton.disabled = true;
+  setPillLabel(exitEditorButton, '正在退出…');
+  let beaconSent = false;
+  try { beaconSent = navigator.sendBeacon(url); }
+  catch { beaconSent = false; }
+  if (!beaconSent) {
+    void fetch(url, {
+      method:'POST', keepalive:true,
+      ...(url.origin === location.origin ? {} : { mode:'no-cors' }),
+    }).catch(() => {});
+  }
+  setTimeout(() => window.close(), 80);
+}
+
+const closeStandaloneEditor = () => requestProcessShutdown(endpoint('/api/shutdown'));
+if (workspaceUrl && !embeddedCreation) {
+  workspaceNavigation.hidden = false;
+  const workspaceClientId = workspaceUrl.searchParams.get('clientId');
+  const workspaceClientSequence = Number(workspaceUrl.searchParams.get('sequence'));
+  const workspaceLeaseUrl = pathname => {
+    const url = new URL(pathname, workspaceUrl);
+    url.searchParams.set('token', workspaceUrl.searchParams.get('token') ?? '');
+    if (workspaceClientId && Number.isSafeInteger(workspaceClientSequence)) {
+      url.searchParams.set('clientId', workspaceClientId);
+      url.searchParams.set('sequence', String(workspaceClientSequence));
+    }
+    return url;
+  };
+  terminateEditorProcess = () => requestProcessShutdown(workspaceLeaseUrl('/api/shutdown'));
+  if (workspaceClientId && Number.isSafeInteger(workspaceClientSequence)) {
+    navigator.sendBeacon(workspaceLeaseUrl('/api/client-connected'));
+    const workspaceLeaseClient = createLauncherLeaseClient({
+      workspaceUrl,
+      clientId:workspaceClientId,
+      sequence:workspaceClientSequence,
+    });
+    workspaceLeaseClient.start();
+    window.addEventListener('pagehide', () => {
+      workspaceLeaseClient.close();
+      navigator.sendBeacon(workspaceLeaseUrl('/api/close'));
+    }, { once:true });
+  }
+  const navigate = destination => {
+    switchWorkspaceButton.disabled = true;
+    workspaceHomeButton.disabled = true;
+    exitEditorButton.disabled = true;
+    workspaceUrl.searchParams.set('view', destination);
+    workspaceUrl.searchParams.set('leaveWorkspace', '1');
+    location.replace(workspaceUrl.href);
+  };
+  navigateToWorkspaceHome = () => navigate('home');
+  new WorkspaceSwitcher({
+    root:workspaceNavigation,
+    trigger:switchWorkspaceButton,
+    loadHistory:() => requestJson('/api/workspace-history'),
+    isCurrent:(kind, entry) => kind === workspaceKind
+      && entry.runtimeState === 'foreground',
+    onRename:input => requestJson('/api/work-items/rename', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify(input),
+    }),
+    onSelect:(kind, entry) => {
+      switchWorkspaceButton.disabled = true;
+      workspaceHomeButton.disabled = true;
+      exitEditorButton.disabled = true;
+      const target = new URL(workspaceUrl);
+      target.searchParams.set('view', kind);
+      target.searchParams.set('leaveWorkspace', '1');
+      target.searchParams.set('switchKind', kind);
+      if (kind === 'creation') {
+        target.searchParams.set('projectRoot', entry.projectRoot);
+        target.searchParams.set('draftId', entry.draftId);
+      } else {
+        target.searchParams.set('deckPath', entry.deckPath);
+        if (typeof entry.workId === 'string') target.searchParams.set('workId', entry.workId);
+      }
+      location.replace(target.href);
+    },
+  });
+  workspaceHomeButton.addEventListener('click', navigateToWorkspaceHome);
+}
+if (!embeddedCreation) {
+  navigateToWorkspaceHome ??= closeStandaloneEditor;
+  terminateEditorProcess ??= closeStandaloneEditor;
+  exitEditorButton.hidden = false;
+  exitEditorButton.addEventListener('click', requestWorkspaceExit);
+}
+
 function onDeckFrameLoad() {
   // document load 早于 frame bridge 的稳定 canvas 发现；此窗口内的 Agent 命令必须排队。
   deckReady = false;
   deckReadyPayload = undefined;
   activeFrameInstanceId = undefined;
+  deckSurfacePointerActive = false;
   inspectorSelection = null;
   inspectorBusy = false;
   pendingInspectorRequest = null;
   inspectorNotice = '';
   renderInspector();
+  renderHistory();
 }
 
 deckFrame.addEventListener('load', onDeckFrameLoad);
@@ -110,9 +271,74 @@ async function requestJson(pathname, options) {
     error.recoveredBySync = body.recoveredBySync;
     error.revision = body.revision;
     error.groupId = body.groupId;
+    error.binding = body.binding;
+    error.stage = body.stage;
+    error.recovery = body.recovery;
+    error.diagnostic = body.diagnostic;
     throw error;
   }
   return body;
+}
+
+function pptxDownloadName(response) {
+  const disposition = response.headers.get('content-disposition') ?? '';
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try { return decodeURIComponent(encoded); }
+    catch { /* 回退到兼容文件名。 */ }
+  }
+  const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  return plain || 'deck.pptx';
+}
+
+async function onExportPptx() {
+  if (pptxExportBusy) return;
+  pptxExportBusy = true;
+  exportPptxButton.disabled = true;
+  exportPptxButton.dataset.exportState = 'busy';
+  exportPptxButton.setAttribute('aria-busy', 'true');
+  exportPptxButton.setAttribute('aria-label', '正在导出 PPTX');
+  exportPptxButton.title = '正在导出 PPTX';
+  showHistoryNotice('正在生成 PPTX，页数较多时可能需要几十秒…');
+  try {
+    const response = await fetch(endpoint('/api/export/pptx'), {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:revision }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const error = new Error(body.message || `HTTP ${response.status}`);
+      error.code = body.code ?? body.error;
+      throw error;
+    }
+    const filename = pptxDownloadName(response);
+    const blob = await response.blob();
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = filename;
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 0);
+    showHistoryNotice(`PPTX 已导出：${filename}`, 'success');
+  } catch (error) {
+    const message = error.code === 'REVISION_CONFLICT'
+      ? '编辑内容刚刚更新，请再次点击导出'
+      : error.code === 'PPTX_EXPORT_BUSY'
+        ? '已有一个 PPTX 正在导出，请稍候'
+        : error.message;
+    showHistoryNotice(`PPTX 导出失败：${message}`, 'error');
+  } finally {
+    pptxExportBusy = false;
+    exportPptxButton.disabled = false;
+    delete exportPptxButton.dataset.exportState;
+    exportPptxButton.removeAttribute('aria-busy');
+    exportPptxButton.setAttribute('aria-label', '导出为 PPTX');
+    exportPptxButton.title = '导出为 PPTX';
+  }
 }
 
 function uniqueTasks(values) {
@@ -144,30 +370,69 @@ function adoptAgentRun(nextRun) {
 }
 
 function renderAgentStatus() {
-  const connection = agentConfiguration?.connection;
-  const connected = Boolean(connection?.threadId);
-  const provider = agentConfiguration?.providers?.find(item => item.id === connection?.provider);
-  const providerName = provider?.name ?? connection?.provider ?? 'Agent';
-  agentStatus.dataset.agentStatus = connected ? 'online' : 'offline';
-  agentLabel.textContent = connected ? `${providerName} 在线` : 'Agent 离线';
-  const detail = connected
-    ? `已连接 ${providerName} 任务 ${connection.threadId}，点击查看连接设置`
-    : 'Agent 会话未连接，点击设置';
+  const runtime = agentTerminalState;
+  const workspaceProvider = runtime.provider ?? 'codex';
+  const workspaceProviderName = {
+    codex:'Codex', 'claude-code':'Claude Code',
+  }[workspaceProvider] ?? workspaceProvider;
+  const interactionRequired = runtime.interactionRequired?.kind
+    ? runtime.interactionRequired
+    : null;
+  const startupLocked = ['pending', 'submitting'].includes(runtime.startupPromptState);
+  const promptReady = runtime.promptReady !== false;
+  const initializing = runtime.state === 'starting'
+    || (runtime.state === 'running' && !promptReady)
+    || startupLocked;
+  const busy = !interactionRequired && (initializing
+    || ['queued', 'running'].includes(agentRun.status));
+  const ready = runtime.state === 'running' && promptReady
+    && !startupLocked && !interactionRequired;
+  const failed = ['failed', 'exited'].includes(runtime.state);
+  agentStatus.dataset.agentStatus = interactionRequired
+    ? 'attention'
+    : (busy ? 'busy' : (ready ? 'online' : 'standby'));
+  let label = `${workspaceProviderName} 未启动`;
+  if (interactionRequired) label = `${workspaceProviderName} 等待确认`;
+  else if (initializing) label = `${workspaceProviderName} 准备中`;
+  else if (busy) label = `${workspaceProviderName} 处理中`;
+  else if (ready) label = `${workspaceProviderName} 空闲`;
+  else if (failed) label = `${workspaceProviderName} 启动失败`;
+  for (const agentLabel of agentLabels) agentLabel.textContent = label;
+  const detail = interactionRequired?.message ?? (ready
+    ? `打开 ${workspaceProviderName} 交互终端`
+    : `打开 ${workspaceProviderName} 终端并启动 bypass 会话`);
   agentStatus.title = detail;
   agentStatus.setAttribute('aria-label', detail);
-  agentStatus.setAttribute('aria-expanded', String(agentPanelOpen));
+  agentStatus.setAttribute('aria-expanded', String(agentTerminalOpen));
 }
 
-function openAgentConnectionSettings() {
-  agentPanelOpen = !agentPanelOpen;
-  if (agentPanelOpen) {
-    agentPanelProvider = agentConfiguration?.connection?.provider
-      ?? agentConfiguration?.selectedProvider
-      ?? agentPanelProvider;
-    void loadAgentSessions().catch(() => {});
-  }
-  renderAgentPanel();
+function renderAgentTerminal() {
+  editorShell.dataset.agentTerminalOpen = String(agentTerminalOpen);
+  renderInspectorLayout();
+  if (agentTerminalOpen) agentTerminal.open(agentTerminalState.provider);
+  else agentTerminal.hide();
+}
+
+function openAgentTerminal() {
+  agentTerminalOpen = !agentTerminalOpen;
+  renderAgentTerminal();
   renderAgentStatus();
+}
+
+function ensureAgentTerminalOpen() {
+  if (agentTerminalOpen) return false;
+  agentTerminalOpen = true;
+  renderAgentTerminal();
+  renderAgentStatus();
+  return true;
+}
+
+function adoptAgentTerminalState(state) {
+  if (!state?.provider || !state?.state) return false;
+  agentTerminalState = state;
+  if (state.interactionRequired?.kind) ensureAgentTerminalOpen();
+  renderAgentStatus();
+  return true;
 }
 
 function compiledSessionActions() {
@@ -188,8 +453,14 @@ function sameInspectorTarget(left, right) {
 function sameInspectorScope(action, selection) {
   const actionRange = action.payload?.textRange;
   const selectionRange = selection.textRange;
-  if (!selectionRange) return actionRange === undefined;
-  return actionRange?.start === selectionRange.start && actionRange?.end === selectionRange.end;
+  if (selectionRange) {
+    return actionRange?.start === selectionRange.start && actionRange?.end === selectionRange.end;
+  }
+  const textStyleRange = selection.textStyleRange;
+  if (textStyleRange && actionRange) {
+    return actionRange.start >= textStyleRange.start && actionRange.end <= textStyleRange.end;
+  }
+  return actionRange === undefined;
 }
 
 function enrichInspectorSelection(selection) {
@@ -217,7 +488,7 @@ function enrichInspectorSelection(selection) {
   return { ...selection, resetValues, modifiedProperties:[...new Set(modifiedProperties)] };
 }
 
-function applyInspectorChanges(changes) {
+function applyInspectorChanges(changes, { coalesceKey = '', scope = 'selection' } = {}) {
   if (!inspectorSelection || inspectorBusy || !Array.isArray(changes) || changes.length === 0) return;
   const requestId = crypto.randomUUID();
   pendingInspectorRequest = { requestId, selectionId:inspectorSelection.selectionId };
@@ -227,6 +498,8 @@ function applyInspectorChanges(changes) {
   deckFrame.contentWindow?.postMessage({
     type:'apply-inspector-styles', requestId,
     selectionId:inspectorSelection.selectionId, changes,
+    ...(scope === 'element' ? { scope:'element' } : {}),
+    ...(coalesceKey ? { coalesceKey:`${inspectorSelection.selectionId}:${coalesceKey}` } : {}),
   }, location.origin);
 }
 
@@ -254,10 +527,41 @@ function renderInspector() {
   });
 }
 
+function renderInspectorLayout() {
+  const editMode = editorMode === 'edit';
+  const expanded = editMode && inspectorExpanded;
+  const dock = agentTerminalOpen ? 'top' : 'right';
+  const state = !editMode ? 'hidden' : (expanded ? 'expanded' : 'collapsed');
+  editorShell.dataset.inspectorDock = dock;
+  editorShell.dataset.inspectorState = state;
+  inspectorContent.querySelector(':scope > .inspector-body')?.dispatchEvent(new CustomEvent(
+    'inspector-dock-change', { detail:{ dock } },
+  ));
+  inspectorPanel.hidden = !expanded;
+  inspectorReopenButton.hidden = state !== 'collapsed';
+
+  const collapseDirection = dock === 'top' ? '↑' : '→';
+  const reopenDirection = dock === 'top' ? '↓' : '←';
+  inspectorCollapseButton.querySelector('[aria-hidden="true"]').textContent = collapseDirection;
+  inspectorReopenButton.querySelector('[aria-hidden="true"]').textContent = reopenDirection;
+  inspectorCollapseButton.setAttribute('aria-label', `向${dock === 'top' ? '上' : '右'}收起属性面板`);
+  inspectorCollapseButton.title = inspectorCollapseButton.getAttribute('aria-label');
+  inspectorReopenButton.setAttribute('aria-label', `展开${dock === 'top' ? '顶部' : '右侧'}属性面板`);
+  inspectorReopenButton.title = inspectorReopenButton.getAttribute('aria-label');
+}
+
+function setInspectorExpanded(expanded) {
+  if (editorMode !== 'edit') return;
+  inspectorExpanded = expanded === true;
+  renderInspectorLayout();
+}
+
 function syncSessionActions() {
   if (!deckReady) return;
+  const actions = compiledSessionActions();
   deckFrame.contentWindow?.postMessage({
-    type: 'sync-actions', actions: compiledSessionActions(),
+    type:'sync-actions', actions,
+    rebaseActionIds:sourceRebaseActionIds(sessionGroups, actions),
   }, location.origin);
 }
 
@@ -299,7 +603,11 @@ function taskFormData(payload, snapshot, attachments, expectedRevision) {
 
 function updatePageBadges() {
   const counts = new Map();
-  for (const task of tasks) counts.set(task.pageKey, (counts.get(task.pageKey) ?? 0) + 1);
+  for (const task of tasks) {
+    if (task.targetMissing === true) continue;
+    if (!['pending', 'processing', 'failed', 'needs-confirmation'].includes(task.status)) continue;
+    counts.set(task.pageKey, (counts.get(task.pageKey) ?? 0) + 1);
+  }
   for (const button of pageList.querySelectorAll('[data-page-key]')) {
     button.querySelector('[data-page-badge]')?.remove();
     const count = counts.get(button.dataset.pageKey) ?? 0;
@@ -314,6 +622,7 @@ function updatePageBadges() {
 }
 
 async function processAllTasks(selectedTasks) {
+  ensureAgentTerminalOpen();
   try {
     const startedRun = await requestJson('/api/agent-runs', {
       method:'POST',
@@ -342,117 +651,17 @@ async function processAllTasks(selectedTasks) {
   }
 }
 
-async function configureAgentConnection({ provider, threadId }) {
-  agentConnectionBusy = true;
-  agentConnectionNotice = threadId ? '正在检测 Skill 并连接会话…' : '正在断开当前会话…';
-  renderAgentPanel();
-  try {
-    const configuration = await requestJson('/api/agent-connection', {
-      method:'PUT',
-      headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ expectedRevision:revision, provider, threadId }),
-    });
-    agentConfiguration = configuration;
-    agentPanelProvider = configuration.connection.provider;
-    updateRevision(configuration.revision);
-    await loadSession(configuration.revision);
-    agentConnectionNotice = threadId
-      ? '已连接；重新打开此 Deck 时会继续该会话。'
-      : '已断开；可选择已有会话或新建专用会话。';
-    void loadAgentSessions({ force:true }).catch(() => {});
-    renderTasks();
-    return agentConnectionNotice;
-  } catch (error) {
-    agentConnectionNotice = `连接失败：${error.message}`;
-    throw error;
-  } finally {
-    agentConnectionBusy = false;
-    renderAgentPanel();
-    renderAgentStatus();
-  }
-}
-
-async function loadAgentSessions({ force = false } = {}) {
-  if (agentSessionsPromise) return agentSessionsPromise;
-  if (agentSessions && !force) return agentSessions;
-  agentSessionsLoading = true;
-  agentSessionsError = '';
-  renderAgentPanel();
-  agentSessionsPromise = requestJson('/api/agent-sessions')
-    .then(catalog => {
-      agentSessions = catalog;
-      return catalog;
-    })
-    .catch(error => {
-      agentSessionsError = error?.message || '会话目录读取失败';
-      throw error;
-    })
-    .finally(() => {
-      agentSessionsLoading = false;
-      agentSessionsPromise = null;
-      renderAgentPanel();
-    });
-  return agentSessionsPromise;
-}
-
-async function pickAgentProject() {
-  agentConnectionBusy = true;
-  agentConnectionNotice = '正在打开系统项目目录选择器…';
-  renderAgentPanel();
-  try {
-    const result = await requestJson('/api/agent-projects/pick', {
-      method:'POST',
-      headers:{ 'content-type':'application/json' },
-      body:'{}',
-    });
-    agentConnectionNotice = result.status === 'cancelled'
-      ? '已取消选择项目。'
-      : `已添加项目：${result.project.name}`;
-    await loadAgentSessions({ force:true });
-  } catch (error) {
-    agentConnectionNotice = `添加项目失败：${error.message}`;
-  } finally {
-    agentConnectionBusy = false;
-    renderAgentPanel();
-  }
-}
-
-async function createAgentSession({ provider, projectPath }) {
-  agentConnectionBusy = true;
-  agentConnectionNotice = '正在创建会话并加载一次 huawei-deck Skill…';
-  renderAgentPanel();
-  try {
-    const configuration = await requestJson('/api/agent-sessions', {
-      method:'POST',
-      headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ expectedRevision:revision, provider, projectPath }),
-    });
-    agentConfiguration = configuration;
-    agentPanelProvider = provider;
-    updateRevision(configuration.revision);
-    await loadSession(configuration.revision);
-    agentConnectionNotice = '新会话已创建、Skill 已加载，并已连接当前 Deck。';
-    await loadAgentSessions({ force:true });
-    renderTasks();
-  } catch (error) {
-    if (error.code === 'REVISION_CONFLICT' && Number.isSafeInteger(error.revision)) {
-      updateRevision(error.revision);
-      await loadSession(error.revision).catch(() => {});
-    }
-    agentConnectionNotice = `新建会话失败：${error.message}`;
-  } finally {
-    agentConnectionBusy = false;
-    renderAgentPanel();
-    renderAgentStatus();
-  }
-}
-
 function locateTask(task) {
+  if (task?.targetMissing === true) {
+    showTaskNotice('这个任务的目标页面已经删除；请撤销删页或删除任务后重新标记。');
+    return;
+  }
   pendingPageKey = task.pageKey;
   deckFrame.contentWindow?.postMessage({
     type: 'locate-task',
     pageKey: task.pageKey,
     rect: task.rect,
+    pageState: task.pageState,
   }, location.origin);
 }
 
@@ -480,9 +689,10 @@ function showHistoryNotice(message, state = 'warning') {
 
 function renderHistory() {
   const { undoGroup, redoGroup } = historyCandidates(sessionGroups, sessionRedo);
+  const unsolidifiedCount = sessionGroups.length + sessionRedo.length;
   const refreshPending = loadedSessionRevision < historyRefreshTargetRevision
     || historySnapshotFulfilled < historySnapshotRequirement;
-  const controlsBusy = historyBusy || refreshPending;
+  const controlsBusy = historyBusy || solidifyBusy || refreshPending;
   historyControls.dataset.busy = String(controlsBusy);
   historyControls.setAttribute('aria-busy', String(controlsBusy));
   undoButton.disabled = controlsBusy || !undoGroup;
@@ -493,6 +703,423 @@ function renderHistory() {
   redoButton.setAttribute('aria-label', redoButton.title);
   undoButton.dataset.groupId = controlsBusy ? '' : (undoGroup?.id ?? '');
   redoButton.dataset.groupId = controlsBusy ? '' : (redoGroup?.id ?? '');
+  solidifyButton.dataset.busy = String(solidifyBusy);
+  solidifyButton.dataset.unsolidified = String(unsolidifiedCount > 0);
+  const bindingBlocked = deckBinding.state !== 'bound';
+  solidifyButton.disabled = controlsBusy || bindingBlocked || unsolidifiedCount === 0;
+  solidifyButton.title = bindingBlocked
+    ? '源文件需要重新绑定，工作副本仍会继续保存'
+    : unsolidifiedCount > 0
+      ? `固化 ${unsolidifiedCount} 组修改并清空撤销记录`
+      : '当前没有可固化的修改';
+  solidifyCount.textContent = `将固化 ${unsolidifiedCount} 组修改`;
+  if (solidifyDialog.open) renderSolidifyDialogContent(solidifyDialogReason);
+}
+
+function renderDeckBinding(next, { announce = false } = {}) {
+  if (!next || !Number.isSafeInteger(next.revision)) return;
+  if (next.revision < deckBinding.revision) return;
+  const previous = deckBinding;
+  deckBinding = next;
+  editorShell.dataset.deckBindingState = next.state;
+  const blocked = !embeddedCreation && next.state !== 'bound';
+  deckBindingBanner.hidden = !blocked;
+  if (blocked) {
+    const replaced = next.reason === 'replaced';
+    deckBindingTitle.textContent = replaced
+      ? '原路径现在是另一份文件，已停止固化'
+      : '源文件位置已变化，需要重新绑定';
+    deckBindingDetail.textContent = replaced
+      ? 'Editor 不会覆盖这份新文件；当前修改仍安全保存在工作副本中。'
+      : '编辑内容仍会安全保存在工作副本中，重新绑定前无法固化。';
+  } else if (announce && next.reason === 'renamed'
+    && previous.currentPath !== next.currentPath) {
+    showHistoryNotice(
+      `已检测到文件改名，已更新为「${next.currentPath.split(/[\\/]/).at(-1)}」`,
+      'success',
+    );
+  }
+  deckBindingRecheck.disabled = deckBindingBusy;
+  deckBindingChoose.disabled = deckBindingBusy;
+  renderHistory();
+}
+
+async function reconcileDeckBinding() {
+  if (deckBindingBusy) return;
+  deckBindingBusy = true;
+  deckBindingRecheck.disabled = true;
+  deckBindingChoose.disabled = true;
+  try {
+    renderDeckBinding(await requestJson('/api/deck-binding/reconcile', {
+      method:'POST', headers:{ 'content-type':'application/json' }, body:'{}',
+    }), { announce:true });
+  } catch (error) {
+    showHistoryNotice(`重新检查失败：${error.message}`, 'error');
+  } finally {
+    deckBindingBusy = false;
+    deckBindingRecheck.disabled = false;
+    deckBindingChoose.disabled = false;
+  }
+}
+
+async function chooseDeckBinding() {
+  if (deckBindingBusy) return;
+  deckBindingBusy = true;
+  deckBindingRecheck.disabled = true;
+  deckBindingChoose.disabled = true;
+  try {
+    const result = await requestJson('/api/deck-binding/choose-file', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedBindingRevision:deckBinding.revision }),
+    });
+    renderDeckBinding(result.binding, { announce:result.status === 'rebound' });
+    if (result.status === 'rebound') {
+      showHistoryNotice('源文件已重新绑定，可以继续固化', 'success');
+    }
+  } catch (error) {
+    if (error.binding) renderDeckBinding(error.binding);
+    showHistoryNotice(`重新绑定失败：${error.message}`, 'error');
+  } finally {
+    deckBindingBusy = false;
+    deckBindingRecheck.disabled = false;
+    deckBindingChoose.disabled = false;
+  }
+}
+
+deckBindingRecheck.addEventListener('click', reconcileDeckBinding);
+deckBindingChoose.addEventListener('click', chooseDeckBinding);
+
+function hasUnsolidifiedChanges() {
+  return sessionGroups.length > 0 || sessionRedo.length > 0;
+}
+
+function taskTimestamp(task) {
+  for (const value of [task?.updatedAt, task?.createdAt]) {
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
+function unsolidifiedDialogState() {
+  const activeGroups = sessionGroups.filter(group => group?.active === true);
+  const taskById = new Map(tasks.map(task => [task?.id, task]));
+  const sectionsByKey = new Map();
+  activeGroups.forEach((group, groupIndex) => {
+    const taskId = typeof group?.taskId === 'string' ? group.taskId : null;
+    const task = taskId ? taskById.get(taskId) ?? null : null;
+    const key = taskId ? `task:${taskId}` : 'direct';
+    let section = sectionsByKey.get(key);
+    if (!section) {
+      section = { key, taskId, task, groups:[], latestIndex:groupIndex };
+      sectionsByKey.set(key, section);
+    }
+    section.groups.push(group);
+    section.latestIndex = groupIndex;
+  });
+  const taskSections = [...sectionsByKey.values()].sort((left, right) => (
+    taskTimestamp(right.task) - taskTimestamp(left.task)
+    || right.latestIndex - left.latestIndex
+  ));
+  return {
+    activeGroupCount:activeGroups.length,
+    taskSections,
+    linkedTaskCount:taskSections.filter(section => section.taskId).length,
+    redoCount:sessionRedo.length,
+  };
+}
+
+const ACTION_LABELS = {
+  setText:'文字修改',
+  translate:'位置移动',
+  resize:'尺寸调整',
+  setStyle:'样式修改',
+  hide:'隐藏元素',
+  show:'显示元素',
+};
+
+function unsolidifiedGroupSummary(group) {
+  if (group?.mutationType === 'source') {
+    const detail = typeof group.source?.summary === 'string'
+      ? group.source.summary.trim() : '';
+    return detail ? `结构修改：${detail}` : '结构修改';
+  }
+  const counts = new Map();
+  for (const action of group?.actions ?? []) {
+    const label = ACTION_LABELS[action?.kind] ?? '其他修改';
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const labels = [...counts].map(([label, count]) => count > 1 ? `${label} ${count} 项` : label);
+  return labels.join('、') || '一组修改';
+}
+
+function renderSolidifyDialogContent(reason = 'toolbar') {
+  const {
+    activeGroupCount, taskSections, linkedTaskCount, redoCount,
+  } = unsolidifiedDialogState();
+  const closing = reason === 'exit';
+  const hasPendingChanges = activeGroupCount > 0 || redoCount > 0;
+  const activeAgent = ['queued', 'running'].includes(agentRun.status);
+  solidifyDialog.dataset.reason = closing ? 'exit' : 'toolbar';
+  solidifyMark.textContent = closing ? '!' : '✓';
+  solidifyEyebrow.textContent = closing ? 'EXIT EDITOR' : 'PERMANENT SAVE';
+  solidifyTitle.textContent = closing
+    ? linkedTaskCount > 0
+      ? `退出前还有 ${linkedTaskCount} 个任务存在未固化修改`
+      : hasPendingChanges
+        ? '退出前还有修改没有固化'
+        : 'Agent 正在处理当前任务'
+    : '固化当前修改？';
+  solidifyDescription.textContent = closing
+    ? hasPendingChanges
+      ? `这些修改仍安全保存在工作副本中，但还没有写入原 Deck。${activeAgent ? '退出还会中断当前 Agent 执行。' : ''}`
+      : '退出会中断当前 Agent 执行；已经保存的工作副本不会丢失。'
+    : '这会把当前修改永久写入这个 Deck，并清空全部撤销和重做记录。固化完成后无法恢复到之前的状态。';
+  solidifyCount.textContent = redoCount > 0
+    ? `将固化当前生效的 ${activeGroupCount} 组修改，并清空 ${redoCount} 组重做记录`
+    : `将固化 ${activeGroupCount} 组修改`;
+  solidifyCount.hidden = closing && !hasPendingChanges;
+
+  solidifyTaskList.replaceChildren();
+  for (const section of taskSections) {
+    const { taskId, task, groups } = section;
+    const item = document.createElement('details');
+    item.className = 'solidify-task';
+    item.dataset.solidifyTask = taskId ?? 'direct';
+    const summary = document.createElement('summary');
+    summary.className = 'solidify-task-summary-row';
+    const taskName = document.createElement('p');
+    taskName.className = 'solidify-task-name';
+    taskName.textContent = task?.instruction
+      ?? (taskId ? `任务 ${taskId.slice(0, 8)}` : '直接编辑与结构调整');
+    const chevron = document.createElement('span');
+    chevron.className = 'solidify-task-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    summary.append(taskName, chevron);
+    item.append(summary);
+    item.addEventListener('toggle', () => {
+      if (!item.open || item.dataset.detailsLoaded === 'true') return;
+      item.dataset.detailsLoaded = 'true';
+      const details = document.createElement('div');
+      details.className = 'solidify-task-details';
+      const meta = document.createElement('div');
+      meta.className = 'solidify-task-meta';
+      const page = document.createElement('span');
+      page.className = 'solidify-task-page';
+      page.textContent = task
+        ? `${String(task.pageIndex).padStart(2, '0')} · ${task.pageLabel}`
+        : taskId ? '任务记录 · 页面信息不可用' : '当前 Deck · 直接编辑';
+      const status = document.createElement('span');
+      status.className = 'solidify-task-status';
+      status.textContent = `${groups.length} 组未固化`;
+      meta.append(page, status);
+      const changes = document.createElement('ul');
+      changes.className = 'solidify-change-list';
+      for (const group of groups) {
+        const change = document.createElement('li');
+        change.className = 'solidify-change-item';
+        change.textContent = unsolidifiedGroupSummary(group);
+        changes.append(change);
+      }
+      details.append(meta, changes);
+      item.append(details);
+    });
+    solidifyTaskList.append(item);
+  }
+  solidifyTaskSummary.hidden = taskSections.length === 0;
+  solidifyTaskCount.textContent = linkedTaskCount > 0
+    ? `${linkedTaskCount} 个任务 · ${activeGroupCount} 组`
+    : `${activeGroupCount} 组直接编辑`;
+
+  const otherChanges = [];
+  if (redoCount > 0) otherChanges.push(`${redoCount} 组已撤销历史`);
+  solidifyOtherCount.hidden = otherChanges.length === 0;
+  solidifyOtherCount.textContent = otherChanges.length > 0
+    ? `另有 ${otherChanges.join('、')}尚未固化。`
+    : '';
+
+  setPillLabel(solidifyCancel, closing ? '继续编辑' : '取消');
+  setPillLabel(solidifyExitWithout, hasPendingChanges ? '暂不固化，退出' : '中断并退出');
+  setPillLabel(solidifyConfirm, closing ? '固化并退出' : '永久固化');
+  solidifyExitWithout.hidden = !closing;
+  solidifyConfirm.hidden = closing && !hasPendingChanges;
+  solidifyCancel.disabled = solidifyBusy;
+  solidifyExitWithout.disabled = solidifyBusy;
+  solidifyConfirm.disabled = solidifyBusy || solidifyButton.disabled;
+  solidifyConfirm.title = deckBinding.state !== 'bound'
+    ? '源文件需要重新绑定后才能固化'
+    : solidifyConfirm.disabled && !solidifyBusy
+      ? '正在同步修改历史，请稍后重试'
+      : '';
+}
+
+function requestWorkspaceExit() {
+  if (!terminateEditorProcess || solidifyBusy) return;
+  const activeAgent = ['queued', 'running'].includes(agentRun.status);
+  if (!hasUnsolidifiedChanges() && !activeAgent) {
+    terminateEditorProcess();
+    return;
+  }
+  openSolidifyDialog('exit');
+}
+
+function openSolidifyDialog(reason = 'toolbar') {
+  const closing = reason === 'exit';
+  if ((!closing && solidifyButton.disabled) || solidifyBusy) return;
+  solidifyDialogReason = closing ? 'exit' : 'toolbar';
+  renderSolidifyDialogContent(solidifyDialogReason);
+  if (solidifyDialog.open) return;
+  resetSolidifyProgress();
+  solidifyModal.show();
+}
+
+function closeSolidifyDialog() {
+  if (!solidifyBusy && solidifyDialog.open) solidifyModal.close();
+}
+
+function exitWorkspaceWithoutSolidifying() {
+  if (solidifyBusy || !terminateEditorProcess) return;
+  closeSolidifyDialog();
+  terminateEditorProcess();
+}
+
+function resetSolidifyProgress() {
+  solidifyProgress.hidden = true;
+  solidifyProgress.dataset.state = 'idle';
+  solidifyProgress.style.removeProperty('--solidify-progress');
+  solidifyProgressLabel.textContent = '准备固化…';
+  solidifyProgressValue.textContent = '';
+  solidifyProgressBar.removeAttribute('aria-valuenow');
+  solidifyProgressBar.setAttribute('aria-valuetext', '准备固化');
+}
+
+function setSolidifyProgress({ state, label, value }) {
+  solidifyProgress.hidden = false;
+  solidifyProgress.dataset.state = state;
+  solidifyProgressLabel.textContent = label;
+  if (Number.isFinite(value)) {
+    const boundedValue = Math.max(0, Math.min(100, Math.round(value)));
+    solidifyProgress.style.setProperty('--solidify-progress', `${boundedValue}%`);
+    solidifyProgressValue.textContent = `${boundedValue}%`;
+    solidifyProgressBar.setAttribute('aria-valuenow', String(boundedValue));
+  } else {
+    solidifyProgress.style.removeProperty('--solidify-progress');
+    solidifyProgressValue.textContent = '';
+    solidifyProgressBar.removeAttribute('aria-valuenow');
+  }
+  solidifyProgressBar.setAttribute('aria-valuetext', label);
+}
+
+function reloadSolidifiedDeck(targetRevision) {
+  if (!Number.isSafeInteger(targetRevision) || targetRevision <= lastSolidifiedReloadRevision) return;
+  lastSolidifiedReloadRevision = targetRevision;
+  const pagePreference = capturePagePreference();
+  authoritativeReloadPending = {
+    frameInstanceId:`solidify:${targetRevision}`,
+    requestSequence:targetRevision,
+    pageKey:pagePreference.pageKey || currentKey.textContent,
+    pageIndex:pagePreference.pageIndex,
+  };
+  deckReady = false;
+  deckReadyPayload = undefined;
+  pendingPageKey = undefined;
+  const previewUrl = endpoint('/preview');
+  previewUrl.searchParams.set('solidifiedRevision', String(targetRevision));
+  deckFrame.src = previewUrl;
+}
+
+function reloadWorkingDeck(targetRevision, reason = 'source') {
+  if (!Number.isSafeInteger(targetRevision) || targetRevision <= lastWorkingReloadRevision) return;
+  lastWorkingReloadRevision = targetRevision;
+  const pagePreference = capturePagePreference();
+  authoritativeReloadPending = {
+    frameInstanceId:`${reason}:${targetRevision}`,
+    requestSequence:targetRevision,
+    pageKey:pagePreference.pageKey || currentKey.textContent,
+    pageIndex:pagePreference.pageIndex,
+  };
+  deckReady = false;
+  deckReadyPayload = undefined;
+  pendingPageKey = undefined;
+  const previewUrl = endpoint('/preview');
+  previewUrl.searchParams.set('workingRevision', String(targetRevision));
+  deckFrame.src = previewUrl;
+}
+
+async function solidifyChanges() {
+  if (solidifyBusy || !hasUnsolidifiedChanges()) return false;
+  const exitAfterSolidify = solidifyDialogReason === 'exit';
+  solidifyBusy = true;
+  solidifyConfirm.disabled = true;
+  solidifyCancel.disabled = true;
+  solidifyExitWithout.disabled = true;
+  setPillLabel(solidifyConfirm, '正在固化…');
+  setSolidifyProgress({
+    state:'indeterminate',
+    label:'正在校验并写入 Deck…',
+  });
+  renderHistory();
+  try {
+    const result = await requestJson('/api/solidify-deck', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:revision,
+        expectedBindingRevision:deckBinding.revision,
+      }),
+    });
+    setSolidifyProgress({
+      state:'determinate',
+      label:'写入完成，正在刷新编辑器…',
+      value:78,
+    });
+    updateRevision(result.revision);
+    requireHistoryRefresh(result.revision);
+    reloadSolidifiedDeck(result.revision);
+    await ensureSessionRevision(result.revision);
+    setSolidifyProgress({ state:'complete', label:'固化完成', value:100 });
+    await new Promise(resolve => setTimeout(resolve, 220));
+    if (solidifyDialog.open) solidifyModal.close();
+    if (exitAfterSolidify) {
+      terminateEditorProcess?.();
+      return true;
+    }
+    showHistoryNotice(`已固化修改，并清空 ${result.clearedGroupCount ?? 0} 组撤销记录`, 'success');
+    return true;
+  } catch (error) {
+    if (error.code === 'REVISION_CONFLICT') requireHistoryRefresh(error.revision);
+    else expectHistoryRevision(error.revision);
+    await loadSession(error.revision).catch(() => {});
+    const failureMessage = error.code === 'REVISION_CONFLICT'
+      ? '修改历史已经变化，请重新确认固化'
+      : error.code === 'PATCH_REPLAY_FAILED'
+        ? '历史修改无法安全重放，已停止固化且原 Deck 未被改动'
+        : error.code === 'NEW_OVERFLOW'
+          ? '检测到新的页面溢出，已停止固化且原 Deck 未被改动'
+          : error.code === 'DECK_CHANGED'
+            ? '原 Deck 已被外部修改，为避免覆盖已停止固化'
+            : error.message?.trim().startsWith('{')
+              ? `固化验证失败（${error.code ?? 'UNKNOWN'}），原 Deck 未被改动`
+              : `固化失败：${error.message}`;
+    showHistoryNotice(failureMessage, 'error');
+    setSolidifyProgress({
+      state:'error',
+      label:failureMessage,
+      value:0,
+    });
+    return false;
+  } finally {
+    solidifyBusy = false;
+    solidifyConfirm.disabled = false;
+    solidifyCancel.disabled = false;
+    solidifyExitWithout.disabled = false;
+    setPillLabel(
+      solidifyConfirm,
+      solidifyDialogReason === 'exit' ? '固化并退出' : '永久固化',
+    );
+    renderHistory();
+  }
 }
 
 function expectHistoryRevision(targetRevision) {
@@ -577,8 +1204,27 @@ function acceptsNativeHistoryShortcut(target) {
 
 function triggerHistoryShortcut(method) {
   const button = method === 'undo' ? undoButton : redoButton;
-  if (historyBusy || button.disabled || !button.dataset.groupId) return false;
-  void changeHistory(method, button);
+  if (historyBusy) return false;
+  if (!button.disabled && button.dataset.groupId) {
+    void changeHistory(method, button);
+    return true;
+  }
+  const refreshPending = Boolean(sessionRefreshPromise)
+    || loadedSessionRevision < historyRefreshTargetRevision
+    || historySnapshotFulfilled < historySnapshotRequirement;
+  if (!refreshPending) return false;
+  if (pendingHistoryShortcut) return true;
+  pendingHistoryShortcut = method;
+  const refresh = sessionRefreshPromise ?? loadSession(historyRefreshTargetRevision);
+  void refresh.then(() => {
+    if (tornDown) return;
+    const queuedMethod = pendingHistoryShortcut;
+    pendingHistoryShortcut = null;
+    if (queuedMethod) triggerHistoryShortcut(queuedMethod);
+  }).catch(error => {
+    pendingHistoryShortcut = null;
+    if (!tornDown) showHistoryNotice(`撤销历史加载失败：${error.message}`, 'error');
+  });
   return true;
 }
 
@@ -692,42 +1338,6 @@ function renderTasks() {
   renderHistory();
 }
 
-function renderAgentPanel() {
-  renderAgentConnectionPanel(agentConnectionPanel, {
-    open:agentPanelOpen,
-    configuration:agentConfiguration,
-    catalog:agentSessions,
-    loading:agentSessionsLoading,
-    error:agentSessionsError,
-    busy:agentConnectionBusy,
-    notice:agentConnectionNotice,
-    selectedProvider:agentPanelProvider,
-    onClose:() => {
-      agentPanelOpen = false;
-      renderAgentPanel();
-      renderAgentStatus();
-      agentStatus.focus();
-    },
-    onSelectProvider:provider => {
-      agentPanelProvider = provider;
-      agentConnectionNotice = '';
-      renderAgentPanel();
-    },
-    onRefresh:() => loadAgentSessions({ force:true }).catch(() => {}),
-    onConnect:session => configureAgentConnection({
-      provider:session.provider,
-      threadId:session.id,
-    }).catch(() => {}),
-    onDisconnect:() => configureAgentConnection({
-      provider:agentConfiguration?.connection?.provider ?? agentPanelProvider,
-      threadId:null,
-    }).catch(() => {}),
-    onPickProject:() => { void pickAgentProject(); },
-    onCreateSession:input => { void createAgentSession(input); },
-    onManualConnect:input => configureAgentConnection(input).catch(() => {}),
-  });
-}
-
 function upsertTask(task) {
   tasks = uniqueTasks([...tasks, task]);
   renderTasks();
@@ -764,6 +1374,12 @@ function loadSession(targetRevision = revision) {
         renderInspector();
       } else {
         renderHistory();
+      }
+      const startupRecovery = session.startupRecovery;
+      if (startupRecovery?.code === 'WORKING_DECK_RECOVERED'
+        && startupRecovery.invalidFingerprint !== shownStartupRecovery) {
+        shownStartupRecovery = startupRecovery.invalidFingerprint;
+        showHistoryNotice('检测到上次工作副本写入未完成，已自动恢复最后一个有效版本。');
       }
       if (loadedSessionRevision < requestedRevision) {
         throw new Error(`权威会话 revision ${loadedSessionRevision} 落后于 ${requestedRevision}`);
@@ -814,24 +1430,63 @@ function capturePagePreference() {
   };
 }
 
+function samePageInventory(nextPages) {
+  return pages.length === nextPages.length && pages.every((page, index) => {
+    const next = nextPages[index];
+    return page.pageKey === next?.pageKey
+      && page.index === next.index
+      && page.label === next.label;
+  });
+}
+
 function renderPages(nextPages, preferredPageKey, preferredPageIndex) {
   pages = nextPages;
-  pageList.replaceChildren();
-  for (const page of pages) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'page-item';
+  const existing = [...pageList.querySelectorAll('[data-page-key]')];
+  const unused = new Set(existing);
+  const desired = pages.map(page => {
+    let button = existing.find(candidate => (
+      unused.has(candidate) && candidate.dataset.pageKey === page.pageKey
+    ));
+    button ??= existing.find(candidate => (
+      unused.has(candidate) && candidate.dataset.pageIndex === String(page.index)
+    ));
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'page-item';
+      button.setAttribute('aria-current', 'false');
+      const label = document.createElement('span');
+      label.className = 'page-item-label';
+      button.append(label);
+      button.addEventListener('click', () => requestPage(button));
+    }
+    unused.delete(button);
     button.dataset.pageKey = page.pageKey;
     button.dataset.pageIndex = String(page.index);
     button.dataset.pageLabel = page.label;
     button.dataset.pageTitle = `${String(page.index).padStart(2, '0')} ${page.label}`;
-    button.setAttribute('aria-current', 'false');
-    const label = document.createElement('span');
-    label.className = 'page-item-label';
-    label.textContent = button.dataset.pageTitle;
-    button.append(label);
-    button.addEventListener('click', () => requestPage(button));
-    pageList.append(button);
+    const label = button.querySelector('.page-item-label');
+    let pageIndex = label.querySelector('.page-item-index');
+    let pageName = label.querySelector('.page-item-name');
+    if (!pageIndex || !pageName) {
+      pageIndex = document.createElement('span');
+      pageIndex.className = 'page-item-index';
+      pageName = document.createElement('span');
+      pageName.className = 'page-item-name';
+      label.replaceChildren(pageIndex, document.createTextNode(' '), pageName);
+    }
+    pageIndex.textContent = String(page.index).padStart(2, '0');
+    pageName.textContent = page.label;
+    button.setAttribute('aria-label', button.dataset.pageTitle);
+    return button;
+  });
+  for (const [index, button] of desired.entries()) {
+    const current = pageList.children[index];
+    if (current !== button) pageList.insertBefore(button, current ?? null);
+  }
+  const desiredSet = new Set(desired);
+  for (const child of [...pageList.children]) {
+    if (!desiredSet.has(child)) child.remove();
   }
   pageCount.textContent = `${pages.length} 页`;
   updatePageBadges();
@@ -842,7 +1497,12 @@ function renderPages(nextPages, preferredPageKey, preferredPageIndex) {
     ? pageList.querySelector(`[data-page-index="${preferredPageIndex}"]`)
     : null;
   const requestedPage = preferredPage ?? fallbackPage ?? pageList.querySelector('[data-page-key]');
-  if (requestedPage) requestPage(requestedPage);
+  if (requestedPage) {
+    // Deck 重放时先保留（或按页序迁移）当前高亮，再异步向 iframe 确认。
+    // 不再清空整列按钮，避免出现“无选中页”的一帧。
+    confirmPage(requestedPage);
+    requestPage(requestedPage);
+  }
 }
 
 function postRegionResult(requestId, result) {
@@ -860,7 +1520,7 @@ function postManualResult(requestId, result) {
 }
 
 async function submitManualActions(message) {
-  const { requestId, actions } = message;
+  const { requestId, actions, coalesceKey } = message;
   if (typeof requestId !== 'string' || manualRequests.has(requestId)) return;
   manualRequests.add(requestId);
   try {
@@ -871,7 +1531,10 @@ async function submitManualActions(message) {
         result = await requestJson('/api/actions', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ expectedRevision: revision, taskId: null, actions }),
+          body: JSON.stringify({
+            expectedRevision:revision, taskId:null, actions,
+            ...(typeof coalesceKey === 'string' && coalesceKey ? { coalesceKey } : {}),
+          }),
         });
       } catch (error) {
         if (error.status === 409 && error.code === 'REVISION_CONFLICT' && !retried) {
@@ -914,10 +1577,13 @@ async function submitManualActions(message) {
 }
 
 async function createRegionTask(message) {
-  const { requestId, payload, snapshot = null, attachments = [] } = message;
+  const {
+    requestId, payload, snapshot = null, attachments = [], processAfterCreate = false,
+  } = message;
   if (typeof requestId !== 'string' || createRequests.has(requestId)) return;
   createRequests.add(requestId);
   try {
+    if (typeof processAfterCreate !== 'boolean') throw new TypeError('任务提交方式无效');
     if (!Array.isArray(attachments) || attachments.length > 8
       || attachments.some(item => !item || !['selected', 'pasted'].includes(item.source)
         || !(item.file instanceof File))) {
@@ -950,7 +1616,30 @@ async function createRegionTask(message) {
     }
     revision = Math.max(revision, result.revision);
     upsertTask(result.task);
-    postRegionResult(requestId, { ok: true, taskId: result.task.id, snapshotDropped });
+    let processStarted = false;
+    let processError = '';
+    if (processAfterCreate) {
+      const actionableTasks = tasks.filter(task => (
+        task.targetMissing !== true && ['pending', 'failed'].includes(task.status)
+      ));
+      const actionableIds = actionableTasks.map(task => task.id);
+      try {
+        const processMessage = await processAllTasks(actionableTasks);
+        processStarted = ['queued', 'running'].includes(agentRun.status)
+          && actionableIds.every(id => agentRun.taskIds?.includes(id));
+        if (!processStarted) processError = processMessage || '当前 Agent 未接收这批任务';
+      } catch (error) {
+        processError = error.message || 'Agent 启动失败';
+      }
+    }
+    postRegionResult(requestId, {
+      ok:true,
+      taskId:result.task.id,
+      snapshotDropped,
+      processRequested:processAfterCreate,
+      processStarted,
+      ...(processError ? { processError } : {}),
+    });
   } catch (error) {
     postRegionResult(requestId, {
       ok:false,
@@ -965,6 +1654,15 @@ async function createRegionTask(message) {
 function onFrameMessage(event) {
   if (event.origin !== location.origin || event.source !== deckFrame.contentWindow) return;
   if (tornDown) return;
+  if (event.data?.type === 'editor-surface-pointerdown') {
+    setTaskDrawerOpen(taskDrawer, false);
+    return;
+  }
+  if (event.data?.type === 'editor-surface-pointer-presence'
+    && typeof event.data.active === 'boolean') {
+    deckSurfacePointerActive = event.data.active;
+    return;
+  }
   if (event.data?.type === 'inspector-selection-changed') {
     inspectorSelection = event.data.selection?.selectionId ? event.data.selection : null;
     if (!inspectorSelection) {
@@ -988,6 +1686,19 @@ function onFrameMessage(event) {
   if (event.data?.type === 'history-shortcut'
     && ['undo', 'redo'].includes(event.data.method)) {
     triggerHistoryShortcut(event.data.method);
+    return;
+  }
+  if (event.data?.type === 'action-replay-failed'
+    && typeof event.data.code === 'string') {
+    showHistoryNotice(
+      `历史重放冲突：${event.data.code}，请撤销冲突修改或等待页面重新同步`,
+      'error',
+    );
+    return;
+  }
+  if (event.data?.type === 'temporary-region-shortcut'
+    && typeof event.data.active === 'boolean') {
+    setTemporaryRegionShortcut(event.data.active);
     return;
   }
   if (event.data?.type === 'request-authoritative-reload'
@@ -1037,6 +1748,9 @@ function onFrameMessage(event) {
       && event.data.frameInstanceId === authoritativeReloadPending.frameInstanceId) return;
     const pagePreference = capturePagePreference();
     const completedReload = authoritativeReloadPending;
+    const inventoryUnchanged = !completedReload
+      && activeFrameInstanceId === event.data.frameInstanceId
+      && samePageInventory(event.data.pages);
     activeFrameInstanceId = typeof event.data.frameInstanceId === 'string'
       ? event.data.frameInstanceId : undefined;
     deckReady = true;
@@ -1046,12 +1760,20 @@ function onFrameMessage(event) {
       diagnostics:Array.isArray(event.data.diagnostics) ? event.data.diagnostics : [],
     };
     announceDeckReady();
-    renderPages(
-      event.data.pages,
-      completedReload?.pageKey ?? pagePreference.pageKey,
-      completedReload?.pageIndex ?? pagePreference.pageIndex,
-    );
-    deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode: editorMode }, location.origin);
+    if (inventoryUnchanged) {
+      pages = event.data.pages;
+      pageCount.textContent = `${pages.length} 页`;
+      updatePageBadges();
+    } else {
+      renderPages(
+        event.data.pages,
+        completedReload?.pageKey ?? pagePreference.pageKey,
+        completedReload?.pageIndex ?? pagePreference.pageIndex,
+      );
+    }
+    deckFrame.contentWindow?.postMessage({
+      type:'set-editor-mode', mode:activeEditorMode(),
+    }, location.origin);
     if (loadedSessionRevision >= revision) syncSessionActions();
     else void ensureSessionRevision(revision).catch(() => {});
     for (const command of pendingFrameCommands.values()) {
@@ -1064,6 +1786,15 @@ function onFrameMessage(event) {
     }
     return;
   }
+  if (event.data?.type === 'active-page-changed'
+    && typeof event.data.pageKey === 'string') {
+    const button = [...pageList.querySelectorAll('[data-page-key]')]
+      .find(candidate => candidate.dataset.pageKey === event.data.pageKey);
+    if (!button) return;
+    pendingPageKey = undefined;
+    confirmPage(button);
+    return;
+  }
   if (event.data?.type === 'create-region-task') {
     void createRegionTask(event.data);
     return;
@@ -1074,7 +1805,8 @@ function onFrameMessage(event) {
   }
   if (['actions-applied', 'actions-rejected', 'actions-prepared', 'actions-committed',
     'actions-rolled-back', 'actions-synced', 'diagnostics-result',
-    'diagnostics-rejected'].includes(event.data?.type)
+    'diagnostics-rejected', 'text-locations', 'text-locations-rejected']
+    .includes(event.data?.type)
     && typeof event.data.commandId === 'string') {
     commandReplies.set(`${event.data.type}:${event.data.commandId}`, event.data);
     if (commandReplies.size > 100) commandReplies.delete(commandReplies.keys().next().value);
@@ -1091,21 +1823,96 @@ function onFrameMessage(event) {
 
 window.addEventListener('message', onFrameMessage);
 
-function setEditorMode(mode) {
-  editorMode = ['text', 'move', 'resize'].includes(mode) ? 'edit' : mode;
-  modeTools.dataset.activeMode = editorMode;
+function activeEditorMode() {
+  if (!temporaryRegionShortcut) return editorMode;
+  if (editorMode === 'edit') return 'region';
+  if (editorMode === 'region') return 'preview';
+  return editorMode;
+}
+
+function renderEditorMode({ preserveRegionPopover=false } = {}) {
+  const activeMode = activeEditorMode();
+  modeTools.dataset.activeMode = activeMode;
+  if (temporaryRegionShortcut) modeTools.dataset.temporaryMode = activeMode;
+  else delete modeTools.dataset.temporaryMode;
   for (const button of modeButtons) {
-    button.setAttribute('aria-pressed', String(button.dataset.mode === editorMode));
+    button.setAttribute('aria-pressed', String(button.dataset.mode === activeMode));
   }
-  deckFrame.contentWindow?.postMessage({ type: 'set-editor-mode', mode:editorMode }, location.origin);
+  deckFrame.contentWindow?.postMessage({
+    type:'set-editor-mode', mode:activeMode, preserveRegionPopover,
+  }, location.origin);
+}
+
+function setEditorMode(mode) {
+  temporaryRegionShortcut = false;
+  const normalizedMode = ['text', 'move', 'resize'].includes(mode) ? 'edit' : mode;
+  editorMode = normalizedMode;
+  inspectorExpanded = normalizedMode === 'edit';
+  renderInspectorLayout();
+  renderEditorMode();
+}
+
+function setTemporaryRegionShortcut(active) {
+  const next = active === true && ['edit', 'region'].includes(editorMode);
+  if (temporaryRegionShortcut === next) return false;
+  temporaryRegionShortcut = next;
+  renderEditorMode({ preserveRegionPopover:!next || editorMode === 'region' });
+  return true;
+}
+
+function isAgentTerminalInput(target) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return Boolean(element?.closest('[data-agent-terminal-host]'));
+}
+
+function onTemporaryRegionKeydown(event) {
+  const captureAgentInput = deckSurfacePointerActive && agentTerminalOpen
+    && isAgentTerminalInput(event.target);
+  if (!['edit', 'region'].includes(editorMode) || event.key.toLowerCase() !== 'r'
+    || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey
+    || (acceptsNativeHistoryShortcut(event.target) && !captureAgentInput)) return;
+  event.preventDefault();
+  if (captureAgentInput) event.stopImmediatePropagation();
+  setTemporaryRegionShortcut(true);
+}
+
+function onTemporaryRegionKeyup(event) {
+  if (!temporaryRegionShortcut || event.key.toLowerCase() !== 'r') return;
+  event.preventDefault();
+  if (deckSurfacePointerActive && agentTerminalOpen && isAgentTerminalInput(event.target)) {
+    event.stopImmediatePropagation();
+  }
+  setTemporaryRegionShortcut(false);
 }
 
 const onModeClick = event => setEditorMode(event.currentTarget.dataset.mode);
 for (const button of modeButtons) button.addEventListener('click', onModeClick);
+exportPptxButton.addEventListener('click', onExportPptx);
+const onInspectorCollapse = () => setInspectorExpanded(false);
+const onInspectorReopen = () => setInspectorExpanded(true);
+inspectorCollapseButton.addEventListener('click', onInspectorCollapse);
+inspectorReopenButton.addEventListener('click', onInspectorReopen);
+function setPagePanelCollapsed(collapsed) {
+  editorShell.dataset.pagePanelCollapsed = String(collapsed === true);
+  pagePanelToggle.setAttribute('aria-expanded', String(collapsed !== true));
+  pagePanelToggle.setAttribute('aria-label', collapsed ? '展开页面列表' : '收起页面列表');
+  pagePanelToggle.title = collapsed ? '展开页面列表' : '收起页面列表';
+  pagePanelToggle.querySelector('[aria-hidden="true"]').textContent = collapsed ? '›' : '‹';
+}
+const onPagePanelToggle = () => setPagePanelCollapsed(
+  editorShell.dataset.pagePanelCollapsed !== 'true',
+);
+pagePanelToggle.addEventListener('click', onPagePanelToggle);
 const onUndoClick = () => { void changeHistory('undo', undoButton); };
 const onRedoClick = () => { void changeHistory('redo', redoButton); };
+const onSolidifyClick = () => openSolidifyDialog('toolbar');
+const onSolidifyConfirm = () => { void solidifyChanges(); };
 undoButton.addEventListener('click', onUndoClick);
 redoButton.addEventListener('click', onRedoClick);
+solidifyButton.addEventListener('click', onSolidifyClick);
+solidifyCancel.addEventListener('click', closeSolidifyDialog);
+solidifyExitWithout.addEventListener('click', exitWorkspaceWithoutSolidifying);
+solidifyConfirm.addEventListener('click', onSolidifyConfirm);
 
 function fitFrame() {
   const availableWidth = Math.max(frameViewport.clientWidth - 56, 1);
@@ -1123,32 +1930,51 @@ const resizeObserver = new ResizeObserver(() => {
 });
 resizeObserver.observe(frameViewport);
 fitFrame();
+agentTerminal = new AgentTerminalPanel(agentTerminalRoot, {
+  token,
+  editorToken,
+  onClose:() => {
+    agentTerminalOpen = false;
+    renderAgentTerminal();
+    renderAgentStatus();
+    agentStatus.focus();
+  },
+  onState:state => {
+    adoptAgentTerminalState(state);
+  },
+});
 renderTasks();
-renderAgentPanel();
+renderAgentTerminal();
 renderInspector();
-agentStatus.addEventListener('click', openAgentConnectionSettings);
+agentStatus.addEventListener('click', openAgentTerminal);
 
-function onAgentPanelOutsidePointer(event) {
-  if (!agentPanelOpen
-    || agentConnectionAnchor.contains(event.target)
-    || agentConnectionPanel.contains(event.target)) return;
-  agentPanelOpen = false;
-  renderAgentPanel();
-  renderAgentStatus();
-}
-
-function onAgentPanelKeydown(event) {
-  if (!agentPanelOpen || event.key !== 'Escape') return;
+function onAgentTerminalKeydown(event) {
+  if (event.key !== 'Escape' || !agentTerminalOpen) return;
   event.preventDefault();
-  agentPanelOpen = false;
-  renderAgentPanel();
+  agentTerminalOpen = false;
+  renderAgentTerminal();
   renderAgentStatus();
   agentStatus.focus();
 }
 
-document.addEventListener('pointerdown', onAgentPanelOutsidePointer);
-document.addEventListener('keydown', onAgentPanelKeydown);
+function onTaskDrawerOutsidePointerDown(event) {
+  if (taskDrawer.dataset.open !== 'true') return;
+  if (event.composedPath().includes(taskDrawer)) return;
+  setTaskDrawerOpen(taskDrawer, false);
+}
+
+function onEditorPointerMove() {
+  // iframe 内的 pointermove 会由 frame bridge 明确上报；父页面能收到移动时，
+  // 指针必然已经离开 Deck，及时恢复 Agent 终端的正常键盘输入。
+  deckSurfacePointerActive = false;
+}
+
+document.addEventListener('pointerdown', onTaskDrawerOutsidePointerDown, true);
+document.addEventListener('pointermove', onEditorPointerMove, true);
+document.addEventListener('keydown', onAgentTerminalKeydown);
 document.addEventListener('keydown', onHistoryKeydown);
+document.addEventListener('keydown', onTemporaryRegionKeydown, true);
+document.addEventListener('keyup', onTemporaryRegionKeyup, true);
 
 const eventsUrl = new URL('/events', location.href);
 eventsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1163,6 +1989,7 @@ eventsClient = connectEvents({
       'rollback-actions': 'actions-rolled-back',
       'sync-actions': 'actions-synced',
       'diagnose-pages': 'diagnostics-result',
+      'locate-text': 'text-locations',
     };
     if (replyTypes[event?.type] && typeof event.commandId === 'string') {
       const reply = commandReplies.get(`${replyTypes[event.type]}:${event.commandId}`);
@@ -1171,12 +1998,27 @@ eventsClient = connectEvents({
       else pendingFrameCommands.set(event.commandId, event);
       return;
     }
-    if (['actions-recorded','group-undone','group-redone'].includes(event?.type)) {
+    if (event?.type === 'deck-binding-changed') {
+      renderDeckBinding(event.payload, { announce:true });
+      return;
+    }
+    if (['actions-recorded','group-undone','group-redone',
+      'source-mutation-recorded'].includes(event?.type)) {
       expectHistoryRevision(event.revision);
       updateRevision(event.revision);
       void ensureSessionRevision(event.revision).catch(() => {});
+    } else if (event?.type === 'deck-solidified') {
+      updateRevision(event.revision);
+      requireHistoryRefresh(event.revision);
+      reloadSolidifiedDeck(event.revision);
+      void ensureSessionRevision(event.revision).catch(() => {});
     } else {
       updateRevision(event?.revision);
+    }
+    if (event?.type === 'working-deck-changed') {
+      reloadWorkingDeck(event.revision, event.payload?.reason ?? 'source');
+    } else if (event?.type === 'source-mutation-failed') {
+      showHistoryNotice(`工作副本修改未进入历史：${event.payload?.message ?? '未知错误'}`, 'error');
     }
     if (['task-created','task-updated'].includes(event?.type) && event.payload?.id) {
       upsertTask(event.payload);
@@ -1185,11 +2027,8 @@ eventsClient = connectEvents({
       renderTasks();
     } else if (event?.type === 'agent-run-updated' && event.payload?.status) {
       if (adoptAgentRun(event.payload)) renderTasks();
-    } else if (event?.type === 'agent-connection-updated' && event.payload?.connection) {
-      agentConfiguration = event.payload;
-      void ensureSessionRevision(event.revision).catch(() => {});
-      renderTasks();
-      renderAgentPanel();
+    } else if (event?.type === 'agent-terminal-updated' && event.payload?.state) {
+      adoptAgentTerminalState(event.payload);
     }
   },
   onState: state => {
@@ -1206,36 +2045,56 @@ eventsClient = connectEvents({
 });
 void Promise.all([
   loadSession(),
+  requestJson('/api/deck-binding').then(binding => renderDeckBinding(binding)),
   requestJson('/api/agent-runs/current').then(run => {
     if (adoptAgentRun(run)) renderTasks();
   }),
-  requestJson('/api/agent-connection').then(configuration => {
-    agentConfiguration = configuration;
-    agentPanelProvider = configuration.connection?.provider ?? agentPanelProvider;
-    renderTasks();
-    renderAgentPanel();
+  requestJson('/api/agent-terminal').then(state => {
+    adoptAgentTerminalState(state);
   }),
-]).catch(error => {
+]).then(() => {
+  renderAgentStatus();
+}).catch(error => {
   showHistoryNotice(`编辑状态恢复失败：${error.message}`, 'error');
 });
 
 function teardown() {
   if (tornDown) return;
   tornDown = true;
+  pendingHistoryShortcut = null;
   clearTimeout(historyNoticeTimer);
   deckFrame.contentWindow?.postMessage({ type: 'editor-teardown' }, location.origin);
   eventsClient?.close();
+  agentTerminal?.dispose();
   resizeObserver.disconnect();
   cancelAnimationFrame(fitFrameRequest);
   pendingFrameCommands.clear();
   deckFrame.removeEventListener('load', onDeckFrameLoad);
   for (const button of modeButtons) button.removeEventListener('click', onModeClick);
+  exportPptxButton.removeEventListener('click', onExportPptx);
+  inspectorCollapseButton.removeEventListener('click', onInspectorCollapse);
+  inspectorReopenButton.removeEventListener('click', onInspectorReopen);
+  pagePanelToggle.removeEventListener('click', onPagePanelToggle);
   undoButton.removeEventListener('click', onUndoClick);
   redoButton.removeEventListener('click', onRedoClick);
-  agentStatus.removeEventListener('click', openAgentConnectionSettings);
-  document.removeEventListener('pointerdown', onAgentPanelOutsidePointer);
-  document.removeEventListener('keydown', onAgentPanelKeydown);
+  solidifyButton.removeEventListener('click', onSolidifyClick);
+  solidifyCancel.removeEventListener('click', closeSolidifyDialog);
+  solidifyExitWithout.removeEventListener('click', exitWorkspaceWithoutSolidifying);
+  solidifyConfirm.removeEventListener('click', onSolidifyConfirm);
+  if (navigateToWorkspaceHome) {
+    workspaceHomeButton.removeEventListener('click', navigateToWorkspaceHome);
+    exitEditorButton.removeEventListener('click', requestWorkspaceExit);
+  }
+  deckBindingRecheck.removeEventListener('click', reconcileDeckBinding);
+  deckBindingChoose.removeEventListener('click', chooseDeckBinding);
+  solidifyModal.destroy();
+  agentStatus.removeEventListener('click', openAgentTerminal);
+  document.removeEventListener('pointerdown', onTaskDrawerOutsidePointerDown, true);
+  document.removeEventListener('pointermove', onEditorPointerMove, true);
+  document.removeEventListener('keydown', onAgentTerminalKeydown);
   document.removeEventListener('keydown', onHistoryKeydown);
+  document.removeEventListener('keydown', onTemporaryRegionKeydown, true);
+  document.removeEventListener('keyup', onTemporaryRegionKeyup, true);
   window.removeEventListener('message', onFrameMessage);
   window.removeEventListener('pagehide', teardown);
   window.removeEventListener('unload', teardown);

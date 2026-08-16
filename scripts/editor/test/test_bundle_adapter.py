@@ -10,6 +10,10 @@ from pathlib import Path
 from unittest import mock
 
 
+if os.name == "nt":
+    raise unittest.SkipTest("bundle_adapter 的 POSIX dirfd 故障注入仅在 POSIX 运行")
+
+
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
     "bundle_adapter", ROOT / "scripts/editor/bundle_adapter.py"

@@ -44,7 +44,7 @@ deck 打开时默认**滚动模式**（鼠标滚轮浏览全部页）。**右上
 - `data-reveal="#id"` 可让某 build 元素显现时联动点亮另一个元素。
 - 活例：模板第 14 页；第 9 页（密集多栏）演示「一拍点亮一组」。
 
-## 3. 机制二：layer 层切换
+## 3. 机制二：layer 层切换（页内多画面的唯一协议）
 
 一个区域多个面板互斥切换（tab / 方案 / 阶段视图）：
 
@@ -64,6 +64,63 @@ deck 打开时默认**滚动模式**（鼠标滚轮浏览全部页）。**右上
 - **引擎规则**：组内当前 active = `data-step < level` 的按钮中 **data-step 最大者**；没有满足者就回到**组内第一个按钮**（默认层）。所以首个按钮不写 data-step，其余按 0,1,2… 递增。
 - 同组按钮 / 面板靠 `data-layer-group` 隔离，跨组互不干扰。**一页可以放多个组**：按钮挂 data-step 的组并入 build 点击线，全部不挂的组则完全靠手点（第 18 页更进一步演示了「build 走完后由某组接管点击」——那是该页运行时按 data-label 定制的逻辑，复制需同步改运行时判断，见 `template-pages.md` 第 18 页条目）。
 - 活例：模板第 15 页（4 标签一组）、第 18 页（一页两组）。
+
+目录、标签页、方案对比、阶段视图、同一页的“下一屏”等功能，本质上都是页内互斥画面，**全部使用这一套 layer 协议**。三套模板的目录页也是活例：组名统一为 `toc`。模板画廊里的四个按钮 / 面板只是示例；新建，或修改涉及目录 / 章节结构时，必须按当前实际大纲重建为真实章数，并让全部按钮、面板从首屏开始固定存在于 DOM。
+
+### 3.1 稳定 DOM 契约
+
+1. 每个状态必须同时有一个按钮和一个面板，二者 `data-layer-group` 与 key 完全一致；每组恰有一个默认按钮和默认面板带 `data-active`。
+2. 按钮、面板和被编辑器定位的业务元素必须在页面初始 DOM 中固定存在。切换状态只允许增删 `data-active`，不得在点击时通过 `innerHTML` / `outerHTML` / `replaceChildren` 重建整组内容。
+3. 不得为同类功能再造 `_cur`、`_stepView`、`data-mod` 等私有状态机。`data-step` 只负责把 layer 纳入放映节拍，当前画面仍以 `data-active` 为唯一权威。
+4. 动态图表可以在初始化时向既有面板内部填充一次内容，但不能在状态切换时替换按钮、面板或整页根节点；需要频繁更新数据时，只修改既有子节点的文本、属性或绘图数据。
+5. 历史 Deck 的 `data-mod` 只由公共运行时和编辑器兼容读取；新模板、新页面和 Agent 生成代码不得再写这种结构。
+
+这个契约让四条工具链共用同一状态语义：放映引擎按 level 推进、编辑器随区域任务保存/恢复画面、`steps.mjs` 逐拍验证、`html2pptx` 逐状态展开。任何自建状态机都会绕开至少一条工具链。
+
+### 3.2 新建与目录结构修改共用的自适应契约
+
+目录不是“替换四个占位标题”即可完成。新建 Deck 一律执行本节；修改已有 Deck 时，只要涉及章数、章名、章节目标、页序、目录 DOM 或目录动画，也执行完全相同的契约。当前确认大纲的每章都要同时落到导航、目录 DOM 和专属动画：
+
+- 数量严格相等：`chapters[]`、`data-layer-btn`、`data-layer-panel`、`data-toc-visual-index`、`tocBuilders` 都等于实际章数。
+- key 使用 `chapter-01`、`chapter-02`…；首章按钮 / 面板唯一带 `data-active` 且按钮不写 `data-step`，后续按钮从 `data-step="0"` 连续编号。
+- 每个按钮、面板、动画容器都写同一个 `data-toc-chapter-id`；按钮的 `.toc-layer-name` 与面板的 `data-toc-title` 写真实章名，动画容器的 `data-toc-animation-topic` 写本章目标。
+- 每章新建一个具名动画函数，返回的 SVG / HTML 根节点同时写 `data-toc-animation-chapter` 与 `data-toc-animation-topic`。动画应直接表达本章对象、关系或过程；不能保留模板的 `animNN` / `animAlgo` / `animMethod` / `animInfra`，不能只改函数名，也不能给不同章节返回同一画面。
+- 若实际章数与模板示例不同，可在目录外层框内调整间距或分栏，但不得靠低于字号下限的文字硬塞；最后由 overflow 和逐拍截图共同验收。
+
+最小结构示例：
+
+```html
+<button data-layer-btn="chapter-01" data-layer-group="toc"
+  data-toc-chapter-id="context" data-active>
+  <span class="toc-layer-name">背景与约束</span>
+</button>
+<div data-layer-panel="chapter-01" data-layer-group="toc"
+  data-toc-chapter-id="context" data-toc-title="背景与约束" data-active>
+  <div data-toc-visual-index="0" data-toc-chapter-id="context"
+    data-toc-animation-topic="讲清适用边界"></div>
+</div>
+<script>
+const tocContext = () => {
+  return '<svg data-toc-animation-chapter="context" data-toc-animation-topic="讲清适用边界">…</svg>';
+};
+const tocBuilders = [tocContext];
+</script>
+```
+
+Editor 新建流程会从已确认大纲自动写出 `*.toc-contract.json`。直接使用 Skill 新建，或修改已有 Deck 的目录 / 章节结构时，也要写入或更新同格式文件：
+
+```json
+{"version":1,"chapters":[{"chapterId":"context","title":"背景与约束","objective":"讲清适用边界"}]}
+```
+
+完成后必须运行两道目录专属校验：
+
+```bash
+python3 scripts/verify/toc_contract.py my-deck.html \
+  --contract my-deck.toc-contract.json \
+  --template assets/training-deck.html
+node scripts/verify/steps.mjs my-deck.html 目录 /tmp/toc-steps
+```
 
 ## 4. 机制三：SMIL 连续运动
 

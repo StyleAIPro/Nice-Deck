@@ -1,18 +1,113 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { isIP } from 'node:net';
-import { readFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, realpath } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WebSocket, WebSocketServer } from 'ws';
 import { buildOpenCommand, startServer } from './server.mjs';
+import { isMainModule } from './main-module.mjs';
+import { AgentTerminalSession } from './agent-terminal-session.mjs';
+import {
+  DraftAgentConversationStore,
+  discoverTerminalConversation,
+} from './agent-terminal-conversation-store.mjs';
+import { createRecentDeckStore } from './recent-deck-store.mjs';
+import { createWorkHistoryStore } from './work-history-store.mjs';
+import { createWorkCatalog } from './work-catalog.mjs';
+import {
+  DeckCreationWorkspace,
+  buildCreationInitializationPrompt,
+  buildCreationResumePrompt,
+} from './deck-creation-workspace.mjs';
+import { CreationManagedDeck } from './creation-managed-deck.mjs';
+import {
+  assertProjectRootIdentity,
+  resolveProjectRoot,
+  resolveSelectedProjectRoot,
+} from './agent-workspace/project-root.mjs';
+import { isAgentProviderId } from './agent-provider-registry.mjs';
+import { defaultPythonExecutable, pythonUtf8SpawnOptions } from './python-utf8.mjs';
+import { buildHelpCatalog } from './help-catalog.mjs';
+import {
+  inspectEnvironment as inspectEnvironmentWithPython,
+  inspectInstallation as inspectInstallationWithPython,
+} from './environment-doctor.mjs';
 
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
+const DEFAULT_PYTHON_EXECUTABLE = defaultPythonExecutable();
+
+async function canonicalDeckLocator(value) {
+  try { return await realpath(value); }
+  catch {
+    const parent = await realpath(dirname(value)).catch(() => resolve(dirname(value)));
+    return join(parent, basename(value));
+  }
+}
 const APP_PUBLIC_DIR = join(EDITOR_DIR, 'app-public');
 const APP_ASSETS = new Map([
   ['/app/app.css', { path:join(APP_PUBLIC_DIR, 'app.css'), type:'text/css; charset=utf-8' }],
   ['/app/app.mjs', { path:join(APP_PUBLIC_DIR, 'app.mjs'), type:'text/javascript; charset=utf-8' }],
+  ['/app/support-center.mjs', {
+    path:join(APP_PUBLIC_DIR, 'support-center.mjs'), type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/launcher-lease-client.mjs', {
+    path:join(EDITOR_DIR, 'public/launcher-lease-client.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/liquid-ether-background.mjs', {
+    path:join(APP_PUBLIC_DIR, 'liquid-ether-background.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/three.module.min.js', {
+    path:join(PROJECT_DIR, 'node_modules/three/build/three.module.min.js'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/three.core.min.js', {
+    path:join(PROJECT_DIR, 'node_modules/three/build/three.core.min.js'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/native-controls.mjs', {
+    path:join(EDITOR_DIR, 'public/native-controls.mjs'), type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/pill-nav.mjs', {
+    path:join(EDITOR_DIR, 'public/pill-nav.mjs'), type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/pill-nav.css', {
+    path:join(EDITOR_DIR, 'public/pill-nav.css'), type:'text/css; charset=utf-8',
+  }],
+  ['/app/create-deck-icon.png', {
+    path:join(APP_PUBLIC_DIR, 'create-deck-icon.png'), type:'image/png',
+  }],
+  ['/app/edit-deck-icon.png', {
+    path:join(APP_PUBLIC_DIR, 'edit-deck-icon.png'), type:'image/png',
+  }],
+  ['/app/agent-terminal-panel.mjs', {
+    path:join(EDITOR_DIR, 'public/agent-terminal-panel.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/agent-provider-registry.mjs', {
+    path:join(EDITOR_DIR, 'agent-provider-registry.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/agent-terminal-panel.css', {
+    path:join(EDITOR_DIR, 'public/agent-terminal-panel.css'),
+    type:'text/css; charset=utf-8',
+  }],
+  ['/app/workspace-switcher.mjs', {
+    path:join(EDITOR_DIR, 'public/workspace-switcher.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/xterm.js', {
+    path:join(PROJECT_DIR, 'node_modules/@xterm/xterm/lib/xterm.js'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/xterm.css', {
+    path:join(PROJECT_DIR, 'node_modules/@xterm/xterm/css/xterm.css'),
+    type:'text/css; charset=utf-8',
+  }],
   ['/app/huawei-logo.png', {
     path:join(PROJECT_DIR, 'assets/huawei-refs/logos/huawei-横版logo-透明.png'),
     type:'image/png',
@@ -34,6 +129,24 @@ function tokenMatches(actual, expected) {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+function authCookieName(token) {
+  const sessionId = createHash('sha256').update(token).digest('hex').slice(0, 16);
+  return `huawei_deck_app_${sessionId}`;
+}
+
+function cookieValue(request, name) {
+  for (const part of (request.headers.cookie ?? '').split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 function sendJson(response, status, body) {
   response.writeHead(status, {
     'cache-control':'no-store',
@@ -47,16 +160,37 @@ function pickerError(message, code = 'PICK_FAILED') {
   return Object.assign(new Error(message), { code });
 }
 
-export function pickDeckWithSystemPicker({
-  pythonExecutable = 'python3',
+async function readJson(request, maximum = 32 * 1024) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > maximum) throw Object.assign(new Error('请求体过大'), { code:'BODY_TOO_LARGE' });
+    chunks.push(chunk);
+  }
+  if (!chunks.length) return {};
+  const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw Object.assign(new Error('请求体必须是 JSON 对象'), { code:'INVALID_BODY' });
+  }
+  return value;
+}
+
+function pickPathWithSystemPicker({
+  pythonExecutable = DEFAULT_PYTHON_EXECUTABLE,
+  pickerFlag,
+  resultKey,
+  resultLabel,
   signal,
   spawnProcess = spawn,
 } = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawnProcess(
       pythonExecutable,
-      [join(PROJECT_DIR, 'scripts/deck-editor.py'), '--pick-only'],
-      { cwd:PROJECT_DIR, stdio:['ignore', 'pipe', 'pipe'], signal },
+      [join(PROJECT_DIR, 'scripts/deck-editor.py'), pickerFlag],
+      pythonUtf8SpawnOptions({
+        cwd:PROJECT_DIR, stdio:['ignore', 'pipe', 'pipe'], signal,
+      }),
     );
     const stdout = [];
     const stderr = [];
@@ -86,57 +220,576 @@ export function pickDeckWithSystemPicker({
       }
       try {
         const payload = JSON.parse(Buffer.concat(stdout).toString('utf8'));
-        if (typeof payload.deckPath !== 'string' || !payload.deckPath) {
-          throw new Error('缺少 deckPath');
+        if (typeof payload[resultKey] !== 'string' || !payload[resultKey]) {
+          throw new Error(`缺少 ${resultKey}`);
         }
-        resolvePromise(payload.deckPath);
+        resolvePromise(payload[resultKey]);
       } catch (error) {
-        reject(pickerError(`无法解析文件选择结果：${error.message}`));
+        reject(pickerError(`无法解析${resultLabel}选择结果：${error.message}`));
       }
     });
   });
+}
+
+export function pickDeckWithSystemPicker(options = {}) {
+  return pickPathWithSystemPicker({
+    ...options,
+    pickerFlag:'--pick-only',
+    resultKey:'deckPath',
+    resultLabel:'文件',
+  });
+}
+
+export function pickProjectDirectoryWithSystemPicker(options = {}) {
+  return pickPathWithSystemPicker({
+    ...options,
+    pickerFlag:'--pick-directory-only',
+    resultKey:'directoryPath',
+    resultLabel:'目录',
+  });
+}
+
+export async function createOnboardingSample({
+  parentDirectory,
+  sourceDeck = join(PROJECT_DIR, 'assets/training-deck.html'),
+} = {}) {
+  if (typeof parentDirectory !== 'string' || !parentDirectory) {
+    throw Object.assign(new Error('示例项目目录无效'), { code:'INVALID_SAMPLE_DIRECTORY' });
+  }
+  const parent = await realpath(parentDirectory);
+  const directory = await mkdtemp(join(parent, 'Huawei Deck 示例-'));
+  const deckPath = join(directory, 'Huawei Deck 示例.html');
+  await copyFile(sourceDeck, deckPath);
+  return { projectRoot:directory, deckPath, deckName:basename(deckPath) };
 }
 
 export async function startAppServer({
   host = '127.0.0.1',
   port = 0,
   token = randomUUID(),
-  pythonExecutable = 'python3',
+  pythonExecutable = DEFAULT_PYTHON_EXECUTABLE,
   pickDeck = options => pickDeckWithSystemPicker({ pythonExecutable, ...options }),
+  pickAgentProjectDirectory = options => pickProjectDirectoryWithSystemPicker({
+    pythonExecutable, ...options,
+  }),
+  resolveAgentProject = options => resolveProjectRoot(options),
+  assertAgentProject = project => assertProjectRootIdentity(project),
+  resolveCreationProject = options => resolveSelectedProjectRoot(options),
+  createCreationWorkspace = options => DeckCreationWorkspace.create(options),
+  openCreationWorkspace = options => DeckCreationWorkspace.open(options),
+  createAgentTerminal = options => new AgentTerminalSession(options),
+  loadHelpCatalog = () => buildHelpCatalog({ projectRoot:PROJECT_DIR }),
+  inspectEnvironment = options => inspectEnvironmentWithPython({
+    pythonExecutable, ...options,
+  }),
+  inspectInstallation = options => inspectInstallationWithPython({
+    pythonExecutable, ...options,
+  }),
+  createSampleDeck = options => createOnboardingSample(options),
+  recentDeckStore = createRecentDeckStore({
+    discoveryRoots:[join(PROJECT_DIR, 'Deck-Projects')],
+  }),
+  workHistoryStore = createWorkHistoryStore({
+    discoveryRoots:[join(PROJECT_DIR, 'Deck-Projects')],
+    recentDeckStore,
+  }),
+  workCatalog = null,
   startEditor = options => startServer(options),
+  startCreationEditor = null,
   editorCloseGraceMs = 10_000,
+  creationClientCloseGraceMs = 10_000,
+  launcherClientCloseGraceMs = 5_000,
+  launcherLeaseHandshakeMs = 15_000,
   agentProvider = 'codex',
 } = {}) {
   host = loopbackHost(host);
+  if (!isAgentProviderId(agentProvider)) {
+    throw new TypeError(`Agent provider 不受支持：${agentProvider}`);
+  }
+  const activeWorkCatalog = workCatalog ?? createWorkCatalog({
+    legacyHistory:workHistoryStore,
+    filePath:typeof workHistoryStore.filePath === 'string'
+      ? join(dirname(workHistoryStore.filePath), 'work-catalog.json')
+      : null,
+  });
   const urlHost = host.includes(':') ? `[${host}]` : host;
   const appHtml = await readFile(join(APP_PUBLIC_DIR, 'index.html'), 'utf8');
   let state = 'idle';
   let serviceOrigin = '';
   let editorApp = null;
   let activePicker = null;
+  let candidate = null;
+  let creationCandidate = null;
+  let creationWorkspace = null;
+  let creationTerminal = null;
+  let creationPickerPreviousState = null;
+  let deckPickerPreviousState = null;
+  let handoffEditorUrl = null;
+  let selectionRevision = 0;
   let launcherClosePromise = null;
   let appClosePromise = null;
+  let creationClientCloseTimer = null;
+  let launcherClientCloseTimer = null;
+  const launcherClientLeases = new Map();
+  const activeLauncherClientLeases = new Map();
+  const launcherLeaseSockets = new Map();
+  const launcherLeaseHandshakeTimers = new Map();
+  let activeLauncherClientLease = null;
+  const creationRuntimes = new Map();
+  const editingRuntimes = new Map();
+  let activeCreationRuntimeKey = null;
+  let activeEditingRuntimeKey = null;
+
+  const eventSockets = new WebSocketServer({ noServer:true, maxPayload:64 * 1024 });
+  const terminalSockets = new WebSocketServer({ noServer:true, maxPayload:128 * 1024 });
+  const launcherSockets = new WebSocketServer({ noServer:true, maxPayload:1024 });
+
+  if (!Number.isSafeInteger(launcherClientCloseGraceMs) || launcherClientCloseGraceMs < 0) {
+    throw new TypeError('launcherClientCloseGraceMs 必须为非负整数');
+  }
+  if (!Number.isSafeInteger(launcherLeaseHandshakeMs) || launcherLeaseHandshakeMs < 1) {
+    throw new TypeError('launcherLeaseHandshakeMs 必须为正整数');
+  }
+
+  const broadcastCreation = event => {
+    const message = JSON.stringify(event);
+    for (const client of eventSockets.clients) {
+      if (client.readyState === WebSocket.OPEN) client.send(message);
+    }
+  };
+
+  const cancelCreationClientClose = () => {
+    clearTimeout(creationClientCloseTimer);
+    creationClientCloseTimer = null;
+  };
+  const cancelLauncherClientClose = () => {
+    clearTimeout(launcherClientCloseTimer);
+    launcherClientCloseTimer = null;
+  };
+  const clientLeaseMatches = (left, right) => Boolean(
+    left && right && left.clientId === right.clientId && left.sequence === right.sequence
+  );
+  const clientLeaseKey = ({ clientId, sequence }) => `${clientId}\0${sequence}`;
+  const cancelLauncherLeaseHandshake = lease => {
+    const key = clientLeaseKey(lease);
+    clearTimeout(launcherLeaseHandshakeTimers.get(key));
+    launcherLeaseHandshakeTimers.delete(key);
+  };
+  const registerLauncherClientLease = ({ clientId, sequence }) => {
+    const previous = launcherClientLeases.get(clientId) ?? 0;
+    if (sequence < previous) return { staleLease:true };
+    launcherClientLeases.set(clientId, Math.max(previous, sequence));
+    activeLauncherClientLeases.set(clientId, sequence);
+    activeLauncherClientLease = { clientId, sequence };
+    cancelCreationClientClose();
+    cancelLauncherClientClose();
+    const lease = { clientId, sequence };
+    const key = clientLeaseKey(lease);
+    if ((launcherLeaseSockets.get(key)?.size ?? 0) === 0) {
+      cancelLauncherLeaseHandshake(lease);
+      const timer = setTimeout(() => {
+        launcherLeaseHandshakeTimers.delete(key);
+        if ((launcherLeaseSockets.get(key)?.size ?? 0) === 0) {
+          scheduleLauncherClientClose(lease);
+        }
+      }, launcherLeaseHandshakeMs);
+      timer.unref?.();
+      launcherLeaseHandshakeTimers.set(key, timer);
+    }
+    return { staleLease:false };
+  };
+  const scheduleLauncherClientClose = ({ clientId = null, sequence = null } = {}) => {
+    if (launcherClosePromise || appClosePromise) return;
+    const requestedLease = clientId && Number.isSafeInteger(sequence)
+      ? { clientId, sequence } : activeLauncherClientLease;
+    if (requestedLease
+      && (launcherClientLeases.get(requestedLease.clientId) ?? -1) > requestedLease.sequence) return;
+    if (requestedLease) {
+      if (activeLauncherClientLeases.get(requestedLease.clientId) !== requestedLease.sequence) return;
+      cancelLauncherLeaseHandshake(requestedLease);
+      activeLauncherClientLeases.delete(requestedLease.clientId);
+      if (clientLeaseMatches(requestedLease, activeLauncherClientLease)) {
+        const fallback = [...activeLauncherClientLeases.entries()].at(-1);
+        activeLauncherClientLease = fallback
+          ? { clientId:fallback[0], sequence:fallback[1] } : null;
+      }
+    }
+    if (activeLauncherClientLeases.size > 0) return;
+    cancelLauncherClientClose();
+    launcherClientCloseTimer = setTimeout(() => {
+      launcherClientCloseTimer = null;
+      if (activeLauncherClientLeases.size > 0) return;
+      void close().catch(() => {});
+    }, launcherClientCloseGraceMs);
+    launcherClientCloseTimer.unref?.();
+  };
+  const scheduleCreationClientClose = () => {
+    if (state !== 'building' || appClosePromise) return;
+    cancelCreationClientClose();
+    creationClientCloseTimer = setTimeout(() => {
+      creationClientCloseTimer = null;
+      const hasClient = [...eventSockets.clients].some(client => client.readyState === WebSocket.OPEN);
+      if (!hasClient && activeLauncherClientLeases.size === 0 && state === 'building') {
+        void close().catch(() => {});
+      }
+    }, creationClientCloseGraceMs);
+    creationClientCloseTimer.unref?.();
+  };
+
+  const creationRuntimeKey = ({ projectRoot, draftId }) => (
+    `${resolve(projectRoot)}\0${draftId}`
+  );
+  const deckRuntimeKey = async (deckPath, deckId = null) => (
+    deckId ?? await realpath(deckPath).catch(() => resolve(deckPath))
+  );
+  const activeCreationRuntime = () => (
+    activeCreationRuntimeKey ? creationRuntimes.get(activeCreationRuntimeKey) ?? null : null
+  );
+  const activateCreationRuntime = runtime => {
+    activeCreationRuntimeKey = runtime.key;
+    activeEditingRuntimeKey = null;
+    creationWorkspace = runtime.workspace;
+    creationTerminal = runtime.terminal;
+    creationCandidate = runtime.candidate;
+    editorApp = null;
+    handoffEditorUrl = null;
+  };
+  const activateEditingRuntime = runtime => {
+    runtime.editorUrl = editorUrlWithWorkspaceNavigation(
+      runtime.app,
+      runtime.terminalHandedOff ? 'creation' : 'editing',
+    );
+    activeEditingRuntimeKey = runtime.key;
+    activeCreationRuntimeKey = null;
+    editorApp = runtime.app;
+    candidate = runtime.candidate;
+    creationWorkspace = null;
+    creationTerminal = null;
+    creationCandidate = null;
+    handoffEditorUrl = runtime.editorUrl;
+  };
+  const parkWorkspace = () => {
+    activeCreationRuntimeKey = null;
+    activeEditingRuntimeKey = null;
+    editorApp = null;
+    creationWorkspace = null;
+    creationTerminal = null;
+    creationCandidate = null;
+    handoffEditorUrl = null;
+  };
+  const findCreationRuntimeByCapability = bearer => {
+    if (!bearer) return null;
+    for (const runtime of creationRuntimes.values()) {
+      if (runtime.workspace?.capabilityToken
+        && tokenMatches(bearer, runtime.workspace.capabilityToken)) return runtime;
+    }
+    return null;
+  };
+  const findEditingRuntime = ({ deckId = null, deckPath = null } = {}) => {
+    if (deckId && editingRuntimes.has(deckId)) return editingRuntimes.get(deckId);
+    const normalizedPath = deckPath ? resolve(deckPath) : null;
+    for (const runtime of editingRuntimes.values()) {
+      if (deckId && runtime.candidate?.deckId === deckId) return runtime;
+      if (normalizedPath && runtime.key === normalizedPath) return runtime;
+      const runtimePath = runtime.app?.deckPath ?? runtime.deckPath ?? runtime.candidate?.deckPath;
+      if (normalizedPath && runtimePath && resolve(runtimePath) === normalizedPath) return runtime;
+    }
+    return null;
+  };
+  const runtimeAwareHistory = async () => {
+    const history = await activeWorkCatalog.list();
+    return {
+      ...history,
+      creation:history.creation.map(entry => {
+        const key = creationRuntimeKey(entry);
+        if (!creationRuntimes.has(key)) return entry;
+        return {
+          ...entry,
+          locked:false,
+          runtimeState:key === activeCreationRuntimeKey ? 'foreground' : 'background',
+        };
+      }),
+      editing:history.editing.map(entry => {
+        const runtime = findEditingRuntime(entry);
+        if (!runtime) return entry;
+        return {
+          ...entry,
+          runtimeState:runtime.key === activeEditingRuntimeKey ? 'foreground' : 'background',
+        };
+      }),
+    };
+  };
+  const workItemForCreation = async snapshot => {
+    const history = await activeWorkCatalog.list();
+    return history.creation.find(entry => (
+      entry.draftId === snapshot.draftId
+      && resolve(entry.projectRoot) === resolve(snapshot.projectRoot)
+    )) ?? null;
+  };
+
+  const attachCreationRuntime = async ({ workspace, project, provider, resumed = false }) => {
+    const runtime = {
+      key:creationRuntimeKey({ projectRoot:project.path, draftId:workspace.draftId }),
+      workspace,
+      terminal:null,
+      unsubscribe:null,
+      candidate:{
+      nonce:randomUUID(),
+      revision:selectionRevision += 1,
+      project,
+      provider,
+      },
+    };
+    const conversationStore = workspace.draftDir ? new DraftAgentConversationStore({
+      draftDir:workspace.draftDir,
+      taskId:workspace.draftId,
+      projectRoot:project.path,
+    }) : null;
+    const terminal = createAgentTerminal({
+      projectRoot:project.path,
+      cwd:project.identity.originalPath,
+      provider,
+      environment:{
+        ...process.env,
+        HUAWEI_DECK_CREATION_URL:serviceOrigin,
+        HUAWEI_DECK_CREATION_CAPABILITY_FILE:workspace.capabilityPath,
+      },
+      initialPrompt:() => resumed
+        ? buildCreationResumePrompt({
+            snapshot:workspace.snapshot(), capabilityPath:workspace.capabilityPath,
+          })
+        : buildCreationInitializationPrompt({
+            projectRoot:project.path, capabilityPath:workspace.capabilityPath,
+          }),
+      resolveConversation:conversationStore
+        ? (selectedProvider, options) => conversationStore.resolve(selectedProvider, options)
+        : async () => null,
+      identifyConversation:discoverTerminalConversation,
+      onConversationStarted:conversationStore
+        ? (selectedProvider, conversationId) => conversationStore.markStarted(
+            selectedProvider, conversationId,
+          )
+        : async () => {},
+      onProviderChange:selectedProvider => {
+        runtime.candidate.provider = selectedProvider;
+      },
+      onStateChange:terminalState => {
+        if (activeCreationRuntimeKey !== runtime.key) return;
+        broadcastCreation({
+          type:'agent-terminal-updated',
+          revision:workspace.snapshot().revision,
+          payload:terminalState,
+        });
+      },
+    });
+    runtime.terminal = terminal;
+    try {
+      await workspace.attachTerminal(terminal);
+      runtime.unsubscribe = workspace.subscribe(event => {
+        if (activeCreationRuntimeKey === runtime.key) broadcastCreation(event);
+      });
+      creationRuntimes.set(runtime.key, runtime);
+      activateCreationRuntime(runtime);
+    } catch (error) {
+      runtime.unsubscribe?.();
+      await terminal.close?.().catch(() => {});
+      throw error;
+    }
+    void terminal.start({ provider }).catch(() => {
+      // 终端失败不能阻断可持久化的 Draft 工作区。
+    });
+    return runtime;
+  };
+
+  const workspaceAppUrl = () => {
+    const url = new URL('/app/', serviceOrigin);
+    url.searchParams.set('token', token);
+    if (activeLauncherClientLease) {
+      url.searchParams.set('clientId', activeLauncherClientLease.clientId);
+      url.searchParams.set('sequence', String(activeLauncherClientLease.sequence));
+    }
+    return url.href;
+  };
+  const editorUrlWithWorkspaceNavigation = (app, kind) => {
+    const url = new URL(`${app.url}/editor/`);
+    url.searchParams.set('token', app.token);
+    url.searchParams.set('editorToken', app.editorToken);
+    url.searchParams.set('workspaceUrl', workspaceAppUrl());
+    url.searchParams.set('workspaceKind', kind);
+    return url.href;
+  };
+  const openCreationManagedDeck = options => CreationManagedDeck.open({
+    ...options,
+    editorCloseGraceMs,
+    startEditor:startCreationEditor ?? startEditor,
+    workspaceHistoryProvider:runtimeAwareHistory,
+    onEditorClose:({ editor }) => {
+      const runtime = [...editingRuntimes.values()].find(value => value.app === editor);
+      if (!runtime) return;
+      editingRuntimes.delete(runtime.key);
+      void runtime.terminal?.close?.().catch(() => {});
+      if (activeEditingRuntimeKey === runtime.key) {
+        activeEditingRuntimeKey = null;
+        editorApp = null;
+      }
+    },
+  });
+  const startDeckEditor = async (selectedCandidate, provider) => {
+    await workHistoryStore.recordDeck({
+      deckPath:selectedCandidate.deckPath,
+      provider,
+    }).catch(() => {});
+    const history = await activeWorkCatalog.list();
+    const canonicalDeckPath = await realpath(selectedCandidate.deckPath)
+      .catch(() => resolve(selectedCandidate.deckPath));
+    const workItem = history.editing.find(entry => (
+      entry.deckPath === canonicalDeckPath
+    )) ?? null;
+    if (workItem) {
+      selectedCandidate.workId = workItem.workId;
+      selectedCandidate.deckId = workItem.deckId;
+      selectedCandidate.binding = workItem.binding;
+    }
+    const key = await deckRuntimeKey(selectedCandidate.deckPath, selectedCandidate.deckId);
+    const existing = findEditingRuntime({
+      deckId:selectedCandidate.deckId,
+      deckPath:selectedCandidate.deckPath,
+    });
+    if (existing) {
+      activateEditingRuntime(existing);
+      return existing.editorUrl;
+    }
+    let runtime = null;
+    const app = await startEditor({
+      deckPath:selectedCandidate.deckPath,
+      host,
+      port:0,
+      openBrowser:false,
+      exitWhenEditorCloses:false,
+      editorCloseGraceMs,
+      agentProvider:provider,
+      agentThreadId:null,
+      agentProjectRoot:selectedCandidate.project.path,
+      agentTerminalCwd:selectedCandidate.project.identity.originalPath,
+      autoStartAgentTerminal:true,
+      pythonExecutable,
+      workspaceHistoryProvider:runtimeAwareHistory,
+      deckId:selectedCandidate.deckId,
+      deckBinding:selectedCandidate.binding,
+      renameWorkItem:input => activeWorkCatalog.rename(input),
+      updateWorkItemBinding:selectedCandidate.workId && selectedCandidate.deckId
+        ? binding => activeWorkCatalog.updateEditingBinding({
+            workId:selectedCandidate.workId,
+            deckId:selectedCandidate.deckId,
+            binding,
+          })
+        : null,
+      onClose:() => {
+        if (!runtime) return;
+        if (editingRuntimes.get(runtime.key) === runtime) editingRuntimes.delete(runtime.key);
+        if (activeEditingRuntimeKey === runtime.key) {
+          activeEditingRuntimeKey = null;
+          editorApp = null;
+        }
+      },
+    });
+    selectedCandidate.provider = provider;
+    runtime = {
+      key,
+      taskId:app.session?.sessionId ?? key,
+      deckPath:selectedCandidate.deckPath,
+      app,
+      candidate:selectedCandidate,
+      terminalHandedOff:false,
+      editorUrl:editorUrlWithWorkspaceNavigation(app, 'editing'),
+    };
+    editingRuntimes.set(key, runtime);
+    activateEditingRuntime(runtime);
+    return runtime.editorUrl;
+  };
+
+  const leaveWorkspace = async () => {
+    state = 'leaving-workspace';
+    cancelCreationClientClose();
+    parkWorkspace();
+    candidate = null;
+    creationPickerPreviousState = null;
+    deckPickerPreviousState = null;
+    selectionRevision += 1;
+    state = 'idle';
+  };
 
   const server = createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? '/', serviceOrigin || `http://${urlHost}`);
-    if (!tokenMatches(requestUrl.searchParams.get('token'), token)) {
+    const bearer = String(request.headers.authorization ?? '').match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+    const capabilityRuntime = findCreationRuntimeByCapability(bearer);
+    const browserAuthorized = tokenMatches(requestUrl.searchParams.get('token'), token)
+      || tokenMatches(cookieValue(request, authCookieName(token)), token);
+    const agentAuthorized = Boolean(
+      capabilityRuntime
+      && requestUrl.pathname.startsWith('/api/creation-draft'),
+    );
+    const requestCreationWorkspace = agentAuthorized
+      ? capabilityRuntime.workspace : creationWorkspace;
+    if (!browserAuthorized && !agentAuthorized) {
       sendJson(response, 403, { code:'FORBIDDEN', message:'导入页令牌无效' });
       return;
     }
 
     if (request.method === 'GET' && (requestUrl.pathname === '/' || requestUrl.pathname === '/app/')) {
+      cancelCreationClientClose();
+      cancelLauncherClientClose();
       const html = appHtml.replaceAll('__APP_TOKEN__', encodeURIComponent(token));
       response.writeHead(200, {
         'cache-control':'no-store',
         'content-security-policy':[
-          "default-src 'self'", "script-src 'self'", "style-src 'self'",
-          "img-src 'self' data:", "connect-src 'self'", "base-uri 'none'",
+          "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data:", "connect-src 'self'",
+          "frame-src 'self' http://127.0.0.1:* http://localhost:*",
+          "base-uri 'none'",
           "form-action 'none'", "frame-ancestors 'none'",
         ].join('; '),
         'content-type':'text/html; charset=utf-8',
+        'set-cookie':`${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`,
         'x-content-type-options':'nosniff',
       });
       response.end(html);
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/launcher-status') {
+      sendJson(response, 200, {
+        state,
+        activePageCount:activeLauncherClientLeases.size,
+        everConnected:launcherClientLeases.size > 0,
+      });
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/help-catalog') {
+      try {
+        sendJson(response, 200, await loadHelpCatalog());
+      } catch (error) {
+        sendJson(response, 500, {
+          code:'HELP_CATALOG_UNAVAILABLE', message:error.message || '无法读取帮助内容',
+        });
+      }
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/diagnostics') {
+      try {
+        const [installation, environment] = await Promise.all([
+          inspectInstallation({ repair:false }),
+          inspectEnvironment({ profiles:['full'], repair:false }),
+        ]);
+        sendJson(response, 200, { schemaVersion:1, installation, environment });
+      } catch (error) {
+        sendJson(response, 500, {
+          code:error.code || 'DIAGNOSTICS_UNAVAILABLE',
+          message:error.message || '无法读取安装与环境状态',
+        });
+      }
       return;
     }
 
@@ -159,29 +812,135 @@ export async function startAppServer({
     if (request.method === 'POST' && requestUrl.pathname === '/api/close') {
       response.writeHead(204, { 'cache-control':'no-store' });
       response.end();
-      if (state !== 'selected') state = 'closed';
-      setImmediate(() => void closeLauncher());
+      const clientId = requestUrl.searchParams.get('clientId');
+      const sequence = Number(requestUrl.searchParams.get('sequence'));
+      scheduleLauncherClientClose({
+        clientId:typeof clientId === 'string' && clientId ? clientId : null,
+        sequence:Number.isSafeInteger(sequence) ? sequence : null,
+      });
       return;
     }
 
-    if (request.method !== 'POST' || requestUrl.pathname !== '/api/choose-deck') {
+    if (request.method === 'POST' && requestUrl.pathname === '/api/shutdown') {
+      sendJson(response, 202, { status:'shutting-down' });
+      setImmediate(() => void close().catch(() => {}));
+      return;
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/client-connected'
+      && requestUrl.searchParams.has('clientId')) {
+      const clientId = requestUrl.searchParams.get('clientId');
+      const sequence = Number(requestUrl.searchParams.get('sequence'));
+      if (typeof clientId !== 'string' || !clientId
+        || !Number.isSafeInteger(sequence) || sequence < 1) {
+        sendJson(response, 400, { code:'INVALID_CLIENT_LEASE', message:'页面连接标识无效' });
+        return;
+      }
+      const previous = launcherClientLeases.get(clientId) ?? 0;
+      if (sequence < previous) {
+        sendJson(response, 200, { status:state, staleLease:true });
+        return;
+      }
+      registerLauncherClientLease({ clientId, sequence });
+      sendJson(response, 200, state === 'selected' && handoffEditorUrl
+        ? { status:state, editorUrl:handoffEditorUrl }
+        : { status:state });
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/creation-draft') {
+      if (!requestCreationWorkspace) {
+        sendJson(response, 404, { code:'CREATION_DRAFT_NOT_FOUND', message:'当前没有 Creation Draft' });
+        return;
+      }
+      sendJson(response, 200, requestCreationWorkspace.snapshot());
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/creation-draft/templates') {
+      if (!requestCreationWorkspace) {
+        sendJson(response, 404, { code:'CREATION_DRAFT_NOT_FOUND', message:'当前没有 Creation Draft' });
+        return;
+      }
+      sendJson(response, 200, requestCreationWorkspace.templates());
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/creation-deck-preview') {
+      if (!requestCreationWorkspace) {
+        sendJson(response, 404, { code:'CREATION_DRAFT_NOT_FOUND', message:'当前没有 Creation Draft' });
+        return;
+      }
+      const snapshot = requestCreationWorkspace.snapshot();
+      const deckPath = snapshot.previewDeck?.path
+        ?? requestCreationWorkspace.previewDeckPath?.()
+        ?? null;
+      if (!deckPath) {
+        sendJson(response, 404, { code:'CREATION_DECK_NOT_READY', message:'独立 Deck 尚未出现' });
+        return;
+      }
+      try {
+        const html = await readFile(deckPath, 'utf8');
+        response.writeHead(200, {
+          'cache-control':'no-store',
+          'content-security-policy':[
+            "default-src 'self' data: blob:",
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:",
+            "style-src 'self' 'unsafe-inline' data:",
+            "img-src 'self' data: blob:",
+            "font-src 'self' data:",
+            "connect-src 'none'",
+            "frame-ancestors 'self'",
+            "base-uri 'none'",
+            "form-action 'none'",
+          ].join('; '),
+          'content-type':'text/html; charset=utf-8',
+          'x-content-type-options':'nosniff',
+        });
+        response.end(html);
+      } catch (error) {
+        sendJson(response, 404, {
+          code:'CREATION_DECK_UNAVAILABLE',
+          message:error?.code === 'ENOENT' ? '独立 Deck 已移动或删除' : '无法读取独立 Deck',
+        });
+      }
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/recent-decks') {
+      try {
+        sendJson(response, 200, { version:1, decks:await recentDeckStore.list() });
+      } catch (error) {
+        sendJson(response, 500, {
+          code:'RECENT_DECKS_UNAVAILABLE', message:error.message || '无法读取最近修改',
+        });
+      }
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/work-history') {
+      try {
+        sendJson(response, 200, await runtimeAwareHistory());
+      } catch (error) {
+        sendJson(response, 500, {
+          code:'WORK_HISTORY_UNAVAILABLE', message:error.message || '无法读取可继续任务',
+        });
+      }
+      return;
+    }
+
+    if (request.method === 'GET' && ['/creation-events', '/agent-terminal'].includes(requestUrl.pathname)) {
+      response.setHeader('upgrade', 'websocket');
+      sendJson(response, 426, { code:'WEBSOCKET_UPGRADE_REQUIRED', message:'请使用 WebSocket 连接' });
+      return;
+    }
+
+    if (request.method !== 'POST') {
       sendJson(response, 404, { code:'NOT_FOUND', message:'接口不存在' });
       return;
     }
-    if (request.headers.origin !== serviceOrigin) {
+    if (!agentAuthorized && request.headers.origin !== serviceOrigin) {
       sendJson(response, 403, { code:'FORBIDDEN', message:'只接受导入页自身发起的请求' });
-      return;
-    }
-    if (state === 'choosing') {
-      sendJson(response, 409, {
-        code:'DECK_SELECTION_IN_PROGRESS', message:'系统文件选择器已经打开',
-      });
-      return;
-    }
-    if (state === 'selected') {
-      sendJson(response, 409, {
-        code:'DECK_ALREADY_SELECTED', message:'本次启动已经添加过一份 HTML',
-      });
       return;
     }
     if (state === 'closed') {
@@ -189,65 +948,907 @@ export async function startAppServer({
       return;
     }
 
-    state = 'choosing';
-    activePicker = new AbortController();
-    let deckPath;
+    const publicCandidate = status => ({
+      status,
+      candidateNonce:candidate.nonce,
+      selectionRevision:candidate.revision,
+      deckName:candidate.deckName,
+      projectRoot:{
+        path:candidate.project.path,
+        source:candidate.project.source,
+        needsConfirmation:candidate.project.needsConfirmation,
+        warning:candidate.project.warning,
+      },
+      provider:candidate.provider,
+      workId:candidate.workId ?? null,
+      deckId:candidate.deckId ?? null,
+    });
+    const publicCreationCandidate = status => ({
+      status,
+      candidateNonce:creationCandidate.nonce,
+      selectionRevision:creationCandidate.revision,
+      projectRoot:{
+        path:creationCandidate.project.path,
+        source:creationCandidate.project.source,
+        needsConfirmation:creationCandidate.project.needsConfirmation,
+        warning:creationCandidate.project.warning,
+      },
+      provider:creationCandidate.provider,
+    });
+    const requireCandidate = body => {
+      if (!candidate
+        || body.candidateNonce !== candidate.nonce
+        || body.selectionRevision !== candidate.revision) {
+        throw Object.assign(new Error('Deck 候选已变化，请重新选择'), {
+          code:'STALE_DECK_CANDIDATE', statusCode:409,
+        });
+      }
+      return candidate;
+    };
+
     try {
-      deckPath = await pickDeck({ signal:activePicker.signal });
+      if (requestUrl.pathname === '/api/diagnostics/repair') {
+        const body = await readJson(request);
+        if (body.kind === 'skill') {
+          sendJson(response, 200, {
+            kind:'skill', result:await inspectInstallation({ repair:true }),
+          });
+          return;
+        }
+        if (body.kind === 'profile'
+          && ['editor-core', 'verify', 'pptx-export', 'materials'].includes(body.profile)) {
+          sendJson(response, 200, {
+            kind:'profile', profile:body.profile,
+            result:await inspectEnvironment({ profiles:[body.profile], repair:true }),
+          });
+          return;
+        }
+        throw Object.assign(new Error('诊断修复目标无效'), {
+          code:'INVALID_DIAGNOSTIC_REPAIR', statusCode:400,
+        });
+      }
+
+      if (requestUrl.pathname === '/api/onboarding/sample') {
+        if (state !== 'idle') throw Object.assign(new Error('只能从首页创建示例项目'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        state = 'choosing-onboarding-directory';
+        const picker = new AbortController();
+        activePicker = picker;
+        let selectedPath;
+        try {
+          selectedPath = await pickAgentProjectDirectory({ signal:picker.signal });
+        } finally {
+          if (activePicker === picker) activePicker = null;
+        }
+        if (state === 'closed') {
+          response.destroy();
+          return;
+        }
+        if (selectedPath === null) {
+          state = 'idle';
+          sendJson(response, 200, { status:'cancelled' });
+          return;
+        }
+        const sample = await createSampleDeck({ parentDirectory:selectedPath });
+        const project = await resolveAgentProject({
+          deckPath:sample.deckPath,
+          explicitRoot:sample.projectRoot,
+        });
+        candidate = {
+          nonce:randomUUID(),
+          revision:selectionRevision += 1,
+          deckPath:sample.deckPath,
+          deckName:sample.deckName,
+          project,
+          provider:agentProvider,
+        };
+        state = 'deck-selected';
+        sendJson(response, 200, { ...publicCandidate('deck-selected'), sample:true });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/client-connected') {
+        const body = await readJson(request);
+        if (typeof body.clientId !== 'string' || !body.clientId
+          || !Number.isSafeInteger(body.sequence) || body.sequence < 1) {
+          throw Object.assign(new Error('页面连接标识无效'), {
+            code:'INVALID_CLIENT_LEASE', statusCode:400,
+          });
+        }
+        const registration = registerLauncherClientLease(body);
+        if (registration.staleLease) {
+          sendJson(response, 200, { status:state, staleLease:true });
+          return;
+        }
+        if (state === 'deck-selected' && candidate) {
+          sendJson(response, 200, publicCandidate('deck-selected'));
+        } else if (state === 'creation-project-selected' && creationCandidate) {
+          sendJson(response, 200, publicCreationCandidate('creation-project-selected'));
+        } else if (state === 'selected' && handoffEditorUrl) {
+          sendJson(response, 200, { status:'selected', editorUrl:handoffEditorUrl });
+        } else {
+          sendJson(response, 200, { status:state });
+        }
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/reset-selection') {
+        if (!['idle', 'deck-selected', 'creation-project-selected'].includes(state)) {
+          throw Object.assign(new Error('当前操作完成前不能返回首页'), {
+            code:'INVALID_APP_STATE', statusCode:409,
+          });
+        }
+        candidate = null;
+        creationCandidate = null;
+        creationPickerPreviousState = null;
+        deckPickerPreviousState = null;
+        selectionRevision += 1;
+        state = 'idle';
+        sendJson(response, 200, { status:'idle' });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/leave-workspace') {
+        const body = await readJson(request);
+        if (!['home', 'creation', 'editing'].includes(body.destination)) {
+          throw Object.assign(new Error('工作台导航目标无效'), {
+            code:'INVALID_WORKSPACE_DESTINATION', statusCode:400,
+          });
+        }
+        if (!['idle', 'building', 'selected'].includes(state)) {
+          throw Object.assign(new Error('当前操作完成前不能切换项目'), {
+            code:'INVALID_APP_STATE', statusCode:409,
+          });
+        }
+        if (state !== 'idle') await leaveWorkspace();
+        sendJson(response, 200, { status:'idle', destination:body.destination });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/work-history/dismiss') {
+        if (state !== 'idle') throw Object.assign(new Error('只能在首页删除任务记录'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        const body = await readJson(request);
+        const catalog = await activeWorkCatalog.list();
+        let workItem = [...catalog.creation, ...catalog.editing].find(
+          entry => entry.workId === body.workId,
+        );
+        if (body.kind === 'creation') {
+          if (typeof body.projectRoot !== 'string' || typeof body.draftId !== 'string') {
+            throw Object.assign(new Error('Creation 任务记录标识不完整'), {
+              code:'INVALID_WORK_HISTORY_ENTRY', statusCode:400,
+            });
+          }
+          await workHistoryStore.dismissCreation({
+            projectRoot:body.projectRoot,
+            draftId:body.draftId,
+          });
+          workItem ??= catalog.creation.find(entry => (
+            entry.projectRoot === resolve(body.projectRoot) && entry.draftId === body.draftId
+          ));
+        } else if (body.kind === 'editing') {
+          if (typeof body.deckPath !== 'string') {
+            throw Object.assign(new Error('Deck 任务记录路径不完整'), {
+              code:'INVALID_WORK_HISTORY_ENTRY', statusCode:400,
+            });
+          }
+          await workHistoryStore.dismissDeck(body.deckPath);
+          workItem ??= catalog.editing.find(entry => entry.deckPath === resolve(body.deckPath));
+        } else {
+          throw Object.assign(new Error('任务记录类型无效'), {
+            code:'INVALID_WORK_HISTORY_ENTRY', statusCode:400,
+          });
+        }
+        if (workItem) {
+          await activeWorkCatalog.dismiss({
+            workId:workItem.workId,
+            expectedRevision:body.expectedRevision ?? workItem.revision,
+          });
+        }
+        sendJson(response, 200, { status:'dismissed', kind:body.kind });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/work-items/rename') {
+        const body = await readJson(request);
+        const workItem = await activeWorkCatalog.rename({
+          workId:body.workId,
+          displayName:body.displayName,
+          expectedRevision:body.expectedRevision,
+        });
+        sendJson(response, 200, { status:'renamed', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/work-items/choose-rebind-file') {
+        if (state !== 'idle') throw Object.assign(new Error('当前不能重新绑定 Deck 文件'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        const body = await readJson(request);
+        const current = await activeWorkCatalog.resolve(body.workId);
+        if (current.kind !== 'editing') throw Object.assign(new Error('工作项不是可编辑 Deck'), {
+          code:'INVALID_WORK_ITEM_KIND', statusCode:400,
+        });
+        state = 'choosing-rebind';
+        const picker = new AbortController();
+        activePicker = picker;
+        let selectedPath;
+        try {
+          selectedPath = await pickDeck({ signal:picker.signal });
+        } finally {
+          if (activePicker === picker) activePicker = null;
+          if (state === 'choosing-rebind') state = 'idle';
+        }
+        if (selectedPath === null) {
+          sendJson(response, 200, { status:'cancelled', workItem:current });
+          return;
+        }
+        const workItem = await activeWorkCatalog.rebindEditing({
+          workId:current.workId,
+          candidatePath:selectedPath,
+          confirmation:'same-file',
+          expectedBindingRevision:current.binding.revision,
+        });
+        sendJson(response, 200, { status:'rebound', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/choose-recent-deck') {
+        if (state !== 'idle') throw Object.assign(new Error('当前不能加载最近 Deck'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        const body = await readJson(request);
+        const deckPath = await recentDeckStore.resolve(body.deckPath);
+        if (!deckPath) throw Object.assign(new Error('这份最近 Deck 已移动或删除'), {
+          code:'RECENT_DECK_NOT_FOUND', statusCode:404,
+        });
+        const project = await resolveAgentProject({
+          deckPath,
+          launchCwd:process.cwd(),
+        });
+        candidate = {
+          nonce:randomUUID(),
+          revision:selectionRevision += 1,
+          deckPath,
+          deckName:basename(deckPath),
+          project,
+          provider:agentProvider,
+        };
+        state = 'deck-selected';
+        sendJson(response, 200, publicCandidate('deck-selected'));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/resume-deck') {
+        if (!['idle', 'selected'].includes(state)) throw Object.assign(new Error('当前不能恢复 Deck 任务'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        const body = await readJson(request);
+        const resolvedWorkItem = typeof body.workId === 'string'
+          ? await activeWorkCatalog.resolve(body.workId)
+          : null;
+        if (resolvedWorkItem && resolvedWorkItem.kind !== 'editing') {
+          throw Object.assign(new Error('工作项不是可编辑 Deck'), {
+            code:'INVALID_WORK_ITEM_KIND', statusCode:400,
+          });
+        }
+        if (resolvedWorkItem && resolvedWorkItem.binding.state !== 'bound') {
+          throw Object.assign(new Error('这份 Deck 需要先重新绑定源文件'), {
+            code:'DECK_REBIND_REQUIRED', statusCode:409,
+            binding:resolvedWorkItem.binding,
+          });
+        }
+        const deckPath = resolvedWorkItem?.deckPath
+          ?? await workHistoryStore.resolveDeck(body.deckPath);
+        if (!deckPath) throw Object.assign(new Error('这份 Deck 已移动或删除'), {
+          code:'RECENT_DECK_NOT_FOUND', statusCode:404,
+        });
+        const catalogHistory = await activeWorkCatalog.list();
+        const comparableDeckPath = await canonicalDeckLocator(deckPath);
+        const catalogWorkItem = resolvedWorkItem
+          ?? catalogHistory.editing.find(item => item.deckPath === comparableDeckPath)
+          ?? null;
+        const runtimeKey = await deckRuntimeKey(deckPath, catalogWorkItem?.deckId);
+        const existingRuntime = findEditingRuntime({
+          deckId:catalogWorkItem?.deckId,
+          deckPath,
+        });
+        if (existingRuntime) {
+          activateEditingRuntime(existingRuntime);
+          state = 'selected';
+          sendJson(response, 200, {
+            ...publicCandidate('selected'),
+            editorUrl:existingRuntime.editorUrl,
+            resumed:true,
+            runtimeReused:true,
+          });
+          return;
+        }
+        if (state === 'selected') await leaveWorkspace();
+        const history = await runtimeAwareHistory();
+        const entry = catalogWorkItem
+          ?? history.editing.find(item => item.deckPath === comparableDeckPath) ?? {};
+        const selectedProvider = isAgentProviderId(entry.provider)
+          ? entry.provider : agentProvider;
+        const project = await resolveAgentProject({
+          deckPath,
+          persistedRoot:entry.projectRoot ?? null,
+          launchCwd:process.cwd(),
+        });
+        candidate = {
+          nonce:randomUUID(),
+          revision:selectionRevision += 1,
+          deckPath,
+          deckName:basename(deckPath),
+          project,
+          provider:selectedProvider,
+          workId:entry.workId ?? null,
+          deckId:entry.deckId ?? null,
+        };
+        if (project.needsConfirmation) {
+          state = 'deck-selected';
+          sendJson(response, 200, publicCandidate('deck-selected'));
+          return;
+        }
+        await assertAgentProject(project);
+        state = 'starting-editor';
+        let editorUrl;
+        try {
+          editorUrl = await startDeckEditor(candidate, selectedProvider);
+        } catch (error) {
+          candidate = null;
+          state = 'idle';
+          throw error;
+        }
+        state = 'selected';
+        sendJson(response, 200, { ...publicCandidate('selected'), editorUrl, resumed:true });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/choose-creation-project') {
+        if (state === 'choosing-creation-project') {
+          sendJson(response, 409, {
+            code:'PROJECT_SELECTION_IN_PROGRESS', message:'项目目录选择器已经打开',
+          });
+          return;
+        }
+        if (!['idle', 'creation-project-selected'].includes(state)) throw Object.assign(new Error('当前不能新建 Deck'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        const previousCreationState = state;
+        creationPickerPreviousState = previousCreationState;
+        state = 'choosing-creation-project';
+        const picker = new AbortController();
+        activePicker = picker;
+        let selectedPath;
+        try {
+          selectedPath = await pickAgentProjectDirectory({ signal:picker.signal });
+        } finally {
+          if (activePicker === picker) activePicker = null;
+        }
+        if (state === 'closed') {
+          response.destroy();
+          return;
+        }
+        if (selectedPath === null) {
+          state = previousCreationState;
+          creationPickerPreviousState = null;
+          sendJson(response, 200, previousCreationState === 'creation-project-selected'
+            ? publicCreationCandidate('cancelled')
+            : { status:'cancelled' });
+          return;
+        }
+        creationCandidate = {
+          nonce:randomUUID(),
+          revision:selectionRevision += 1,
+          project:await resolveCreationProject({ selectedPath }),
+          provider:agentProvider,
+        };
+        creationPickerPreviousState = null;
+        state = 'creation-project-selected';
+        sendJson(response, 200, publicCreationCandidate('creation-project-selected'));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/creation-drafts') {
+        const body = await readJson(request);
+        if (!creationCandidate
+          || body.candidateNonce !== creationCandidate.nonce
+          || body.selectionRevision !== creationCandidate.revision) {
+          throw Object.assign(new Error('项目目录候选已变化，请重新选择'), {
+            code:'STALE_PROJECT_CANDIDATE', statusCode:409,
+          });
+        }
+        if (state !== 'creation-project-selected') throw Object.assign(new Error('当前不能创建 Draft'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        if (!isAgentProviderId(body.provider)) {
+          throw Object.assign(new Error('Agent provider 不受支持'), {
+            code:'INVALID_AGENT_PROVIDER', statusCode:400,
+          });
+        }
+        if (creationCandidate.project.needsConfirmation && body.confirmProjectRoot !== true) {
+          throw Object.assign(new Error('项目目录范围过宽，需要明确确认'), {
+            code:'PROJECT_ROOT_CONFIRMATION_REQUIRED', statusCode:409,
+          });
+        }
+        await assertAgentProject(creationCandidate.project);
+        state = 'creating-draft';
+        try {
+          const workspace = await createCreationWorkspace({
+            projectRoot:creationCandidate.project.path,
+            provider:body.provider,
+            pythonExecutable,
+            openManagedDeck:openCreationManagedDeck,
+          });
+          const project = creationCandidate.project;
+          await attachCreationRuntime({
+            workspace, project, provider:body.provider, resumed:false,
+          });
+          await workHistoryStore.recordCreation({
+            projectRoot:project.path,
+            draftId:workspace.snapshot().draftId,
+            provider:body.provider,
+          }).catch(() => {});
+        } catch (error) {
+          state = 'creation-project-selected';
+          throw error;
+        }
+        creationCandidate.provider = body.provider;
+        state = 'building';
+        const workItem = await workItemForCreation(creationWorkspace.snapshot());
+        sendJson(response, 201, {
+          status:'building',
+          draft:creationWorkspace.snapshot(),
+          workItem,
+          templates:creationWorkspace.templates(),
+          terminal:creationTerminal.snapshot(),
+        });
+        scheduleCreationClientClose();
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/resume-creation-draft') {
+        if (state !== 'idle') throw Object.assign(new Error('当前不能恢复 Creation Draft'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        const body = await readJson(request);
+        const entry = await workHistoryStore.resolveCreation({
+          projectRoot:body.projectRoot,
+          draftId:body.draftId,
+        });
+        if (!entry) throw Object.assign(new Error('这份 Creation Draft 已移动或删除'), {
+          code:'CREATION_DRAFT_NOT_FOUND', statusCode:404,
+        });
+        const existingRuntime = creationRuntimes.get(creationRuntimeKey(entry));
+        if (existingRuntime) {
+          activateCreationRuntime(existingRuntime);
+          state = 'building';
+          await workHistoryStore.recordCreation({
+            projectRoot:entry.projectRoot,
+            draftId:entry.draftId,
+            provider:existingRuntime.candidate.provider,
+          }).catch(() => {});
+          sendJson(response, 200, {
+            status:'building',
+            resumed:true,
+            runtimeReused:true,
+            draft:existingRuntime.workspace.snapshot(),
+            workItem:await workItemForCreation(existingRuntime.workspace.snapshot()),
+            templates:existingRuntime.workspace.templates(),
+            terminal:existingRuntime.terminal.snapshot(),
+          });
+          return;
+        }
+        state = 'resuming-draft';
+        let workspace = null;
+        try {
+          const project = await resolveCreationProject({ selectedPath:entry.projectRoot });
+          await assertAgentProject(project);
+          workspace = await openCreationWorkspace({
+            projectRoot:entry.projectRoot,
+            draftId:entry.draftId,
+            pythonExecutable,
+            openManagedDeck:openCreationManagedDeck,
+          });
+          await attachCreationRuntime({
+            workspace,
+            project,
+            provider:entry.provider,
+            resumed:true,
+          });
+          await workHistoryStore.recordCreation({
+            projectRoot:entry.projectRoot,
+            draftId:entry.draftId,
+            provider:entry.provider,
+          }).catch(() => {});
+        } catch (error) {
+          await workspace?.close?.({ reason:'resume-failed' }).catch(() => {});
+          creationWorkspace = null;
+          creationTerminal = null;
+          creationCandidate = null;
+          state = 'idle';
+          throw error;
+        }
+        state = 'building';
+        const workItem = await workItemForCreation(creationWorkspace.snapshot());
+        sendJson(response, 200, {
+          status:'building',
+          resumed:true,
+          draft:creationWorkspace.snapshot(),
+          workItem,
+          templates:creationWorkspace.templates(),
+          terminal:creationTerminal.snapshot(),
+        });
+        scheduleCreationClientClose();
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/creation-draft/commands') {
+        if (!requestCreationWorkspace
+          || (!agentAuthorized && !['building', 'handing-off'].includes(state))) {
+          throw Object.assign(new Error('当前没有可修改的 Creation Draft'), {
+            code:'CREATION_DRAFT_NOT_FOUND', statusCode:404,
+          });
+        }
+        const command = await readJson(request);
+        const receipt = await requestCreationWorkspace.dispatch(command);
+        sendJson(response, 200, receipt);
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/creation-draft/open-editor') {
+        if (handoffEditorUrl) {
+          sendJson(response, 200, { status:'selected', editorUrl:handoffEditorUrl });
+          return;
+        }
+        if (!creationWorkspace || creationWorkspace.snapshot().phase !== 'ready') {
+          throw Object.assign(new Error('Deck 尚未生成并发布'), {
+            code:'CREATION_GATE_UNMET', statusCode:409,
+          });
+        }
+        state = 'handing-off';
+        const draft = creationWorkspace.snapshot();
+        const sourceRuntime = activeCreationRuntime();
+        let app;
+        let runtimeKey;
+        try {
+          runtimeKey = await deckRuntimeKey(draft.generation.publishedDeck);
+          app = creationWorkspace.takePublishedEditor();
+        } catch (error) {
+          state = 'building';
+          throw error;
+        }
+        const handoffCandidate = {
+          nonce:randomUUID(),
+          revision:selectionRevision += 1,
+          deckPath:runtimeKey,
+          deckName:basename(runtimeKey),
+          project:sourceRuntime?.candidate.project ?? {
+            path:draft.projectRoot,
+            source:'creation-draft',
+            needsConfirmation:false,
+            warning:null,
+            identity:{ originalPath:draft.projectRoot, realPath:draft.projectRoot },
+          },
+          provider:draft.provider,
+        };
+        const editingRuntime = {
+          key:runtimeKey,
+          taskId:app.session?.sessionId ?? runtimeKey,
+          deckPath:runtimeKey,
+          app,
+          terminal:creationTerminal,
+          candidate:handoffCandidate,
+          terminalHandedOff:true,
+          editorUrl:editorUrlWithWorkspaceNavigation(app, 'creation'),
+        };
+        editingRuntimes.set(runtimeKey, editingRuntime);
+        await workHistoryStore.recordDeck({
+          deckPath:draft.generation.publishedDeck,
+          provider:draft.provider,
+        }).catch(() => {});
+        await workHistoryStore.completeCreation({
+          projectRoot:draft.projectRoot,
+          draftId:draft.draftId,
+        }).catch(() => {});
+        sourceRuntime?.unsubscribe?.();
+        if (sourceRuntime) creationRuntimes.delete(sourceRuntime.key);
+        await sourceRuntime?.workspace.close({ reason:'handoff' });
+        activateEditingRuntime(editingRuntime);
+        state = 'selected';
+        sendJson(response, 200, { status:'selected', editorUrl:editingRuntime.editorUrl });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/choose-deck') {
+        if (state === 'choosing-deck') {
+          sendJson(response, 409, {
+            code:'DECK_SELECTION_IN_PROGRESS', message:'系统文件选择器已经打开',
+          });
+          return;
+        }
+        if (!['idle', 'deck-selected'].includes(state)) {
+          sendJson(response, 409, {
+            code:'INVALID_APP_STATE', message:'当前不能重新选择 Deck',
+          });
+          return;
+        }
+        const previousDeckState = state;
+        deckPickerPreviousState = previousDeckState;
+        state = 'choosing-deck';
+        const picker = new AbortController();
+        activePicker = picker;
+        let deckPath;
+        try {
+          deckPath = await pickDeck({ signal:picker.signal });
+        } finally {
+          if (activePicker === picker) activePicker = null;
+        }
+        if (state === 'closed') {
+          response.destroy();
+          return;
+        }
+        if (!deckPath) {
+          state = previousDeckState;
+          deckPickerPreviousState = null;
+          sendJson(response, 200, { status:'cancelled' });
+          return;
+        }
+        const project = await resolveAgentProject({
+          deckPath,
+          launchCwd:process.cwd(),
+        });
+        candidate = {
+          nonce:randomUUID(),
+          revision:selectionRevision += 1,
+          deckPath,
+          deckName:basename(deckPath),
+          project,
+          provider:agentProvider,
+        };
+        deckPickerPreviousState = null;
+        state = 'deck-selected';
+        sendJson(response, 200, publicCandidate('deck-selected'));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/choose-agent-project') {
+        if (state === 'choosing-project') {
+          sendJson(response, 409, {
+            code:'PROJECT_SELECTION_IN_PROGRESS', message:'项目目录选择器已经打开',
+          });
+          return;
+        }
+        const body = await readJson(request);
+        const selectedCandidate = requireCandidate(body);
+        if (state !== 'deck-selected') throw Object.assign(new Error('当前不能更改项目目录'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        state = 'choosing-project';
+        const picker = new AbortController();
+        activePicker = picker;
+        let selectedPath;
+        try {
+          selectedPath = await pickAgentProjectDirectory({ signal:picker.signal });
+        } finally {
+          if (activePicker === picker) activePicker = null;
+        }
+        if (state === 'closed') {
+          response.destroy();
+          return;
+        }
+        if (selectedPath === null) {
+          state = 'deck-selected';
+          sendJson(response, 200, publicCandidate('cancelled'));
+          return;
+        }
+        selectedCandidate.project = await resolveAgentProject({
+          deckPath:selectedCandidate.deckPath,
+          explicitRoot:selectedPath,
+        });
+        selectedCandidate.revision = selectionRevision += 1;
+        state = 'deck-selected';
+        sendJson(response, 200, publicCandidate('project-selected'));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/open-deck') {
+        const body = await readJson(request);
+        const selectedCandidate = requireCandidate(body);
+        if (state !== 'deck-selected') throw Object.assign(new Error('当前不能打开编辑器'), {
+          code:'INVALID_APP_STATE', statusCode:409,
+        });
+        if (!isAgentProviderId(body.provider)) {
+          throw Object.assign(new Error('Agent provider 不受支持'), {
+            code:'INVALID_AGENT_PROVIDER', statusCode:400,
+          });
+        }
+        if (selectedCandidate.project.needsConfirmation && body.confirmProjectRoot !== true) {
+          throw Object.assign(new Error('项目目录范围过宽，需要明确确认'), {
+            code:'PROJECT_ROOT_CONFIRMATION_REQUIRED', statusCode:409,
+          });
+        }
+        await assertAgentProject(selectedCandidate.project);
+        state = 'starting-editor';
+        let editorUrl;
+        try {
+          editorUrl = await startDeckEditor(selectedCandidate, body.provider);
+        } catch (error) {
+          state = 'deck-selected';
+          throw error;
+        }
+        state = 'selected';
+        sendJson(response, 200, {
+          ...publicCandidate('selected'),
+          editorUrl,
+        });
+        return;
+      }
+
+      sendJson(response, 404, { code:'NOT_FOUND', message:'接口不存在' });
     } catch (error) {
       activePicker = null;
+      if (state === 'choosing-deck') state = deckPickerPreviousState ?? 'idle';
+      if (state === 'choosing-rebind') state = 'idle';
+      deckPickerPreviousState = null;
+      if (state === 'choosing-project') state = 'deck-selected';
+      if (state === 'choosing-creation-project') state = creationPickerPreviousState ?? 'idle';
+      if (state === 'choosing-onboarding-directory') state = 'idle';
+      creationPickerPreviousState = null;
       if (state === 'closed') {
         response.destroy();
         return;
       }
-      state = 'idle';
-      sendJson(response, 500, {
-        code:error.code ?? 'PICK_FAILED', message:error.message || '无法打开系统文件选择器',
+      sendJson(response, error.statusCode ?? 500, {
+        code:error.code ?? 'APP_OPERATION_FAILED',
+        message:error.message || '导入页操作失败',
+        ...(typeof error.stage === 'string' ? { stage:error.stage } : {}),
+        ...(typeof error.recovery === 'string' ? { recovery:error.recovery } : {}),
+        ...(typeof error.diagnostic === 'string' ? { diagnostic:error.diagnostic } : {}),
       });
-      return;
     }
-    activePicker = null;
-    if (state === 'closed') {
-      response.destroy();
-      return;
-    }
-    if (!deckPath) {
-      state = 'idle';
-      sendJson(response, 200, { status:'cancelled' });
-      return;
-    }
+  });
 
-    try {
-      editorApp = await startEditor({
-        deckPath,
-        host,
-        port:0,
-        openBrowser:false,
-        exitWhenEditorCloses:true,
-        editorCloseGraceMs,
-        agentProvider,
-        agentThreadId:null,
-      });
-    } catch (error) {
-      state = 'idle';
-      sendJson(response, 500, {
-        code:error.code ?? 'EDITOR_START_FAILED', message:error.message || '编辑器启动失败',
+  const launcherLeaseOriginAllowed = origin => {
+    if (origin === undefined || origin === serviceOrigin) return true;
+    return [...editingRuntimes.values()].some(runtime => {
+      try { return new URL(runtime.app?.url).origin === origin; }
+      catch { return false; }
+    });
+  };
+
+  server.on('upgrade', (request, socket, head) => {
+    let requestUrl;
+    try { requestUrl = new URL(request.url ?? '/', serviceOrigin || `http://${urlHost}`); }
+    catch {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (requestUrl.pathname === '/launcher-lease') {
+      if (!tokenMatches(requestUrl.searchParams.get('token'), token)
+        || !launcherLeaseOriginAllowed(request.headers.origin)) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      const clientId = requestUrl.searchParams.get('clientId');
+      const sequence = Number(requestUrl.searchParams.get('sequence'));
+      if (!clientId || !Number.isSafeInteger(sequence) || sequence < 1) {
+        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      launcherSockets.handleUpgrade(request, socket, head, client => {
+        client.launcherLease = { clientId, sequence };
+        launcherSockets.emit('connection', client, request);
       });
       return;
     }
+    if (!['/creation-events', '/agent-terminal'].includes(requestUrl.pathname)
+      || !tokenMatches(requestUrl.searchParams.get('token'), token)
+      || !tokenMatches(requestUrl.searchParams.get('editorToken'), token)
+      || !creationWorkspace) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (request.headers.origin !== undefined && request.headers.origin !== serviceOrigin) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    const target = requestUrl.pathname === '/agent-terminal' ? terminalSockets : eventSockets;
+    target.handleUpgrade(request, socket, head, client => target.emit('connection', client, request));
+  });
 
-    state = 'selected';
-    const editorUrl = `${editorApp.url}/editor/?token=${encodeURIComponent(editorApp.token)}`
-      + `&editorToken=${encodeURIComponent(editorApp.editorToken)}`;
-    sendJson(response, 200, { status:'selected', deckName:basename(deckPath), editorUrl });
-    setImmediate(() => void closeLauncher());
+  launcherSockets.on('connection', socket => {
+    const lease = socket.launcherLease;
+    const registration = registerLauncherClientLease(lease);
+    if (registration.staleLease) {
+      socket.close(1008, '页面租约已过期');
+      return;
+    }
+    const key = clientLeaseKey(lease);
+    const clients = launcherLeaseSockets.get(key) ?? new Set();
+    clients.add(socket);
+    launcherLeaseSockets.set(key, clients);
+    cancelLauncherLeaseHandshake(lease);
+    socket.on('close', () => {
+      clients.delete(socket);
+      if (clients.size > 0) return;
+      launcherLeaseSockets.delete(key);
+      setImmediate(() => scheduleLauncherClientClose(lease));
+    });
+  });
+
+  eventSockets.on('connection', socket => {
+    cancelCreationClientClose();
+    if (creationWorkspace) {
+      socket.send(JSON.stringify({
+        type:'creation-draft-snapshot',
+        revision:creationWorkspace.snapshot().revision,
+      }));
+    }
+    socket.on('close', () => setImmediate(scheduleCreationClientClose));
+  });
+
+  terminalSockets.on('connection', socket => {
+    if (!creationTerminal) {
+      socket.close(1011, 'Agent 终端尚未创建');
+      return;
+    }
+    const detach = creationTerminal.attach(socket);
+    let commandChain = Promise.resolve();
+    socket.on('message', data => {
+      commandChain = commandChain.then(async () => {
+        let message;
+        try { message = JSON.parse(String(data)); }
+        catch { throw Object.assign(new Error('终端消息不是有效 JSON'), { code:'INVALID_TERMINAL_MESSAGE' }); }
+        if (message.type === 'start') {
+          await creationTerminal.start({ provider:message.provider, cols:message.cols, rows:message.rows });
+        } else if (message.type === 'restart') {
+          await creationTerminal.restart({
+            provider:message.provider,
+            cols:message.cols,
+            rows:message.rows,
+            newConversation:message.newConversation === true,
+          });
+        } else if (message.type === 'input') {
+          creationTerminal.input(message.data);
+        } else if (message.type === 'resize') {
+          creationTerminal.resize(message.cols, message.rows);
+        } else {
+          throw Object.assign(new Error('未知终端命令'), { code:'INVALID_TERMINAL_MESSAGE' });
+        }
+      }).catch(error => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type:'error', code:error?.code ?? 'AGENT_TERMINAL_FAILED',
+            message:error?.message ?? 'Agent 终端操作失败',
+          }));
+        }
+      });
+    });
+    socket.on('close', detach);
   });
 
   const closeLauncher = () => {
     if (launcherClosePromise) return launcherClosePromise;
+    cancelCreationClientClose();
+    cancelLauncherClientClose();
+    for (const timer of launcherLeaseHandshakeTimers.values()) clearTimeout(timer);
+    launcherLeaseHandshakeTimers.clear();
     activePicker?.abort();
     activePicker = null;
-    launcherClosePromise = new Promise(resolvePromise => {
+    if (state !== 'selected') candidate = null;
+    for (const client of eventSockets.clients) client.terminate();
+    for (const client of terminalSockets.clients) client.terminate();
+    for (const client of launcherSockets.clients) client.terminate();
+    const eventClosed = new Promise(resolvePromise => eventSockets.close(() => resolvePromise()));
+    const terminalClosed = new Promise(resolvePromise => terminalSockets.close(() => resolvePromise()));
+    const launcherSocketsClosed = new Promise(resolvePromise => (
+      launcherSockets.close(() => resolvePromise())
+    ));
+    const httpClosed = new Promise(resolvePromise => {
       if (!server.listening) {
         resolvePromise();
         return;
@@ -255,19 +1856,44 @@ export async function startAppServer({
       server.close(() => resolvePromise());
       server.closeIdleConnections?.();
     });
+    launcherClosePromise = Promise.all([
+      eventClosed, terminalClosed, launcherSocketsClosed, httpClosed,
+    ]);
     return launcherClosePromise;
   };
 
   const close = () => {
     if (appClosePromise) return appClosePromise;
-    if (state !== 'selected') state = 'closed';
+    cancelCreationClientClose();
+    cancelLauncherClientClose();
+    state = 'closed';
+    const creationShutdown = [...creationRuntimes.values()].flatMap(runtime => {
+      runtime.unsubscribe?.();
+      return [
+        runtime.workspace?.close?.({ reason:'server-stop' }) ?? Promise.resolve(),
+        runtime.terminal?.close?.() ?? Promise.resolve(),
+      ];
+    });
+    const editingShutdown = [...editingRuntimes.values()].flatMap(runtime => [
+      runtime.app?.close?.() ?? Promise.resolve(),
+      ...(runtime.terminalHandedOff && runtime.terminal
+        ? [runtime.terminal.close?.() ?? Promise.resolve()]
+        : []),
+    ]);
+    creationRuntimes.clear();
+    editingRuntimes.clear();
+    parkWorkspace();
     appClosePromise = Promise.allSettled([
       closeLauncher(),
-      editorApp?.close?.() ?? Promise.resolve(),
+      ...creationShutdown,
+      ...editingShutdown,
     ]).then(results => {
       const failures = results.filter(result => result.status === 'rejected');
       if (failures.length) throw new AggregateError(
-        failures.map(result => result.reason), '关闭桌面导入入口失败',
+        failures.map(result => result.reason),
+        `关闭桌面导入入口失败：${failures.map(result => (
+          result.reason?.message ?? String(result.reason)
+        )).join('；')}`,
       );
     });
     return appClosePromise;
@@ -316,7 +1942,7 @@ function appHelp() {
 function parseArguments(argv) {
   let host = '127.0.0.1';
   let port = 0;
-  let pythonExecutable = 'python3';
+  let pythonExecutable = DEFAULT_PYTHON_EXECUTABLE;
   let openBrowser = true;
   let agentProvider = 'codex';
   for (let index = 0; index < argv.length; index += 1) {
@@ -344,12 +1970,17 @@ function parseArguments(argv) {
     }
     throw new TypeError(`未知参数: ${argument}`);
   }
+  if (!isAgentProviderId(agentProvider)) {
+    throw new TypeError(`--agent-provider 不受支持：${agentProvider}`);
+  }
   return { help:false, host, port, pythonExecutable, openBrowser, agentProvider };
 }
 
 function openPage(url) {
   const { command, args } = buildOpenCommand(process.platform, url);
-  const opener = spawn(command, args, { detached:true, stdio:'ignore' });
+  const opener = spawn(command, args, {
+    detached:true, stdio:'ignore', windowsHide:true,
+  });
   opener.once('error', () => {});
   opener.unref();
 }
@@ -391,6 +2022,6 @@ export async function runAppServerCli(argv = process.argv.slice(2)) {
   return 0;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   process.exitCode = await runAppServerCli();
 }

@@ -1,11 +1,15 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// 本文件专门故障注入 POSIX dirfd helper；Windows 由
+// windows-sidecar-io.test.mjs 覆盖原生 handle/映射盘闭环。
+const test = process.platform === 'win32' ? nodeTest.skip : nodeTest;
 
 async function identity(path) {
   const { lstat } = await import('node:fs/promises');
@@ -19,6 +23,51 @@ async function identity(path) {
 }
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
+test('持久 helper 在同目录外部改名后按文件见证重新绑定且保留原 session', async t => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-rebind-'));
+  t.after(() => rm(project, { recursive:true, force:true }));
+  const oldPath = join(project, 'before.html');
+  const newPath = join(project, 'after.html');
+  const contents = Buffer.from('<!doctype html><title>rebind</title>');
+  const fingerprint = sha256(contents);
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const sessionName = `before-${fingerprint.slice(0, 8)}`;
+  await writeFile(oldPath, contents);
+  const io = await createPersistentSidecarIO({ project:await identity(project) });
+  try {
+    await io.ensureRoot();
+    await io.prepareSession({
+      deckName:'before.html', sessionId, initialFingerprint:fingerprint,
+      sessionName, mode:'fresh',
+    });
+    await io.bindSession({ deckName:'before.html', sessionId, sessionName, create:true });
+    await rename(oldPath, newPath);
+    const fileIdentity = await identity(newPath);
+
+    const rebound = await io.rebindDeck({
+      deckName:'after.html',
+      expectedWitness:{ dev:fileIdentity.dev, ino:fileIdentity.ino },
+    });
+
+    assert.equal(rebound.deckName, 'after.html');
+    assert.deepEqual(await io.hashDeck(), { fingerprint });
+  } finally {
+    await io.close();
+  }
+
+  const reopened = await createPersistentSidecarIO({ project:await identity(project) });
+  try {
+    await reopened.ensureRoot();
+    const discovery = await reopened.discover({ deckName:'after.html' });
+    assert.equal(discovery.registry.version, 2);
+    assert.equal(discovery.sessions[0].sessionId, sessionId);
+    assert.equal(discovery.sessions[0].sessionName, sessionName);
+  } finally {
+    await reopened.close();
+  }
+});
 
 test('持久 helper 长期持有 root dirfd，换根后 discover 仍只读取原目录', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
@@ -80,10 +129,11 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
     });
     const binding = await io.bindSession({ deckName:'deck.html', sessionId, sessionName, create:false });
     assert.deepEqual(Object.keys(binding.identities).sort(), [
-      'backups', 'session', 'snapshots', 'transactions', 'writeErrors',
+      'backups', 'session', 'snapshots', 'transactions', 'working', 'workingVersions',
+      'writeErrors',
     ]);
     assert.deepEqual((await readdir(session)).sort(), [
-      'backups', 'session.json', 'snapshots', 'transactions', 'write-errors',
+      'backups', 'session.json', 'snapshots', 'transactions', 'working', 'write-errors',
     ]);
     const attachmentBinding = await io.bindAttachments();
     assert.deepEqual(Object.keys(attachmentBinding.identities).sort(), [
@@ -118,6 +168,55 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
       { fingerprint },
     );
     assert.deepEqual(await io.hashDeck(), { fingerprint });
+  } finally {
+    await io.close();
+  }
+});
+
+test('托管工作副本按指纹写入、归档并可恢复历史版本', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const project = await mkdtemp(join(tmpdir(), 'deck-working-copy-'));
+  const deckBytes = Buffer.from('real-deck');
+  const fingerprint = sha256(deckBytes);
+  const root = join(project, '.huawei-deck-editor');
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+  await writeFile(join(project, 'deck.html'), deckBytes);
+  const io = await createPersistentSidecarIO({ project:await identity(project) });
+  try {
+    await io.ensureRoot();
+    await io.prepareSession({
+      deckName:'deck.html', sessionId, initialFingerprint:fingerprint,
+      sessionName, mode:'fresh',
+    });
+    await io.bindSession({ deckName:'deck.html', sessionId, sessionName, create:true });
+    const first = Buffer.from('working-a');
+    const second = Buffer.from('working-b');
+    const firstFingerprint = sha256(first);
+    const secondFingerprint = sha256(second);
+    assert.deepEqual(await io.writeWorkingDeck({
+      sessionId, bytes:first, expectedFingerprint:null,
+    }), { committed:true, commitScope:'working-deck', fingerprint:firstFingerprint });
+    assert.equal((await io.readWorkingDeck()).fingerprint, firstFingerprint);
+    assert.deepEqual(await io.writeWorkingDeck({
+      sessionId, bytes:second, expectedFingerprint:firstFingerprint,
+    }), { committed:true, commitScope:'working-deck', fingerprint:secondFingerprint });
+    assert.deepEqual(await io.restoreWorkingDeck({
+      fingerprint:firstFingerprint, expectedFingerprint:secondFingerprint,
+    }), { fingerprint:firstFingerprint });
+    const restored = await io.readWorkingDeck();
+    assert.equal(Buffer.from(restored.bytes, 'base64').toString(), 'working-a');
+    const transactionId = '223e4567-e89b-42d3-a456-426614174000';
+    const published = await io.publishWorkingDeck({
+      sessionId, transactionId,
+      expectedDeckFingerprint:fingerprint,
+      expectedWorkingFingerprint:firstFingerprint,
+    });
+    assert.equal(published.ok, true);
+    assert.equal(published.fingerprint, firstFingerprint);
+    assert.equal((await readFile(join(project, 'deck.html'))).toString(), 'working-a');
+    assert.equal((await io.readTransaction({ transactionId })).candidateFingerprint,
+      firstFingerprint);
   } finally {
     await io.close();
   }
@@ -393,6 +492,86 @@ test('session JSON 可跨过 1MiB 旧限制并可完整读回', async () => {
   }
 });
 
+test('Agent Workspace 通过固定命令原子写入并完整读回', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-agent-workspace-'));
+  const root = join(project, '.huawei-deck-editor');
+  const deckName = 'deck.html';
+  const fingerprint = sha256('deck');
+  const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const state = {
+    version:1,
+    workspaceRevision:0,
+    deckSessionId:sessionId,
+    projectRoot:project,
+  };
+  await mkdir(root);
+  await writeFile(join(project, deckName), 'deck');
+  const io = await createPersistentSidecarIO({
+    project:await identity(project), root:await identity(root), timeoutMs:5_000,
+  });
+  try {
+    await io.prepareSession({
+      deckName, sessionId, initialFingerprint:fingerprint, sessionName, mode:'fresh',
+    });
+    await io.bindSession({ deckName, sessionId, sessionName, create:true });
+    assert.equal(await io.readAgentWorkspace({ missingOk:true }), null);
+
+    assert.deepEqual(
+      await io.writeAgentWorkspace({
+        sessionId,
+        bytes:Buffer.from(JSON.stringify(state)),
+      }),
+      { committed:true, commitScope:'agent-workspace' },
+    );
+    assert.deepEqual(await io.readAgentWorkspace(), state);
+
+    await assert.rejects(
+      () => io.writeAgentWorkspace({
+        sessionId:'223e4567-e89b-42d3-a456-426614174000',
+        bytes:Buffer.from(JSON.stringify({ ...state, deckSessionId:'wrong' })),
+      }),
+      /sessionId|deckSessionId/,
+    );
+    assert.deepEqual(await io.readAgentWorkspace(), state, '失败写入不得覆盖权威工作区');
+    assert.equal(io.readFile, undefined, 'wrapper 不得提供任意文件读取');
+    assert.equal(io.writeFile, undefined, 'wrapper 不得提供任意文件写入');
+  } finally {
+    await io.close();
+  }
+});
+
+test('Agent Workspace 写请求已 dispatch 后 helper 崩溃，错误保留独立 commit scope', async () => {
+  const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stderr.setEncoding = () => {};
+  child.stdin = new EventEmitter();
+  child.stdin.end = () => {};
+  child.stdin.write = () => {
+    queueMicrotask(() => child.emit('close', 1));
+    return true;
+  };
+  child.kill = () => queueMicrotask(() => child.emit('close', null));
+  const io = await createPersistentSidecarIO({
+    project:{ path:'/tmp/project', realPath:'/tmp/project', dev:'1', ino:'2' },
+    spawnHelper:() => child,
+    skipReadyHandshake:true,
+  });
+
+  await assert.rejects(
+    () => io.writeAgentWorkspace({
+      sessionId:'123e4567-e89b-42d3-a456-426614174000',
+      bytes:Buffer.from('{}'),
+    }),
+    error => error.committed === true && error.commitScope === 'agent-workspace',
+  );
+  await io.close();
+});
+
 test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回收 child', async t => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
 
@@ -427,6 +606,29 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
       error.code === 'SIDECAR_HELPER_TIMEOUT'
     ));
     assert.equal(child.killed, true);
+    await io.close();
+  });
+
+  await t.test('大 working Deck 命令使用独立长时限而不被普通 1s 预算误杀', async () => {
+    const child = fakeChild((current, line) => {
+      const request = JSON.parse(String(line));
+      setTimeout(() => current.stdout.emit('data', `${JSON.stringify({
+        id:request.id,
+        ok:true,
+        result:{ bytes:'ZA==', fingerprint:'0'.repeat(64) },
+      })}\n`), 35);
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity,
+      spawnHelper:() => child,
+      timeoutMs:10,
+      workingDeckTimeoutMs:100,
+      maxWorkingDeckOutputBytes:1024,
+      skipReadyHandshake:true,
+    });
+    const result = await io.readWorkingDeck();
+    assert.equal(result.bytes, 'ZA==');
+    assert.equal(child.killed, false);
     await io.close();
   });
 

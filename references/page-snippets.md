@@ -1,6 +1,6 @@
 # page-snippets.md — 可直接粘贴的页面骨架与构件
 
-所有片段与 `assets/template-deck.html` 的实页写法一致，每段都标注了「模板第 N 页有活例」（页序与 data-label 对照见 `template-pages.md`）。**配图相关构件**（类型化占位块、图卡片、自绘流程图节点 / 箭头 / 泳道、标准分组表格）在 `artwork.md`，此处不重复；以后新增表格统一复用其第 4 节的「品牌红表头 + 全黑边框 + 分组粗外框」骨架。**整页复用优先直接复制模板对应页**（保占位说明与节拍编排）；本文的骨架用于从零拼一页或往现有页里加构件。
+所有片段与 `assets/training-deck.html` 的实页写法一致，每段都标注了「模板第 N 页有活例」（页序与 data-label 对照见 `template-pages.md`）。**配图相关构件**（类型化占位块、图卡片、自绘流程图节点 / 箭头 / 泳道、标准分组表格）在 `artwork.md`，此处不重复；以后新增表格统一复用其第 4 节的「品牌红表头 + 全黑边框 + 分组粗外框」骨架。**整页复用优先直接复制模板对应页**（保占位说明与节拍编排）；本文的骨架用于从零拼一页或往现有页里加构件。
 
 每页在 deck 里的**外壳**固定是：
 
@@ -10,7 +10,7 @@
 </div></div>
 ```
 
-`data-idx` 必须是**数字**（装饰性、非唯一，导航按 DOM 顺序）；`data-label` 是页标识，verify 脚本与 edit-bundle 都用它定位——**尽量别起同名页**（工具遇到同名只处理第一个）。下面的片段除注明外只给 `<section>…</section>` 部分。插入新页用 `edit-bundle.py` 的 `insert_page`（见 `editing-guide.md`），别手拼。
+`data-idx` 必须是**数字**（装饰性、非唯一，导航按 DOM 顺序）；`data-label` 是 verify 脚本与 edit-bundle 使用的工具侧页名，Managed Editor 则用持久 `data-page-id` 承担稳定页面身份。**不要起同名 label**（传统工具遇到同名多数只处理第一个）。下面的片段除注明外只给 `<section>…</section>` 部分；插入新页必须用 `edit-bundle.py` 的 `insert_page`（见 `editing-guide.md`），它会生成新的 pageId，不要手拼或复用原页面 ID。
 
 ---
 
@@ -55,7 +55,7 @@
 
 初始就显示的元素**不要加** `class="build"`；同一 data-step 的多个元素同拍齐现。规则与铁律见 `animation.md`。
 
-## 4. layer 层切换（活例：第 15 页）
+## 4. layer 层切换（页内多画面的唯一写法；活例：目录页与第 15 页）
 
 ```html
 <!-- 按钮区：首个 data-active 且不写 data-step；要方向键推进的按钮加 data-step -->
@@ -77,6 +77,8 @@
 ```
 
 `.layerbtn` / `.layerpanel` / `[data-active]`（红底白字高亮）的 CSS 模板已内置，无需自己写。面板内再嵌 build（data-step 接在按钮之后）即成混合链——活例第 16 页。
+
+目录、标签页、方案切换、阶段视图等互斥画面都复用这个骨架。按钮和面板必须从初始 DOM 起固定存在，切换时只增删 `data-active`；禁止使用 `_cur` / `data-mod` 另建状态，也禁止在点击时用 `innerHTML`、`outerHTML` 或 `replaceChildren` 重建整组。动态图表最多在初始化时向既有面板内部填充一次。
 
 ## 5. SMIL 连续运动（活例：第 17 页；装饰用法见第 2 页议程）
 

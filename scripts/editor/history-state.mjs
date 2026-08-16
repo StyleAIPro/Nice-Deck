@@ -20,6 +20,11 @@ export function historyCandidates(groups = [], redo = []) {
 export function historyLabel(group, tasks = [], verb = 'undo') {
   const prefix = verb === 'redo' ? '重做' : '撤销';
   if (!group) return prefix;
+  if (group.mutationType === 'source') {
+    const summary = typeof group.source?.summary === 'string'
+      ? group.source.summary.trim().slice(0, 36) : '';
+    return summary ? `${prefix}结构修改：${summary}` : `${prefix}结构修改`;
+  }
   const task = group.taskId === null
     ? null : tasks.find(candidate => candidate?.id === group.taskId);
   if (task?.instruction) return `${prefix} Agent 任务：${task.instruction.slice(0, 36)}`;

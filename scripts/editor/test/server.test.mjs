@@ -1,5 +1,9 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
+
+// 本文件大量注入 POSIX dirfd、signal 与 symlink 替换；Windows 原生 helper
+// 由 windows-sidecar-io.test.mjs 和真实 Claude E2E 覆盖，不能混用两套语义。
+const test = process.platform === 'win32' ? nodeTest.skip : nodeTest;
 import { spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -14,7 +18,9 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import WebSocket from 'ws';
 import { BridgeService } from '../bridge-service.mjs';
+import { openDeckBinding } from '../deck-binding-coordinator.mjs';
 import { startServer } from '../server.mjs';
+import { createEmptyWorkspace } from '../agent-workspace/schema.mjs';
 
 const taskInput = {
   expectedRevision: 0,
@@ -49,6 +55,7 @@ async function makeApp(t, options = {}) {
     bridgeTimeoutMs: options.bridgeTimeoutMs,
     writerTimeoutMs: options.writerTimeoutMs,
     writerKillGraceMs: options.writerKillGraceMs,
+    pythonExecutable: options.pythonExecutable,
     spawnWriter: options.spawnWriter,
     attachmentWriterTimeoutMs: options.attachmentWriterTimeoutMs,
     spawnAttachmentWriter: options.spawnAttachmentWriter,
@@ -57,15 +64,61 @@ async function makeApp(t, options = {}) {
     syncDirectory: options.syncDirectory,
     agentThreadId: options.agentThreadId,
     agentProvider: options.agentProvider,
-    agentAdapter: options.agentAdapter,
-    agentSessionCatalog: options.agentSessionCatalog,
-    pickAgentProjectDirectory: options.pickAgentProjectDirectory,
-    spawnAgent: options.spawnAgent,
+    agentRunAdapter: options.agentRunAdapter,
+    spawnAgentTerminal: options.spawnAgentTerminal,
+    createAgentTerminalConversation: options.createAgentTerminalConversation,
+    resumeAgentTerminalConversation: options.resumeAgentTerminalConversation,
     agentRunTimeoutMs: options.agentRunTimeoutMs,
+    pptxExporter:options.pptxExporter,
+    pptxExportTimeoutMs:options.pptxExportTimeoutMs,
+    managedWorkingDeck: options.managedWorkingDeck ?? false,
+    workingPatchVerifier: options.workingPatchVerifier ?? (async () => ({ ok:true })),
   });
   t.after(() => app.close());
   return app;
 }
+
+test('显式退出接口关闭当前编辑服务', async t => {
+  const app = await makeApp(t);
+  const response = await fetch(`${app.url}/api/shutdown?token=${encodeURIComponent(app.token)}`, {
+    method:'POST', headers:{ origin:app.url },
+  });
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { status:'shutting-down' });
+  const deadline = Date.now() + 1_000;
+  let closed = false;
+  while (!closed && Date.now() < deadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 5));
+    closed = await fetch(`${app.url}/api/session?token=${encodeURIComponent(app.token)}`)
+      .then(() => false, () => true);
+  }
+  assert.equal(closed, true);
+});
+
+test('PPTX 导出接口返回工作副本并使用源 Deck 文件名', async t => {
+  let exportedHtml;
+  const app = await makeApp(t, {
+    pptxExporter:async ({ htmlBytes, signal }) => {
+      exportedHtml = Buffer.from(htmlBytes);
+      assert.equal(signal.aborted, false);
+      return Buffer.from('PK\u0003\u0004pptx');
+    },
+  });
+  const response = await fetch(`${app.url}/api/export/pptx?token=secret`, {
+    method:'POST',
+    headers:{ 'content-type':'application/json', origin:app.url },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get('content-type'),
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  );
+  assert.match(response.headers.get('content-disposition'), /filename\*=UTF-8''deck\.pptx/);
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from('PK\u0003\u0004pptx'));
+  assert.deepEqual(exportedHtml, Buffer.from('deck'));
+  assert.equal(await readFile(app.deckPath, 'utf8'), 'deck');
+});
 
 function connect(url, options) {
   const socket = new WebSocket(url, options);
@@ -119,6 +172,36 @@ async function connectDiagnosticsEditor(t, app) {
   }
   assert.equal(Object.keys(app.session.diagnosticsBaseline ?? {}).length, 1);
   return socket;
+}
+
+async function connectCanonicalActionEditor(t, app) {
+  const editor = await connectDiagnosticsEditor(t, app);
+  editor.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type === 'apply-actions') {
+      editor.send(JSON.stringify({
+        type:'actions-prepared', commandId:message.commandId,
+        applied:message.actions.length,
+        results:message.actions.map(candidate => ({
+          ...candidate,
+          before:Object.hasOwn(candidate, 'before') ? candidate.before : '旧文案',
+          after:Object.hasOwn(candidate, 'after') ? candidate.after : candidate.payload?.text,
+          appliedAt:candidate.appliedAt ?? '2026-08-16T00:00:00.000Z',
+        })),
+      }));
+    } else if (message.type === 'commit-actions') {
+      editor.send(JSON.stringify({
+        type:'actions-committed', commandId:message.commandId, committed:true,
+      }));
+    } else if (message.type === 'rollback-actions') {
+      editor.send(JSON.stringify({
+        type:'actions-rolled-back', commandId:message.commandId, rolledBack:true,
+      }));
+    } else if (message.type === 'sync-actions') {
+      editor.send(JSON.stringify({ type:'actions-synced', commandId:message.commandId }));
+    }
+  });
+  return editor;
 }
 
 async function prepareAndCommit(socket, command, results = command.actions) {
@@ -205,6 +288,79 @@ async function createAttachedTask(app, contents = 'trusted attachment') {
 
 function validBundle() {
   const template = '<!doctype html><body><div class="stage"></div></body>';
+  return '<script type="__bundler/manifest">\n{}\n</script>\n'
+    + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
+}
+
+function managedBundle(text = '旧文案') {
+  const template = `<!doctype html><body>\n`
+    + `<div class="slide-fit"><div><section data-label="测试页"><h1>${text}</h1></section></div></div>\n`
+    + `<script>\nconst nav = [\n      { i:0, code:'01', label:'测试页' },\n    ];\n`
+    + `const chapters = [{name:'测试', start:0}];\n</script></body>`;
+  return '<script type="__bundler/manifest">\n{}\n</script>\n'
+    + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
+}
+
+function managedTwoPageBundle() {
+  const template = `<!doctype html><body>\n`
+    + `<div class="slide-fit"><div><section data-label="保留页"><h1>保留页</h1></section></div></div>\n`
+    + `<div class="slide-fit"><div><section data-label="删除页"><h1>删除页</h1></section></div></div>\n`
+    + `<script>\nconst nav = [\n      { i:0, code:'01', label:'保留页' },\n`
+    + `      { i:1, code:'02', label:'删除页' },\n    ];\n`
+    + `const chapters = [{name:'测试', start:0}];\n</script></body>`;
+  return '<script type="__bundler/manifest">\n{}\n</script>\n'
+    + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
+}
+
+function managedTwoPageBundleWithPatches(patches) {
+  const firstPageKey = 'page-11111111111111111111111111111111';
+  const secondPageKey = 'page-22222222222222222222222222222222';
+  const patchBlock = '<!-- huawei-deck-editor:begin -->\n'
+    + `<script type="application/json" id="huawei-deck-editor-patches">${JSON.stringify(patches)}</script>\n`
+    + '<script></script>\n<!-- huawei-deck-editor:end -->';
+  const template = `<!doctype html><body>\n`
+    + `<div class="slide-fit"><div><section data-label="保留页" data-page-id="${firstPageKey}"><h1>保留页</h1></section></div></div>\n`
+    + `<div class="slide-fit"><div><section data-label="删除页" data-page-id="${secondPageKey}"><h1>删除页</h1></section></div></div>\n`
+    + `<script>\nconst nav = [\n      { i:0, code:'01', label:'保留页' },\n`
+    + `      { i:1, code:'02', label:'删除页' },\n    ];\n`
+    + `const chapters = [{name:'测试', start:0}];\n</script>${patchBlock}\n</body>`;
+  return '<script type="__bundler/manifest">\n{}\n</script>\n'
+    + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
+}
+
+function updateBundledTemplate(bundle, update) {
+  const lines = String(bundle).split('\n');
+  const marker = lines.findIndex(line => line.trim() === '<script type="__bundler/template">');
+  if (marker < 0) throw new Error('测试 bundle 缺少 template');
+  lines[marker + 1] = JSON.stringify(update(JSON.parse(lines[marker + 1])))
+    .replaceAll('</', '<\\u002F');
+  return lines.join('\n');
+}
+
+function managedPageBlock(template, pageKey) {
+  const escapedPageKey = pageKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(
+    `<div class="slide-fit"><div><section(?=[^>]*\\bdata-page-id="${escapedPageKey}")[^>]*>`
+      + '[\\s\\S]*?<\\/section><\\/div><\\/div>\\n',
+  );
+  const block = template.match(pattern)?.[0];
+  assert.ok(block, `测试模板找不到页面 ${pageKey}`);
+  return block;
+}
+
+function removeManagedPage(template, pageKey) {
+  return template.replace(managedPageBlock(template, pageKey), '');
+}
+
+function managedBundleWithPatches(patches) {
+  const pageKey = 'page-11111111111111111111111111111111';
+  const patchBlock = '<!-- huawei-deck-editor:begin -->\n'
+    + `<script type="application/json" id="huawei-deck-editor-patches">${JSON.stringify(patches)}</script>\n`
+    + '<script></script>\n<!-- huawei-deck-editor:end -->';
+  const template = `<!doctype html><body>\n`
+    + `<div class="slide-fit"><div><section data-label="测试页" data-page-id="${pageKey}"><h1>旧文案</h1></section></div></div>\n`
+    + `<script>\nconst nav = [\n      { i:0, code:'01', label:'测试页' },\n    ];\n`
+    + `const chapters = [{name:'测试', start:0}];\n</script>${patchBlock}\n</body>`;
   return '<script type="__bundler/manifest">\n{}\n</script>\n'
     + `<script type="__bundler/template">\n${JSON.stringify(template)}\n</script>`;
 }
@@ -368,6 +524,71 @@ function epipe() {
   return Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
 }
 
+test('活动 Editor 检测同目录外部改名，更新绑定且重启仍恢复原 session', async t => {
+  const app = await makeApp(t);
+  const oldPath = app.deckPath;
+  const newPath = join(dirname(oldPath), 'renamed.html');
+  const sessionId = app.session.sessionId;
+  await rename(oldPath, newPath);
+  let binding = null;
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    binding = await fetch(`${app.url}/api/deck-binding?token=${app.token}`)
+      .then(response => response.json());
+    if (binding.currentPath === newPath && binding.state === 'bound') break;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+  }
+  assert.equal(binding.currentPath, newPath, JSON.stringify(binding));
+  assert.equal(binding.reason, 'renamed');
+  assert.equal(app.deckPath, newPath);
+  await app.close();
+
+  const reopened = await startServer({
+    deckPath:newPath, host:'127.0.0.1', port:0, openBrowser:false,
+  });
+  t.after(() => reopened.close());
+  assert.equal(reopened.session.sessionId, sessionId);
+  assert.equal(reopened.deckPath, newPath);
+});
+
+test('Editor 关闭期间同目录外部改名，WorkCatalog 绑定可恢复原 session', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-closed-rename-session-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const oldPath = join(root, 'closed-before.html');
+  const newPath = join(root, 'closed-after.html');
+  await writeFile(oldPath, validBundle());
+  const deckId = '923e4567-e89b-42d3-a456-426614174000';
+  const binding = await openDeckBinding({
+    deckId,
+    initialBinding:{ currentPath:oldPath, trustedRoot:root, revision:0 },
+    storageRoot:root,
+    watch:false,
+  });
+  t.after(() => binding.close());
+  const first = await startServer({
+    deckPath:oldPath, deckId, deckBinding:binding.snapshot(),
+    host:'127.0.0.1', port:0, openBrowser:false,
+    autoStartAgentTerminal:false, managedWorkingDeck:false,
+  });
+  const sessionId = first.session.sessionId;
+  await first.close();
+  await rename(oldPath, newPath);
+  const rebound = await binding.reconcile({ cause:'resume' });
+  assert.equal(rebound.reason, 'renamed');
+
+  const reopened = await startServer({
+    deckPath:newPath, deckId, deckBinding:rebound,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    autoStartAgentTerminal:false, managedWorkingDeck:false,
+  });
+  try {
+    assert.equal(reopened.session.sessionId, sessionId);
+    assert.equal(reopened.deckPath, newPath);
+  } finally {
+    await reopened.close();
+  }
+});
+
 test('session lock 跨 helper 进程互斥，失败方零副作用且 close 后可重启', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-lock-'));
   const deckPath = join(root, 'deck.html');
@@ -463,6 +684,61 @@ test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，�
     }
   });
 
+  await t.test('macOS 与 Windows 的绝对路径表示不同仍复用同一注册 session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'deck-registry-cross-platform-'));
+    const deckPath = join(root, 'deck.html');
+    await writeFile(deckPath, 'cross-platform-deck');
+    const fingerprint = sha256('cross-platform-deck');
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const sessionName = `deck-${fingerprint.slice(0, 8)}`;
+    const foreignDeckPath = 'Y:\\shared-project\\deck.html';
+    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sessionDir = await makeCompleteSessionDirectory(sidecarRoot, sessionName);
+    await writeFile(join(sessionDir, 'session.json'), JSON.stringify(emptySessionState(
+      foreignDeckPath, fingerprint, { sessionId },
+    ), null, 2));
+    await writeFile(join(sidecarRoot, 'sessions.json'), JSON.stringify({
+      version:1,
+      sessions:{
+        [sessionId]:{
+          sessionId,
+          deckRealPath:foreignDeckPath,
+          initialFingerprint:fingerprint,
+          sessionName,
+          mode:'fresh',
+          status:'active',
+        },
+      },
+    }, null, 2));
+    const persistedWorkspace = createEmptyWorkspace({
+      deckSessionId:sessionId,
+      projectRoot:root,
+      projectRootSource:'launch-cwd',
+      now:() => '2026-08-09T12:00:00.000Z',
+    });
+    persistedWorkspace.projectRoot = '\\\\Mac\\Home\\zyq_workspace\\huawei-deck';
+    await writeFile(
+      join(sessionDir, 'agent-workspace.json'),
+      JSON.stringify(persistedWorkspace, null, 2),
+    );
+
+    const app = await startServer({
+      deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    });
+    try {
+      const canonicalRoot = await realpath(root);
+      assert.equal(app.session.sessionId, sessionId);
+      assert.equal(app.sessionDir, sessionDir);
+      assert.equal(app.agentWorkspace.snapshot().projectRoot, canonicalRoot);
+      assert.equal(
+        JSON.parse(await readFile(join(sessionDir, 'agent-workspace.json'))).projectRoot,
+        canonicalRoot,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   await t.test('无 registry 的严格 legacy 且无 pending 时一次迁移', async () => {
     const root = await mkdtemp(join(tmpdir(), 'deck-registry-legacy-'));
     const deckPath = join(root, 'deck.html');
@@ -547,121 +823,243 @@ test('拒绝无令牌请求并向 WebSocket 推送新任务', async t => {
   assert.equal((await event).type, 'task-created');
 });
 
-test('Agent 连接跟随 Deck 持久化，并可在网页接口手动改绑', async t => {
-  const sourceThreadId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
-  const manualThreadId = '019fc842-816b-7413-bb23-10b0f87e1d4d';
-  const first = await makeApp(t, { agentThreadId:sourceThreadId });
-  let configuration = await fetch(
-    `${first.url}/api/agent-connection?token=secret`,
-  ).then(response => response.json());
-  assert.equal(configuration.connection.threadId, sourceThreadId);
-  assert.equal(configuration.connection.source, 'launch');
-
-  const changedResponse = await fetch(`${first.url}/api/agent-connection?token=secret`, {
-    method:'PUT', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({
-      expectedRevision:0, provider:'codex', threadId:manualThreadId,
-    }),
+test('旧版 Agent 连接、会话扫描与结构化 runtime API 已移除', async t => {
+  const app = await makeApp(t);
+  for (const path of [
+    '/api/agent-providers',
+    '/api/agent-workspace',
+    '/api/agent-events',
+    '/api/agent-connection',
+    '/api/agent-sessions',
+  ]) {
+    const response = await fetch(`${app.url}${path}?token=secret`);
+    assert.equal(response.status, 404, path);
+  }
+  const command = await fetch(`${app.url}/api/agent-command?token=secret`, {
+    method:'POST',
+    headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ type:'interrupt' }),
   });
-  configuration = await changedResponse.json();
-  assert.equal(changedResponse.status, 200, JSON.stringify(configuration));
-  assert.equal(configuration.connection.threadId, manualThreadId);
-  assert.equal(configuration.connection.source, 'manual');
-  assert.equal(configuration.revision, 1);
+  assert.equal(command.status, 404);
+});
 
+test('启动参数中的 Agent provider 覆盖旧 workspace 默认值', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-provider-selection-'));
+  const deckPath = join(root, 'deck.html');
+  await writeFile(deckPath, 'deck');
+  const first = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false, agentProvider:'codex',
+  });
   await first.close();
   const reopened = await startServer({
-    deckPath:first.deckPath, host:'127.0.0.1', port:0,
-    openBrowser:false, token:'reopened-secret', editorToken:'reopened-editor-secret',
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    agentProvider:'claude-code',
   });
-  t.after(() => reopened.close());
-  configuration = await fetch(
-    `${reopened.url}/api/agent-connection?token=reopened-secret`,
-  ).then(response => response.json());
-  assert.equal(configuration.connection.threadId, manualThreadId);
-  assert.equal(configuration.connection.source, 'manual');
-  assert.equal(configuration.connection.mode, 'resume');
+  try {
+    assert.equal(reopened.agentWorkspace.snapshot().activeProvider, 'claude-code');
+    assert.equal(reopened.agentTerminal.snapshot().provider, 'claude-code');
+  } finally {
+    await reopened.close();
+  }
 });
 
-test('会话目录可列出其他 Agent，并在连接前写入只读 Skill 检测结果', async t => {
-  const sessionId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
-  const agentSessionCatalog = {
-    async list() {
-      return {
-        version:1,
-        providers:[{ id:'claude-code', name:'Claude Code', available:true }],
-        sessions:[{
-          provider:'claude-code', id:sessionId, title:'Deck 后续修改',
-          updatedAt:'2026-08-04T00:00:00.000Z', skillStatus:'unknown',
-        }],
-      };
-    },
-    async inspectSkill(provider, selectedId) {
-      assert.deepEqual([provider, selectedId], ['claude-code', sessionId]);
-      return { provider, sessionId:selectedId, skillStatus:'detected' };
-    },
+
+test('默认 Codex 使用一个长期 bypass PTY，首次加载 Skill，后续批次写入同一终端', async t => {
+  let app;
+  let spawnCount = 0;
+  const children = [];
+  const completePendingTasks = prompt => {
+    if (!/本批任务 ID/.test(prompt)) return;
+    queueMicrotask(() => {
+      for (const task of app.session.tasks) {
+        if (task.status === 'pending') task.status = 'completed';
+      }
+    });
   };
-  const app = await makeApp(t, { agentSessionCatalog });
-
-  const catalog = await fetch(`${app.url}/api/agent-sessions?token=secret`).then(response => response.json());
-  assert.equal(catalog.sessions[0].title, 'Deck 后续修改');
-  const response = await fetch(`${app.url}/api/agent-connection?token=secret`, {
-    method:'PUT', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ expectedRevision:0, provider:'claude-code', threadId:sessionId }),
+  const spawnAgentTerminal = (executable, args, options) => {
+    spawnCount += 1;
+    const events = new EventEmitter();
+    const child = {
+      executable, args, options, pid:7000 + spawnCount,
+      writes:[], killed:false,
+      onData(listener) { events.on('data', listener); return { dispose() {} }; },
+      onExit(listener) { events.on('exit', listener); return { dispose() {} }; },
+      write(data) {
+        this.writes.push(data);
+        completePendingTasks(data);
+      },
+      resize() {},
+      kill() { this.killed = true; },
+    };
+    children.push(child);
+    queueMicrotask(() => events.emit('data', '\r\ncodex READY\r\n'));
+    return child;
+  };
+  app = await makeApp(t, {
+    spawnAgentTerminal,
+    createAgentTerminalConversation:async () => ({
+      conversationId:'persistent-codex-session', resume:true,
+    }),
   });
-  const configuration = await response.json();
-  assert.equal(response.status, 200, JSON.stringify(configuration));
-  assert.equal(configuration.connection.provider, 'claude-code');
-  assert.equal(configuration.connection.skillStatus, 'detected');
+
+  const runBatch = async instruction => {
+    const revision = app.session.revision;
+    const created = await fetch(`${app.url}/api/tasks?token=secret`, {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ ...taskInput, expectedRevision:revision, instruction }),
+    }).then(response => response.json());
+    const response = await fetch(`${app.url}/api/agent-runs?token=secret`, {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:created.revision,
+        taskIds:[created.task.id],
+      }),
+    });
+    assert.equal(response.status, 202, JSON.stringify(await response.clone().json()));
+    const deadline = Date.now() + 1_000;
+    for (;;) {
+      const run = await fetch(
+        `${app.url}/api/agent-runs/current?token=secret`,
+      ).then(value => value.json());
+      if (!['queued', 'running'].includes(run.status)) {
+        assert.equal(run.status, 'succeeded', JSON.stringify(run));
+        while (['pending', 'submitting'].includes(
+          app.agentTerminal.snapshot().startupPromptState,
+        )) {
+          if (Date.now() > deadline) assert.fail('等待初始指令自动回车超时');
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return;
+      }
+      if (Date.now() > deadline) assert.fail('等待持久 Codex run 超时');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+
+  await runBatch('第一批');
+  await runBatch('第二批');
+  assert.equal(spawnCount, 1);
+  assert.equal(children[0].executable, 'codex');
+  assert.deepEqual(children[0].args.slice(0, 3), [
+    'resume', '--dangerously-bypass-approvals-and-sandbox', 'persistent-codex-session',
+  ]);
+  const submittedPrompts = children[0].writes.filter(value => /本批任务 ID/.test(value));
+  assert.equal(submittedPrompts.length, 2);
+  assert.match(submittedPrompts[0], /huawei-deck/);
+  assert.doesNotMatch(submittedPrompts[1], /\$huawei-deck/);
+  assert.equal(app.agentTerminal.snapshot().state, 'running');
+  assert.equal(app.agentWorkspace.snapshot().workspaceRevision, 1);
+  assert.equal(
+    app.agentWorkspace.snapshot().providers.codex.activeConversationId,
+    'persistent-codex-session',
+  );
 });
 
-test('右上角连接接口可添加项目并在该目录立即创建 Agent 会话', async t => {
-  const projectPath = await mkdtemp(join(tmpdir(), 'deck-agent-project-'));
-  const canonicalProjectPath = await realpath(projectPath);
-  t.after(() => rm(projectPath, { recursive:true, force:true }));
-  let created;
-  const sessionId = '019fc842-816b-7413-bb23-10b0f87e1d4c';
-  const connection = {
-    version:1, provider:'codex', threadId:sessionId, projectPath:canonicalProjectPath,
-    source:'created', skillStatus:'loaded', updatedAt:'2026-08-04T00:00:00.000Z',
+test('Agent CLI 按 Esc 取消当前批次、保留长期 PTY，并允许重新提交未完成任务', {
+  timeout:5_000,
+}, async t => {
+  const children = [];
+  const spawnAgentTerminal = (executable, args, options) => {
+    const events = new EventEmitter();
+    const child = {
+      executable, args, options, pid:7800,
+      writes:[], killed:false,
+      onData(listener) { events.on('data', listener); return { dispose() {} }; },
+      onExit(listener) { events.on('exit', listener); return { dispose() {} }; },
+      write(data) { this.writes.push(data); },
+      resize() {},
+      kill() { this.killed = true; },
+    };
+    children.push(child);
+    queueMicrotask(() => events.emit('data', '\r\ncodex READY\r\n'));
+    return child;
   };
   const app = await makeApp(t, {
-    pickAgentProjectDirectory:async () => projectPath,
-    agentSessionCatalog:{
-      async list() {
-        return {
-          version:1,
-          providers:[{ id:'codex', name:'Codex', available:true }],
-          sessions:[],
-        };
-      },
-      async inspectSkill() { return { skillStatus:'unknown' }; },
-    },
-    agentAdapter:{
-      id:'agent-router',
-      get connection() { return null; },
-      async run() { return { summary:'unused' }; },
-      async createSession(input, context) {
-        created = { input, context };
-        return { connection };
-      },
-    },
+    spawnAgentTerminal,
+    createAgentTerminalConversation:async () => ({
+      conversationId:'escape-cancel-session', resume:true,
+    }),
   });
-
-  const picked = await fetch(`${app.url}/api/agent-projects/pick?token=secret`, {
-    method:'POST', headers:{ 'content-type':'application/json' }, body:'{}',
-  }).then(response => response.json());
-  assert.equal(picked.project.path, canonicalProjectPath);
-  const response = await fetch(`${app.url}/api/agent-sessions?token=secret`, {
+  const created = await fetch(`${app.url}/api/tasks?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ expectedRevision:0, provider:'codex', projectPath:canonicalProjectPath }),
+    body:JSON.stringify({ ...taskInput, expectedRevision:0, instruction:'可被 Esc 中断' }),
+  }).then(response => response.json());
+  const startRun = async () => {
+    const response = await fetch(`${app.url}/api/agent-runs?token=secret`, {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:app.session.revision,
+        taskIds:[created.task.id],
+      }),
+    });
+    assert.equal(response.status, 202, JSON.stringify(await response.clone().json()));
+    const deadline = Date.now() + 1_000;
+    while (app.agentRuns.snapshot().status !== 'running'
+      || app.agentTerminal.snapshot().state !== 'running'
+      || ['pending', 'submitting'].includes(
+        app.agentTerminal.snapshot().startupPromptState,
+      )) {
+      if (Date.now() > deadline) assert.fail('等待 Agent run 进入 running 超时');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+
+  await startRun();
+  app.agentTerminal.input('\u001b');
+  await app.agentRuns.activePromise;
+  assert.equal(app.agentRuns.snapshot().status, 'cancelled');
+  assert.match(app.agentRuns.snapshot().message, /Esc|中断/);
+  assert.equal(app.session.tasks[0].status, 'pending');
+  assert.equal(app.agentTerminal.snapshot().state, 'running');
+  assert.equal(children[0].killed, false);
+
+  await startRun();
+  assert.equal(app.agentRuns.snapshot().status, 'running');
+  app.agentTerminal.input('\u001b');
+  await app.agentRuns.activePromise;
+});
+
+test('已保存 Codex ID 不存在时创建可恢复替代会话而不是启动失败', async t => {
+  const children = [];
+  let resumedId = null;
+  let initializationPrompt = null;
+  const app = await makeApp(t, {
+    agentThreadId:'019ff492-40fd-7383-b595-6d7440fe6172',
+    resumeAgentTerminalConversation:async (_provider, options) => {
+      resumedId = options.conversationId;
+      throw Object.assign(new Error('No saved session found'), { code:'SESSION_NOT_FOUND' });
+    },
+    createAgentTerminalConversation:async (_provider, options) => {
+      initializationPrompt = options.initialPrompt;
+      return {
+        conversationId:'019ff492-40fd-7383-b595-6d7440fe6173',
+        resume:true,
+        initialPromptConsumed:true,
+      };
+    },
+    spawnAgentTerminal:(executable, args, options) => {
+      const events = new EventEmitter();
+      const child = {
+        executable, args, options, pid:7999,
+        onData(listener) { events.on('data', listener); return { dispose() {} }; },
+        onExit(listener) { events.on('exit', listener); return { dispose() {} }; },
+        write() {}, resize() {}, kill() {},
+      };
+      children.push(child);
+      return child;
+    },
   });
-  const result = await response.json();
-  assert.equal(response.status, 201, JSON.stringify(result));
-  assert.deepEqual(created.input, { provider:'codex', projectPath:canonicalProjectPath });
-  assert.equal(created.context.deckPath, app.deckPath);
-  assert.equal(result.connection.projectPath, canonicalProjectPath);
-  assert.equal(result.connection.skillStatus, 'loaded');
+  await app.agentTerminal.start();
+  assert.equal(resumedId, '019ff492-40fd-7383-b595-6d7440fe6172');
+  assert.match(initializationPrompt, /huawei-deck/);
+  assert.deepEqual(children[0].args, [
+    'resume', '--dangerously-bypass-approvals-and-sandbox',
+    '019ff492-40fd-7383-b595-6d7440fe6173',
+  ]);
+  assert.equal(
+    app.agentWorkspace.snapshot().providers.codex.activeConversationId,
+    '019ff492-40fd-7383-b595-6d7440fe6173',
+  );
 });
 
 test('真实 multipart 创建附件任务，并仅在 API 与广播中派生绝对路径', async t => {
@@ -1113,10 +1511,16 @@ test('所有受保护路由都拒绝无令牌请求且 Bearer 可授权', async 
     ['GET', '/api/tasks'],
     ['POST', '/api/tasks'],
     ['GET', '/api/tasks/missing'],
+    ['POST', '/api/tasks/missing/source-edit/begin'],
+    ['POST', '/api/tasks/missing/source-edit/cancel'],
+    ['POST', '/api/source-edits'],
+    ['POST', '/api/source-edits/33333333-3333-4333-8333-333333333333/commit'],
+    ['POST', '/api/source-edits/33333333-3333-4333-8333-333333333333/cancel'],
     ['POST', '/api/actions'],
     ['POST', '/api/groups/missing/undo'],
     ['POST', '/api/groups/missing/redo'],
     ['POST', '/api/write-deck'],
+    ['POST', '/api/solidify-deck'],
     ['GET', '/preview'],
     ['GET', '/editor/index.html'],
     ['GET', '/events'],
@@ -1289,9 +1693,14 @@ test('server guard 后项目根目录被替换时 adapter 以启动 identity 拒
   const replacementBytes = Buffer.from('replacement deck must stay untouched');
   const outsideBytes = Buffer.from('outside sentinel must stay untouched');
   const originalBytes = Buffer.from(validBundle());
+  const configuredPython = process.platform === 'darwin' ? '/usr/bin/python3' : 'python3';
   const app = await makeApp(t, {
     deckContents:originalBytes,
+    pythonExecutable:configuredPython,
     spawnWriter:(command, args, options) => {
+      assert.equal(command, configuredPython);
+      assert.equal(options.env.PYTHONIOENCODING, 'utf-8');
+      assert.equal(options.env.PYTHONUTF8, '1');
       if (!swapped) {
         swapped = true;
         const project = dirname(app.deckPath);
@@ -1953,6 +2362,77 @@ test('write-deck 的 session 写已 committed 后保留新基线、保留 record
   );
 });
 
+test('solidify write 原子固化累计动作、增加 revision 并清空历史 groupId', async () => {
+  const page = {
+    pageKey:'page-001-a', sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+  };
+  const completedAt = new Date(0).toISOString();
+  const group = {
+    id:'group-solidify', taskId:'task-solidify', active:true,
+    actions:[{ ...action, taskId:'task-solidify', expectedRevision:7 }],
+  };
+  const state = {
+    version:1, sessionId:'session-solidify', deckPath:'/tmp/deck.html',
+    deckFingerprint:'old', revision:7,
+    tasks:[{
+      id:'task-solidify', status:'completed', groupId:group.id,
+      createdAt:completedAt, updatedAt:completedAt,
+    }],
+    groups:[group], redo:['old-undone-group'], solidifiedActions:[],
+    diagnosticsBaseline:{ [page.pageKey]:page },
+    diagnosticsCurrent:{ [page.pageKey]:page }, diagnosticsRevision:7, conflict:null,
+  };
+  const sessionStore = {
+    state, sessionPath:'/tmp/session-solidify.json',
+    async persistState() {},
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      if (message.type !== 'diagnose-pages') return;
+      queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+        type:'diagnostics-result', commandId:message.commandId,
+        revision:message.revision, pages:[page],
+      })));
+    },
+  };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready', pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+    diagnostics:[page],
+  }));
+  let writtenActions;
+  const result = await bridge.writeDeck(7, {
+    solidify:true,
+    fingerprint:async () => 'old',
+    writer:async patches => {
+      writtenActions = patches;
+      return { fingerprint:'new', backup:'/tmp/solidify-backup.html' };
+    },
+    restore:async () => {},
+  });
+
+  assert.equal(result.solidified, true);
+  assert.equal(result.revision, 8);
+  assert.equal(result.clearedGroupCount, 1);
+  assert.equal(result.clearedRedoCount, 1);
+  assert.equal(writtenActions.length, 1);
+  assert.equal(writtenActions[0].payload.text, '新文案');
+  assert.equal(state.revision, 8);
+  assert.deepEqual(state.groups, []);
+  assert.deepEqual(state.redo, []);
+  assert.equal(state.solidifiedActions.length, 1);
+  assert.deepEqual(state.solidifiedActions, writtenActions,
+    'session 固化基线必须与实际写入 Deck 的规范动作完全一致');
+  assert.equal('expectedRevision' in state.solidifiedActions[0], false,
+    '请求并发字段不得进入持久化动作基线');
+  assert.equal(state.tasks[0].status, 'completed');
+  assert.equal(state.tasks[0].groupId, undefined);
+  assert.deepEqual(bridge.compiledActions(), []);
+});
+
 test('actions-prepared 只接受与动作数一致的安全非负整数', async t => {
   const app = await makeApp(t);
   const ws = await connect(app.editorWsUrl);
@@ -2250,6 +2730,14 @@ test('顶层 taskId 与 action.taskId 不一致时在 tentative 前原子拒绝'
     } else if (message.type === 'commit-actions') {
       editor.send(JSON.stringify({
         type:'actions-committed', commandId:message.commandId, committed:true,
+      }));
+    } else if (message.type === 'rollback-actions') {
+      editor.send(JSON.stringify({
+        type:'actions-rolled-back', commandId:message.commandId, rolledBack:true,
+      }));
+    } else if (message.type === 'sync-actions') {
+      editor.send(JSON.stringify({
+        type:'actions-synced', commandId:message.commandId,
       }));
     }
   });
@@ -2680,6 +3168,7 @@ test('writer 成功但 session persist 前中断后进入 RECOVERY_REQUIRED，�
   await app.close();
   const restarted = await startServer({
     deckPath:app.deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    managedWorkingDeck:false,
   });
   try {
     assert.deepEqual(await readFile(app.deckPath), Buffer.from(validBundle()));
@@ -2790,6 +3279,7 @@ test('重启按 durable record 收敛 old、candidate 与 third 状态后才清�
         app = await startServer({
           deckPath:fixture.deckPath,
           host:'127.0.0.1', port:0, openBrowser:false,
+          managedWorkingDeck:false,
         });
         assert.equal(app.sessionDir, fixture.sessionDir);
         assert.deepEqual(await readFile(fixture.deckPath), current.expectedBytes);
@@ -2808,7 +3298,7 @@ test('重启按 durable record 收敛 old、candidate 与 third 状态后才清�
   }
 });
 
-test('启动拒绝 forged/stale transaction 且发现阶段保持 sidecar 只读', async t => {
+test('启动拒绝 forged/stale transaction，除受控 working 目录外不改 sidecar', async t => {
   const oldBytes = Buffer.from(validBundle());
   const candidateBytes = Buffer.from(validBundle().replace('stage', 'stage candidate'));
 
@@ -2821,6 +3311,7 @@ test('启动拒绝 forged/stale transaction 且发现阶段保持 sidecar 只读
       app = await startServer({
         deckPath:fixture.deckPath,
         host:'127.0.0.1', port:0, openBrowser:false,
+        managedWorkingDeck:false,
       });
     } catch (error) {
       startupError = error;
@@ -2830,7 +3321,12 @@ test('启动拒绝 forged/stale transaction 且发现阶段保持 sidecar 只读
     assert.equal(app, undefined, '不可信 pending record 不得启动服务');
     assert.equal(startupError?.code, 'UNSAFE_SIDECAR');
     assert.deepEqual(await readFile(fixture.deckPath), deckBefore);
-    assert.deepEqual(await sidecarTree(fixture.sidecarRoot), treeBefore);
+    const treeAfter = await sidecarTree(fixture.sidecarRoot);
+    const withoutWorkingBootstrap = treeAfter.filter(path => (
+      !path.endsWith('/working') && !path.endsWith('/working/versions')
+    ));
+    assert.deepEqual(withoutWorkingBootstrap, treeBefore);
+    assert.equal(treeAfter.some(path => path.includes('/attachments')), false);
   };
 
   await t.test('错误 session 目录名即使 record 自洽也拒绝', async () => {
@@ -3168,7 +3664,7 @@ test('Node 恢复边界拒绝当前 session backups 内的符号链接文件', a
   assert.deepEqual(await readFile(outside), deckBefore);
 });
 
-test('写入适配器只接收运行时所需的最小动作 DTO', async t => {
+test('写入适配器保留可验证重放所需的规范动作元数据', async t => {
   let receivedPatches;
   const child = fakeWriterChild({
     onEnd:(current, data) => queueMicrotask(() => {
@@ -3207,13 +3703,1036 @@ test('写入适配器只接收运行时所需的最小动作 DTO', async t => {
     body:JSON.stringify({ expectedRevision:1 }),
   });
   assert.equal(response.status, 500);
-  assert.deepEqual(Object.keys(receivedPatches[0]).sort(), ['id', 'kind', 'payload', 'target']);
+  assert.deepEqual(Object.keys(receivedPatches[0]).sort(), [
+    'after', 'appliedAt', 'before', 'id', 'kind', 'payload', 'target', 'taskId',
+  ]);
   assert.deepEqual(receivedPatches[0], {
     id:canonicalAction.id,
+    taskId:null,
     target:canonicalAction.target,
     kind:canonicalAction.kind,
     payload:canonicalAction.payload,
+    before:canonicalAction.before,
+    after:canonicalAction.after,
+    appliedAt:canonicalAction.appliedAt,
   });
+});
+
+test('文字定位通过唯一 editor capability 返回 CLI 可复用 locator', async t => {
+  const app = await makeApp(t);
+  const editor = await connectDiagnosticsEditor(t, app);
+  const commandPromise = nextMessage(editor);
+  const responsePromise = fetch(
+    `${app.url}/api/text-locations?token=secret&text=${encodeURIComponent('旧标题')}`,
+  );
+  const command = await commandPromise;
+  assert.equal(command.type, 'locate-text');
+  assert.equal(command.text, '旧标题');
+  const result = {
+    pageKey:'page-001-save-gate', pageIndex:1, pageLabel:'测试页',
+    target:{
+      pageKey:'page-001-save-gate', path:'0/1', tag:'H1',
+      fingerprint:'1234abcd', textPath:'0', rect:{ x:1, y:2, w:3, h:4 },
+    },
+    text:'旧标题文字', occurrences:1,
+  };
+  editor.send(JSON.stringify({
+    type:'text-locations', commandId:command.commandId, results:[result],
+  }));
+  const response = await responsePromise;
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).results, [result]);
+});
+
+test('托管工作副本的外部结构修改进入统一历史且真实 Deck 保持不变', async t => {
+  const source = managedBundle();
+  const app = await makeApp(t, {
+    deckContents:source,
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  assert.match(workingBefore, /data-page-id=\\"page-[0-9a-f]{32}\\"/);
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', '结构修改文案'));
+
+  const deadline = Date.now() + 3_000;
+  let session;
+  do {
+    await new Promise(resolve => setTimeout(resolve, 40));
+    session = await (await fetch(`${app.url}/api/session?token=secret`)).json();
+  } while (session.groups.length === 0 && Date.now() < deadline);
+
+  assert.equal(session.groups.length, 1);
+  assert.equal(session.groups[0].mutationType, 'source');
+  assert.equal(session.groups[0].actions.length, 0);
+  assert.deepEqual(await readFile(app.deckPath, 'utf8'), source);
+
+  let response = await fetch(
+    `${app.url}/api/groups/${session.groups[0].id}/undo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:session.revision,
+    }) },
+  );
+  let result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.match(await readFile(app.workingDeckPath, 'utf8'), /旧文案/);
+
+  response = await fetch(
+    `${app.url}/api/groups/${session.groups[0].id}/redo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.match(await readFile(app.workingDeckPath, 'utf8'), /结构修改文案/);
+  assert.deepEqual(await readFile(app.deckPath, 'utf8'), source);
+});
+
+test('工作副本已经写盘时人工 action 必须先登记 SourceMutation 并拒绝过期 revision', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  await connectCanonicalActionEditor(t, app);
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  assert.match(workingBefore, /data-editor-id=\\"element-[0-9a-f]{32}\\"/);
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', 'Agent 先写盘'));
+
+  const response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0,
+      taskId:null,
+      actions:[{
+        id:'action-after-source-write', taskId:null,
+        target:{
+          pageKey:'page-001-save-gate', path:'0', tag:'H1', fingerprint:'1234abcd',
+          rect:{ x:0, y:0, w:200, h:80 },
+        },
+        kind:'setText', payload:{ text:'人工后提交' },
+        before:'旧文案', after:'人工后提交',
+        appliedAt:'2026-08-16T00:00:00.000Z', expectedRevision:0,
+      }],
+    }),
+  });
+  const result = await response.json();
+
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'REVISION_CONFLICT');
+  assert.deepEqual(app.session.groups.map(group => group.mutationType), ['source']);
+  assert.equal(app.session.revision, 1);
+});
+
+test('源码事务预留 revision，写盘期间拒绝人工动作并在显式提交时登记历史', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  let response = await fetch(`${app.url}/api/source-edits?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0, taskId:null,
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  assert.match(result.sourceEditId, /^[0-9a-f-]{36}$/);
+  assert.equal(result.revision, 1);
+  assert.equal(result.beforeFingerprint, app.session.workingDeckFingerprint);
+  const { sourceEditId } = result;
+
+  response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:1,
+      taskId:null,
+      actions:[{
+        id:'manual-during-source-edit', taskId:null,
+        target:{ pageKey:'page-001-save-gate', path:'0', tag:'H1', fingerprint:'1234abcd' },
+        kind:'setText', payload:{ text:'不得抢在源码事务中间' },
+      }],
+    }),
+  });
+  result = await response.json();
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'SOURCE_EDIT_ACTIVE');
+
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', '源码事务修改'));
+  response = await fetch(
+    `${app.url}/api/source-edits/${sourceEditId}/commit?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:1,
+    }) },
+  );
+  const committed = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(committed));
+  assert.equal(committed.revision, 2);
+  assert.equal(app.session.sourceEdit, undefined);
+  assert.deepEqual(app.session.groups.map(group => group.mutationType), ['source']);
+  assert.match(await readFile(app.workingDeckPath, 'utf8'), /源码事务修改/);
+});
+
+test('源码事务写盘后重启仍保留旧基线并可显式提交', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  let response = await fetch(`${app.url}/api/source-edits?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0, taskId:null,
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  const { sourceEditId, beforeFingerprint } = result;
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', '重启后提交'));
+  await app.close();
+
+  const reopened = await startServer({
+    deckPath:app.deckPath,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'reopen-secret', editorToken:'reopen-editor-secret',
+    managedWorkingDeck:true,
+    autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+  });
+  t.after(() => reopened.close());
+  assert.equal(reopened.session.sourceEdit?.id, sourceEditId);
+  assert.equal(reopened.session.sourceEdit?.beforeFingerprint, beforeFingerprint);
+  assert.equal(reopened.session.workingDeckFingerprint, beforeFingerprint);
+
+  response = await fetch(
+    `${reopened.url}/api/source-edits/${sourceEditId}/commit?token=reopen-secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:1,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.revision, 2);
+  assert.equal(reopened.session.sourceEdit, undefined);
+  assert.deepEqual(reopened.session.groups.map(group => group.mutationType), ['source']);
+  assert.match(await readFile(reopened.workingDeckPath, 'utf8'), /重启后提交/);
+});
+
+test('源码事务开始与等待浏览器 ACK 的人工 action 共用同一串行队列', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  const editor = await connectDiagnosticsEditor(t, app);
+  const commandPromise = nextMessage(editor);
+  const actionResponsePromise = fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0,
+      taskId:null,
+      actions:[{
+        id:'manual-before-source-begin', taskId:null,
+        target:{
+          pageKey:'page-001-save-gate', path:'0', tag:'H1', fingerprint:'1234abcd',
+        },
+        kind:'setText', payload:{ text:'先完成人工修改' },
+        before:'旧文案', after:'先完成人工修改',
+        appliedAt:'2026-08-16T00:00:00.000Z', expectedRevision:0,
+      }],
+    }),
+  });
+  const command = await commandPromise;
+  assert.equal(command.type, 'apply-actions');
+
+  let beginSettled = false;
+  const beginResponsePromise = fetch(`${app.url}/api/source-edits?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0, taskId:null,
+    }),
+  }).then(response => {
+    beginSettled = true;
+    return response;
+  });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(beginSettled, false, '人工 action 未确认前不得越过队列创建源码事务');
+
+  await prepareAndCommit(editor, command);
+  const actionResponse = await actionResponsePromise;
+  assert.equal(actionResponse.status, 200, await actionResponse.text());
+  const beginResponse = await beginResponsePromise;
+  const beginResult = await beginResponse.json();
+  assert.equal(beginResponse.status, 409, JSON.stringify(beginResult));
+  assert.equal(beginResult.code, 'REVISION_CONFLICT');
+  assert.equal(app.session.sourceEdit, undefined);
+  assert.equal(app.session.revision, 1);
+});
+
+test('取消源码事务原子恢复开始前工作副本且不创建历史', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath);
+  let response = await fetch(`${app.url}/api/source-edits?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0, taskId:null,
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  await writeFile(
+    app.workingDeckPath,
+    Buffer.from(workingBefore.toString('utf8').replace('旧文案', '取消掉的修改')),
+  );
+
+  response = await fetch(
+    `${app.url}/api/source-edits/${result.sourceEditId}/cancel?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:1,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.revision, 2);
+  assert.equal(app.session.sourceEdit, undefined);
+  assert.deepEqual(app.session.groups, []);
+  assert.deepEqual(await readFile(app.workingDeckPath), workingBefore);
+});
+
+test('工作副本已经写盘时撤销必须先登记 SourceMutation 并拒绝旧历史操作', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  await connectCanonicalActionEditor(t, app);
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  const pageKey = workingBefore.match(/data-page-id=\\"(page-[0-9a-f]{32})\\"/)?.[1];
+  assert.ok(pageKey);
+
+  let response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0,
+      taskId:null,
+      actions:[{
+        id:'action-before-source-write', taskId:null,
+        target:{
+          pageKey, path:'0', tag:'H1', fingerprint:'1234abcd',
+          rect:{ x:0, y:0, w:200, h:80 },
+        },
+        kind:'setText', payload:{ text:'人工先提交' },
+        before:'旧文案', after:'人工先提交',
+        appliedAt:'2026-08-16T00:00:00.000Z', expectedRevision:0,
+      }],
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  const actionGroupId = result.groupId;
+
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', 'Agent 后写盘'));
+  response = await fetch(
+    `${app.url}/api/groups/${actionGroupId}/undo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'REVISION_CONFLICT');
+  assert.deepEqual(app.session.groups.map(group => group.mutationType), ['action', 'source']);
+  assert.equal(app.session.groups[0].active, true);
+  assert.equal(app.session.groups[1].active, true);
+  assert.equal(app.session.revision, 2);
+});
+
+test('工作副本已经写盘时固化必须先登记 SourceMutation 并拒绝过期 revision', async t => {
+  const source = managedBundle();
+  const app = await makeApp(t, {
+    deckContents:source,
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', 'Agent 待固化写盘'));
+
+  const response = await fetch(`${app.url}/api/solidify-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:0 }),
+  });
+  const result = await response.json();
+
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'REVISION_CONFLICT');
+  assert.deepEqual(app.session.groups.map(group => group.mutationType), ['source']);
+  assert.equal(app.session.revision, 1);
+  assert.deepEqual(await readFile(app.deckPath, 'utf8'), source);
+});
+
+test('工作副本写入中断时关闭不报错且重开恢复最后有效版本', async t => {
+  const source = managedBundle();
+  const app = await makeApp(t, {
+    deckContents:source,
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath);
+  const validFingerprint = app.session.workingDeckFingerprint;
+  await writeFile(
+    app.workingDeckPath,
+    '<script type="__bundler/template">\n"写入中断',
+  );
+  await new Promise(resolve => setTimeout(resolve, 350));
+  await app.close();
+
+  const reopened = await startServer({
+    deckPath:app.deckPath,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'reopen-secret', editorToken:'reopen-editor-secret',
+    managedWorkingDeck:true,
+    autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+  });
+  t.after(() => reopened.close());
+  assert.deepEqual(await readFile(reopened.workingDeckPath), workingBefore);
+  assert.equal(reopened.session.workingDeckFingerprint, validFingerprint);
+  assert.equal(reopened.session.startupRecovery?.code, 'WORKING_DECK_RECOVERED');
+  assert.equal(reopened.session.startupRecovery?.restoredFingerprint, validFingerprint);
+  assert.deepEqual(await readFile(reopened.deckPath, 'utf8'), source);
+});
+
+test('旧工作副本补齐元素身份后同步迁移 SourceMutation 指纹并保持撤销重做', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  const normalizedBefore = await readFile(app.workingDeckPath, 'utf8');
+  const beforeFingerprint = app.session.workingDeckFingerprint;
+  assert.match(normalizedBefore, /data-editor-id=\\"element-[0-9a-f]{32}\\"/);
+  await app.close();
+
+  const legacyWorking = updateBundledTemplate(normalizedBefore, template => (
+    template.replace(/\s+data-editor-id="element-[0-9a-f]{32}"/g, '')
+  ));
+  const legacyFingerprint = sha256(legacyWorking);
+  await writeFile(app.workingDeckPath, legacyWorking);
+  const sessionPath = join(app.sessionDir, 'session.json');
+  const session = JSON.parse(await readFile(sessionPath, 'utf8'));
+  session.revision = 1;
+  session.workingDeckFingerprint = legacyFingerprint;
+  session.groups = [{
+    id:'11111111-1111-4111-8111-111111111111',
+    mutationType:'source', taskId:null, actions:[], active:true,
+    source:{
+      beforeFingerprint, afterFingerprint:legacyFingerprint,
+      summary:'旧版工作副本结构修改',
+    },
+  }];
+  session.redo = [];
+  await writeFile(sessionPath, JSON.stringify(session, null, 2));
+
+  const reopened = await startServer({
+    deckPath:app.deckPath,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'identity-reopen-secret', editorToken:'identity-reopen-editor-secret',
+    managedWorkingDeck:true,
+    autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+  });
+  t.after(() => reopened.close());
+  const migratedAfter = reopened.session.workingDeckFingerprint;
+  assert.notEqual(migratedAfter, legacyFingerprint);
+  assert.equal(reopened.session.groups[0].source.beforeFingerprint, beforeFingerprint);
+  assert.equal(reopened.session.groups[0].source.afterFingerprint, migratedAfter);
+  assert.match(await readFile(reopened.workingDeckPath, 'utf8'),
+    /data-editor-id=\\"element-[0-9a-f]{32}\\"/);
+
+  let response = await fetch(
+    `${reopened.url}/api/groups/${session.groups[0].id}/undo?token=identity-reopen-secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:reopened.session.revision,
+    }) },
+  );
+  let result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(reopened.session.workingDeckFingerprint, beforeFingerprint);
+
+  response = await fetch(
+    `${reopened.url}/api/groups/${session.groups[0].id}/redo?token=identity-reopen-secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(reopened.session.workingDeckFingerprint, migratedAfter);
+});
+
+test('启动托管工作副本时从内嵌补丁恢复中文固化基线', async t => {
+  const patches = [{
+    id:'中文固化动作', taskId:null,
+    target:{
+      pageKey:'page-11111111111111111111111111111111',
+      path:'0', tag:'H1', fingerprint:'1234abcd', textPath:'0',
+    },
+    kind:'setText', payload:{ text:'我是帅哥' },
+    before:'从模型适配到强化学习资源预测', after:'我是帅哥',
+    appliedAt:'2026-08-15T00:00:00.000Z',
+  }];
+  const app = await makeApp(t, {
+    deckContents:managedBundleWithPatches(patches),
+    managedWorkingDeck:true,
+  });
+
+  assert.deepEqual(app.session.solidifiedActions, patches);
+});
+
+test('Agent 结构任务绑定下一次工作副本修改，并随撤销重做切换任务状态', async t => {
+  const source = managedBundle();
+  const app = await makeApp(t, {
+    deckContents:source,
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  const pageKey = workingBefore.match(/data-page-id=\\"(page-[0-9a-f]{32})\\"/)?.[1];
+  assert.ok(pageKey);
+
+  let response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0,
+      pageKey, pageIndex:1, pageLabel:'测试页',
+      rect:{ x:1, y:2, w:3, h:4 }, instruction:'删除这一页',
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  const taskId = result.task.id;
+
+  response = await fetch(
+    `${app.url}/api/tasks/${taskId}/source-edit/begin?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.taskId, taskId);
+  assert.equal(result.revision, 2);
+  const { sourceEditId } = result;
+
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', '结构任务文案'));
+  response = await fetch(
+    `${app.url}/api/source-edits/${sourceEditId}/commit?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  const session = app.session;
+
+  assert.equal(session.tasks[0].status, 'completed');
+  assert.equal(session.groups.length, 1);
+  assert.equal(session.groups[0].mutationType, 'source');
+  assert.equal(session.groups[0].taskId, taskId);
+  assert.equal(session.tasks[0].groupId, session.groups[0].id);
+
+  response = await fetch(
+    `${app.url}/api/groups/${session.groups[0].id}/undo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:session.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.task.status, 'pending');
+
+  response = await fetch(
+    `${app.url}/api/groups/${session.groups[0].id}/redo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.task.status, 'completed');
+});
+
+test('结构任务租约拒绝并发绑定，取消后允许下一任务接管', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+  });
+  const working = await readFile(app.workingDeckPath, 'utf8');
+  const pageKey = working.match(/data-page-id=\\"(page-[0-9a-f]{32})\\"/)?.[1];
+  assert.ok(pageKey);
+  const createTask = async (instruction, expectedRevision) => {
+    const response = await fetch(`${app.url}/api/tasks?token=secret`, {
+      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+        expectedRevision, pageKey, pageIndex:1, pageLabel:'测试页',
+        rect:{ x:1, y:2, w:3, h:4 }, instruction,
+      }),
+    });
+    const result = await response.json();
+    assert.equal(response.status, 201, JSON.stringify(result));
+    return result;
+  };
+  const first = await createTask('删除第一页', 0);
+  const second = await createTask('移动第一页', first.revision);
+  const postLease = (taskId, operation, expectedRevision) => fetch(
+    `${app.url}/api/tasks/${taskId}/source-edit/${operation}?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision,
+    }) },
+  );
+
+  let response = await postLease(first.task.id, 'begin', second.revision);
+  let result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.revision, 3);
+  response = await postLease(second.task.id, 'begin', result.revision);
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, 'SOURCE_EDIT_ACTIVE');
+  response = await postLease(first.task.id, 'cancel', result.revision);
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.revision, 4);
+  response = await postLease(second.task.id, 'begin', result.revision);
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.revision, 5);
+});
+
+test('固化结构历史才会原子发布托管工作副本并清空撤销队列', async t => {
+  const source = managedBundle();
+  const app = await makeApp(t, {
+    deckContents:source,
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  const pageKey = workingBefore.match(/data-page-id=\\"(page-[0-9a-f]{32})\\"/)?.[1];
+  assert.ok(pageKey);
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  const sendReady = revision => editor.send(JSON.stringify({
+    type:'deck-ready', revision,
+    pages:[{ index:1, label:'测试页', pageKey }],
+    diagnostics:[{
+      pageKey, sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+    }],
+  }));
+  editor.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type !== 'diagnose-pages') return;
+    editor.send(JSON.stringify({
+      type:'diagnostics-result', commandId:message.commandId,
+      revision:message.revision,
+      pages:message.pageKeys.map(requested => ({
+        pageKey:requested, sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+      })),
+    }));
+  });
+  sendReady(0);
+  await writeFile(app.workingDeckPath, workingBefore.replace('旧文案', '已固化结构文案'));
+  const deadline = Date.now() + 3_000;
+  while (app.session.groups.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  assert.equal(app.session.groups[0]?.mutationType, 'source');
+  sendReady(app.session.revision);
+  const diagnosticsDeadline = Date.now() + 1_000;
+  while (!Object.keys(app.session.diagnosticsBaseline ?? {}).length
+    && Date.now() < diagnosticsDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  const response = await fetch(`${app.url}/api/solidify-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:app.session.revision }),
+  });
+  const result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.solidified, true);
+  assert.deepEqual(app.session.groups, []);
+  assert.deepEqual(app.session.redo, []);
+  assert.match(await readFile(app.deckPath, 'utf8'), /已固化结构文案/);
+});
+
+test('未固化删除任务目标页后可安全重开并撤销恢复', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedTwoPageBundle(),
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  const pageKeys = [...workingBefore.matchAll(/data-page-id=\\"(page-[0-9a-f]{32})\\"/g)]
+    .map(match => match[1]);
+  const deletedPageKey = pageKeys[1];
+  let response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0,
+      pageKey:deletedPageKey, pageIndex:2, pageLabel:'删除页',
+      rect:{ x:1, y:2, w:3, h:4 }, instruction:'删掉这一页',
+    }),
+  });
+  let result = await response.json();
+  const taskId = result.task.id;
+  response = await fetch(
+    `${app.url}/api/tasks/${taskId}/source-edit/begin?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  const { sourceEditId } = result;
+  await writeFile(app.workingDeckPath, updateBundledTemplate(
+    workingBefore,
+    template => removeManagedPage(template, deletedPageKey)
+      .replace("      { i:1, code:'02', label:'删除页' },\n", ''),
+  ));
+  response = await fetch(
+    `${app.url}/api/source-edits/${sourceEditId}/commit?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  await app.close();
+
+  const reopened = await startServer({
+    deckPath:app.deckPath,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'reopen-secret', editorToken:'reopen-editor-secret',
+    managedWorkingDeck:true,
+    autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+  });
+  t.after(() => reopened.close());
+  const reopenedTask = reopened.session.tasks.find(task => task.id === taskId);
+  assert.equal(reopenedTask?.status, 'completed');
+  assert.equal(reopenedTask?.targetMissing, true);
+  const [group] = reopened.session.groups;
+  response = await fetch(
+    `${reopened.url}/api/groups/${group.id}/undo?token=reopen-secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:reopened.session.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.task.status, 'pending');
+  assert.equal(result.task.targetMissing, undefined);
+  assert.match(await readFile(reopened.workingDeckPath, 'utf8'), new RegExp(deletedPageKey));
+});
+
+test('新增改名和重排页面的未固化任务均可安全重开', async t => {
+  const mutations = new Map([
+    ['改名', template => template.replaceAll('删除页', '改名页')],
+    ['新增', template => template
+      .replace(
+        '<script>\nconst nav',
+        '<div class="slide-fit"><div><section data-label="新增页" '
+          + 'data-page-id="page-33333333333333333333333333333333">'
+          + '<h1>新增页</h1></section></div></div>\n<script>\nconst nav',
+      )
+      .replace(
+        "      { i:1, code:'02', label:'删除页' },\n",
+        "      { i:1, code:'02', label:'删除页' },\n"
+          + "      { i:2, code:'03', label:'新增页' },\n",
+      )],
+    ['重排', (template, pageKeys) => {
+      const first = managedPageBlock(template, pageKeys[0]);
+      const second = managedPageBlock(template, pageKeys[1]);
+      return template.replace(first + second, second + first).replace(
+        "      { i:0, code:'01', label:'保留页' },\n"
+          + "      { i:1, code:'02', label:'删除页' },\n",
+        "      { i:0, code:'02', label:'删除页' },\n"
+          + "      { i:1, code:'01', label:'保留页' },\n",
+      );
+    }],
+  ]);
+  for (const [name, mutate] of mutations) {
+    await t.test(name, async subtest => {
+      const app = await makeApp(subtest, {
+        deckContents:managedTwoPageBundle(),
+        managedWorkingDeck:true,
+      });
+      const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+      const pageKeys = [...workingBefore.matchAll(/data-page-id=\\"(page-[0-9a-f]{32})\\"/g)]
+        .map(match => match[1]);
+      let response = await fetch(`${app.url}/api/tasks?token=secret`, {
+        method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+          expectedRevision:0,
+          pageKey:pageKeys[1], pageIndex:2, pageLabel:'删除页',
+          rect:{ x:1, y:2, w:3, h:4 }, instruction:`${name}页面`,
+        }),
+      });
+      let result = await response.json();
+      response = await fetch(
+        `${app.url}/api/tasks/${result.task.id}/source-edit/begin?token=secret`,
+        { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+          expectedRevision:result.revision,
+        }) },
+      );
+      result = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(result));
+      const { sourceEditId } = result;
+      await writeFile(
+        app.workingDeckPath,
+        updateBundledTemplate(workingBefore, template => mutate(template, pageKeys)),
+      );
+      response = await fetch(
+        `${app.url}/api/source-edits/${sourceEditId}/commit?token=secret`,
+        { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+          expectedRevision:result.revision,
+        }) },
+      );
+      result = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(result));
+      await app.close();
+      const reopened = await startServer({
+        deckPath:app.deckPath,
+        host:'127.0.0.1', port:0, openBrowser:false,
+        token:`${name}-reopen`, editorToken:`${name}-editor`,
+        managedWorkingDeck:true,
+        autoStartAgentTerminal:false,
+        workingPatchVerifier:async () => ({ ok:true }),
+      });
+      subtest.after(() => reopened.close());
+      assert.equal(reopened.session.groups.length, 1);
+      assert.equal(reopened.session.tasks[0]?.targetMissing, undefined);
+    });
+  }
+});
+
+test('固化删除页面后保留归档任务并隔离同页残留任务', async t => {
+  const app = await makeApp(t, {
+    deckContents:managedTwoPageBundle(),
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  const pageKeys = [...workingBefore.matchAll(/data-page-id=\\"(page-[0-9a-f]{32})\\"/g)]
+    .map(match => match[1]);
+  assert.equal(pageKeys.length, 2);
+  const [remainingPageKey, deletedPageKey] = pageKeys;
+
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  editor.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type !== 'diagnose-pages') return;
+    editor.send(JSON.stringify({
+      type:'diagnostics-result', commandId:message.commandId,
+      revision:message.revision,
+      pages:message.pageKeys.map(pageKey => ({
+        pageKey, sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+      })),
+    }));
+  });
+  const sendReady = (revision, keys) => editor.send(JSON.stringify({
+    type:'deck-ready', revision,
+    pages:keys.map((pageKey, index) => ({
+      index:index + 1, label:index === 0 ? '保留页' : '删除页', pageKey,
+    })),
+    diagnostics:keys.map(pageKey => ({
+      pageKey, sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+    })),
+  }));
+  sendReady(0, pageKeys);
+
+  let response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0,
+      pageKey:deletedPageKey, pageIndex:2, pageLabel:'删除页',
+      rect:{ x:1, y:2, w:3, h:4 }, instruction:'删掉这一页',
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  const taskId = result.task.id;
+  response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+      pageKey:deletedPageKey, pageIndex:2, pageLabel:'删除页',
+      rect:{ x:10, y:20, w:30, h:40 }, instruction:'把这一页标题改短',
+    }),
+  });
+  result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  const residualTaskId = result.task.id;
+  response = await fetch(
+    `${app.url}/api/tasks/${taskId}/source-edit/begin?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  const { sourceEditId } = result;
+
+  const workingAfterDelete = updateBundledTemplate(workingBefore, template => removeManagedPage(
+    template,
+    deletedPageKey,
+  )
+    .replace("      { i:1, code:'02', label:'删除页' },\n", ''));
+  await writeFile(app.workingDeckPath, workingAfterDelete);
+  response = await fetch(
+    `${app.url}/api/source-edits/${sourceEditId}/commit?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(app.session.tasks[0]?.status, 'completed');
+  assert.equal(app.session.tasks[0]?.pageKey, deletedPageKey);
+  assert.equal(app.session.groups[0]?.mutationType, 'source');
+  sendReady(app.session.revision, [remainingPageKey]);
+
+  response = await fetch(`${app.url}/api/solidify-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:app.session.revision }),
+  });
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.deepEqual(app.session.groups, []);
+  assert.deepEqual(app.session.redo, []);
+  assert.equal(app.session.tasks[0]?.pageKey, deletedPageKey);
+
+  await app.close();
+  const reopened = await startServer({
+    deckPath:app.deckPath,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'reopen-secret', editorToken:'reopen-editor-secret',
+    managedWorkingDeck:true,
+    autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+  });
+  t.after(() => reopened.close());
+  assert.equal(reopened.session.tasks[0]?.status, 'completed');
+  assert.equal(reopened.session.tasks[0]?.pageKey, deletedPageKey);
+  assert.equal(reopened.session.tasks[0]?.targetMissing, true);
+  const residualTask = reopened.session.tasks.find(task => task.id === residualTaskId);
+  assert.equal(residualTask?.status, 'pending');
+  assert.equal(residualTask?.targetMissing, true);
+  response = await fetch(`${reopened.url}/api/agent-runs?token=reopen-secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:reopened.session.revision, taskIds:[residualTaskId],
+    }),
+  });
+  result = await response.json();
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'TASK_TARGET_MISSING');
+});
+
+test('删除已有固化动作的页面后仍可重开撤销且拒绝再次固化', async t => {
+  const deletedPageKey = 'page-22222222222222222222222222222222';
+  const patches = [{
+    id:'固化动作', taskId:null,
+    target:{
+      pageKey:deletedPageKey,
+      path:'0', tag:'H1', fingerprint:'1234abcd', textPath:'0',
+    },
+    kind:'setText', payload:{ text:'已修改' },
+    before:'删除页', after:'已修改', appliedAt:'2026-08-15T00:00:00.000Z',
+  }];
+  const app = await makeApp(t, {
+    deckContents:managedTwoPageBundleWithPatches(patches),
+    managedWorkingDeck:true,
+  });
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  await writeFile(app.workingDeckPath, updateBundledTemplate(
+    workingBefore,
+    template => removeManagedPage(template, deletedPageKey)
+      .replace("      { i:1, code:'02', label:'删除页' },\n", ''),
+  ));
+  const deadline = Date.now() + 3_000;
+  while (app.session.groups.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  await app.close();
+
+  const reopened = await startServer({
+    deckPath:app.deckPath,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'reopen-secret', editorToken:'reopen-editor-secret',
+    managedWorkingDeck:true,
+    autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+  });
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.session.solidifiedActions, patches);
+  let response = await fetch(`${reopened.url}/api/solidify-deck?token=reopen-secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:reopened.session.revision,
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'MISSING_PAGE_TARGETS');
+
+  const [group] = reopened.session.groups;
+  response = await fetch(
+    `${reopened.url}/api/groups/${group.id}/undo?token=reopen-secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:reopened.session.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.match(await readFile(reopened.workingDeckPath, 'utf8'), new RegExp(deletedPageKey));
+});
+
+test('固化补丁重放失败时真实 Deck 不变且工作副本恢复到固化前版本', async t => {
+  const source = managedBundle();
+  const verifierError = Object.assign(new Error('注入补丁重放失败'), {
+    code:'PATCH_REPLAY_FAILED', statusCode:409, stage:'patch-replay',
+  });
+  const app = await makeApp(t, {
+    deckContents:source,
+    managedWorkingDeck:true,
+    workingPatchVerifier:async () => { throw verifierError; },
+  });
+  const initialWorking = await readFile(app.workingDeckPath, 'utf8');
+  const pageKey = initialWorking.match(/data-page-id=\\"(page-[0-9a-f]{32})\\"/)?.[1];
+  assert.ok(pageKey);
+  const editor = await connect(app.editorWsUrl);
+  t.after(() => editor.close());
+  editor.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type !== 'diagnose-pages') return;
+    editor.send(JSON.stringify({
+      type:'diagnostics-result', commandId:message.commandId,
+      revision:message.revision,
+      pages:message.pageKeys.map(requested => ({
+        pageKey:requested, sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+      })),
+    }));
+  });
+  const sendReady = revision => editor.send(JSON.stringify({
+    type:'deck-ready', revision,
+    pages:[{ index:1, label:'测试页', pageKey }],
+    diagnostics:[{ pageKey, sectionOverflow:{ x:0, y:0 }, nestedClips:[] }],
+  }));
+  sendReady(0);
+  await writeFile(app.workingDeckPath, initialWorking.replace('旧文案', '待固化结构文案'));
+  const deadline = Date.now() + 3_000;
+  while (app.session.groups.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  assert.equal(app.session.groups[0]?.mutationType, 'source');
+  sendReady(app.session.revision);
+  const diagnosticsDeadline = Date.now() + 1_000;
+  while (!Object.keys(app.session.diagnosticsBaseline ?? {}).length
+    && Date.now() < diagnosticsDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const beforeSolidify = await readFile(app.workingDeckPath);
+  const response = await fetch(`${app.url}/api/solidify-deck?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:app.session.revision }),
+  });
+  const result = await response.json();
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'PATCH_REPLAY_FAILED');
+  assert.deepEqual(await readFile(app.deckPath), Buffer.from(source));
+  assert.deepEqual(await readFile(app.workingDeckPath), beforeSolidify);
+  assert.equal(app.session.groups.length, 1);
+  assert.equal(app.session.groups[0].mutationType, 'source');
 });
 
 test('保存回滚后 watcher 必须在串行边界重新读取权威指纹', async () => {

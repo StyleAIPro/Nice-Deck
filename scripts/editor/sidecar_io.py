@@ -31,6 +31,10 @@ CONTROL_REQUEST_BYTES = 1024 * 1024
 MAX_SESSION_BYTES = 32 * 1024 * 1024
 MAX_SESSION_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_WORKING_DECK_BYTES = 48 * 1024 * 1024
+MAX_AGENT_WORKSPACE_BYTES = 2 * 1024 * 1024
+MAX_AGENT_WORKSPACE_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_AGENT_WORKSPACE_RESPONSE_BYTES = 4 * 1024 * 1024
 TRANSACTION_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -76,6 +80,22 @@ def _require_uuid(value, label="ID"):
     if not isinstance(value, str) or not TRANSACTION_ID_RE.fullmatch(value):
         raise SidecarIOError(f"{label} 不是规范小写 UUID v4")
     return value
+
+
+def _portable_basename(path):
+    """同时识别 POSIX 与 Windows 持久化路径中的文件名。"""
+    return str(path).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _registry_entry_matches_deck(entry, deck_name, deck_real_path):
+    """同一 sidecar 根内允许 macOS/Windows 对同一 Deck 使用不同绝对路径。"""
+    if entry["deckRealPath"] == deck_real_path:
+        return True
+    expected_name = f"{Path(deck_name).stem}-{entry['initialFingerprint'][:8]}"
+    return (
+        _portable_basename(entry["deckRealPath"]) == deck_name
+        and entry["sessionName"] == expected_name
+    )
 
 
 def _validate_publish_files(value):
@@ -350,6 +370,33 @@ def _rename_directory_no_replace(source_fd, source, target_fd, target):
     if result != 0:
         error_number = ctypes.get_errno()
         raise OSError(error_number, os.strerror(error_number), os.fsdecode(target))
+
+
+def _exchange_file_entries(directory_fd, left, right):
+    """原子交换两个既有文件名；任一名字消失时绝不创建替代路径。"""
+    left = os.fsencode(_require_name(left))
+    right = os.fsencode(_require_name(right))
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        exchange = libc.renameatx_np
+        exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                             ctypes.c_uint]
+        exchange.restype = ctypes.c_int
+        result = exchange(directory_fd, left, directory_fd, right, 0x00000002)
+    elif sys.platform.startswith("linux"):
+        try:
+            exchange = libc.renameat2
+        except AttributeError as error:  # pragma: no cover - 现代 glibc 提供该入口
+            raise SidecarIOError("当前平台缺少原子文件 exchange") from error
+        exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                             ctypes.c_uint]
+        exchange.restype = ctypes.c_int
+        result = exchange(directory_fd, left, directory_fd, right, 0x00000002)
+    else:  # pragma: no cover - Windows 使用独立 helper
+        raise SidecarIOError("当前平台不支持原子文件 exchange")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), os.fsdecode(right))
 
 
 def _open_managed_attachment_directory(parent_fd, name):
@@ -815,7 +862,10 @@ def _decode_json_file(directory_fd: int, name: str, *, max_bytes=None):
 
 def _atomic_write_fd(directory_fd: int, name: str, contents: bytes, *, commit_scope: str):
     """仅在持久 helper 已持有的目录 fd 内原子发布文件。"""
-    if commit_scope not in {"session", "snapshot", "registry"}:
+    if commit_scope not in {
+        "session", "snapshot", "registry", "agent-workspace", "working-deck",
+        "deck-publish",
+    }:
         raise SidecarIOError("原子写 commitScope 无效")
     name = _require_name(name)
     temporary = f".{name}.{uuid.uuid4()}.tmp"
@@ -844,7 +894,7 @@ def _atomic_write_fd(directory_fd: int, name: str, contents: bytes, *, commit_sc
             ),
             committed=renamed,
             commit_scope=commit_scope,
-            code=f"{commit_scope.upper()}_WRITE_FAILED",
+            code=f"{commit_scope.upper().replace('-', '_')}_WRITE_FAILED",
         )
         raise wrapped from error
     finally:
@@ -891,6 +941,8 @@ class PersistentHelper:
         self.backups_fd = None
         self.transactions_fd = None
         self.write_errors_fd = None
+        self.working_fd = None
+        self.working_versions_fd = None
         self.attachments_fd = None
         self.attachment_staging_fd = None
 
@@ -901,8 +953,8 @@ class PersistentHelper:
             self.root_locked = False
         for name in (
             "attachment_staging_fd", "attachments_fd", "write_errors_fd",
-            "transactions_fd", "backups_fd", "snapshots_fd", "session_fd", "root_fd",
-            "project_fd",
+            "working_versions_fd", "working_fd", "transactions_fd", "backups_fd",
+            "snapshots_fd", "session_fd", "root_fd", "project_fd",
         ):
             fd = getattr(self, name)
             if fd is not None:
@@ -945,10 +997,6 @@ class PersistentHelper:
         ):
             raise SidecarIOError("bind-session 参数无效")
         session_name = _require_name(payload["sessionName"])
-        expected_prefix = f"{Path(deck_name).stem}-"
-        suffix = session_name.removeprefix(expected_prefix)
-        if not session_name.startswith(expected_prefix) or not re.fullmatch(r"[a-f0-9]{8}", suffix):
-            raise SidecarIOError("session 名称未严格绑定 Deck 和 old8")
         try:
             registry = self._validate_registry(
                 json.loads(_read_fd_file(self.root_fd, "sessions.json"))
@@ -957,10 +1005,17 @@ class PersistentHelper:
             raise SidecarIOError("bind-session 缺少 registry") from error
         entry = registry["sessions"].get(session_id)
         deck_real_path = str(Path(self.project_identity["realPath"]) / deck_name)
+        expected_prefix = f"{Path(deck_name).stem}-"
+        suffix = session_name.removeprefix(expected_prefix)
+        legacy_name_invalid = registry["version"] == 1 and (
+            not session_name.startswith(expected_prefix)
+            or not re.fullmatch(r"[a-f0-9]{8}", suffix)
+        )
         if (
             entry is None
             or entry["sessionName"] != session_name
-            or entry["deckRealPath"] != deck_real_path
+            or legacy_name_invalid
+            or not _registry_entry_matches_deck(entry, deck_name, deck_real_path)
             or entry["status"] not in {"preparing", "active"}
             or (
                 payload["create"]
@@ -971,7 +1026,8 @@ class PersistentHelper:
 
         for name in (
             "attachment_staging_fd", "attachments_fd", "write_errors_fd",
-            "transactions_fd", "backups_fd", "snapshots_fd", "session_fd",
+            "working_versions_fd", "working_fd", "transactions_fd", "backups_fd",
+            "snapshots_fd", "session_fd",
         ):
             fd = getattr(self, name)
             if fd is not None:
@@ -993,10 +1049,19 @@ class PersistentHelper:
             self.write_errors_fd = _open_child_directory(
                 self.session_fd, "write-errors", create=payload["create"]
             )
+            # working copy 是新能力；恢复历史 session 时也允许在已绑定 session
+            # 内创建这个受控子目录，不改变真实 Deck。
+            self.working_fd = _open_child_directory(
+                self.session_fd, "working", create=True
+            )
+            self.working_versions_fd = _open_child_directory(
+                self.working_fd, "versions", create=True
+            )
         except Exception:
             for name in (
                 "attachment_staging_fd", "attachments_fd", "write_errors_fd",
-                "transactions_fd", "backups_fd", "snapshots_fd", "session_fd",
+                "working_versions_fd", "working_fd", "transactions_fd", "backups_fd",
+                "snapshots_fd", "session_fd",
             ):
                 fd = getattr(self, name)
                 if fd is not None:
@@ -1013,6 +1078,11 @@ class PersistentHelper:
             ("backups", self.backups_fd, f"{session_name}/backups"),
             ("transactions", self.transactions_fd, f"{session_name}/transactions"),
             ("writeErrors", self.write_errors_fd, f"{session_name}/write-errors"),
+            ("working", self.working_fd, f"{session_name}/working"),
+            (
+                "workingVersions", self.working_versions_fd,
+                f"{session_name}/working/versions",
+            ),
         ):
             identities[key] = self._identity_for_fd(
                 fd,
@@ -1099,6 +1169,293 @@ class PersistentHelper:
                 return None
             raise
 
+    def read_agent_workspace(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"missingOk"}:
+            raise SidecarIOError("read-agent-workspace payload 格式无效")
+        if not isinstance(payload["missingOk"], bool):
+            raise SidecarIOError("read-agent-workspace missingOk 必须是布尔值")
+        self._require_bound_session()
+        try:
+            return _decode_json_file(
+                self.session_fd,
+                "agent-workspace.json",
+                max_bytes=MAX_AGENT_WORKSPACE_BYTES,
+            )
+        except FileNotFoundError:
+            if payload["missingOk"]:
+                return None
+            raise
+        except SidecarIOError as error:
+            if error.code == "SIDECAR_SESSION_TOO_LARGE":
+                raise SidecarIOError(
+                    str(error),
+                    code="SIDECAR_AGENT_WORKSPACE_TOO_LARGE",
+                    status_code=413,
+                ) from error
+            raise
+
+    def _archive_working_bytes(self, contents):
+        fingerprint = hashlib.sha256(contents).hexdigest()
+        name = f"{fingerprint}.html"
+        try:
+            existing = _read_fd_file(
+                self.working_versions_fd, name, max_bytes=MAX_WORKING_DECK_BYTES
+            )
+            if existing != contents:
+                raise SidecarIOError("working version 指纹碰撞或内容损坏")
+        except FileNotFoundError:
+            _atomic_write_fd(
+                self.working_versions_fd, name, contents,
+                commit_scope="working-deck",
+            )
+        return fingerprint
+
+    def read_working_deck(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"missingOk"} \
+                or not isinstance(payload["missingOk"], bool):
+            raise SidecarIOError("read-working-deck payload 格式无效")
+        self._require_bound_session()
+        self._assert_bound_directories(include_attachments=False)
+        try:
+            contents = _read_fd_file(
+                self.working_fd, "deck.html", max_bytes=MAX_WORKING_DECK_BYTES
+            )
+        except FileNotFoundError:
+            if payload["missingOk"]:
+                return None
+            raise
+        return {
+            "bytes": base64.b64encode(contents).decode("ascii"),
+            "fingerprint": hashlib.sha256(contents).hexdigest(),
+        }
+
+    def write_working_deck(self, payload):
+        required = {"sessionId", "bytes", "expectedFingerprint"}
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise SidecarIOError("write-working-deck payload 格式无效")
+        self._require_bound_session()
+        if payload["sessionId"] != self.session_id:
+            raise SidecarIOError("write-working-deck sessionId 不一致")
+        expected = payload["expectedFingerprint"]
+        if expected is not None and (
+            not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)
+        ):
+            raise SidecarIOError("working Deck expectedFingerprint 无效")
+        try:
+            current = _read_fd_file(
+                self.working_fd, "deck.html", max_bytes=MAX_WORKING_DECK_BYTES
+            )
+        except FileNotFoundError:
+            current = None
+        if current is None:
+            if expected is not None:
+                raise SidecarIOError(
+                    "working Deck 不存在，无法匹配 expectedFingerprint",
+                    code="WORKING_DECK_CHANGED", status_code=409,
+                )
+        else:
+            current_fingerprint = hashlib.sha256(current).hexdigest()
+            if expected != current_fingerprint:
+                raise SidecarIOError(
+                    "working Deck 指纹已变化，拒绝覆盖",
+                    code="WORKING_DECK_CHANGED", status_code=409,
+                )
+            self._archive_working_bytes(current)
+        contents = _decode_bytes(payload["bytes"], max_bytes=MAX_WORKING_DECK_BYTES)
+        result = _atomic_write_fd(
+            self.working_fd, "deck.html", contents, commit_scope="working-deck"
+        )
+        fingerprint = self._archive_working_bytes(contents)
+        return {**result, "fingerprint": fingerprint}
+
+    def archive_working_deck(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"expectedFingerprint"}:
+            raise SidecarIOError("archive-working-deck payload 格式无效")
+        expected = payload["expectedFingerprint"]
+        if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
+            raise SidecarIOError("archive-working-deck fingerprint 无效")
+        contents = _read_fd_file(
+            self.working_fd, "deck.html", max_bytes=MAX_WORKING_DECK_BYTES
+        )
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != expected:
+            raise SidecarIOError(
+                "working Deck 在归档前再次变化",
+                code="WORKING_DECK_CHANGED", status_code=409,
+            )
+        self._archive_working_bytes(contents)
+        return {"fingerprint": actual}
+
+    def restore_working_deck(self, payload):
+        required = {"fingerprint", "expectedFingerprint"}
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise SidecarIOError("restore-working-deck payload 格式无效")
+        target = payload["fingerprint"]
+        expected = payload["expectedFingerprint"]
+        if not all(isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value)
+                   for value in (target, expected)):
+            raise SidecarIOError("restore-working-deck fingerprint 无效")
+        current = _read_fd_file(
+            self.working_fd, "deck.html", max_bytes=MAX_WORKING_DECK_BYTES
+        )
+        actual = hashlib.sha256(current).hexdigest()
+        if actual != expected:
+            raise SidecarIOError(
+                "working Deck 在恢复前再次变化",
+                code="WORKING_DECK_CHANGED", status_code=409,
+            )
+        contents = _read_fd_file(
+            self.working_versions_fd, f"{target}.html",
+            max_bytes=MAX_WORKING_DECK_BYTES,
+        )
+        if hashlib.sha256(contents).hexdigest() != target:
+            raise SidecarIOError("working version 内容损坏")
+        self._archive_working_bytes(current)
+        _atomic_write_fd(
+            self.working_fd, "deck.html", contents, commit_scope="working-deck"
+        )
+        return {"fingerprint": target}
+
+    def publish_working_deck(self, payload):
+        required = {
+            "sessionId", "transactionId", "expectedDeckFingerprint",
+            "expectedWorkingFingerprint",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise SidecarIOError("publish-working-deck payload 格式无效")
+        if payload["sessionId"] != self.session_id:
+            raise SidecarIOError("publish-working-deck sessionId 不一致")
+        transaction_id = _require_uuid(payload["transactionId"], "transactionId")
+        expected_deck = payload["expectedDeckFingerprint"]
+        expected_working = payload["expectedWorkingFingerprint"]
+        if not all(isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value)
+                   for value in (expected_deck, expected_working)):
+            raise SidecarIOError("publish-working-deck fingerprint 无效")
+        self._assert_bound_directories(include_attachments=False)
+        original = _read_fd_file(self.project_fd, self.deck_name)
+        actual_deck = hashlib.sha256(original).hexdigest()
+        if actual_deck != expected_deck:
+            raise SidecarIOError(
+                "真实 Deck 已被外部修改，拒绝固化",
+                code="DECK_CHANGED", status_code=409,
+            )
+        candidate = _read_fd_file(
+            self.working_fd, "deck.html", max_bytes=MAX_WORKING_DECK_BYTES
+        )
+        candidate_fingerprint = hashlib.sha256(candidate).hexdigest()
+        if candidate_fingerprint != expected_working:
+            raise SidecarIOError(
+                "working Deck 已变化，拒绝固化",
+                code="WORKING_DECK_CHANGED", status_code=409,
+            )
+        backup_name = f"{Path(self.deck_name).stem}-{actual_deck}.html"
+        try:
+            existing = _read_fd_file(self.backups_fd, backup_name)
+            if existing != original:
+                raise SidecarIOError("真实 Deck 的既有备份已损坏")
+        except FileNotFoundError:
+            _atomic_write_fd(
+                self.backups_fd, backup_name, original, commit_scope="deck-publish"
+            )
+        candidate_name = f".{self.deck_name}.{uuid.uuid4().hex}.tmp"
+        transaction_name = f"{transaction_id}.json"
+        transaction_path = str(
+            Path(self.root_identity["path"]) / self.session_name
+            / "transactions" / transaction_name
+        )
+        backup_path = str(
+            Path(self.root_identity["path"]) / self.session_name
+            / "backups" / backup_name
+        )
+        deck_path = str(Path(self.project_identity["path"]) / self.deck_name)
+        session_path = str(Path(self.root_identity["path"]) / self.session_name)
+        record = {
+            "version": 1,
+            "transactionId": transaction_id,
+            "sessionId": self.session_id,
+            "deckPath": deck_path,
+            "sessionDir": session_path,
+            "oldFingerprint": actual_deck,
+            "candidateFingerprint": candidate_fingerprint,
+            "backup": backup_path,
+        }
+        transaction_written = False
+        exchanged = False
+        published = False
+        try:
+            _atomic_write_fd(
+                self.project_fd, candidate_name, candidate, commit_scope="deck-publish"
+            )
+            _atomic_write_fd(
+                self.transactions_fd,
+                transaction_name,
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                commit_scope="deck-publish",
+            )
+            transaction_written = True
+            if hashlib.sha256(_read_fd_file(self.project_fd, self.deck_name)).hexdigest() \
+                    != actual_deck:
+                raise SidecarIOError(
+                    "真实 Deck 在固化发布前再次变化",
+                    code="DECK_CHANGED", status_code=409,
+                )
+            try:
+                _exchange_file_entries(self.project_fd, candidate_name, self.deck_name)
+            except (FileNotFoundError, OSError) as error:
+                raise SidecarIOError(
+                    "真实 Deck 在固化交换前已移动或变化，拒绝重新创建旧路径",
+                    code="DECK_CHANGED", status_code=409,
+                ) from error
+            exchanged = True
+            exchanged_original = _read_fd_file(self.project_fd, candidate_name)
+            exchanged_candidate = _read_fd_file(self.project_fd, self.deck_name)
+            if (
+                hashlib.sha256(exchanged_original).hexdigest() != actual_deck
+                or hashlib.sha256(exchanged_candidate).hexdigest() != candidate_fingerprint
+            ):
+                raise SidecarIOError(
+                    "真实 Deck 在原子交换期间发生身份变化，拒绝固化",
+                    code="DECK_CHANGED", status_code=409,
+                )
+            os.fsync(self.project_fd)
+            os.unlink(candidate_name, dir_fd=self.project_fd)
+            exchanged = False
+            os.fsync(self.project_fd)
+            published = True
+            return {
+                "ok": True,
+                "fingerprint": candidate_fingerprint,
+                "backup": backup_path,
+                "transaction": transaction_path,
+            }
+        except Exception:
+            if exchanged:
+                try:
+                    current = _read_fd_file(self.project_fd, self.deck_name)
+                    held = _read_fd_file(self.project_fd, candidate_name)
+                    if (
+                        hashlib.sha256(current).hexdigest() == candidate_fingerprint
+                        and hashlib.sha256(held).hexdigest() == actual_deck
+                    ):
+                        _exchange_file_entries(
+                            self.project_fd, candidate_name, self.deck_name
+                        )
+                        exchanged = False
+                        os.fsync(self.project_fd)
+                except Exception:
+                    # 无法证明仍是本事务的两个版本时，保留 record 交给重启恢复。
+                    pass
+            if transaction_written and not exchanged:
+                self._unlink_bound(self.transactions_fd, transaction_name)
+                transaction_written = False
+            raise
+        finally:
+            if not published and not exchanged:
+                try:
+                    os.unlink(candidate_name, dir_fd=self.project_fd)
+                except FileNotFoundError:
+                    pass
+
     @staticmethod
     def _same_directory_entry(parent_fd, name, expected_fd):
         current_fd = _open_child_directory(parent_fd, name, create=False)
@@ -1122,6 +1479,8 @@ class PersistentHelper:
             (self.session_fd, "backups", self.backups_fd),
             (self.session_fd, "transactions", self.transactions_fd),
             (self.session_fd, "write-errors", self.write_errors_fd),
+            (self.session_fd, "working", self.working_fd),
+            (self.working_fd, "versions", self.working_versions_fd),
         ]
         if include_attachments:
             if self.attachments_fd is None or self.attachment_staging_fd is None:
@@ -1446,6 +1805,64 @@ class PersistentHelper:
             self.session_fd, "session.json", contents, commit_scope="session"
         )
 
+    def write_agent_workspace(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"sessionId", "bytes"}:
+            raise SidecarIOError("write-agent-workspace payload 格式无效")
+        self._require_bound_session()
+        session_id = payload["sessionId"]
+        if not isinstance(session_id, str) or not TRANSACTION_ID_RE.fullmatch(session_id):
+            raise SidecarIOError("write-agent-workspace sessionId 无效")
+        if session_id != self.session_id:
+            raise SidecarIOError(
+                "write-agent-workspace sessionId 与已绑定 registry 不一致"
+            )
+
+        try:
+            contents = _decode_bytes(
+                payload["bytes"], max_bytes=MAX_AGENT_WORKSPACE_BYTES
+            )
+        except SidecarIOError as error:
+            if error.code == "SIDECAR_SESSION_TOO_LARGE":
+                raise SidecarIOError(
+                    str(error),
+                    code="SIDECAR_AGENT_WORKSPACE_TOO_LARGE",
+                    status_code=413,
+                ) from error
+            raise
+        try:
+            state = json.loads(contents)
+        except json.JSONDecodeError as error:
+            raise SidecarIOError(
+                "write-agent-workspace bytes 不是有效 JSON"
+            ) from error
+        if (
+            not isinstance(state, dict)
+            or state.get("version") != 1
+            or state.get("deckSessionId") != session_id
+        ):
+            raise SidecarIOError(
+                "agent-workspace.json 未绑定当前 sessionId 或 schema version"
+            )
+
+        try:
+            existing = os.stat(
+                "agent-workspace.json",
+                dir_fd=self.session_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise SidecarIOError(
+                "agent-workspace.json 必须是非符号链接的常规文件"
+            )
+        return _atomic_write_fd(
+            self.session_fd,
+            "agent-workspace.json",
+            contents,
+            commit_scope="agent-workspace",
+        )
+
     @staticmethod
     def _unlink_bound(directory_fd, name):
         name = _require_name(name)
@@ -1645,7 +2062,7 @@ class PersistentHelper:
         deck_real_path = str(Path(self.project_identity["realPath"]) / deck_name)
         sessions = []
         for session_id, entry in sorted(registry["sessions"].items()):
-            if entry["deckRealPath"] != deck_real_path:
+            if not _registry_entry_matches_deck(entry, deck_name, deck_real_path):
                 continue
             try:
                 info = os.stat(
@@ -1719,11 +2136,11 @@ class PersistentHelper:
         if (
             not isinstance(registry, dict)
             or set(registry) != {"version", "sessions"}
-            or registry["version"] != 1
+            or registry["version"] not in {1, 2}
             or not isinstance(registry["sessions"], dict)
         ):
             raise SidecarIOError("sessions.json schema 无效")
-        normalized = {"version": 1, "sessions": {}}
+        normalized = {"version": registry["version"], "sessions": {}}
         for session_id, entry in registry["sessions"].items():
             if (
                 not isinstance(session_id, str)
@@ -1742,10 +2159,9 @@ class PersistentHelper:
                 or entry.get("status") not in {"preparing", "active"}
             ):
                 raise SidecarIOError("sessions.json session 记录无效")
-            expected_name = (
-                f"{Path(entry['deckRealPath']).stem}-{entry['initialFingerprint'][:8]}"
-            )
-            if entry["sessionName"] != expected_name:
+            deck_name = _portable_basename(entry["deckRealPath"])
+            expected_name = f"{Path(deck_name).stem}-{entry['initialFingerprint'][:8]}"
+            if registry["version"] == 1 and entry["sessionName"] != expected_name:
                 raise SidecarIOError("registry sessionName 未绑定 initialFingerprint")
             normalized["sessions"][session_id] = dict(entry)
         return normalized
@@ -1803,6 +2219,47 @@ class PersistentHelper:
         )
         return entry
 
+    def rebind_deck(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"deckName", "expectedWitness"}:
+            raise SidecarIOError("rebind-deck payload 格式无效")
+        self._require_bound_session()
+        deck_name = _require_name(payload["deckName"])
+        witness = payload["expectedWitness"]
+        if (
+            not deck_name.lower().endswith((".html", ".htm"))
+            or not isinstance(witness, dict)
+            or set(witness) != {"dev", "ino"}
+            or not all(isinstance(witness[key], str) for key in ("dev", "ino"))
+        ):
+            raise SidecarIOError("rebind-deck 参数无效")
+        info = os.stat(deck_name, dir_fd=self.project_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or str(info.st_dev) != witness["dev"]
+            or str(info.st_ino) != witness["ino"]
+        ):
+            raise SidecarIOError(
+                "重新绑定候选的文件见证不一致",
+                code="DECK_BINDING_WITNESS_MISMATCH", status_code=409,
+            )
+        registry = self._validate_registry(
+            json.loads(_read_fd_file(self.root_fd, "sessions.json"))
+        )
+        entry = registry["sessions"].get(self.session_id)
+        if entry is None or entry["sessionName"] != self.session_name:
+            raise SidecarIOError("rebind-deck 未绑定当前 registry session")
+        deck_real_path = str(Path(self.project_identity["realPath"]) / deck_name)
+        registry = {"version": 2, "sessions": dict(registry["sessions"])}
+        registry["sessions"][self.session_id] = {**entry, "deckRealPath": deck_real_path}
+        _atomic_write_fd(
+            self.root_fd,
+            "sessions.json",
+            json.dumps(registry, ensure_ascii=False, indent=2).encode("utf-8"),
+            commit_scope="registry",
+        )
+        self.deck_name = deck_name
+        return {"deckName": deck_name, "deckRealPath": deck_real_path}
+
     def activate_session(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"sessionId"}:
             raise SidecarIOError("activate-session payload 格式无效")
@@ -1824,7 +2281,8 @@ class PersistentHelper:
         if (
             not isinstance(state, dict)
             or state.get("sessionId") != session_id
-            or os.path.realpath(str(state.get("deckPath", ""))) != entry["deckRealPath"]
+            or _portable_basename(state.get("deckPath", ""))
+            != _portable_basename(entry["deckRealPath"])
             or state.get("deckFingerprint") != entry["initialFingerprint"]
         ):
             raise SidecarIOError("session.json 未严格绑定 preparing registry")
@@ -1862,6 +2320,10 @@ class PersistentHelper:
             return self.bind_attachments(request["payload"])
         if command == "read-session":
             return self.read_session(request["payload"])
+        if command == "read-agent-workspace":
+            return self.read_agent_workspace(request["payload"])
+        if command == "read-working-deck":
+            return self.read_working_deck(request["payload"])
         if command == "assert-bound":
             return self.assert_bound(request["payload"])
         if command == "publish-attachments":
@@ -1882,8 +2344,20 @@ class PersistentHelper:
             return self.verify_backup(request["payload"])
         if command == "hash-deck":
             return self.hash_deck(request["payload"])
+        if command == "rebind-deck":
+            return self.rebind_deck(request["payload"])
         if command == "write-session":
             return self.write_session(request["payload"])
+        if command == "write-agent-workspace":
+            return self.write_agent_workspace(request["payload"])
+        if command == "write-working-deck":
+            return self.write_working_deck(request["payload"])
+        if command == "archive-working-deck":
+            return self.archive_working_deck(request["payload"])
+        if command == "restore-working-deck":
+            return self.restore_working_deck(request["payload"])
+        if command == "publish-working-deck":
+            return self.publish_working_deck(request["payload"])
         if command == "write-snapshot":
             return self.write_snapshot(request["payload"])
         if command == "delete-snapshot":
@@ -1916,7 +2390,9 @@ def serve():
                 command = request.get("command") if isinstance(request, dict) else None
                 request_limit = (
                     MAX_SESSION_REQUEST_BYTES
-                    if command == "write-session"
+                    if command in {"write-session", "write-working-deck"}
+                    else MAX_AGENT_WORKSPACE_REQUEST_BYTES
+                    if command == "write-agent-workspace"
                     else CONTROL_REQUEST_BYTES
                 )
                 if len(line) > request_limit:
@@ -1941,7 +2417,11 @@ def serve():
             encoded = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
             response_limit = (
                 MAX_RESPONSE_BYTES
-                if isinstance(request, dict) and request.get("command") == "read-session"
+                if isinstance(request, dict)
+                and request.get("command") in {"read-session", "read-working-deck"}
+                else MAX_AGENT_WORKSPACE_RESPONSE_BYTES
+                if isinstance(request, dict)
+                and request.get("command") == "read-agent-workspace"
                 else CONTROL_REQUEST_BYTES
             )
             if len(encoded) > response_limit:

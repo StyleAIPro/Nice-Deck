@@ -28,7 +28,7 @@
 huawei-deck/
 ├── SKILL.md                  # 入口：触发条件、快速上手工作流、设计铁律摘要、文件导航
 ├── assets/
-│   └── template-deck.html    # ★模板 deck：页型画廊 ~25-35 页，全部运行时补丁内置，约 5-8MB
+│   └── training-deck.html    # ★授课模板 deck：页型画廊 ~25-35 页，全部运行时补丁内置，约 5-8MB
 ├── references/
 │   ├── template-pages.md     # 逐页索引：第 N 页 = 什么页型 / 常用于什么 / 改哪里 / 动画写法
 │   ├── design-system.md      # 颜色、字体、字号刻度（body {13,15,17,19,21,24,27,30}、散文地板 21px、
@@ -42,7 +42,8 @@ huawei-deck/
     ├── edit-bundle.py        # 编辑独立版工具（自现有复制，路径解耦：deck 路径一律做参数）
     ├── apply_bg.py           # 换封面背景画（自 apply_template_bg.py 改造为参数化）
     ├── html2pptx/
-    │   ├── convert.sh        # 一键转换入口（照搬，路径适配）
+    │   ├── convert.py        # macOS / Windows / Linux 统一转换入口
+    │   ├── convert.sh        # POSIX 薄包装，转交 convert.py
     │   ├── shoot.mjs         # 逐页截图 + layer 逐标签展开 + build 全显（照搬）
     │   └── build_pptx.py     # python-pptx 组装（照搬）
     ├── verify/
@@ -53,11 +54,11 @@ huawei-deck/
 ```
 
 **使用者工作流**（SKILL.md 主线）：
-1. `cp assets/template-deck.html 我的演示.html`（改前改后都只动副本）。
+1. `cp assets/training-deck.html 我的演示.html`（改前改后都只动副本）。
 2. 读 `template-pages.md` 挑页型；直接改对应页的占位内容；同页型多用 = 用 `edit-bundle.py`
    复制该页 section 再插入；删除不用的模板页（工具自动同步 nav/chapters）。
 3. 每改一批跑 `verify/measure_overflow.mjs`（Y=0）+ `shot.mjs` 截图目检；动画页按 animation.md 验放映态。
-4. 需要 PPTX 时 `html2pptx/convert.sh 我的演示.html`。
+4. 需要 PPTX 时 `python3 scripts/html2pptx/convert.py 我的演示.html`；Windows 用 `py -3`。
 
 ## 3. 模板 deck 产出规则（核心工作，做减法）
 
@@ -100,7 +101,7 @@ build 元素强制 `opacity:1`；`[data-layer-btn]/[data-layer-panel]` 页逐标
 2. 版式：全页 `measure_overflow.mjs` Y=0 X=0；`clipscan.mjs` 无内层文字裁切。
 3. 动画：三个机制 demo 页 + 全部带动画的版式页，放映态逐拍截图（模拟 level 推进），build/layer/SMIL 行为正确。
 4. 易用性：断网（file://，无代理）能打开；刷新后回到上次页；loading overlay 正常出现与消失。
-5. 转换：`convert.sh` 全流程跑通，layer demo 页在 PPTX 中展开为多页，页序正确。
+5. 转换：`convert.py` 全流程跑通，layer demo 页在 PPTX 中展开为多页，页序正确。
 6. skill 安装测试：目录复制到 `~/.claude/skills/` 后新会话可触发；SKILL.md 内相对路径全部有效。
 
 ## 6. 风险与对策

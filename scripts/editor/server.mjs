@@ -1,34 +1,93 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants as fsConstants, unwatchFile, watchFile } from 'node:fs';
+import { constants as fsConstants, unlinkSync, unwatchFile, watchFile } from 'node:fs';
 import { createServer } from 'node:http';
 import { isIP } from 'node:net';
 import { lstat, open, readFile, realpath } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
+import { isMainModule } from './main-module.mjs';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
-  AgentRunCoordinator, createAgentRouter, manualAgentConnection,
-  providerConfiguration, resolveAgentConnection,
+  AgentRunCoordinator, buildAgentPrompt, buildSessionInitializationPrompt,
 } from './agent-runner.mjs';
-import { createAgentSessionCatalog } from './agent-session-catalog.mjs';
-import { pickAgentProject } from './agent-project-picker.mjs';
+import { AgentTerminalSession } from './agent-terminal-session.mjs';
+import {
+  createTerminalConversation,
+  discoverTerminalConversation,
+  resumeTerminalConversation,
+} from './agent-terminal-conversation-store.mjs';
+import {
+  createWorkspaceFromLegacyConnection,
+  resolveLegacyConnection,
+} from './agent-workspace/legacy-migration.mjs';
+import { AgentWorkspaceStore } from './agent-workspace/workspace-store.mjs';
+import {
+  resolveAgentTerminalCwd,
+  resolveProjectRoot,
+} from './agent-workspace/project-root.mjs';
 import { AttachmentStore } from './attachment-store.mjs';
 import { BridgeService } from './bridge-service.mjs';
+import {
+  buildCreationHandoffPrompt,
+  loadCreationHandoffContext,
+  persistCreationHandoffContext,
+} from './creation-handoff-context.mjs';
 import { parseTaskMultipart } from './multipart-task.mjs';
+import { exportPptxSnapshot } from './pptx-exporter.mjs';
+import { defaultPythonExecutable, pythonUtf8SpawnOptions } from './python-utf8.mjs';
+import { openDeckBinding } from './deck-binding-coordinator.mjs';
+import { pickDeckWithSystemPicker } from './system-picker.mjs';
 import { validateAction, validateTask } from './protocol.mjs';
 import { RevisionConflict, SessionStore } from './session-store.mjs';
 import { createPersistentSidecarIO } from './sidecar-io.mjs';
+import { WorkingDeckStore, verifyWorkingPatchReplay } from './working-deck-store.mjs';
+import { startHeadlessEditorRuntime } from './headless-editor-runtime.mjs';
+import {
+  removeWorkspaceCapability,
+  writeWorkspaceCapability,
+} from './workspace-capability.mjs';
+import {
+  agentProviderDefinition,
+  isAgentProviderId,
+} from './agent-provider-registry.mjs';
+import { loadUiFontAssets } from './ui-font-assets.mjs';
 
+const DEFAULT_PYTHON_EXECUTABLE = defaultPythonExecutable();
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
 const PUBLIC_DIR = join(EDITOR_DIR, 'public');
 const MAX_BODY_BYTES = 1024 * 1024;
+const PPTX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 const EDITOR_ASSETS = new Map([
   ['/editor/editor.css', { path: join(PUBLIC_DIR, 'editor.css'), type: 'text/css; charset=utf-8' }],
   ['/editor/editor.mjs', { path: join(PUBLIC_DIR, 'editor.mjs'), type: 'text/javascript; charset=utf-8' }],
-  ['/editor/agent-connection-panel.mjs', {
-    path: join(PUBLIC_DIR, 'agent-connection-panel.mjs'), type: 'text/javascript; charset=utf-8',
+  ['/editor/launcher-lease-client.mjs', {
+    path:join(PUBLIC_DIR, 'launcher-lease-client.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/editor/native-controls.mjs', {
+    path: join(PUBLIC_DIR, 'native-controls.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/pill-nav.mjs', {
+    path: join(PUBLIC_DIR, 'pill-nav.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/pill-nav.css', {
+    path: join(PUBLIC_DIR, 'pill-nav.css'), type: 'text/css; charset=utf-8',
+  }],
+  ['/editor/workspace-switcher.mjs', {
+    path: join(PUBLIC_DIR, 'workspace-switcher.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/agent-terminal-panel.mjs', {
+    path: join(PUBLIC_DIR, 'agent-terminal-panel.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/agent-provider-registry.mjs', {
+    path:join(EDITOR_DIR, 'agent-provider-registry.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/editor/agent-terminal-panel.css', {
+    path: join(PUBLIC_DIR, 'agent-terminal-panel.css'), type: 'text/css; charset=utf-8',
   }],
   ['/editor/inspector-panel.mjs', {
     path: join(PUBLIC_DIR, 'inspector-panel.mjs'), type: 'text/javascript; charset=utf-8',
@@ -44,6 +103,14 @@ const EDITOR_ASSETS = new Map([
     path: join(PROJECT_DIR, 'node_modules/html2canvas/dist/html2canvas.min.js'),
     type: 'text/javascript; charset=utf-8',
   }],
+  ['/editor/xterm.js', {
+    path: join(PROJECT_DIR, 'node_modules/@xterm/xterm/lib/xterm.js'),
+    type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/xterm.css', {
+    path: join(PROJECT_DIR, 'node_modules/@xterm/xterm/css/xterm.css'),
+    type: 'text/css; charset=utf-8',
+  }],
   ['/editor/patch-runtime.js', {
     path: join(EDITOR_DIR, 'runtime/patch-runtime.js'),
     type: 'text/javascript; charset=utf-8',
@@ -52,7 +119,117 @@ const EDITOR_ASSETS = new Map([
     path: join(PROJECT_DIR, 'assets/huawei-refs/logos/huawei-横版logo-透明.png'),
     type: 'image/png',
   }],
+  ['/editor/edit-deck-icon.png', {
+    path: join(EDITOR_DIR, 'app-public/edit-deck-icon.png'),
+    type: 'image/png',
+  }],
 ]);
+
+function migrateSessionToPersistentPageIds(state, workingDeck, fingerprintMap = {}) {
+  const candidate = structuredClone(state);
+  let changed = false;
+  const mapKey = value => {
+    const mapped = workingDeck.mapLegacyPageKey(value);
+    if (mapped !== value) changed = true;
+    return mapped;
+  };
+  const mapTarget = (target, mapper=mapKey) => {
+    if (!target || typeof target.pageKey !== 'string') return target;
+    return { ...target, pageKey:mapper(target.pageKey) };
+  };
+  const isRecoverablePageKey = value => (
+    /^page-(?:[a-f0-9]{32}|\d{3}-[a-f0-9]{8})$/.test(String(value ?? ''))
+  );
+  const mapRecoverableKey = value => {
+    try { return mapKey(value); }
+    catch (error) {
+      // 删除页在当前工作副本中不存在，但可能仍能通过 SourceMutation 的版本快照撤销。
+      // 保留可信 pageKey 作为历史身份；任意格式的未知 key 仍然拒绝迁移。
+      if (isRecoverablePageKey(value)) return value;
+      throw error;
+    }
+  };
+  const historyGroups = [...(candidate.groups ?? [])];
+  const mapFingerprint = value => {
+    const mapped = fingerprintMap[value] ?? value;
+    if (mapped !== value) changed = true;
+    return mapped;
+  };
+  for (const group of historyGroups) {
+    if (group?.mutationType !== 'source' || !group.source) continue;
+    group.source.beforeFingerprint = mapFingerprint(group.source.beforeFingerprint);
+    group.source.afterFingerprint = mapFingerprint(group.source.afterFingerprint);
+  }
+  if (candidate.sourceEdit) {
+    candidate.sourceEdit.beforeFingerprint = mapFingerprint(
+      candidate.sourceEdit.beforeFingerprint,
+    );
+  }
+  // 工作副本内嵌补丁是浏览器实际重放并经验证的固化基线，必须先对账再映射。
+  // 否则旧 session 中已经失效的 action 会在权威补丁替换前阻断整个启动过程。
+  if (!candidate.sourceEdit && Array.isArray(workingDeck.embeddedPatches)
+    && !isDeepStrictEqual(candidate.solidifiedActions ?? [], workingDeck.embeddedPatches)) {
+    candidate.solidifiedActions = structuredClone(workingDeck.embeddedPatches);
+    changed = true;
+  }
+  for (const action of [
+    ...(candidate.solidifiedActions ?? []),
+    ...historyGroups.flatMap(group => group.actions ?? []),
+  ]) action.target = mapTarget(action.target, mapRecoverableKey);
+  for (const task of candidate.tasks ?? []) {
+    task.pageKey = mapRecoverableKey(task.pageKey);
+    for (const item of task.pageState?.elements ?? []) {
+      item.target = mapTarget(item.target, mapRecoverableKey);
+    }
+    if (Array.isArray(task.candidates)) {
+      task.candidates = task.candidates.map(target => mapTarget(target, mapRecoverableKey));
+    }
+    const targetMissing = !candidate.sourceEdit && workingDeck.managed
+      && !workingDeck.pageIds.includes(task.pageKey);
+    if (targetMissing && task.targetMissing !== true) {
+      task.targetMissing = true;
+      changed = true;
+    } else if (!candidate.sourceEdit && !targetMissing && 'targetMissing' in task) {
+      delete task.targetMissing;
+      changed = true;
+    }
+  }
+  if (changed || candidate.workingDeckPath !== workingDeck.path
+    || candidate.workingDeckFingerprint !== workingDeck.fingerprint) {
+    candidate.workingDeckPath = workingDeck.path;
+    candidate.workingDeckFingerprint = workingDeck.fingerprint;
+    // pageKey 命名空间改变后必须从工作副本重新采集诊断基线。
+    candidate.diagnosticsBaseline = {};
+    candidate.diagnosticsCurrent = {};
+    candidate.diagnosticsRevision = null;
+    changed = true;
+  }
+  return changed ? candidate : null;
+}
+
+async function snapshotEditorAssets(overrides = null) {
+  if (overrides !== null && !(overrides instanceof Map)) {
+    throw new TypeError('editorAssets 必须是 Map 或 null');
+  }
+  const assets = new Map();
+  for (const [pathname, asset] of EDITOR_ASSETS) {
+    const override = overrides?.get(pathname);
+    if (override !== undefined && (!override || typeof override !== 'object'
+      || (!Buffer.isBuffer(override.contents) && typeof override.contents !== 'string')
+      || typeof override.type !== 'string' || !override.type)) {
+      throw new TypeError(`编辑器资源覆盖无效：${pathname}`);
+    }
+    assets.set(pathname, {
+      type:override?.type ?? asset.type,
+      contents:override === undefined ? await readFile(asset.path) : Buffer.from(override.contents),
+    });
+  }
+  for (const [pathname, asset] of await loadUiFontAssets()) assets.set(pathname, asset);
+  for (const pathname of overrides?.keys() ?? []) {
+    if (!EDITOR_ASSETS.has(pathname)) throw new TypeError(`未知编辑器资源覆盖：${pathname}`);
+  }
+  return assets;
+}
 
 function httpError(code, statusCode, message = code) {
   return Object.assign(new Error(message), { code, statusCode });
@@ -83,6 +260,9 @@ function unsafeSidecarError(message, cause) {
   return detailedHttpError('UNSAFE_SIDECAR', 500, message, {
     stage:'sidecar',
     recovery:'移除 sidecar 路径中的符号链接并使用 Deck 同目录下的真实目录后重试',
+    diagnostic:typeof cause?.message === 'string'
+      ? cause.message.slice(0, 1_024)
+      : undefined,
     cause,
   });
 }
@@ -364,6 +544,13 @@ function requireTaskId(value) {
   return value;
 }
 
+function requireSourceEditId(value) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+    String(value ?? ''),
+  )) throw httpError('INVALID_SOURCE_EDIT_ID', 400, 'sourceEditId 必须是规范 UUID v4');
+  return value;
+}
+
 function json(response, statusCode, value) {
   const body = JSON.stringify(value);
   response.writeHead(statusCode, {
@@ -384,12 +571,11 @@ function send(response, statusCode, body, contentType, headers = {}) {
   response.end(body);
 }
 
-async function sendEditorIndex(request, response, url, token, editorToken, serviceOrigin) {
+function sendEditorIndex(request, response, url, token, editorToken, serviceOrigin, contents) {
   authorize(request, url, token, serviceOrigin);
   if (url.searchParams.get('editorToken') !== editorToken) {
     throw httpError('FORBIDDEN', 403, '缺少编辑器能力令牌');
   }
-  const contents = await readFile(join(PUBLIC_DIR, 'index.html'));
   send(response, 200, contents, 'text/html; charset=utf-8', {
     'set-cookie': `${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`,
   });
@@ -406,6 +592,20 @@ function injectPreviewBridge(contents) {
     preview = headOpen
       ? `${preview.slice(0, headOpen.index + headOpen[0].length)}\n${runtimeTag}${preview.slice(headOpen.index + headOpen[0].length)}`
       : `${runtimeTag}${preview}`;
+  }
+  if (!/<link\b[^>]*\bhref=["']\/editor\/ui-font\.css["'][^>]*>/i.test(preview)) {
+    const fontTag = '<link rel="stylesheet" href="/editor/ui-font.css">\n';
+    const headOpen = preview.match(/<head\b[^>]*>/i);
+    preview = headOpen
+      ? `${preview.slice(0, headOpen.index + headOpen[0].length)}\n${fontTag}${preview.slice(headOpen.index + headOpen[0].length)}`
+      : `${fontTag}${preview}`;
+  }
+  if (!/<link\b[^>]*\bhref=["']\/editor\/pill-nav\.css["'][^>]*>/i.test(preview)) {
+    const pillNavTag = '<link rel="stylesheet" href="/editor/pill-nav.css" data-deck-editor-ui>\n';
+    const headOpen = preview.match(/<head\b[^>]*>/i);
+    preview = headOpen
+      ? `${preview.slice(0, headOpen.index + headOpen[0].length)}\n${pillNavTag}${preview.slice(headOpen.index + headOpen[0].length)}`
+      : `${pillNavTag}${preview}`;
   }
   const tags = [];
   if (!/<script\b[^>]*\bsrc=["']\/editor\/html2canvas\.min\.js["'][^>]*>/i.test(preview)) {
@@ -450,11 +650,16 @@ function errorResponse(response, error) {
   if (typeof error?.stage === 'string') details.stage = error.stage;
   if (typeof error?.recovery === 'string') details.recovery = error.recovery;
   if (typeof error?.diagnostic === 'string') details.diagnostic = error.diagnostic;
+  if (process.env.HUAWEI_DECK_DEBUG_ERRORS === '1' && !details.diagnostic
+    && typeof error?.message === 'string') {
+    details.diagnostic = error.message.slice(0, 1_024);
+  }
   if (typeof error?.candidate === 'string') details.candidate = error.candidate;
   if (typeof error?.backup === 'string') details.backup = error.backup;
   if (typeof error?.expectedFingerprint === 'string') details.expectedFingerprint = error.expectedFingerprint;
   if (typeof error?.actualFingerprint === 'string') details.actualFingerprint = error.actualFingerprint;
   if (Array.isArray(error?.blockers)) details.blockers = error.blockers;
+  if (error?.binding && typeof error.binding === 'object') details.binding = error.binding;
   json(response, statusCode, { error: code, code, message, ...details });
 }
 
@@ -467,6 +672,7 @@ function runWritePatches(
   sessionId,
   sidecarIdentity,
   {
+  pythonExecutable,
   spawnWriter,
   timeoutMs,
   killGraceMs,
@@ -484,12 +690,12 @@ function runWritePatches(
     'print(json.dumps(module.write_patches_safe(sys.argv[2],patches,sys.argv[3],sys.argv[4],sys.argv[7],identity,sys.argv[6]),ensure_ascii=False))',
   ].join(';');
   return new Promise((resolvePromise, reject) => {
-    const child = spawnWriter('python3', [
+    const child = spawnWriter(pythonExecutable, [
       '-c', program, adapterPath, deckPath, sessionDir, expectedFingerprint,
       JSON.stringify(sidecarIdentity), sessionId, transactionId,
-    ], {
+    ], pythonUtf8SpawnOptions({
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    }));
     let stdout = '';
     let stderr = '';
     let requestSettled = false;
@@ -737,11 +943,20 @@ const LEGACY_SESSION_KEYS = [
   'tasks', 'version',
 ];
 
+function portableDeckName(path) {
+  return String(path ?? '').replaceAll('\\', '/').split('/').at(-1);
+}
+
+function samePersistedDeck(left, right) {
+  return resolve(left ?? '') === resolve(right)
+    || portableDeckName(left) === portableDeckName(right);
+}
+
 function strictLegacySessionState(state, deckPath, fingerprint) {
   return Boolean(state && typeof state === 'object' && !Array.isArray(state)
     && JSON.stringify(Object.keys(state).sort()) === JSON.stringify(LEGACY_SESSION_KEYS)
     && state.version === 1
-    && resolve(state.deckPath ?? '') === resolve(deckPath)
+    && samePersistedDeck(state.deckPath, deckPath)
     && state.deckFingerprint === fingerprint
     && Number.isInteger(state.revision) && state.revision >= 0
     && Array.isArray(state.tasks) && Array.isArray(state.groups) && Array.isArray(state.redo)
@@ -749,10 +964,12 @@ function strictLegacySessionState(state, deckPath, fingerprint) {
     && state.diagnosticsCurrent && typeof state.diagnosticsCurrent === 'object');
 }
 
-function validateRegisteredSessionState(state, entry, deckPath, { preparing=false } = {}) {
+function validateRegisteredSessionState(
+  state, entry, deckPath, { preparing=false, allowReboundPath=false } = {},
+) {
   if (!state || typeof state !== 'object' || Array.isArray(state)
     || state.sessionId !== entry.sessionId
-    || resolve(state.deckPath ?? '') !== resolve(deckPath)
+    || (!samePersistedDeck(state.deckPath, deckPath) && !allowReboundPath)
     || !/^[a-f0-9]{64}$/.test(state.deckFingerprint ?? '')
     || (preparing && state.deckFingerprint !== entry.initialFingerprint)
     || !Array.isArray(state.tasks) || !Array.isArray(state.groups) || !Array.isArray(state.redo)) {
@@ -885,9 +1102,11 @@ async function recoverRegisteredTransaction(deckPath, state, sidecarBoundary) {
   return conflicted;
 }
 
-async function initializePersistentSidecar(deckPath) {
+async function initializePersistentSidecar(
+  deckPath, { pythonExecutable=DEFAULT_PYTHON_EXECUTABLE } = {},
+) {
   const project = await captureDirectoryIdentity(dirname(deckPath), 'Deck 项目目录');
-  const io = await createPersistentSidecarIO({ project });
+  const io = await createPersistentSidecarIO({ project, pythonExecutable });
   try {
     const { identity:root } = await io.ensureRoot();
     const deckName = basename(deckPath);
@@ -912,7 +1131,16 @@ async function initializePersistentSidecar(deckPath) {
       });
       persistedState = await io.readSession({ missingOk:entry.status === 'preparing' });
       if (entry.status === 'active') {
-        validateRegisteredSessionState(persistedState, entry, deckPath);
+        const allowReboundPath = discovery.registry?.version === 2
+          && samePersistedDeck(entry.deckRealPath, deckPath);
+        validateRegisteredSessionState(persistedState, entry, deckPath, { allowReboundPath });
+        if (!samePersistedDeck(persistedState.deckPath, deckPath)) {
+          persistedState = { ...persistedState, deckPath };
+          await io.writeSession({
+            sessionId:entry.sessionId,
+            bytes:Buffer.from(JSON.stringify(persistedState, null, 2)),
+          });
+        }
       } else if (entry.mode === 'legacy') {
         if ((await io.listTransactions()).length) {
           throw new Error('preparing legacy session 出现 pending transaction');
@@ -992,13 +1220,78 @@ async function initializePersistentSidecar(deckPath) {
   }
 }
 
+async function prepareClosedEditorRename(
+  deckPath, { deckId, deckBinding, pythonExecutable=DEFAULT_PYTHON_EXECUTABLE } = {},
+) {
+  if (!deckId || !deckBinding || !['renamed', 'moved'].includes(deckBinding.reason)
+    || typeof deckBinding.previousPath !== 'string'
+    || typeof deckBinding.currentPath !== 'string'
+    || !deckBinding.witness) return false;
+  const [currentRealPath, requestedRealPath, previousParent, currentParent] = await Promise.all([
+    realpath(deckBinding.currentPath).catch(() => null),
+    realpath(deckPath).catch(() => null),
+    realpath(dirname(deckBinding.previousPath)).catch(() => null),
+    realpath(dirname(deckPath)).catch(() => null),
+  ]);
+  if (!currentRealPath || currentRealPath !== requestedRealPath
+    || !previousParent || previousParent !== currentParent) return false;
+  const project = await captureDirectoryIdentity(dirname(deckPath), 'Deck 项目目录');
+  const io = await createPersistentSidecarIO({ project, pythonExecutable });
+  try {
+    await io.ensureRoot();
+    const discovery = await io.discover({ deckName:basename(deckBinding.previousPath) });
+    if (discovery.registry === null || discovery.sessions.length === 0) return false;
+    if (discovery.sessions.length !== 1) {
+      throw unsafeSidecarError('外部改名前的 Deck 存在多个 session，拒绝猜测');
+    }
+    const [entry] = discovery.sessions;
+    if (entry.kind !== 'directory' || entry.status !== 'active') {
+      throw unsafeSidecarError('外部改名前的 Deck session 不可安全恢复');
+    }
+    await io.bindSession({
+      deckName:basename(deckBinding.previousPath),
+      sessionId:entry.sessionId,
+      sessionName:entry.sessionName,
+      create:false,
+    });
+    if ((await io.listTransactions()).length) {
+      throw unsafeSidecarError('Deck 改名时存在未完成固化事务，必须先恢复旧路径');
+    }
+    const state = await io.readSession({ missingOk:false });
+    if (state?.sessionId !== entry.sessionId || state?.deckId !== deckId) {
+      throw unsafeSidecarError('外部改名绑定与原 Deck session 身份不一致');
+    }
+    const expectedWitness = deckBinding.witness.platform === 'windows'
+      ? {
+          dev:deckBinding.witness.volumeSerial,
+          ino:deckBinding.witness.fileId,
+        }
+      : {
+          dev:deckBinding.witness.device,
+          ino:deckBinding.witness.inode,
+        };
+    await io.rebindDeck({ deckName:basename(deckPath), expectedWitness });
+    await io.writeSession({
+      sessionId:entry.sessionId,
+      bytes:Buffer.from(JSON.stringify({ ...state, deckId, deckPath }, null, 2)),
+    });
+    return true;
+  } finally {
+    await io.close();
+  }
+}
+
 export async function startServer({
   deckPath,
+  deckId = null,
+  deckBinding = null,
+  pickDeckFile = options => pickDeckWithSystemPicker({ pythonExecutable, ...options }),
   host = '127.0.0.1',
   port = 0,
   openBrowser = false,
   exitWhenEditorCloses = false,
   editorCloseGraceMs = 10_000,
+  onClose = () => {},
   token = randomUUID(),
   editorToken = randomUUID(),
   bridgeTimeoutMs = 10_000,
@@ -1012,16 +1305,65 @@ export async function startServer({
   syncDirectory = syncDirectoryPath,
   agentProvider = 'codex',
   agentThreadId = null,
-  agentAdapter = null,
-  agentSessionCatalog = null,
-  pickAgentProjectDirectory = pickAgentProject,
-  spawnAgent = spawn,
+  agentProjectRoot = null,
+  agentTerminalCwd = null,
+  agentLaunchCwd = process.cwd(),
+  agentRunAdapter = null,
+  spawnAgentTerminal = null,
+  createAgentTerminalConversation = createTerminalConversation,
+  discoverAgentTerminalConversation = discoverTerminalConversation,
+  resumeAgentTerminalConversation = resumeTerminalConversation,
+  agentTerminalSession = null,
+  closeAgentTerminalOnShutdown = true,
+  autoStartAgentTerminal = false,
+  creationHandoff = null,
   agentRunTimeoutMs = 20 * 60 * 1000,
+  editorAssets = null,
+  pythonExecutable = DEFAULT_PYTHON_EXECUTABLE,
+  pptxExporter = exportPptxSnapshot,
+  pptxExportTimeoutMs = 5 * 60 * 1_000,
+  managedWorkingDeck = true,
+  workingPatchVerifier = verifyWorkingPatchReplay,
+  workspaceHistoryProvider = async () => ({ version:1, creation:[], editing:[] }),
+  renameWorkItem = null,
+  updateWorkItemBinding = null,
 } = {}) {
   void openBrowser;
   if (!deckPath) throw new TypeError('缺少 deckPath');
   if (!Number.isSafeInteger(editorCloseGraceMs) || editorCloseGraceMs < 0) {
     throw new TypeError('editorCloseGraceMs 必须为非负整数');
+  }
+  if (typeof onClose !== 'function') throw new TypeError('onClose 必须是函数');
+  if (typeof autoStartAgentTerminal !== 'boolean') {
+    throw new TypeError('autoStartAgentTerminal 必须是布尔值');
+  }
+  if (creationHandoff !== null
+    && (!creationHandoff || typeof creationHandoff !== 'object' || Array.isArray(creationHandoff))) {
+    throw new TypeError('creationHandoff 必须是对象或 null');
+  }
+  if (typeof closeAgentTerminalOnShutdown !== 'boolean') {
+    throw new TypeError('closeAgentTerminalOnShutdown 必须是布尔值');
+  }
+  if (typeof managedWorkingDeck !== 'boolean') {
+    throw new TypeError('managedWorkingDeck 必须是布尔值');
+  }
+  if (typeof workingPatchVerifier !== 'function') {
+    throw new TypeError('workingPatchVerifier 必须是函数');
+  }
+  if (typeof pptxExporter !== 'function') {
+    throw new TypeError('pptxExporter 必须是函数');
+  }
+  if (!Number.isSafeInteger(pptxExportTimeoutMs) || pptxExportTimeoutMs <= 0) {
+    throw new TypeError('pptxExportTimeoutMs 必须为正整数');
+  }
+  if (typeof workspaceHistoryProvider !== 'function') {
+    throw new TypeError('workspaceHistoryProvider 必须是函数');
+  }
+  if (renameWorkItem !== null && typeof renameWorkItem !== 'function') {
+    throw new TypeError('renameWorkItem 必须是函数或 null');
+  }
+  if (updateWorkItemBinding !== null && typeof updateWorkItemBinding !== 'function') {
+    throw new TypeError('updateWorkItemBinding 必须是函数或 null');
   }
   const normalizedHost = String(host).toLowerCase();
   const ipv4Loopback = isIP(normalizedHost) === 4 && normalizedHost.startsWith('127.');
@@ -1031,11 +1373,19 @@ export async function startServer({
   host = normalizedHost;
   const urlHost = host.includes(':') ? `[${host}]` : host;
   const absoluteDeckPath = resolve(deckPath);
-  const defaultAgentProject = dirname(absoluteDeckPath);
+  let currentDeckPath = absoluteDeckPath;
+  let defaultAgentProject = dirname(absoluteDeckPath);
+  const pinnedEditorAssets = await snapshotEditorAssets(editorAssets);
+  const pinnedEditorIndex = await readFile(join(PUBLIC_DIR, 'index.html'));
   let sidecarBoundary;
   let initialization;
   try {
-    initialization = await initializePersistentSidecar(absoluteDeckPath);
+    await prepareClosedEditorRename(absoluteDeckPath, {
+      deckId, deckBinding, pythonExecutable,
+    });
+    initialization = await initializePersistentSidecar(
+      absoluteDeckPath, { pythonExecutable },
+    );
     sidecarBoundary = initialization.sidecarBoundary;
   } catch (error) {
     if (error?.code === 'SESSION_LOCKED') {
@@ -1045,7 +1395,9 @@ export async function startServer({
     throw unsafeSidecarError('sidecar 路径不可信，拒绝启动编辑服务', error);
   }
   let sessionStore;
-  let initialAgentConnection;
+  let workingDeckStore;
+  let agentWorkspaceStore;
+  let projectResolution;
   try {
     sessionStore = await SessionStore.open({
       deckPath:absoluteDeckPath,
@@ -1063,26 +1415,110 @@ export async function startServer({
         sessionId:initialization.entry.sessionId,
       });
     }
-    initialAgentConnection = resolveAgentConnection({
+    const openedWorkingDeck = await WorkingDeckStore.open({
+      deckPath:absoluteDeckPath,
+      sessionDir:sidecarBoundary.sessionDir,
+      sessionId:sessionStore.state.sessionId,
+      sidecarIO:sidecarBoundary.io,
+      pythonExecutable,
+      manageBundle:managedWorkingDeck,
+      expectedWorkingFingerprint:sessionStore.state.workingDeckFingerprint ?? null,
+      reservedBeforeFingerprint:sessionStore.state.sourceEdit?.beforeFingerprint ?? null,
+    });
+    workingDeckStore = openedWorkingDeck.store;
+    let migratedSession = migrateSessionToPersistentPageIds(
+      sessionStore.state, workingDeckStore, openedWorkingDeck.fingerprintMap,
+    );
+    if (openedWorkingDeck.recovery) {
+      migratedSession ??= structuredClone(sessionStore.state);
+      migratedSession.startupRecovery = {
+        ...openedWorkingDeck.recovery,
+        recoveredAt:new Date().toISOString(),
+      };
+    } else if (sessionStore.state.startupRecovery) {
+      migratedSession ??= structuredClone(sessionStore.state);
+      delete migratedSession.startupRecovery;
+    }
+    if (migratedSession) await sessionStore.persistState(migratedSession);
+    const persistedAgentWorkspace = await sidecarBoundary.io.readAgentWorkspace({ missingOk:true });
+    projectResolution = await resolveProjectRoot({
+      deckPath:absoluteDeckPath,
+      persistedRoot:persistedAgentWorkspace?.projectRoot ?? null,
+      explicitRoot:agentProjectRoot,
+      launchCwd:agentLaunchCwd,
+    });
+    defaultAgentProject = projectResolution.path;
+    const projectRootSource = persistedAgentWorkspace?.projectRoot === defaultAgentProject
+      ? persistedAgentWorkspace.projectRootSource
+      : projectResolution.source;
+    const legacyConnection = resolveLegacyConnection({
       provider:agentProvider,
       launchThreadId:agentThreadId,
       persistedConnection:sessionStore.state.agentConnection,
     });
-    if (JSON.stringify(initialAgentConnection) !== JSON.stringify(sessionStore.state.agentConnection)) {
-      const candidate = {
-        ...structuredClone(sessionStore.state),
-        agentConnection:initialAgentConnection,
-      };
-      await sessionStore.persistState(candidate);
-      Object.assign(sessionStore.state, candidate);
+    agentWorkspaceStore = await AgentWorkspaceStore.open({
+      deckSessionId:sessionStore.state.sessionId,
+      projectRoot:defaultAgentProject,
+      projectRootSource,
+      sidecarIO:sidecarBoundary.io,
+      initialState:createWorkspaceFromLegacyConnection({
+        deckSessionId:sessionStore.state.sessionId,
+        projectRoot:defaultAgentProject,
+        projectRootSource,
+        connection:legacyConnection,
+      }),
+    });
+    const openedWorkspace = agentWorkspaceStore.snapshot();
+    if (openedWorkspace.projectRoot !== defaultAgentProject
+      || openedWorkspace.projectRootSource !== projectRootSource
+      || openedWorkspace.activeProvider !== agentProvider) {
+      await agentWorkspaceStore.update(draft => {
+        draft.projectRoot = defaultAgentProject;
+        draft.projectRootSource = projectRootSource;
+        draft.activeProvider = agentProvider;
+      }, openedWorkspace.workspaceRevision);
     }
   } catch (error) {
+    await agentWorkspaceStore?.close().catch(() => {});
     await sidecarBoundary.io.close();
     throw unsafeSidecarError('session/registry 无法安全完成初始化', error);
+  }
+  try {
+    agentTerminalCwd = await resolveAgentTerminalCwd({
+      projectRoot:defaultAgentProject,
+      preferredCwd:agentTerminalCwd ?? agentLaunchCwd,
+      projectIdentity:projectResolution.identity,
+    });
+  } catch (error) {
+    await agentWorkspaceStore.close().catch(() => {});
+    await sidecarBoundary.io.close();
+    throw error;
   }
   if (resolve(sessionStore.sessionDir) !== resolve(sidecarBoundary.sessionDir)) {
     await sidecarBoundary.io.close();
     throw unsafeSidecarError('Deck 在 sidecar 初始化期间发生变化，请重试');
+  }
+  if (agentTerminalSession
+    && (typeof agentTerminalSession.snapshot !== 'function'
+      || typeof agentTerminalSession.attach !== 'function'
+      || agentTerminalSession.snapshot().projectRoot !== defaultAgentProject)) {
+    await agentWorkspaceStore.close().catch(() => {});
+    await sidecarBoundary.io.close();
+    throw httpError('AGENT_TERMINAL_HANDOFF_FAILED', 409, 'Agent 终端与 Editor 项目目录不一致');
+  }
+  let creationHandoffState = null;
+  try {
+    creationHandoffState = creationHandoff
+      ? await persistCreationHandoffContext(sessionStore.sessionDir, creationHandoff)
+      : await loadCreationHandoffContext(sessionStore.sessionDir);
+  } catch (error) {
+    if (creationHandoff) {
+      await agentWorkspaceStore.close().catch(() => {});
+      await sidecarBoundary.io.close();
+      throw unsafeSidecarError('Creation 交接上下文无法安全持久化', error);
+    }
+    // 历史交接文件只是增强上下文；损坏或迁移失败不得阻断 Deck 本身继续编辑。
+    creationHandoffState = null;
   }
   let attachmentStore;
   try {
@@ -1090,6 +1526,7 @@ export async function startServer({
       sidecarBoundary:canonicalAttachmentBoundary(sidecarBoundary),
       sidecarIO:sidecarBoundary.io,
       spawnAttachmentWriter,
+      pythonExecutable,
       timeoutMs:attachmentWriterTimeoutMs,
     });
     await sidecarBoundary.io.reconcileAttachments({
@@ -1106,28 +1543,32 @@ export async function startServer({
     sessionStore,
     timeoutMs:bridgeTimeoutMs,
     beforeSessionPersist,
+    getPageIds:() => [...workingDeckStore.pageIds],
+    reconcileSession:state => (
+      migrateSessionToPersistentPageIds(state, workingDeckStore) ?? structuredClone(state)
+    ),
   });
   const webSockets = new WebSocketServer({ noServer: true });
+  const terminalSockets = new WebSocketServer({ noServer:true, maxPayload:128 * 1024 });
   const activeWriters = new Map();
+  const activePptxExports = new Set();
+  let pptxExportBusy = false;
   let watcherClosed = false;
   let watcherGeneration = 0;
   let watcherQueue = Promise.resolve();
+  let workingWatcherQueue = Promise.resolve();
   let serviceOrigin;
   let editorConnectedOnce = false;
   let editorCloseTimer;
   let closePromise;
   let agentRuns;
-  let activeAgentAdapter;
-  const sessionCatalog = agentSessionCatalog ?? createAgentSessionCatalog();
-  const allowedAgentProjects = new Map([[
-    defaultAgentProject,
-    {
-      path:defaultAgentProject, name:basename(defaultAgentProject) || defaultAgentProject,
-      source:'default', providers:[],
-    },
-  ]]);
-  const knownSessionProjects = new Map();
-  let agentProjectPickerActive = false;
+  let agentTerminal;
+  let detachTerminalState = null;
+  let detachTerminalProvider = null;
+  let detachTerminalInterrupt = null;
+  let bindingCoordinator = null;
+  let bindingPersistenceQueue = Promise.resolve();
+  let restartDeckWatcher = () => {};
 
   const broadcast = (type, revision, payload) => {
     const message = JSON.stringify({ type, revision, payload });
@@ -1136,45 +1577,141 @@ export async function startServer({
     }
   };
 
-  const requireAgentProject = async path => {
-    if (typeof path !== 'string' || !isAbsolute(path) || !allowedAgentProjects.has(path)) {
-      throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, 'Agent 项目目录不在已发现或已选择的列表中');
+  const effectiveDeckId = deckId ?? sessionStore.state.deckId ?? sessionStore.state.sessionId;
+  try {
+    bindingCoordinator = await openDeckBinding({
+      deckId:effectiveDeckId,
+      initialBinding:deckBinding ?? {
+        revision:0,
+        currentPath:absoluteDeckPath,
+        trustedRoot:dirname(absoluteDeckPath),
+      },
+      storageRoot:sidecarBoundary.sidecarRoot,
+      onBeforeRebind:async ({ nextPath, witness }) => {
+        const expectedWitness = witness.platform === 'windows'
+          ? { dev:witness.volumeSerial, ino:witness.fileId }
+          : { dev:witness.device, ino:witness.inode };
+        await sidecarBoundary.io.rebindDeck({
+          deckName:basename(nextPath), expectedWitness,
+        });
+        currentDeckPath = nextPath;
+        sessionStore.deckPath = nextPath;
+        await sessionStore.persistState({
+          ...sessionStore.state,
+          deckId:effectiveDeckId,
+          deckPath:nextPath,
+        });
+      },
+      onChange:event => {
+        currentDeckPath = event.binding.currentPath;
+        restartDeckWatcher();
+        broadcast(event.type, event.revision, event.binding);
+        if (updateWorkItemBinding) {
+          bindingPersistenceQueue = bindingPersistenceQueue
+            .then(() => updateWorkItemBinding(event.binding))
+            .catch(() => {});
+        }
+      },
+    });
+    if (sessionStore.state.deckId !== effectiveDeckId) {
+      await sessionStore.persistState({ ...sessionStore.state, deckId:effectiveDeckId });
     }
-    const actualPath = await realpath(path);
-    const info = await lstat(actualPath);
-    if (!info.isDirectory()) {
-      throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, 'Agent 项目路径不是目录');
-    }
-    return actualPath;
-  };
+  } catch (error) {
+    bridge.close();
+    await attachmentStore.close().catch(() => {});
+    await agentWorkspaceStore.close().catch(() => {});
+    await bindingCoordinator?.close?.().catch(() => {});
+    await sidecarBoundary.io.close().catch(() => {});
+    throw error;
+  }
 
   const agentContext = () => ({
-    deckPath:absoluteDeckPath,
+    deckPath:workingDeckStore.path,
+    sourceDeckPath:currentDeckPath,
+    projectPath:agentWorkspaceStore.snapshot().projectRoot,
     serviceUrl:serviceOrigin,
     token,
+    creationContextPath:creationHandoffState?.path ?? null,
   });
 
   try {
-    activeAgentAdapter = agentAdapter ?? createAgentRouter({
-      initialConnection:initialAgentConnection,
-      persistConnection:async (connection, { expectedRevision } = {}) => {
-        const result = await bridge.setAgentConnection(
-          connection,
-          expectedRevision ?? sessionStore.state.revision,
-        );
-        broadcast(
-          'agent-connection-updated',
-          result.revision,
-          providerConfiguration(result.connection.provider, result.connection),
-        );
-        return result;
-      },
-      spawnProcess:spawnAgent,
-      timeoutMs:agentRunTimeoutMs,
-    });
+    const terminalAdapter = {
+        id:'agent-terminal',
+        get mode() { return 'terminal'; },
+        async run(context) {
+          if (!agentTerminal) {
+            throw httpError('AGENT_TERMINAL_UNAVAILABLE', 503, 'Agent 终端尚未完成初始化');
+          }
+          const persistedProvider = agentWorkspaceStore.snapshot().activeProvider;
+          if (!isAgentProviderId(persistedProvider)) {
+            throw httpError(
+              'AGENT_PROVIDER_UNAVAILABLE', 503,
+              `当前 Agent provider 不受支持：${String(persistedProvider)}`,
+            );
+          }
+          const provider = persistedProvider;
+          const firstTurn = agentTerminal.snapshot().state !== 'running'
+            || agentTerminal.snapshot().provider !== provider;
+          const prompt = buildAgentPrompt({
+            ...context,
+            sourceThreadId:null,
+            loadSkill:firstTurn,
+            skillInvocation:provider === 'codex'
+              ? '$huawei-deck'
+              : '请先读取并使用 huawei-deck Skill。',
+            environmentCredentials:true,
+          });
+          context.onProgress?.({
+            mode:'terminal',
+            message:firstTurn
+              ? `正在启动 ${agentProviderDefinition(provider).label} 终端并处理反馈`
+              : '任务已发送到当前 Agent 终端，请在右侧查看实时过程',
+          });
+          const deadline = Date.now() + agentRunTimeoutMs;
+          if (firstTurn) await agentTerminal.start({ provider, initialPrompt:prompt });
+          await agentTerminal.waitUntilReady?.({
+            timeoutMs:Math.max(1, deadline - Date.now()),
+          });
+          if (!firstTurn) {
+            agentTerminal.submitPrompt(prompt);
+          }
+          let heartbeatAt = Date.now();
+          while (Date.now() < deadline) {
+            if (context.signal?.aborted) {
+              throw httpError('AGENT_RUN_CANCELLED', 409, 'Agent 任务已取消');
+            }
+            const remaining = new Set(context.taskIds);
+            for (const task of sessionStore.state.tasks) {
+              if (remaining.has(task.id) && !['pending', 'failed'].includes(task.status)) {
+                remaining.delete(task.id);
+              }
+            }
+            if (remaining.size === 0) {
+              return { mode:'terminal', summary:'Agent 已在终端中完成本批处理，请检查页面结果' };
+            }
+            const terminalState = agentTerminal.snapshot();
+            if (['failed', 'exited', 'closed'].includes(terminalState.state)) {
+              throw httpError(
+                'AGENT_TERMINAL_EXITED', 502,
+                `${terminalState.providerLabel} 终端已退出，仍有 ${remaining.size} 个任务未完成`,
+              );
+            }
+            if (Date.now() - heartbeatAt >= 15_000) {
+              heartbeatAt = Date.now();
+              context.onProgress?.({
+                mode:'terminal',
+                message:`Agent 仍在终端中处理，剩余 ${remaining.size} 个任务`,
+              });
+            }
+            await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
+          }
+          throw httpError('AGENT_RUN_TIMEOUT', 504, 'Agent 终端处理任务超时');
+        },
+    };
+    const runAdapter = agentRunAdapter ?? terminalAdapter;
     agentRuns = new AgentRunCoordinator({
-      provider:activeAgentAdapter.id,
-      adapter:activeAgentAdapter,
+      provider:runAdapter.id,
+      adapter:runAdapter,
       getSession:() => sessionStore.state,
       getContext:agentContext,
       onUpdate:run => broadcast('agent-run-updated', sessionStore.state.revision, run),
@@ -1213,12 +1750,125 @@ export async function startServer({
       if (watcherClosed || generation !== watcherGeneration) return;
       const changed = await bridge.noteDeckFingerprint(async () => {
         try { return (await sidecarBoundary.io.hashDeck()).fingerprint; }
-        catch (error) { return `unavailable:${error.code ?? 'READ_ERROR'}`; }
+        catch (error) {
+          const binding = await bindingCoordinator.reconcile({ cause:'watcher' });
+          if (binding.state !== 'bound') return sessionStore.state.deckFingerprint;
+          try { return (await sidecarBoundary.io.hashDeck()).fingerprint; }
+          catch { return `unavailable:${error.code ?? 'READ_ERROR'}`; }
+        }
       });
       if (!watcherClosed && generation === watcherGeneration && changed) {
         broadcast('deck-conflict', sessionStore.state.revision, sessionStore.state.conflict);
       }
     }).catch(() => {});
+  };
+
+  const publishSourceMutation = async (change, {
+    sourceEditId=null, expectedRevision=sessionStore.state.revision,
+  } = {}) => {
+    const source = {
+      beforeFingerprint:change.beforeFingerprint,
+      afterFingerprint:change.afterFingerprint,
+      origin:'working-copy',
+      summary:'终端或外部工具修改工作副本',
+      recordedAt:new Date().toISOString(),
+    };
+    const transaction = {
+      restore:(target, expected) => workingDeckStore.restore(target, expected),
+    };
+    const result = sourceEditId === null
+      ? await bridge.recordSourceMutation(source, transaction)
+      : await bridge.commitSourceEdit({
+        sourceEditId,
+        expectedRevision,
+        source,
+        ...transaction,
+        finalize:afterFingerprint => workingDeckStore.confirmExternalChange(afterFingerprint),
+      });
+    if (sourceEditId === null) workingDeckStore.confirmExternalChange(change.afterFingerprint);
+    const serializedResult = await serializeTaskResult(result, { committed:true });
+    broadcast('source-mutation-recorded', result.revision, serializedResult);
+    broadcast('working-deck-changed', result.revision, {
+      groupId:result.groupId,
+      reason:'source-mutation',
+      workingDeckFingerprint:change.afterFingerprint,
+    });
+    return serializedResult;
+  };
+
+  const checkpointWorkingDeckChange = async ({
+    allowSourceEdit=false,
+    sourceEditId=null,
+    expectedRevision=sessionStore.state.revision,
+  } = {}) => {
+    if (!workingDeckStore.managed) return;
+    const generation = watcherGeneration;
+    if (watcherClosed || generation !== watcherGeneration) return;
+    if (!allowSourceEdit && bridge.sourceEditSnapshot()) return;
+    const change = await workingDeckStore.checkpointExternalChange();
+    if (!change) return;
+    if (watcherClosed || generation !== watcherGeneration) return;
+    return publishSourceMutation(change, { sourceEditId, expectedRevision });
+  };
+
+  const queueWorkingDeckCheckpoint = () => {
+    const generation = watcherGeneration;
+    const operation = workingWatcherQueue.then(checkpointWorkingDeckChange);
+    workingWatcherQueue = operation.catch(error => {
+      if (!watcherClosed && generation === watcherGeneration) {
+        broadcast('source-mutation-failed', sessionStore.state.revision, {
+          code:error?.code ?? 'SOURCE_MUTATION_FAILED',
+          message:error?.message ?? '工作副本修改无法进入历史',
+        });
+      }
+    });
+    return operation;
+  };
+
+  // 文件系统通知只能说明“可能发生了变化”，不能作为 mutation 的提交顺序。
+  // 所有带 revision 的写操作先穿过同一个检查点 seam：若 Agent 已经写盘，
+  // SourceMutation 必须先增加 revision，随后旧请求以 REVISION_CONFLICT 安全重试。
+  const guardWorkingRevision = async expectedRevision => {
+    if (workingDeckStore.managed) await queueWorkingDeckCheckpoint();
+    bridge.assertRevision(expectedRevision);
+  };
+
+  const beginSourceEdit = async ({ expectedRevision, taskId=null }) => {
+    if (!workingDeckStore.managed) {
+      throw httpError('SOURCE_EDIT_UNAVAILABLE', 409, '当前 Deck 没有托管工作副本');
+    }
+    await guardWorkingRevision(expectedRevision);
+    const result = await bridge.beginSourceEdit({
+      expectedRevision,
+      taskId,
+      beforeFingerprint:workingDeckStore.fingerprint,
+    });
+    return { ...result, workingDeckPath:workingDeckStore.path };
+  };
+
+  const commitSourceEdit = async ({ sourceEditId, expectedRevision }) => {
+    const active = bridge.sourceEditSnapshot();
+    if (!active || active.id !== sourceEditId) {
+      // 让 Bridge 生成稳定的 NOT_FOUND / MISMATCH 错误，同时不读取或改写工作副本。
+      return bridge.commitSourceEdit({ sourceEditId, expectedRevision, source:null });
+    }
+    const result = await checkpointWorkingDeckChange({
+      allowSourceEdit:true, sourceEditId, expectedRevision,
+    });
+    if (!result) {
+      throw httpError('SOURCE_EDIT_NO_CHANGE', 409, '源码事务尚未写入工作副本');
+    }
+    return result;
+  };
+
+  const cancelSourceEdit = ({ sourceEditId, expectedRevision }) => bridge.cancelSourceEdit({
+    sourceEditId,
+    expectedRevision,
+    discard:beforeFingerprint => workingDeckStore.discardExternalChange(beforeFingerprint),
+  });
+
+  const workingWatchListener = () => {
+    void queueWorkingDeckCheckpoint().catch(() => {});
   };
 
   const server = createServer(async (request, response) => {
@@ -1231,12 +1881,115 @@ export async function startServer({
       if (isProtected(pathname)) authorize(request, url, token, serviceOrigin);
 
       if (request.method === 'GET' && pathname === '/') {
-        await sendEditorIndex(request, response, url, token, editorToken, serviceOrigin);
+        sendEditorIndex(
+          request, response, url, token, editorToken, serviceOrigin, pinnedEditorIndex,
+        );
         return;
       }
 
       if (request.method === 'GET' && pathname === '/api/session') {
         json(response, 200, sessionStore.state);
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/shutdown') {
+        json(response, 202, { status:'shutting-down' });
+        setImmediate(() => void close().catch(() => {}));
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/export/pptx') {
+        const { expectedRevision } = await readJson(request);
+        requireRevision(expectedRevision);
+        await guardWorkingRevision(expectedRevision);
+        if (pptxExportBusy) {
+          throw httpError('PPTX_EXPORT_BUSY', 409, '已有一个 PPTX 正在导出，请稍候');
+        }
+        pptxExportBusy = true;
+        const controller = new AbortController();
+        const operation = (async () => {
+          const patches = bridge.compiledRuntimeWriteActions();
+          const htmlBytes = workingDeckStore.managed
+            ? await workingDeckStore.materializePatches(patches)
+            : await workingDeckStore.read();
+          return pptxExporter({
+            htmlBytes,
+            pythonExecutable,
+            timeoutMs:pptxExportTimeoutMs,
+            signal:controller.signal,
+          });
+        })();
+        const job = { controller, promise:operation };
+        activePptxExports.add(job);
+        try {
+          const exported = await operation;
+          const pptxBytes = Buffer.isBuffer(exported) ? exported : Buffer.from(exported ?? []);
+          if (pptxBytes.length === 0) {
+            throw httpError('PPTX_EXPORT_FAILED', 500, 'PPTX 导出结果为空');
+          }
+          const stem = basename(currentDeckPath, extname(currentDeckPath)) || 'deck';
+          const downloadName = `${stem}.pptx`;
+          send(response, 200, pptxBytes, PPTX_CONTENT_TYPE, {
+            'content-disposition':`attachment; filename="deck.pptx"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
+          });
+        } finally {
+          pptxExportBusy = false;
+          activePptxExports.delete(job);
+        }
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/deck-binding') {
+        json(response, 200, bindingCoordinator.snapshot());
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/deck-binding/reconcile') {
+        json(response, 200, await bindingCoordinator.reconcile({ cause:'manual' }));
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/deck-binding/choose-file') {
+        const { expectedBindingRevision, confirmation = 'same-file' } = await readJson(request);
+        const candidatePath = await pickDeckFile({});
+        if (candidatePath === null) {
+          json(response, 200, { status:'cancelled', binding:bindingCoordinator.snapshot() });
+          return;
+        }
+        const binding = await bindingCoordinator.rebind({
+          candidatePath,
+          expectedBindingRevision,
+          confirmation,
+        });
+        json(response, 200, { status:'rebound', binding });
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/workspace-history') {
+        json(response, 200, await workspaceHistoryProvider());
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/work-items/rename') {
+        if (!renameWorkItem) {
+          throw httpError('WORK_ITEM_RENAME_UNAVAILABLE', 409, '当前启动方式不支持修改工作项名称');
+        }
+        const body = await readJson(request);
+        const workItem = await renameWorkItem({
+          workId:body.workId,
+          displayName:body.displayName,
+          expectedRevision:body.expectedRevision,
+        });
+        json(response, 200, { status:'renamed', workItem });
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/text-locations') {
+        const text = url.searchParams.get('text') ?? '';
+        const pageKey = url.searchParams.get('pageKey');
+        if (!text || text.length > 500) {
+          throw httpError('INVALID_TEXT_QUERY', 400, 'text 必须为 1 到 500 个字符');
+        }
+        json(response, 200, await bridge.locateText(text, { pageKey }));
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/agent-terminal') {
+        json(response, 200, agentTerminal?.snapshot() ?? {
+          provider:'codex',
+          state:'stopped',
+        });
         return;
       }
       if (request.method === 'GET' && pathname === '/api/tasks') {
@@ -1246,163 +1999,14 @@ export async function startServer({
         json(response, 200, tasks);
         return;
       }
-      if (request.method === 'GET' && pathname === '/api/agent-providers') {
-        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
-        json(response, 200, providerConfiguration(
-          connection.provider,
-          connection,
-        ));
-        return;
-      }
-      if (request.method === 'GET' && pathname === '/api/agent-connection') {
-        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
-        json(response, 200, providerConfiguration(
-          connection.provider,
-          connection,
-        ));
-        return;
-      }
-      if (request.method === 'GET' && pathname === '/api/agent-sessions') {
-        const catalog = await sessionCatalog.list();
-        const connection = activeAgentAdapter.connection ?? initialAgentConnection;
-        for (const session of catalog.sessions) {
-          if (typeof session.cwd !== 'string' || !isAbsolute(session.cwd)) continue;
-          const projectPath = resolve(session.cwd);
-          knownSessionProjects.set(`${session.provider}\0${session.id}`, projectPath);
-          const existingProject = allowedAgentProjects.get(projectPath);
-          allowedAgentProjects.set(projectPath, {
-            path:projectPath,
-            name:basename(projectPath) || projectPath,
-            source:existingProject?.source ?? 'discovered',
-            providers:[...new Set([...(existingProject?.providers ?? []), session.provider])],
-          });
-        }
-        catalog.sessions = catalog.sessions.map(session => {
-          const selected = session.provider === connection.provider
-            && session.id === connection.threadId;
-          return {
-            ...session,
-            selected,
-            skillStatus:selected && ['loaded', 'detected'].includes(connection.skillStatus)
-              ? connection.skillStatus
-              : session.skillStatus,
-          };
-        });
-        catalog.projects = [...allowedAgentProjects.values()].map(project => ({
-          ...project, providers:[...project.providers],
-        })).sort((a, b) => (
-          a.name.localeCompare(b.name, 'zh-CN') || a.path.localeCompare(b.path)
-        ));
-        catalog.defaultProjectPath = defaultAgentProject;
-        json(response, 200, catalog);
-        return;
-      }
-      if (request.method === 'POST' && pathname === '/api/agent-projects/pick') {
-        if (agentProjectPickerActive) {
-          throw httpError('PROJECT_PICKER_ACTIVE', 409, '项目目录选择器已经打开');
-        }
-        agentProjectPickerActive = true;
-        let selectedPath;
-        try {
-          selectedPath = await pickAgentProjectDirectory();
-        } finally {
-          agentProjectPickerActive = false;
-        }
-        if (selectedPath === null) {
-          json(response, 200, { status:'cancelled' });
-          return;
-        }
-        const projectPath = await realpath(selectedPath);
-        const info = await lstat(projectPath);
-        if (!info.isDirectory()) {
-          throw httpError('AGENT_PROJECT_UNAVAILABLE', 400, '选择结果不是项目目录');
-        }
-        const project = {
-          path:projectPath,
-          name:basename(projectPath) || projectPath,
-          source:'selected',
-          providers:allowedAgentProjects.get(projectPath)?.providers ?? [],
-        };
-        allowedAgentProjects.set(projectPath, project);
-        json(response, 200, { status:'selected', project });
-        return;
-      }
-      if (request.method === 'POST' && pathname === '/api/agent-sessions/inspect') {
-        const { provider, sessionId } = await readJson(request);
-        const candidate = manualAgentConnection({ provider, threadId:sessionId });
-        json(response, 200, await sessionCatalog.inspectSkill(
-          candidate.provider, candidate.threadId,
-        ));
-        return;
-      }
-      if (request.method === 'POST' && pathname === '/api/agent-sessions') {
-        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
-          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能新建会话');
-        }
-        if (typeof activeAgentAdapter.createSession !== 'function') {
-          throw httpError('AGENT_SESSION_CREATE_UNAVAILABLE', 409, '当前 Agent adapter 不支持新建会话');
-        }
-        const { expectedRevision, provider, projectPath } = await readJson(request);
-        requireRevision(expectedRevision);
-        if (expectedRevision !== sessionStore.state.revision) {
-          const error = httpError('REVISION_CONFLICT', 409, '编辑会话已经变化，请刷新后重试');
-          error.revision = sessionStore.state.revision;
-          throw error;
-        }
-        const trustedProjectPath = await requireAgentProject(projectPath);
-        const result = await activeAgentAdapter.createSession(
-          { provider, projectPath:trustedProjectPath },
-          agentContext(),
-        );
-        const project = allowedAgentProjects.get(trustedProjectPath);
-        if (project) project.providers = [...new Set([...project.providers, provider])];
-        const configuration = providerConfiguration(
-          result.connection.provider, result.connection,
-        );
-        json(response, 201, { ...configuration, revision:sessionStore.state.revision });
-        return;
-      }
-      if (request.method === 'PUT' && pathname === '/api/agent-connection') {
-        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
-          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能更改连接');
-        }
-        if (typeof activeAgentAdapter.configure !== 'function') {
-          throw httpError('AGENT_CONNECTION_UNAVAILABLE', 409, '当前 Agent adapter 不支持手动连接');
-        }
-        const { expectedRevision, provider, threadId } = await readJson(request);
-        requireRevision(expectedRevision);
-        const currentConnection = activeAgentAdapter.connection ?? initialAgentConnection;
-        let skillStatus = 'unknown';
-        if (threadId !== null) {
-          if (provider === currentConnection.provider && threadId === currentConnection.threadId
-            && ['loaded', 'detected'].includes(currentConnection.skillStatus)) {
-            skillStatus = currentConnection.skillStatus;
-          } else {
-            try {
-              ({ skillStatus } = await sessionCatalog.inspectSkill(provider, threadId));
-            } catch {
-              skillStatus = 'unknown';
-            }
-          }
-        }
-        const projectPath = threadId === null ? null
-          : (knownSessionProjects.get(`${provider}\0${threadId}`)
-            ?? (provider === currentConnection.provider && threadId === currentConnection.threadId
-              ? currentConnection.projectPath : null));
-        const configured = await activeAgentAdapter.configure(
-          { provider, threadId, projectPath, source:'manual', skillStatus },
-          { expectedRevision },
-        );
-        const configuration = providerConfiguration(configured.connection.provider, configured.connection);
-        json(response, 200, { ...configuration, revision:configured.revision });
-        return;
-      }
       if (request.method === 'GET' && pathname === '/api/agent-runs/current') {
         json(response, 200, agentRuns.snapshot());
         return;
       }
       if (request.method === 'POST' && pathname === '/api/agent-runs') {
         const { expectedRevision, taskIds } = await readJson(request);
+        requireRevision(expectedRevision);
+        await guardWorkingRevision(expectedRevision);
         const run = agentRuns.start({ expectedRevision, taskIds });
         json(response, 202, run);
         return;
@@ -1431,6 +2035,7 @@ export async function startServer({
           const { expectedRevision, ...input } = body;
           requireRevision(expectedRevision);
           validateTask(input);
+          await guardWorkingRevision(expectedRevision);
           const result = await bridge.createTask(input, expectedRevision, {
             attachmentsLifecycle,
           });
@@ -1470,6 +2075,7 @@ export async function startServer({
         const id = decodeURIComponent(taskMatch[1]);
         const body = await readJson(request);
         requireRevision(body.expectedRevision);
+        await guardWorkingRevision(body.expectedRevision);
         if (request.method === 'PATCH') {
           const result = await bridge.updateTask(id, body.instruction, body.expectedRevision);
           const task = await serializeTaskOutput(result.task, result.revision, { committed:true });
@@ -1489,8 +2095,67 @@ export async function startServer({
         json(response, 200, await serializeTaskOutput(task, sessionStore.state.revision));
         return;
       }
+      if (request.method === 'POST' && pathname === '/api/source-edits') {
+        const { expectedRevision, taskId = null } = await readJson(request);
+        requireRevision(expectedRevision);
+        requireTaskId(taskId);
+        const result = await beginSourceEdit({ expectedRevision, taskId });
+        broadcast('source-edit-begun', result.revision, result);
+        json(response, 201, result);
+        return;
+      }
+      const sourceEditTransactionMatch = pathname.match(
+        /^\/api\/source-edits\/([^/]+)\/(commit|cancel)$/,
+      );
+      if (sourceEditTransactionMatch && request.method === 'POST') {
+        const sourceEditId = requireSourceEditId(decodeURIComponent(sourceEditTransactionMatch[1]));
+        const operation = sourceEditTransactionMatch[2];
+        const { expectedRevision } = await readJson(request);
+        requireRevision(expectedRevision);
+        const result = operation === 'commit'
+          ? await commitSourceEdit({ sourceEditId, expectedRevision })
+          : await cancelSourceEdit({ sourceEditId, expectedRevision });
+        if (operation === 'cancel') broadcast('source-edit-cancelled', result.revision, result);
+        json(response, 200, result);
+        return;
+      }
+      const sourceEditMatch = pathname.match(
+        /^\/api\/tasks\/([^/]+)\/source-edit\/(begin|cancel)$/,
+      );
+      if (sourceEditMatch && request.method === 'POST') {
+        if (!workingDeckStore.managed) {
+          throw httpError('SOURCE_EDIT_UNAVAILABLE', 409, '当前 Deck 没有托管工作副本');
+        }
+        const taskId = decodeURIComponent(sourceEditMatch[1]);
+        const operation = sourceEditMatch[2];
+        const { expectedRevision } = await readJson(request);
+        requireRevision(expectedRevision);
+        if (operation === 'begin') {
+          const result = await beginSourceEdit({ expectedRevision, taskId });
+          broadcast('source-edit-begun', result.revision, result);
+          json(response, 200, result);
+          return;
+        }
+        const active = bridge.sourceEditSnapshot();
+        if (!active) {
+          bridge.assertRevision(expectedRevision);
+          json(response, 200, {
+            taskId, revision:sessionStore.state.revision, cancelled:false,
+          });
+          return;
+        }
+        if (active.taskId !== taskId) {
+          throw httpError('SOURCE_TASK_ACTIVE', 409, '另一个结构任务正在等待工作副本修改');
+        }
+        const result = await cancelSourceEdit({
+          sourceEditId:active.id, expectedRevision,
+        });
+        broadcast('source-edit-cancelled', result.revision, result);
+        json(response, 200, result);
+        return;
+      }
       if (request.method === 'POST' && pathname === '/api/actions') {
-        const { expectedRevision, taskId, actions } = await readJson(request);
+        const { expectedRevision, taskId, actions, coalesceKey } = await readJson(request);
         requireRevision(expectedRevision);
         requireTaskId(taskId);
         if (!Array.isArray(actions) || actions.length === 0) {
@@ -1500,9 +2165,17 @@ export async function startServer({
         if (new Set(actions.map(action => action.id)).size !== actions.length) {
           throw httpError('DUPLICATE_ACTION_ID', 400, '同一批次 action id 不得重复');
         }
+        if (coalesceKey !== undefined && (taskId !== null || typeof coalesceKey !== 'string'
+          || coalesceKey.length === 0 || coalesceKey.length > 256)) {
+          throw httpError('INVALID_INPUT', 400, 'coalesceKey 只允许人工动作使用非空短字符串');
+        }
+        await guardWorkingRevision(expectedRevision);
         let result;
         try {
-          result = await bridge.applyActions({ taskId, actions, expectedRevision });
+          result = await bridge.applyActions({
+            taskId, actions, expectedRevision,
+            ...(coalesceKey === undefined ? {} : { coalesceKey }),
+          });
         } catch (error) {
           if (error?.task?.id && Number.isSafeInteger(error?.revision)) {
             const task = await serializeTaskOutput(error.task, error.revision, {
@@ -1523,61 +2196,180 @@ export async function startServer({
         const groupId = decodeURIComponent(groupMatch[1]);
         const { expectedRevision } = await readJson(request);
         requireRevision(expectedRevision);
-        const result = groupMatch[2] === 'undo'
-          ? await bridge.undoGroup(groupId, expectedRevision)
-          : await bridge.redoGroup(groupId, expectedRevision);
+        await guardWorkingRevision(expectedRevision);
+        const method = groupMatch[2];
+        const sourceGroup = sessionStore.state.groups
+          .find(group => group?.id === groupId && group?.mutationType === 'source');
+        const result = sourceGroup
+          ? await bridge.changeSourceGroup(method, groupId, expectedRevision, {
+            restore:(target, expected) => workingDeckStore.restore(target, expected),
+          })
+          : (method === 'undo'
+            ? await bridge.undoGroup(groupId, expectedRevision)
+            : await bridge.redoGroup(groupId, expectedRevision));
         const serializedResult = await serializeTaskResult(result, { committed:true });
         broadcast(
-          `group-${groupMatch[2] === 'undo' ? 'undone' : 'redone'}`,
+          `group-${method === 'undo' ? 'undone' : 'redone'}`,
           result.revision,
           serializedResult,
         );
+        if (sourceGroup) {
+          broadcast('working-deck-changed', result.revision, {
+            groupId, reason:`source-${method}`,
+            workingDeckFingerprint:result.workingDeckFingerprint,
+          });
+        }
         json(response, 200, serializedResult);
         return;
       }
-      if (request.method === 'POST' && pathname === '/api/write-deck') {
-        const { expectedRevision } = await readJson(request);
+      if (request.method === 'POST'
+        && ['/api/write-deck', '/api/solidify-deck'].includes(pathname)) {
+        const { expectedRevision, expectedBindingRevision } = await readJson(request);
         requireRevision(expectedRevision);
+        await guardWorkingRevision(expectedRevision);
+        const solidify = pathname === '/api/solidify-deck';
+        if (solidify) {
+          const binding = await bindingCoordinator.reconcile({ cause:'before-publish' });
+          if (expectedBindingRevision !== undefined
+            && expectedBindingRevision !== binding.revision) {
+            throw detailedHttpError(
+              'DECK_BINDING_REVISION_CONFLICT', 409,
+              'Deck 文件绑定已更新，请刷新后重试',
+              { binding },
+            );
+          }
+          if (binding.state !== 'bound') {
+            throw detailedHttpError(
+              'DECK_REBIND_REQUIRED', 409,
+              'Editor 不能确认当前源文件，重新绑定前无法固化',
+              { binding },
+            );
+          }
+        }
         let result;
         try {
           result = await bridge.writeDeck(
             expectedRevision,
             {
               fingerprint:() => sidecarBoundary.io.hashDeck().then(result => result.fingerprint),
-              writer:(patches, expectedFingerprint) => runWriteTransaction({
-                deckPath:absoluteDeckPath,
-                sessionDir:sessionStore.sessionDir,
-                expectedFingerprint,
-                sidecarBoundary,
-                syncDirectory,
-                runWriter:transactionId => runWritePatches(
-                  absoluteDeckPath,
-                  sessionStore.sessionDir,
-                  patches,
+              writer:workingDeckStore.managed
+                ? async (patches, expectedFingerprint) => {
+                  if (!solidify) {
+                    return {
+                      ok:true,
+                      fingerprint:workingDeckStore.fingerprint,
+                      previousFingerprint:workingDeckStore.fingerprint,
+                    };
+                  }
+                  const workingResult = await workingDeckStore.writePatches(patches);
+                  try {
+                    await workingPatchVerifier(workingDeckStore.path);
+                  } catch (error) {
+                    try {
+                      await workingDeckStore.restore(
+                        workingResult.previousFingerprint, workingResult.fingerprint,
+                      );
+                    } catch (restoreError) {
+                      throw detailedHttpError(
+                        'RECOVERY_REQUIRED', 503,
+                        '补丁验证失败且工作副本无法恢复，请重启 Editor 完成对账',
+                        { cause:restoreError, originalError:error },
+                      );
+                    }
+                    throw error;
+                  }
+                  try {
+                    const published = await runWriteTransaction({
+                      deckPath:currentDeckPath,
+                      sessionDir:sessionStore.sessionDir,
+                      expectedFingerprint,
+                      sidecarBoundary,
+                      syncDirectory,
+                      runWriter:transactionId => sidecarBoundary.io.publishWorkingDeck({
+                        sessionId:sessionStore.state.sessionId,
+                        transactionId,
+                        expectedDeckFingerprint:expectedFingerprint,
+                        expectedWorkingFingerprint:workingResult.fingerprint,
+                      }),
+                    });
+                    return {
+                      ...published,
+                      previousWorkingFingerprint:workingResult.previousFingerprint,
+                      workingFingerprint:workingResult.fingerprint,
+                    };
+                  } catch (error) {
+                    if (error?.committed !== true) {
+                      try {
+                        await workingDeckStore.restore(
+                          workingResult.previousFingerprint, workingResult.fingerprint,
+                        );
+                      } catch (restoreError) {
+                        throw detailedHttpError(
+                          'RECOVERY_REQUIRED', 503,
+                          '固化发布失败且工作副本无法恢复，请重启 Editor 完成对账',
+                          { cause:restoreError, originalError:error },
+                        );
+                      }
+                    }
+                    throw error;
+                  }
+                }
+                : (patches, expectedFingerprint) => runWriteTransaction({
+                  deckPath:currentDeckPath,
+                  sessionDir:sessionStore.sessionDir,
                   expectedFingerprint,
-                  transactionId,
-                  sessionStore.state.sessionId,
-                  sidecarBoundary.pythonIdentity,
-                  {
-                    spawnWriter,
-                    timeoutMs: writerTimeoutMs,
-                    killGraceMs: writerKillGraceMs,
-                    activeWriters,
-                    onActiveWritersChange,
-                  },
+                  sidecarBoundary,
+                  syncDirectory,
+                  runWriter:transactionId => runWritePatches(
+                    currentDeckPath,
+                    sessionStore.sessionDir,
+                    patches,
+                    expectedFingerprint,
+                    transactionId,
+                    sessionStore.state.sessionId,
+                    sidecarBoundary.pythonIdentity,
+                    {
+                      pythonExecutable,
+                      spawnWriter,
+                      timeoutMs: writerTimeoutMs,
+                      killGraceMs: writerKillGraceMs,
+                      activeWriters,
+                      onActiveWritersChange,
+                    },
+                  ),
+                }),
+              restore:workingDeckStore.managed
+                ? (solidify
+                  ? async (writerResult, expectedFingerprint) => {
+                    await restoreDeckBackup(
+                      currentDeckPath,
+                      sessionStore.sessionDir,
+                      { backupPath:resolve(writerResult.backup) },
+                      expectedFingerprint,
+                      writerResult.fingerprint,
+                      sidecarBoundary,
+                    );
+                    await workingDeckStore.restore(
+                      writerResult.previousWorkingFingerprint,
+                      writerResult.workingFingerprint,
+                    );
+                  }
+                  : async () => {})
+                : (writerResult, expectedFingerprint) => restoreDeckBackup(
+                  currentDeckPath,
+                  sessionStore.sessionDir,
+                  { backupPath:resolve(writerResult.backup) },
+                  expectedFingerprint,
+                  writerResult.fingerprint,
+                  sidecarBoundary,
                 ),
-              }),
-              restore:(writerResult, expectedFingerprint) => restoreDeckBackup(
-                absoluteDeckPath,
-                sessionStore.sessionDir,
-                { backupPath:resolve(writerResult.backup) },
-                expectedFingerprint,
-                writerResult.fingerprint,
-                sidecarBoundary,
-              ),
-              finalize:value => finalizeWriteTransaction(
-                value, sessionStore.sessionDir, sidecarBoundary,
-              ),
+              finalize:workingDeckStore.managed && !solidify
+                ? async () => {}
+                : value => finalizeWriteTransaction(
+                  value, sessionStore.sessionDir, sidecarBoundary,
+                ),
+              solidify,
+              scope:workingDeckStore.managed && !solidify ? 'working' : 'deck',
             },
           );
         } catch (error) {
@@ -1586,29 +2378,44 @@ export async function startServer({
           }
           throw error;
         }
+        if (solidify) {
+          const acceptedBinding = await bindingCoordinator.acceptPublishedFile({
+            expectedPath:currentDeckPath,
+            expectedFingerprint:`sha256:${result.fingerprint}`,
+          });
+          await bindingPersistenceQueue;
+          broadcast('deck-solidified', result.revision, {
+            solidified:true,
+            clearedGroupCount:result.clearedGroupCount,
+            clearedRedoCount:result.clearedRedoCount,
+            fingerprint:result.fingerprint,
+            bindingRevision:acceptedBinding.revision,
+          });
+        }
         json(response, 200, { revision: sessionStore.state.revision, ...result });
         return;
       }
       if (request.method === 'GET' && pathname === '/preview') {
-        const contents = await readFile(absoluteDeckPath, 'utf8');
+        const contents = (await workingDeckStore.read()).toString('utf8');
         const preview = injectPreviewBridge(contents);
         send(response, 200, preview, 'text/html; charset=utf-8');
         return;
       }
       if (request.method === 'GET' && (pathname === '/editor' || pathname === '/editor/')) {
-        await sendEditorIndex(request, response, url, token, editorToken, serviceOrigin);
+        sendEditorIndex(
+          request, response, url, token, editorToken, serviceOrigin, pinnedEditorIndex,
+        );
         return;
       }
-      if (request.method === 'GET' && EDITOR_ASSETS.has(pathname)) {
-        const asset = EDITOR_ASSETS.get(pathname);
-        const contents = await readFile(asset.path);
-        send(response, 200, contents, asset.type);
+      if (request.method === 'GET' && pinnedEditorAssets.has(pathname)) {
+        const asset = pinnedEditorAssets.get(pathname);
+        send(response, 200, asset.contents, asset.type);
         return;
       }
       if (request.method === 'GET' && (pathname === '/editor' || pathname.startsWith('/editor/'))) {
         throw httpError('EDITOR_ASSET_NOT_FOUND', 404, `编辑器资源不存在：${pathname}`);
       }
-      if (request.method === 'GET' && pathname === '/events') {
+      if (request.method === 'GET' && ['/events', '/agent-terminal'].includes(pathname)) {
         response.setHeader('upgrade', 'websocket');
         throw httpError('WEBSOCKET_UPGRADE_REQUIRED', 426, '请使用 WebSocket 连接');
       }
@@ -1626,7 +2433,8 @@ export async function startServer({
       socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
       return;
     }
-    if (url.pathname !== '/events' || url.searchParams.get('token') !== token) {
+    if (!['/events', '/agent-terminal'].includes(url.pathname)
+      || url.searchParams.get('token') !== token) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -1643,6 +2451,16 @@ export async function startServer({
     const isEditor = suppliedEditorToken === editorToken;
     if (suppliedEditorToken !== null && !isEditor) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (url.pathname === '/agent-terminal') {
+      if (!isEditor) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      terminalSockets.handleUpgrade(request, socket, head, client => {
+        terminalSockets.emit('connection', client, request);
+      });
       return;
     }
     if (isEditor && bridge.hasEditorSocket()) {
@@ -1676,6 +2494,47 @@ export async function startServer({
     });
   });
 
+  terminalSockets.on('connection', socket => {
+    const detach = agentTerminal.attach(socket);
+    let commandChain = Promise.resolve();
+    socket.on('message', data => {
+      commandChain = commandChain.then(async () => {
+        let message;
+        try { message = JSON.parse(String(data)); }
+        catch { throw httpError('INVALID_TERMINAL_MESSAGE', 400, '终端消息不是有效 JSON'); }
+        if (message.type === 'start') {
+          await agentTerminal.start({
+            provider:message.provider,
+            cols:message.cols,
+            rows:message.rows,
+          });
+        } else if (message.type === 'restart') {
+          await agentTerminal.restart({
+            provider:message.provider,
+            cols:message.cols,
+            rows:message.rows,
+            newConversation:message.newConversation === true,
+          });
+        } else if (message.type === 'input') {
+          agentTerminal.input(message.data);
+        } else if (message.type === 'resize') {
+          agentTerminal.resize(message.cols, message.rows);
+        } else {
+          throw httpError('INVALID_TERMINAL_MESSAGE', 400, '未知终端命令');
+        }
+      }).catch(error => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type:'error',
+            code:error?.code ?? 'AGENT_TERMINAL_FAILED',
+            message:error?.message ?? 'Agent 终端操作失败',
+          }));
+        }
+      });
+    });
+    socket.on('close', detach);
+  });
+
   try {
     await new Promise((resolvePromise, reject) => {
       server.once('error', reject);
@@ -1687,7 +2546,11 @@ export async function startServer({
   } catch (error) {
     bridge.close();
     await agentRuns.close().catch(() => {});
+    await agentTerminal?.close().catch(() => {});
     await attachmentStore.close().catch(() => {});
+    await agentWorkspaceStore.close().catch(() => {});
+    await bindingPersistenceQueue.catch(() => {});
+    await bindingCoordinator?.close?.().catch(() => {});
     await sidecarBoundary.io.close();
     throw error;
   }
@@ -1695,47 +2558,294 @@ export async function startServer({
   const actualPort = typeof address === 'object' && address ? address.port : port;
   const url = `http://${urlHost}:${actualPort}`;
   serviceOrigin = url;
-  const wsUrl = `ws://${urlHost}:${actualPort}/events`;
-  const editorWsUrl = `${wsUrl}?token=${encodeURIComponent(token)}&editorToken=${encodeURIComponent(editorToken)}`;
-  watchFile(absoluteDeckPath, { interval:500 }, watchListener);
+  let deckWatcherStarted = false;
+  let watchedDeckPath = null;
+  let workingWatcherStarted = false;
+  let wsUrl;
+  let editorWsUrl;
+  let terminalWsUrl;
+  const cleanupFailedPostListen = async () => {
+    watcherClosed = true;
+    watcherGeneration += 1;
+    if (deckWatcherStarted && watchedDeckPath) unwatchFile(watchedDeckPath, watchListener);
+    if (workingWatcherStarted) unwatchFile(workingDeckStore.path, workingWatchListener);
+    deckWatcherStarted = false;
+    workingWatcherStarted = false;
+    bridge.close();
+    detachTerminalState?.();
+    detachTerminalProvider?.();
+    detachTerminalInterrupt?.();
+    detachTerminalState = null;
+    detachTerminalProvider = null;
+    detachTerminalInterrupt = null;
+    for (const client of webSockets.clients) client.terminate();
+    for (const client of terminalSockets.clients) client.terminate();
+    const httpClosed = new Promise(resolvePromise => {
+      try { server.close(() => resolvePromise()); }
+      catch { resolvePromise(); }
+    });
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
+    await Promise.allSettled([
+      httpClosed,
+      agentRuns?.close?.(),
+      closeAgentTerminalOnShutdown ? agentTerminal?.close?.() : Promise.resolve(),
+      attachmentStore.close(),
+      agentWorkspaceStore.close(),
+      bindingPersistenceQueue,
+      bindingCoordinator?.close?.(),
+    ]);
+    await sidecarBoundary.io.close().catch(() => {});
+  };
+  try {
+    const storedTerminalProvider = agentWorkspaceStore.snapshot().activeProvider;
+    const persistTerminalConversation = async (provider, conversationId) => {
+      const current = agentWorkspaceStore.snapshot();
+      const providerState = current.providers[provider];
+      const known = providerState?.conversations.some(item => item.id === conversationId);
+      if (known && providerState.activeConversationId === conversationId
+        && current.activeProvider === provider) return;
+      const timestamp = new Date().toISOString();
+      await agentWorkspaceStore.update(draft => {
+        const nextProvider = draft.providers[provider];
+        if (!nextProvider.conversations.some(item => item.id === conversationId)) {
+          nextProvider.conversations.push({
+            id:conversationId,
+            ownership:'editor-created',
+            title:'Huawei Deck 专用会话',
+            projectRoot:draft.projectRoot,
+            createdAt:timestamp,
+            updatedAt:timestamp,
+            skill:{ status:'uninitialized' },
+          });
+        }
+        nextProvider.activeConversationId = conversationId;
+        draft.activeProvider = provider;
+      }, current.workspaceRevision);
+    };
+    const resolveTerminalConversation = async (
+      provider, { newConversation = false, initialPrompt = '' } = {},
+    ) => {
+      const current = agentWorkspaceStore.snapshot();
+      const providerState = current.providers[provider];
+      const active = providerState?.conversations.find(
+        item => item.id === providerState.activeConversationId,
+      );
+      if (!newConversation && active) {
+        try {
+          return await resumeAgentTerminalConversation(provider, {
+            projectRoot:current.projectRoot,
+            conversationId:active.id,
+          });
+        } catch { /* 旧 ID 不存在时创建新的、真正可恢复的会话 */ }
+      }
+      const created = await createAgentTerminalConversation(provider, {
+        projectRoot:current.projectRoot,
+        initialPrompt,
+      });
+      if (created.resume) await persistTerminalConversation(provider, created.conversationId);
+      return created;
+    };
+    const handleTerminalConversationStarted = async (provider, conversationId) => {
+      await persistTerminalConversation(provider, conversationId);
+    };
+    const terminalOptions = {
+      projectRoot:agentWorkspaceStore.snapshot().projectRoot,
+      cwd:agentTerminalCwd,
+      provider:storedTerminalProvider,
+      environment:{
+        ...process.env,
+        HUAWEI_DECK_EDITOR_URL:serviceOrigin,
+        HUAWEI_DECK_EDITOR_TOKEN:token,
+        HUAWEI_DECK_SOURCE_PATH:currentDeckPath,
+        HUAWEI_DECK_WORKING_PATH:workingDeckStore.path,
+        ...(creationHandoffState ? {
+          HUAWEI_DECK_CREATION_CONTEXT:creationHandoffState.path,
+          HUAWEI_DECK_CREATION_MATERIALS:
+            creationHandoffState.context.artifacts.materialsDirectory,
+          ...(creationHandoffState.context.artifacts.planPath ? {
+            HUAWEI_DECK_CREATION_PLAN:creationHandoffState.context.artifacts.planPath,
+          } : {}),
+        } : {}),
+      },
+      initialPrompt:provider => buildSessionInitializationPrompt({
+        deckPath:workingDeckStore.path,
+        sourceDeckPath:currentDeckPath,
+        projectPath:agentWorkspaceStore.snapshot().projectRoot,
+        skillInvocation:provider === 'codex'
+          ? '$huawei-deck'
+          : '请先读取并使用 huawei-deck Skill。',
+        creationContextPath:creationHandoffState?.path ?? null,
+      }),
+      resolveConversation:resolveTerminalConversation,
+      identifyConversation:discoverAgentTerminalConversation,
+      onConversationStarted:handleTerminalConversationStarted,
+      onProviderChange:async provider => {
+        const current = agentWorkspaceStore.snapshot();
+        if (current.activeProvider === provider) return;
+        await agentWorkspaceStore.update(draft => { draft.activeProvider = provider; }, current.workspaceRevision);
+      },
+      onStateChange:terminal => {
+        broadcast('agent-terminal-updated', sessionStore.state.revision, terminal);
+      },
+      ...(spawnAgentTerminal ? { spawnPty:spawnAgentTerminal } : {}),
+    };
+    if (agentTerminalSession) {
+      agentTerminal = agentTerminalSession;
+      agentTerminal.updateConversationLifecycle?.({
+        resolveConversation:resolveTerminalConversation,
+        identifyConversation:discoverAgentTerminalConversation,
+        onConversationStarted:handleTerminalConversationStarted,
+      });
+      agentTerminal.updateEnvironment?.(terminalOptions.environment);
+      detachTerminalProvider = agentTerminal.addProviderChangeListener?.(terminalOptions.onProviderChange) ?? null;
+      detachTerminalState = agentTerminal.addStateListener?.(terminalOptions.onStateChange) ?? null;
+      if (creationHandoffState && creationHandoff) {
+        const prompt = buildCreationHandoffPrompt({
+          ...creationHandoffState,
+          editor:{
+            workingDeckPath:workingDeckStore.path,
+            sourceDeckPath:currentDeckPath,
+            cliPath:join(EDITOR_DIR, 'cli.mjs'),
+            serviceUrl:serviceOrigin,
+            token,
+          },
+        });
+        if (prompt) {
+          const submitHandoffPrompt = () => {
+            try { agentTerminal.submitPrompt?.(prompt); }
+            catch { /* 终端已关闭或正在切换时，交接说明不能阻断 Editor 启动 */ }
+          };
+          if (typeof agentTerminal.waitUntilReady === 'function') {
+            void agentTerminal.waitUntilReady({ timeoutMs:30_000 })
+              .then(submitHandoffPrompt)
+              .catch(() => {});
+          } else {
+            submitHandoffPrompt();
+          }
+        }
+      }
+    } else {
+      agentTerminal = new AgentTerminalSession(terminalOptions);
+    }
+    detachTerminalInterrupt = agentTerminal.addInterruptListener?.(() => {
+      agentRuns.cancel(
+        '已在 Agent CLI 中按 Esc 中断本批任务，未完成任务可重新提交',
+      );
+    }) ?? null;
+    if (autoStartAgentTerminal && !agentTerminalSession) {
+      void agentTerminal.start({ provider:terminalOptions.provider }).catch(() => {
+        // 启动失败已进入 terminal snapshot，不能阻断 Editor 主服务。
+      });
+    }
+    wsUrl = `ws://${urlHost}:${actualPort}/events`;
+    editorWsUrl = `${wsUrl}?token=${encodeURIComponent(token)}&editorToken=${encodeURIComponent(editorToken)}`;
+    terminalWsUrl = `ws://${urlHost}:${actualPort}/agent-terminal`
+      + `?token=${encodeURIComponent(token)}&editorToken=${encodeURIComponent(editorToken)}`;
+    restartDeckWatcher = () => {
+      if (watcherClosed) return;
+      if (deckWatcherStarted && watchedDeckPath) unwatchFile(watchedDeckPath, watchListener);
+      watchedDeckPath = currentDeckPath;
+      watchFile(watchedDeckPath, { interval:500 }, watchListener);
+      deckWatcherStarted = true;
+      agentTerminal?.updateEnvironment?.({
+        ...terminalOptions.environment,
+        HUAWEI_DECK_SOURCE_PATH:currentDeckPath,
+      });
+    };
+    restartDeckWatcher();
+    if (workingDeckStore.managed) {
+      watchFile(workingDeckStore.path, { interval:250 }, workingWatchListener);
+      workingWatcherStarted = true;
+    }
+  } catch (error) {
+    await cleanupFailedPostListen();
+    throw error;
+  }
 
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
+      const finalWorkingCheckpoint = workingDeckStore.managed
+        ? await Promise.allSettled([queueWorkingDeckCheckpoint()])
+        : [];
       watcherClosed = true;
       watcherGeneration += 1;
       clearTimeout(editorCloseTimer);
       editorCloseTimer = undefined;
-      unwatchFile(absoluteDeckPath, watchListener);
+      if (watchedDeckPath) unwatchFile(watchedDeckPath, watchListener);
+      if (workingDeckStore.managed) {
+        unwatchFile(workingDeckStore.path, workingWatchListener);
+      }
       bridge.close();
+      detachTerminalState?.();
+      detachTerminalProvider?.();
+      detachTerminalInterrupt?.();
+      detachTerminalState = null;
+      detachTerminalProvider = null;
+      detachTerminalInterrupt = null;
       const agentClosed = agentRuns.close();
+      const terminalClosed = closeAgentTerminalOnShutdown
+        ? agentTerminal?.close() ?? Promise.resolve()
+        : Promise.resolve();
       const attachmentClosed = attachmentStore.close();
+      const workspaceClosed = agentWorkspaceStore.close();
       const writerClosed = [];
       for (const writer of activeWriters.values()) {
         writerClosed.push(writer.closed);
         writer.cancel(httpError('SERVICE_CLOSED', 503, '服务已关闭'));
       }
+      const exportClosed = [];
+      for (const job of activePptxExports) {
+        exportClosed.push(job.promise);
+        job.controller.abort();
+      }
       for (const client of webSockets.clients) client.terminate();
+      for (const client of terminalSockets.clients) client.terminate();
       const webSocketClosed = new Promise(resolvePromise => webSockets.close(() => resolvePromise()));
+      const terminalSocketClosed = new Promise(resolvePromise => (
+        terminalSockets.close(() => resolvePromise())
+      ));
       const httpClosed = new Promise(resolvePromise => server.close(() => resolvePromise()));
       await new Promise(resolvePromise => setImmediate(resolvePromise));
       server.closeIdleConnections?.();
       const writersSettled = Promise.allSettled(writerClosed);
+      const exportsSettled = Promise.allSettled(exportClosed);
       const shutdown = await Promise.allSettled([
         watcherQueue,
+        workingWatcherQueue,
         webSocketClosed,
+        terminalSocketClosed,
         httpClosed,
         writersSettled,
+        exportsSettled,
         agentClosed,
+        terminalClosed,
         attachmentClosed,
+        workspaceClosed,
+        bindingPersistenceQueue,
+        bindingCoordinator.close(),
       ]);
       server.closeAllConnections?.();
       const helperResult = await Promise.allSettled([sidecarBoundary.io.close()]);
-      const failures = [...shutdown, ...helperResult]
+      const failures = [...finalWorkingCheckpoint, ...shutdown, ...helperResult]
         .filter(result => result.status === 'rejected')
-        .map(result => result.reason);
-      if (failures.length) throw new AggregateError(failures, '编辑服务关闭时清理失败');
-    })();
+        .map(result => result.reason)
+        // 无效的外部候选没有进入 session 历史；下次启动会按已持久化指纹
+        // 从 working/versions 恢复，因此不能让一次写入中断拖垮正常关闭。
+        .filter(error => error?.code !== 'INVALID_WORKING_DECK');
+      if (failures.length) throw new AggregateError(
+        failures,
+        `编辑服务关闭时清理失败：${failures.map(error => (
+          `${error?.code ?? error?.name ?? 'ERROR'}: ${error?.message ?? String(error)}`
+        )).join('；')}`,
+      );
+    })().finally(() => {
+      try {
+        const pending = onClose();
+        pending?.catch?.(() => {});
+      } catch { /* 生命周期通知失败不能让已经关闭的 Editor 复活 */ }
+    });
     return closePromise;
   };
 
@@ -1745,11 +2855,22 @@ export async function startServer({
     token,
     editorToken,
     editorWsUrl,
+    terminalWsUrl,
     port: actualPort,
-    deckPath: absoluteDeckPath,
+    get deckPath() { return currentDeckPath; },
+    deckId:effectiveDeckId,
+    binding:bindingCoordinator,
+    workingDeckPath:workingDeckStore.path,
     sessionDir: sessionStore.sessionDir,
     session: sessionStore.state,
+    creationHandoff:creationHandoffState,
+    agentWorkspace:agentWorkspaceStore,
     agentRuns,
+    agentTerminal,
+    waitUntilReady:options => bridge.waitUntilReady(options),
+    flushWorkingDeckChanges:() => (
+      workingDeckStore.managed ? queueWorkingDeckCheckpoint() : Promise.resolve()
+    ),
     close,
   };
 }
@@ -1762,9 +2883,12 @@ function serverHelp() {
     '  --host HOST   监听地址（默认 127.0.0.1）',
     '  --port PORT   监听端口（默认 0，自动分配）',
     '  --no-open     不自动打开浏览器',
+    '  --headless-workspace  后台挂载受控页面，不打开 Editor 窗口或 Agent 终端',
     '  --exit-when-editor-closes  编辑器页面关闭后自动退出（桌面应用使用）',
+    '  --no-agent-autostart  不自动启动右侧 Agent 终端',
     '  --agent-thread-id ID  绑定来源 Codex 任务（Skill 自动传入）',
     '  --agent-provider ID   新建会话的默认 Agent provider（默认 codex）',
+    '  --python PATH  sidecar helper 使用的 Python 解释器',
     '  --help        显示帮助',
   ].join('\n');
 }
@@ -1775,8 +2899,11 @@ function parseServerArguments(argv) {
   let port = 0;
   let openBrowser = true;
   let exitWhenEditorCloses = false;
+  let autoStartAgentTerminal = true;
+  let headlessWorkspace = false;
   let agentThreadId = null;
   let agentProvider = 'codex';
+  let pythonExecutable = DEFAULT_PYTHON_EXECUTABLE;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') return { help: true };
@@ -1784,17 +2911,30 @@ function parseServerArguments(argv) {
       openBrowser = false;
       continue;
     }
+    if (argument === '--headless-workspace') {
+      headlessWorkspace = true;
+      openBrowser = false;
+      autoStartAgentTerminal = false;
+      exitWhenEditorCloses = false;
+      continue;
+    }
     if (argument === '--exit-when-editor-closes') {
       exitWhenEditorCloses = true;
       continue;
     }
+    if (argument === '--no-agent-autostart') {
+      autoStartAgentTerminal = false;
+      continue;
+    }
     if (argument === '--host' || argument === '--port'
-      || argument === '--agent-thread-id' || argument === '--agent-provider') {
+      || argument === '--agent-thread-id' || argument === '--agent-provider'
+      || argument === '--python') {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) throw new TypeError(`${argument} 缺少值`);
       if (argument === '--host') host = value;
       else if (argument === '--agent-thread-id') agentThreadId = value;
       else if (argument === '--agent-provider') agentProvider = value;
+      else if (argument === '--python') pythonExecutable = value;
       else {
         port = Number(value);
         if (!Number.isSafeInteger(port) || port < 0 || port > 65535) {
@@ -1809,9 +2949,13 @@ function parseServerArguments(argv) {
     deckPath = argument;
   }
   if (!deckPath) throw new TypeError('缺少 deck 文件');
+  if (!isAgentProviderId(agentProvider)) {
+    throw new TypeError(`--agent-provider 不受支持：${agentProvider}`);
+  }
   return {
     help:false, deckPath, host, port, openBrowser, exitWhenEditorCloses,
-    agentThreadId, agentProvider,
+    agentThreadId, agentProvider, autoStartAgentTerminal, pythonExecutable,
+    headlessWorkspace,
   };
 }
 
@@ -1828,7 +2972,9 @@ export function buildOpenCommand(platform, editorUrl) {
 
 function openEditor(editorUrl) {
   const { command, args } = buildOpenCommand(process.platform, editorUrl);
-  const opener = spawn(command, args, { detached: true, stdio: 'ignore' });
+  const opener = spawn(command, args, {
+    detached:true, stdio:'ignore', windowsHide:true,
+  });
   opener.once('error', () => {});
   opener.unref();
 }
@@ -1856,6 +3002,8 @@ export async function runServerCli(argv = process.argv.slice(2)) {
       exitWhenEditorCloses: options.exitWhenEditorCloses,
       agentThreadId: options.agentThreadId,
       agentProvider: options.agentProvider,
+      autoStartAgentTerminal: options.autoStartAgentTerminal,
+      pythonExecutable: options.pythonExecutable,
     });
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
@@ -1863,7 +3011,47 @@ export async function runServerCli(argv = process.argv.slice(2)) {
   }
   const editorUrl = `${app.url}/editor/?token=${encodeURIComponent(app.token)}`
     + `&editorToken=${encodeURIComponent(app.editorToken)}`;
-  process.stdout.write(`${JSON.stringify({ url: app.url, token: app.token, editorUrl })}\n`);
+  let headlessRuntime = null;
+  let capabilityPath = null;
+  try {
+    if (options.headlessWorkspace) {
+      headlessRuntime = await startHeadlessEditorRuntime({ editorUrl });
+      await app.waitUntilReady({ timeoutMs:20_000 });
+    }
+    capabilityPath = await writeWorkspaceCapability(app.sessionDir, {
+      url:app.url,
+      token:app.token,
+      mode:options.headlessWorkspace ? 'headless' : 'visible',
+      deckPath:app.deckPath,
+      workingDeckPath:app.workingDeckPath,
+      sessionDir:app.sessionDir,
+      pid:process.pid,
+      createdAt:new Date().toISOString(),
+    });
+  } catch (error) {
+    await headlessRuntime?.close().catch(() => {});
+    await app.close().catch(() => {});
+    process.stderr.write(`Managed Workspace 启动失败: ${error.message}\n`);
+    return 1;
+  }
+  process.stdout.write(`${JSON.stringify({
+    mode:options.headlessWorkspace ? 'headless-workspace' : 'visible-editor',
+    url:app.url,
+    token:app.token,
+    editorUrl,
+    deckPath:app.deckPath,
+    workingDeckPath:app.workingDeckPath,
+    sessionDir:app.sessionDir,
+    capabilityPath,
+  })}\n`);
+  // 桌面模式可能由“最后一个浏览器客户端离开”自然关闭服务，而不是收到
+  // SIGINT/SIGTERM。exit 回调必须同步清掉短期 token，避免无效 capability
+  // 长期留在 sidecar 中；显式 shutdown 仍走下面的异步清理。
+  process.once('exit', () => {
+    if (!capabilityPath) return;
+    try { unlinkSync(capabilityPath); }
+    catch (error) { if (error.code !== 'ENOENT') process.stderr.write(`${error.message}\n`); }
+  });
   if (options.openBrowser) openEditor(editorUrl);
 
   let closing = false;
@@ -1872,6 +3060,8 @@ export async function runServerCli(argv = process.argv.slice(2)) {
     closing = true;
     process.off('SIGINT', shutdown);
     process.off('SIGTERM', shutdown);
+    await removeWorkspaceCapability(capabilityPath).catch(() => {});
+    await headlessRuntime?.close().catch(() => {});
     await app.close();
     process.exit(0);
   };
@@ -1880,6 +3070,6 @@ export async function runServerCli(argv = process.argv.slice(2)) {
   return 0;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   process.exitCode = await runServerCli();
 }

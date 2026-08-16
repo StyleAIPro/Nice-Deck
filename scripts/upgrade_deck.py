@@ -11,6 +11,7 @@ import difflib
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -20,7 +21,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
-CURRENT_VERSION = "2026.08.2"
+CURRENT_VERSION = "2026.08.3"
 VERSION_RE = re.compile(r'<meta name="huawei-deck-version" content="([^"]+)">')
 
 
@@ -36,6 +37,18 @@ def load_edit_bundle():
 eb = load_edit_bundle()
 
 
+def load_patch_bundle():
+    path = REPO / "scripts" / "editor" / "patch_bundle.py"
+    spec = importlib.util.spec_from_file_location("huawei_deck_patch_bundle", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+patch_bundle = load_patch_bundle()
+
+
 class MigrationError(RuntimeError):
     pass
 
@@ -47,9 +60,17 @@ USER_SCRIPT_END = "<!-- HUAWEI_DECK_USER_SCRIPT_END -->"
 HASH_RE = re.compile(r'<meta name="huawei-deck-runtime-hash" content="([^"]+)">')
 KIND_RE = re.compile(r'<meta name="huawei-deck-template-kind" content="([^"]+)">')
 LATEST_TEMPLATES = {
-    "teaching": REPO / "assets" / "template-deck.html",
+    "teaching": REPO / "assets" / "training-deck.html",
     "tech-share": REPO / "assets" / "tech-share-deck.html",
     "work-report": REPO / "assets" / "work-report-deck.html",
+}
+
+# 授课模板曾使用过过宽的 template-deck.html 名称。模板改名不能切断旧 Deck
+# 的 Git 三方合并基线，因此历史扫描同时覆盖当前路径与所有已发布旧路径。
+TEMPLATE_HISTORY_PATHS = {
+    "teaching": ("assets/training-deck.html", "assets/template-deck.html"),
+    "tech-share": ("assets/tech-share-deck.html",),
+    "work-report": ("assets/work-report-deck.html",),
 }
 
 
@@ -217,6 +238,7 @@ def compose_latest(latest, content):
 
 def _normalize_runtime(s):
     """删除用户拥有区域，返回只代表 Skill 公共外壳的稳定文本。"""
+    s = patch_bundle.strip_block(s)
     content = extract_user_content(s)
     slide_start, slide_end = _slide_bounds(s)
     result = s[:slide_start] + "__HUAWEI_DECK_SLIDES__" + s[slide_end:]
@@ -353,13 +375,19 @@ def _git(*args):
 
 
 def find_legacy_baseline(s, template_kind):
-    path = LATEST_TEMPLATES[template_kind].relative_to(REPO).as_posix()
-    commits = _git("log", "--format=%H", "--", path).splitlines()
-    if not commits:
+    history = []
+    seen = set()
+    for path in TEMPLATE_HISTORY_PATHS[template_kind]:
+        for commit in _git("log", "--format=%H", "--", path).splitlines():
+            identity = (commit, path)
+            if identity not in seen:
+                seen.add(identity)
+                history.append(identity)
+    if not history:
         raise MigrationError(f"未找到 {template_kind} 模板历史基线。")
     target = _similarity_surface(s)
     candidates = []
-    for commit in commits:
+    for commit, path in history:
         try:
             raw = _git("show", f"{commit}:{path}")
             candidate = eb.get_template(raw.split('\n'))
@@ -372,6 +400,37 @@ def find_legacy_baseline(s, template_kind):
     if not candidates:
         raise MigrationError(f"无法解析 {template_kind} 的历史模板。")
     return max(candidates, key=lambda item: item[0])
+
+
+MERGE_CONFLICT_RE = re.compile(
+    r"^<<<<<<<[^\n]*\n(.*?)^=======\n(.*?)^>>>>>>>[^\n]*\n?",
+    re.M | re.S,
+)
+
+
+def resolve_known_shell_conflicts(value):
+    """只自动保留已知的 Deck 业务交互模块；未知冲突一律留给调用方拒绝。
+
+    早期技术分享 Deck 会把目录渲染器直接写在公共脚本中，而新模板在同一位置
+    引入 data-layer 协议，标准三方合并必然冲突。这里保留业务 Deck 的完整目录
+    模块，随后仍由浏览器补丁重放校验兜底；不得把这个规则扩展成通用“偏向用户”。
+    """
+    def replace(match):
+        user, latest = match.group(1), match.group(2)
+        user_toc = (
+            "const tocRender = () =>" in user
+            and "this._tocRender = tocRender" in user
+            and "this._tocH = (e) =>" in user
+        )
+        latest_toc = (
+            "tocBuilders" in latest
+            and ("hasStandardToc" in latest or "data-toc-visual-index" in latest)
+        )
+        if user_toc and latest_toc:
+            return user.rstrip() + "\n"
+        return match.group(0)
+
+    return MERGE_CONFLICT_RE.sub(replace, value)
 
 
 def merge_legacy_shell(original, latest, template_kind, content):
@@ -389,11 +448,11 @@ def merge_legacy_shell(original, latest, template_kind, content):
             text=True,
             capture_output=True,
         )
-    if result.returncode != 0 or "<<<<<<<" in result.stdout:
+    merged = resolve_known_shell_conflicts(result.stdout)
+    if result.returncode > 1 or "<<<<<<<" in merged:
         raise MigrationError(
             f"历史模板三方合并冲突（基线 {commit[:8]}，相似度 {score:.3f}），已停止写入。"
         )
-    merged = result.stdout
     replacements = {
         "__HUAWEI_DECK_SLIDES__": content["slides"],
         "__HUAWEI_DECK_NAV__": content["nav"],
@@ -452,8 +511,10 @@ def merge_manifests(old_manifest, latest_manifest, latest, content):
 
 
 def build_upgrade(old_lines, latest_lines, template_kind):
-    original = eb.get_template(old_lines)
-    latest = eb.get_template(latest_lines)
+    original_with_patches = eb.get_template(old_lines)
+    patches = patch_bundle.extract_patches(original_with_patches)
+    original = patch_bundle.strip_block(original_with_patches)
+    latest = patch_bundle.strip_block(eb.get_template(latest_lines))
     content = extract_user_content(original)
     merged_manifest, content = merge_manifests(
         eb.get_manifest(old_lines), eb.get_manifest(latest_lines), latest, content
@@ -463,7 +524,13 @@ def build_upgrade(old_lines, latest_lines, template_kind):
         or USER_STYLE_START not in original
         or USER_SCRIPT_START not in original
     )
-    if is_legacy:
+    declared_hash = HASH_RE.search(original)
+    declared_hash = declared_hash.group(1) if declared_hash else ""
+    # 已有新版元数据也不代表公共壳没有被业务 Deck 直接定制。声明指纹与实际
+    # 规范化外壳不一致时，必须把这些差异作为用户修改参与三方合并；直接
+    # compose_latest 会静默丢掉目录交互等壳内逻辑，并连带让既有补丁失效。
+    has_custom_shell = bool(declared_hash and runtime_hash(original) != declared_hash)
+    if is_legacy or has_custom_shell:
         upgraded, _, _ = merge_legacy_shell(
             original, latest, template_kind, content
         )
@@ -471,9 +538,63 @@ def build_upgrade(old_lines, latest_lines, template_kind):
         upgraded = compose_latest(latest, content)
     upgraded = set_version(upgraded, CURRENT_VERSION)
     upgraded = set_template_kind(upgraded, template_kind)
+    # pageId 属于用户页面身份，不属于模板公共外壳。旧 Deck 在升级候选中一次性
+    # 补齐；后续改文案、改样式和移动页面都不再改变补丁的页面定位。
+    upgraded = eb.ensure_page_ids(upgraded)
     target_hash = runtime_hash(latest)
     upgraded = set_runtime_hash(upgraded, target_hash)
+    if patches is not None:
+        upgraded = patch_bundle.replace_block(upgraded, patches)
     return upgraded, merged_manifest, target_hash
+
+
+def verify_patch_replay(path):
+    """在真实浏览器中确认候选 Deck 的全部离线补丁均成功重放。"""
+    command = [
+        "node",
+        str(REPO / "scripts" / "verify" / "patches.mjs"),
+        str(path),
+    ]
+    result = subprocess.run(command, text=True, capture_output=True)
+    if result.returncode == 0:
+        return
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if result.returncode == 1:
+        raise MigrationError(f"升级候选的 Editor 补丁无法完整重放。\n{output}")
+    raise MigrationError(f"无法验证升级候选的 Editor 补丁。\n{output}")
+
+
+def migrate_patch_targets(path, patches):
+    """基于候选 Deck 的严格 path/tag/fingerprint 唯一匹配迁移 pageKey。"""
+    with tempfile.TemporaryDirectory(prefix="huawei-deck-patch-migrate-") as directory:
+        input_path = Path(directory) / "patches.json"
+        output_path = Path(directory) / "migrated.json"
+        input_path.write_text(
+            json.dumps(patches, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        command = [
+            "node",
+            str(REPO / "scripts" / "verify" / "migrate-patches.mjs"),
+            str(path),
+            str(input_path),
+            str(output_path),
+        ]
+        result = subprocess.run(command, text=True, capture_output=True)
+        output = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part.strip()
+        )
+        if result.returncode == 0:
+            try:
+                migrated = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise MigrationError(f"补丁迁移没有生成有效结果：{error}") from error
+            if not isinstance(migrated, list) or len(migrated) != len(patches):
+                raise MigrationError("补丁迁移结果数量与输入不一致")
+            return migrated
+        if result.returncode == 1:
+            raise MigrationError(f"升级候选无法唯一迁移全部 Editor 补丁。\n{output}")
+        raise MigrationError(f"无法运行 Editor 补丁迁移。\n{output}")
 
 
 def backup_path(path):
@@ -603,12 +724,34 @@ def main():
             lines, latest_lines, template_kind
         )
 
-        backup = backup_path(path)
-        shutil.copy2(path, backup)
-        eb.set_template(lines, upgraded)
-        eb.set_manifest(lines, merged_manifest)
-        eb.save(path, lines)
-        eb.verify(path)
+        candidate_fd, candidate_name = tempfile.mkstemp(
+            prefix=f".{path.name}.upgrade-", suffix=".html", dir=path.parent
+        )
+        os.close(candidate_fd)
+        candidate = Path(candidate_name)
+        try:
+            patches = patch_bundle.extract_patches(upgraded)
+            candidate_template = patch_bundle.strip_block(upgraded)
+            result_lines = list(lines)
+            eb.set_template(result_lines, candidate_template)
+            eb.set_manifest(result_lines, merged_manifest)
+            eb.save(candidate, result_lines)
+            eb.verify(candidate)
+            if patches is not None:
+                migrated = migrate_patch_targets(candidate, patches)
+                candidate_template = patch_bundle.replace_block(
+                    candidate_template, migrated
+                )
+                eb.set_template(result_lines, candidate_template)
+                eb.save(candidate, result_lines)
+                eb.verify(candidate)
+                verify_patch_replay(candidate)
+
+            backup = backup_path(path)
+            shutil.copy2(path, backup)
+            os.replace(candidate, path)
+        finally:
+            candidate.unlink(missing_ok=True)
         print(f"备份：{backup}")
         print(f"升级完成：{version} → {CURRENT_VERSION}；运行时 {target_hash[:12]}")
         return 0

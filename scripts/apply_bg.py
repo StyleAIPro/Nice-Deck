@@ -17,7 +17,7 @@ url()，logo 取自 alt="HUAWEI" 或 data-brand-logo 的 <img> 的 src），换�
 退出码: 0 成功 / 1 业务失败（deck 里找不到目标引用等）/ 2 参数或环境错误。
 依赖: 同目录的 edit-bundle.py。
 """
-import argparse, importlib.util, json, os, re, sys
+import argparse, importlib.util, json, os, re, subprocess, sys
 
 TARGETS = {  # target -> (新 key 前缀, 描述, tpl-bg-950 规则选择器标记; logo 特判)
     'bg':     ('tplbg',     '金色门面背景画（封面/目录/章扉页/结语页）', 'data-label="封面"'),
@@ -107,9 +107,15 @@ def main():
     print('新图片    : %s (%s, %d 字节)' % (args.image, mime, os.path.getsize(args.image)))
     if not args.yes:
         print('\n[预览模式] 未写盘。建议先备份，再加 --yes 执行:')
-        print('  cp "%s" "%s"' % (args.deck, re.sub(r'\.html?$', '', args.deck) + '.bak.html'))
-        print('  python3 "%s" "%s" "%s" --target %s --yes'
-              % (os.path.abspath(__file__), args.deck, args.image, args.target))
+        backup = re.sub(r'\.html?$', '', args.deck) + '.bak.html'
+        command = [sys.executable, os.path.abspath(__file__), args.deck, args.image,
+                   '--target', args.target, '--yes']
+        if os.name == 'nt':
+            print('  ' + subprocess.list2cmdline(['copy', '/Y', args.deck, backup]))
+            print('  ' + subprocess.list2cmdline(command))
+        else:
+            print('  cp "%s" "%s"' % (args.deck, backup))
+            print('  ' + subprocess.list2cmdline(command))
         return 0
 
     uid = eb.embed_image(lines, args.image, mime=mime, prefix=prefix)   # 1) 新图入 manifest

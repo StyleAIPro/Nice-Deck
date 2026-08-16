@@ -420,6 +420,25 @@ test('snapshot 与 attachment 均为零时返回 null 与空可信记录', async
   assert.equal(fx.calls.discard, 0);
 });
 
+test('task multipart 保留经协议校验的页面交互状态', async () => {
+  const fx = uploadFixture();
+  const pageState = {
+    schema:1,
+    layers:[{ group:'resource-e2e', key:'capacity' }],
+    elements:[{
+      target:{
+        pageKey:'page-001-a', path:'0/1', tag:'BUTTON', fingerprint:'abc12345',
+        rect:{ x:1, y:2, w:30, h:20 },
+      },
+      dataActive:true,
+    }],
+  };
+  const parsed = await parseTaskMultipart(multipartRequest([
+    taskPart(task([], { pageState })),
+  ]), { attachmentStore:fx.store });
+  assert.deepEqual(parsed.input.pageState, pageState);
+});
+
 test('task 必须是首个、有 filename 的唯一 application/json file part', async t => {
   const cases = [
     ['缺少 task', [{ name:'snapshot', filename:'a.png', mime:'image/png', body:PNG }]],
@@ -846,7 +865,7 @@ test('首 boundary 携带 1025 字节 padding 时不再被当作合法 delimiter
 });
 
 test('stage 失败会取消部分 writer、等待 drain，并且只 discard 一次', {
-  timeout:2000,
+  timeout:process.platform === 'win32' ? 5000 : 2000,
 }, async () => {
   const stageError = Object.assign(new Error('disk full'), {
     code:'ATTACHMENT_WRITE_FAILED', statusCode:500, stage:'attachment-write',

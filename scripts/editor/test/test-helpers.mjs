@@ -8,7 +8,7 @@ export async function startFixtureServer(options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'deck-editor-fixture-'));
   const deckPath = join(root, 'minimal-deck.html');
   if (options.bundle) {
-    const wrapper = await readFile(resolve('assets/template-deck.html'), 'utf8');
+    const wrapper = await readFile(resolve('assets/training-deck.html'), 'utf8');
     let template = (await readFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), 'utf8'))
       .replace('../../runtime/patch-runtime.js', '/editor/patch-runtime.js');
     if (typeof options.fixtureTransform === 'function') template = options.fixtureTransform(template);
@@ -40,44 +40,92 @@ export async function startFixtureServer(options = {}) {
       writerKillGraceMs: options.writerKillGraceMs,
       spawnWriter: options.spawnWriter,
       onActiveWritersChange: options.onActiveWritersChange,
-      agentAdapter: options.agentAdapter,
-      agentSessionCatalog: options.agentSessionCatalog,
-      pickAgentProjectDirectory: options.pickAgentProjectDirectory,
+      spawnAgentTerminal: options.spawnAgentTerminal,
+      createAgentTerminalConversation: options.createAgentTerminalConversation,
+      discoverAgentTerminalConversation: options.discoverAgentTerminalConversation,
+      resumeAgentTerminalConversation: options.resumeAgentTerminalConversation,
+      autoStartAgentTerminal: options.autoStartAgentTerminal,
+      pptxExporter:options.pptxExporter,
+      pptxExportTimeoutMs:options.pptxExportTimeoutMs,
+      workingPatchVerifier: options.workingPatchVerifier ?? (async () => ({ ok:true })),
+      pickDeckFile:options.pickDeckFile,
+      agentRunTimeoutMs: options.agentRunTimeoutMs,
+      agentRunAdapter: options.agentRunAdapter,
+      editorAssets: options.editorAssets,
     });
     const closeServer = app.close;
     let closePromise;
     app.close = () => {
       closePromise ??= options.preserveRoot
         ? closeServer()
-        : closeServer().finally(() => rm(root, { recursive: true, force: true }));
+        : closeServer().finally(() => rm(root, {
+          recursive:true, force:true, maxRetries:10, retryDelay:100,
+        }));
       return closePromise;
     };
-    app.cleanup = () => rm(root, { recursive: true, force: true });
+    app.cleanup = () => rm(root, {
+      recursive:true, force:true, maxRetries:10, retryDelay:100,
+    });
     return app;
   } catch (error) {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive:true, force:true, maxRetries:10, retryDelay:100 });
     throw error;
   }
 }
 
 export function classifyResourceFailure(failure, options = {}) {
-  const exactPilotCancellation = options.allowPilotDocumentBlobAbort === true
-    && options.cancellationCount === 0
+  const allowedPilotCancellations = Number.isInteger(options.maxPilotDocumentBlobAborts)
+    ? Math.max(0, options.maxPilotDocumentBlobAborts)
+    : options.allowPilotDocumentBlobAbort === true ? 1 : 0;
+  const exactPilotCancellation = options.cancellationCount < allowedPilotCancellations
     && failure.resourceType === 'document'
     && failure.url.startsWith(`blob:${options.appUrl}/`)
     && failure.errorText === 'net::ERR_ABORTED';
   return exactPilotCancellation ? 'pilot-cancellation' : 'problem';
 }
 
+async function settleWithin(promise, timeoutMs) {
+  let timer;
+  const settled = await Promise.race([
+    Promise.resolve(promise).then(() => true, () => true),
+    new Promise(resolvePromise => {
+      timer = setTimeout(() => resolvePromise(false), timeoutMs);
+    }),
+  ]);
+  clearTimeout(timer);
+  return settled;
+}
+
 export async function openEditor(app, options = {}) {
   const chromium = await loadChromium();
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browserProblems = [];
+  const resourceProblems = [];
+  const resourceCancellations = [];
+  const resourceRequests = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-    const browserProblems = [];
-    const resourceProblems = [];
-    const resourceCancellations = [];
-    const resourceRequests = [];
+    const closeBrowser = browser.close.bind(browser);
+    // 测试清理不模拟真实用户关窗，直接跳过页面退出生命周期。
+    let closingBrowser;
+    browser.close = (...args) => {
+      closingBrowser ??= (async () => {
+        if (!page.isClosed()) {
+          const pageClosed = await settleWithin(
+            page.close({ runBeforeUnload:false }), 3_000,
+          );
+          if (!pageClosed) {
+            // synthetic pagehide 等测试场景偶发让 Playwright close RPC 永久等待；
+            // 测试清理必须有界，断开 driver 会同时终止其启动的 Chrome。
+            browser._connection?.close();
+            return;
+          }
+        }
+        const browserClosed = await settleWithin(closeBrowser(...args), 5_000);
+        if (!browserClosed) browser._connection?.close();
+      })();
+      return closingBrowser;
+    };
     page.on('console', message => {
       if (['error', 'warning'].includes(message.type())) browserProblems.push(message.text());
     });
@@ -93,6 +141,7 @@ export async function openEditor(app, options = {}) {
       if (classifyResourceFailure(failure, {
         appUrl:app.url,
         allowPilotDocumentBlobAbort:options.allowPilotDocumentBlobAbort,
+        maxPilotDocumentBlobAborts:options.maxPilotDocumentBlobAborts,
         cancellationCount:resourceCancellations.length,
       }) === 'pilot-cancellation') {
         resourceCancellations.push(detail);
@@ -106,9 +155,14 @@ export async function openEditor(app, options = {}) {
         resourceProblems.push(`${type} ${response.status()} ${response.url()}`);
       }
     });
+    const workspaceQuery = options.workspaceUrl
+      ? `&workspaceUrl=${encodeURIComponent(options.workspaceUrl)}`
+      : '';
     await page.goto(`${app.url}/?token=${encodeURIComponent(app.token)}`
-      + `&editorToken=${encodeURIComponent(app.editorToken)}`);
-    await page.waitForSelector('#deck-frame', { timeout: 3_000 });
+      + `&editorToken=${encodeURIComponent(app.editorToken)}${workspaceQuery}`);
+    // 大型离线 bundle 在整套串行 E2E 中可能遇到磁盘/CPU 峰值；iframe 元素本身
+    // 与 deck-ready 使用同一等待预算，避免已可见却刚好越过 3 秒硬阈值的假失败。
+    await page.waitForSelector('#deck-frame', { timeout:options.readyTimeoutMs ?? 12_000 });
     // iframe 元素出现早于 frame bridge 完成稳定 canvas 发现；测试交互必须等 deck-ready
     // 已渲染页序，否则首个模式切换/拖拽可能在 bridge 注册监听器前丢失。
     await page.waitForSelector('[data-page-key]', { timeout:options.readyTimeoutMs ?? 12_000 });
@@ -116,16 +170,37 @@ export async function openEditor(app, options = {}) {
       browser, page, browserProblems, resourceProblems, resourceCancellations, resourceRequests,
     };
   } catch (error) {
+    error.browserProblems = browserProblems;
+    error.resourceProblems = resourceProblems;
     await browser.close();
     throw error;
   }
 }
 
 export async function dragInFrame(page, start, end) {
-  const box = await page.locator('#deck-frame').boundingBox();
-  await page.mouse.move(box.x + start.x, box.y + start.y);
+  const frame = page.locator('#deck-frame');
+  const box = await frame.boundingBox();
+  const delta = { x:end.x - start.x, y:end.y - start.y };
+  const reachable = await frame.evaluate((frameElement, point) => {
+    const rect = frameElement.getBoundingClientRect();
+    const owner = frameElement.ownerDocument;
+    const requested = { x:rect.left + point.x, y:rect.top + point.y };
+    if (owner.elementFromPoint(requested.x, requested.y) === frameElement) return point;
+    // 响应式布局可能把 iframe 的一部分裁到视口外。Playwright
+    // 的 boundingBox 仍包含被裁部分；改用真正可命中的中心点。
+    const candidate = {
+      x:Math.min(innerWidth - 8, Math.max(8, rect.left + rect.width / 2)),
+      y:Math.min(innerHeight - 8, Math.max(8, rect.top + rect.height / 2)),
+    };
+    if (owner.elementFromPoint(candidate.x, candidate.y) !== frameElement) {
+      throw new Error('iframe 在当前视口没有可交互区域');
+    }
+    return { x:candidate.x - rect.left, y:candidate.y - rect.top };
+  }, start);
+  const origin = { x:box.x + reachable.x, y:box.y + reachable.y };
+  await page.mouse.move(origin.x, origin.y);
   await page.mouse.down();
-  await page.mouse.move(box.x + end.x, box.y + end.y);
+  await page.mouse.move(origin.x + delta.x, origin.y + delta.y, { steps:8 });
   await page.mouse.up();
 }
 
