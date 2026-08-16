@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compareDiagnostics } from '../bridge-service.mjs';
+import { inspectInstallation } from '../environment-doctor.mjs';
 
 const locator = { pageKey:'page-001-a', path:'0/1', tag:'div', fingerprint:'old' };
 
@@ -56,4 +57,21 @@ test('缺页诊断不能被当作无问题放行', () => {
     ),
     error => error.code === 'DIAGNOSTICS_UNAVAILABLE' && error.stage === 'diagnostics',
   );
+});
+
+test('Skill 接管确认只在显式请求时传给安装器', async () => {
+  let invocation;
+  const result = await inspectInstallation({
+    repair:true,
+    adoptExisting:true,
+    runProcess:async (command, args, options) => {
+      invocation = { command, args, options };
+      return { ready:true };
+    },
+  });
+
+  assert.deepEqual(result, { ready:true });
+  assert.ok(invocation.args.includes('repair'));
+  assert.ok(invocation.args.includes('--adopt-existing'));
+  assert.ok(invocation.args.includes('--skill-only'));
 });

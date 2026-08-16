@@ -855,7 +855,7 @@ function positionPopover(popover, region) {
 
 async function captureSnapshot(canvas, rect) {
   try {
-    if (typeof window.html2canvas !== 'function') throw new Error('html2canvas unavailable');
+    if (typeof window.html2canvas !== 'function') throw new Error('页面截图组件不可用');
     const rendered = await window.html2canvas(canvas, {
       backgroundColor: null,
       scale: 0.5,

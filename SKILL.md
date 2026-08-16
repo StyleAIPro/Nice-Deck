@@ -232,7 +232,7 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 
 ## 性能与依赖
 
-- **Skill 注册**：Codex 的标准用户级位置是 `~/.agents/skills/huawei-deck`。macOS / Linux 运行 `python3 scripts/install.py install`，Windows PowerShell 运行 `py -3 scripts\install.py install`；安装器会注册当前仓库并检查 `editor-core`，已有冲突目标不会被覆盖。完整安装、修复与卸载说明见 `INSTALL.md`。
+- **Skill 注册**：Codex 的标准用户级位置是 `~/.agents/skills/huawei-deck`。macOS / Linux 运行 `python3 scripts/install.py install`，Windows PowerShell 运行 `py -3 scripts\install.py install`；安装器会注册当前仓库并检查 `editor-core`，已有冲突目标不会被覆盖，已有同源但无记录的链接也必须通过诊断页“接管此安装”或 `repair --adopt-existing` 明确确认后才登记所有权。完整安装、修复与卸载说明见 `INSTALL.md`。
 - **按任务体检**：动手前先跑 `python3 scripts/check_deps.py --profile editor-core --check-only`（Windows：`py -3 scripts\check_deps.py --profile editor-core --check-only`）。Profile 分为 `editor-core`、`verify`、`pptx-export`、`materials` 与 `full`；加 `--repair` 才修复可自动安装项，`--json` 输出结构化结果。无 `--profile` 时为兼容旧命令仍按 `full` 自动修复。退出码：0 所选能力就绪 / 1 仍缺 / 2 工具或参数错误。
 - 预期性能：模板 12MB，headless Chrome 首开约 2.6s；PPTX 导出 34 页 → 55 张、约 47s。
 - 依赖：本机 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）；后期可视化编辑器另需 `ws`、`html2canvas`、`busboy`、`node-pty`、`@xterm/xterm` 与 `three`（由 `package-lock.json` 或 `scripts/check_deps.py` 安装）；PPTX 导出另需 `python-pptx`，统一调用 `scripts/html2pptx/convert.py`（Windows 用 `py -3`，macOS / Linux 用 `python3`）。

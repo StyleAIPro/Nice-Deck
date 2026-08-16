@@ -39,7 +39,7 @@ Windows PowerShell：
 py -3 scripts\install.py install
 ```
 
-默认注册位置是 `~/.agents/skills/huawei-deck`。macOS/Linux 使用 symlink，Windows 使用不要求 Developer Mode 的目录 junction。已有目标不指向当前仓库时，安装器会停止并报告 `INSTALL_TARGET_OCCUPIED`，不会覆盖用户内容。
+默认注册位置是 `~/.agents/skills/huawei-deck`。macOS/Linux 使用 symlink，Windows 使用不要求 Developer Mode 的目录 junction。已有目标不指向当前仓库时，安装器会停止并报告 `INSTALL_TARGET_OCCUPIED`，不会覆盖用户内容；已有同源链接但缺少安装记录时也不会静默接管，需在诊断页确认“接管此安装”，或显式运行 `scripts/install.py repair --adopt-existing`。
 
 安装后新开 Agent 任务，再双击 `Huawei Deck 编辑器.app`（macOS）或 `Huawei Deck 编辑器.cmd`（Windows）。完整的检查、其他 Agent 兼容注册、修复与卸载说明见 [`INSTALL.md`](INSTALL.md)。
 

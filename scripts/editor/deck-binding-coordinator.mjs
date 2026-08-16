@@ -285,6 +285,14 @@ class DeckBindingCoordinator {
       }
       if (confirmation === 'same-file') {
         if (!witnessEquals(candidate.witness, this.binding.witness)) {
+          if (candidate.fingerprint === this.binding.sourceFingerprint) {
+            throw bindingError(
+              'DECK_BINDING_VERIFIED_COPY_CONFIRMATION_REQUIRED',
+              409,
+              '所选文件是内容一致的副本，需要明确确认后才能重新绑定',
+              { binding:this.snapshot(), candidate:normalized },
+            );
+          }
           throw bindingError('DECK_BINDING_WITNESS_MISMATCH', 409, '所选文件不是原来的物理文件');
         }
       } else if (confirmation === 'verified-copy') {

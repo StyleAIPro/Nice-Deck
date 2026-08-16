@@ -115,6 +115,14 @@ python3 scripts/install.py inspect --json
 
 如果注册目标已经存在且不指向当前仓库，安装器会返回 `INSTALL_TARGET_OCCUPIED` 并停止，不会覆盖原目录。请先确认旧目录来源，再手工移动或删除；不要对不明目录执行递归删除。
 
+如果注册目标已经指向当前仓库，但没有本安装器的所有权记录，检查结果会显示 `adoption-required`，普通安装或修复会返回 `INSTALL_ADOPTION_REQUIRED`，不会静默接管。确认该链接确实应由 Huawei Deck 管理后运行：
+
+```bash
+python3 scripts/install.py repair --adopt-existing
+```
+
+Windows PowerShell 使用 `py -3 scripts\install.py repair --adopt-existing`。Editor 首页的“安装与诊断”也会显示“接管此安装”，并在写入所有权记录前要求明确确认。
+
 ## 7. 按任务准备能力
 
 基础 Editor：
@@ -179,6 +187,8 @@ python3 scripts/install.py uninstall
 - Python、Node.js、Chrome、LibreOffice 或 Agent CLI。
 
 如果注册目标在安装后被改到别处，卸载会返回 `UNINSTALL_TARGET_CHANGED` 并拒绝删除。
+
+多 Host 卸载按事务执行；任一注册项删除失败时，安装器会恢复此前已经移除的链接和原安装记录，避免留下半卸载状态。
 
 ## 10. 常见问题
 

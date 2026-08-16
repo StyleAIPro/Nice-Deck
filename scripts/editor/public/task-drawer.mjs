@@ -343,7 +343,7 @@ export function renderTaskDrawer(root, {
         copy.addEventListener('click', async () => {
           copy.disabled = true;
           try {
-            if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+            if (!navigator.clipboard?.writeText) throw new Error('浏览器剪贴板不可用');
             await navigator.clipboard.writeText(attachment.path);
             setPillLabel(copy, '已复制');
           } catch {

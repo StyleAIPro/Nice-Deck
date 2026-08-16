@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { appendFile, readFile, rename, unlink } from 'node:fs/promises';
+import { appendFile, copyFile, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import WebSocket from 'ws';
 import { openEditor, startFixtureServer } from './test-helpers.mjs';
@@ -206,6 +206,43 @@ test('持久提醒中的系统选择器可把同一物理文件手动重新绑�
   assert.equal(app.deckPath, reboundPath);
   assert.ok((await readFile(reboundPath)).length > 0);
   await assert.rejects(() => readFile(oldPath), error => error?.code === 'ENOENT');
+});
+
+test('内容一致复制件经用户明确确认后可从系统选择器重新绑定', async t => {
+  let pickedPath = null;
+  let pickCount = 0;
+  const app = await startFixtureServer({
+    bundle:true,
+    pickDeckFile:async () => {
+      pickCount += 1;
+      return pickedPath;
+    },
+  });
+  t.after(() => app.close());
+  const { page } = await openReadyEditor(t, app);
+  const oldPath = app.deckPath;
+  const copiedPath = join(dirname(oldPath), 'verified-copy.html');
+  await copyFile(oldPath, copiedPath);
+  await unlink(oldPath);
+  await waitFor(async () => {
+    const value = await fetch(`${app.url}/api/deck-binding?token=${app.token}`)
+      .then(response => response.json());
+    return value.state === 'needs-rebind' ? value : null;
+  });
+  await page.locator('[data-deck-binding-banner]').waitFor({ state:'visible' });
+  pickedPath = copiedPath;
+  let confirmationText = '';
+  page.once('dialog', async dialog => {
+    confirmationText = dialog.message();
+    await dialog.accept();
+  });
+
+  await page.getByRole('button', { name:'重新绑定文件' }).click();
+
+  await page.locator('[data-deck-binding-banner]').waitFor({ state:'hidden' });
+  assert.match(confirmationText, /内容一致的副本/);
+  assert.equal(pickCount, 1, '确认复制件时不应要求用户重复选择文件');
+  assert.equal(app.deckPath, copiedPath);
 });
 
 test('section、新 nested clip 与既有 clip 增量均阻断，撤销后恢复保存', async t => {

@@ -208,12 +208,20 @@ class InstallationManager:
             for item in (state or {}).get("registrations", [])
             if isinstance(item, dict)
         }
+        owned_paths = set((state or {}).get("ownedPaths", []))
         for host in self.hosts:
             target = self.target_for(host)
             exists = _lexists(target)
             same = _same_target(target, self.root)
-            if same:
+            managed = bool(
+                recorded.get(host)
+                and recorded[host].get("targetPath") in owned_paths
+                and same
+            )
+            if managed:
                 status = "ready"
+            elif same:
+                status = "adoption-required"
             elif exists:
                 status = "occupied"
             else:
@@ -224,24 +232,28 @@ class InstallationManager:
                 "state": status,
                 "method": recorded.get(host, {}).get("method")
                     or (_registration_method(target, platform=self.platform) if same else None),
-                "managed": bool(recorded.get(host) and same),
+                "managed": managed,
                 **({"resolvedTarget": str(target.resolve(strict=True))} if same else {}),
             })
+        ready = all(item["state"] == "ready" for item in registrations)
+        manual_action_required = any(
+            item["state"] in {"occupied", "adoption-required"} for item in registrations
+        )
         return {
             "schemaVersion": SCHEMA_VERSION,
             "channel": "developer",
             "productVersion": PRODUCT_VERSION,
             "installRoot": str(self.root),
             "stateFile": str(self.state_file),
-            "ready": all(item["state"] == "ready" for item in registrations),
-            "state": "ready" if all(item["state"] == "ready" for item in registrations)
-                else "manual-action-required" if any(item["state"] == "occupied" for item in registrations)
+            "ready": ready,
+            "state": "ready" if ready
+                else "manual-action-required" if manual_action_required
                 else "repairable",
             "registrations": registrations,
             "record": state,
         }
 
-    def plan(self, operation: str):
+    def plan(self, operation: str, *, adopt_existing=False):
         snapshot = self.inspect()
         actions = []
         if operation in {"install", "repair"}:
@@ -253,6 +265,17 @@ class InstallationManager:
                     "Skill 注册目标已存在且不指向当前仓库；安装器不会覆盖它",
                     details=targets,
                 )
+            adoption_required = [
+                item for item in snapshot["registrations"]
+                if item["state"] == "adoption-required"
+            ]
+            if adoption_required and not adopt_existing:
+                targets = "、".join(item["targetPath"] for item in adoption_required)
+                raise InstallError(
+                    "INSTALL_ADOPTION_REQUIRED",
+                    "Skill 注册已指向当前仓库，但不属于本安装记录；确认后才能接管",
+                    details=targets,
+                )
             method = "junction" if self.platform == "win32" else "symlink"
             for item in snapshot["registrations"]:
                 if item["state"] == "absent":
@@ -260,13 +283,21 @@ class InstallationManager:
                         "create-registration", host=item["host"],
                         target=item["targetPath"], method=method,
                     ))
+                elif item["state"] == "adoption-required":
+                    actions.append(InstallAction(
+                        "adopt-registration", host=item["host"],
+                        target=item["targetPath"], method=item["method"] or method,
+                    ))
             actions.append(InstallAction("write-state"))
         elif operation == "uninstall":
             record = snapshot["record"]
             if record:
                 requested = set(self.hosts)
+                owned_paths = set(record.get("ownedPaths", []))
                 for item in record.get("registrations", []):
                     if item.get("host") not in requested:
+                        continue
+                    if item.get("targetPath") not in owned_paths:
                         continue
                     target = Path(item.get("targetPath", ""))
                     if not _lexists(target):
@@ -281,7 +312,12 @@ class InstallationManager:
                         "remove-registration", host=item.get("host"), target=str(target),
                         method=item.get("method") or _registration_method(target, platform=self.platform),
                     ))
-                actions.append(InstallAction("remove-state"))
+                remaining = [
+                    item for item in record.get("registrations", [])
+                    if item.get("host") not in requested
+                    and item.get("targetPath") in owned_paths
+                ]
+                actions.append(InstallAction("write-state" if remaining else "remove-state"))
         else:
             raise InstallError("INSTALL_OPERATION_INVALID", f"未知安装动作：{operation}")
         return {
@@ -298,7 +334,10 @@ class InstallationManager:
         if dry_run:
             return {"status": "planned", "plan": plan, "snapshot": self.inspect()}
         before_state = self.state_file.read_bytes() if self.state_file.is_file() else None
+        before_record = _load_state(self.state_file)
+        owned_targets = set((before_record or {}).get("ownedPaths", []))
         created = []
+        removed = []
         try:
             for raw in plan.get("actions", []):
                 kind = raw.get("kind")
@@ -306,27 +345,47 @@ class InstallationManager:
                     target = Path(raw["target"])
                     if _lexists(target):
                         if _same_target(target, self.root):
-                            continue
+                            raise InstallError(
+                                "INSTALL_ADOPTION_REQUIRED",
+                                f"注册目标在执行期间变为同源链接，需要明确确认接管：{target}",
+                            )
                         raise InstallError("INSTALL_TARGET_OCCUPIED", f"注册目标已被占用：{target}")
                     _create_registration(target, self.root, raw["method"])
                     created.append((target, raw["method"]))
+                    owned_targets.add(str(target))
+                elif kind == "adopt-registration":
+                    target = Path(raw["target"])
+                    if not _same_target(target, self.root):
+                        raise InstallError(
+                            "INSTALL_ADOPTION_TARGET_CHANGED",
+                            f"待接管的 Skill 注册已经变化：{target}",
+                        )
+                    owned_targets.add(str(target))
                 elif kind == "remove-registration":
                     target = Path(raw["target"])
                     if _lexists(target):
                         if not _same_target(target, self.root):
                             raise InstallError("UNINSTALL_TARGET_CHANGED", f"注册目标已变化：{target}")
+                        removed.append((target, raw["method"]))
                         _remove_registration(target, raw["method"])
+                    owned_targets.discard(str(target))
                 elif kind == "write-state":
                     snapshot = self.inspect()
                     previous = snapshot.get("record") or {}
                     registrations = [
+                        item for item in previous.get("registrations", [])
+                        if item.get("host") not in self.hosts
+                        and item.get("targetPath") in owned_targets
+                    ] + [
                         {
                             "host": item["host"],
                             "targetPath": item["targetPath"],
                             "method": item["method"]
                                 or ("junction" if self.platform == "win32" else "symlink"),
                         }
-                        for item in snapshot["registrations"] if item["state"] == "ready"
+                        for item in snapshot["registrations"]
+                        if item["state"] in {"ready", "adoption-required"}
+                        and item["targetPath"] in owned_targets
                     ]
                     payload = {
                         "schemaVersion": SCHEMA_VERSION,
@@ -344,18 +403,31 @@ class InstallationManager:
                     self.state_file.unlink(missing_ok=True)
                 else:
                     raise InstallError("INSTALL_PLAN_INVALID", f"安装计划包含未知动作：{kind}")
-        except Exception:
+        except Exception as error:
+            rollback_errors = []
             for target, method in reversed(created):
                 if _same_target(target, self.root):
                     try:
                         _remove_registration(target, method)
-                    except Exception:
-                        pass
+                    except Exception as rollback_error:
+                        rollback_errors.append(str(rollback_error))
+            for target, method in reversed(removed):
+                if not _lexists(target):
+                    try:
+                        _create_registration(target, self.root, method)
+                    except Exception as rollback_error:
+                        rollback_errors.append(str(rollback_error))
             if before_state is None:
                 self.state_file.unlink(missing_ok=True)
             else:
                 self.state_file.parent.mkdir(parents=True, exist_ok=True)
                 self.state_file.write_bytes(before_state)
+            if rollback_errors:
+                raise InstallError(
+                    "INSTALL_ROLLBACK_FAILED",
+                    "安装操作失败，且未能完整恢复原状态",
+                    details="；".join(rollback_errors),
+                ) from error
             raise
         return {
             "status": "uninstalled" if plan["operation"] == "uninstall" else "installed",
@@ -410,6 +482,10 @@ def main(argv=None):
                         help="codex、claude-code、codex-legacy 或 all；可逗号分隔")
     parser.add_argument("--skill-only", action="store_true", help="不检查或修复 Editor Core")
     parser.add_argument("--dry-run", action="store_true", help="只展示计划，不写入环境")
+    parser.add_argument(
+        "--adopt-existing", action="store_true",
+        help="明确接管已经指向当前仓库、但尚未登记所有权的 Skill 注册",
+    )
     parser.add_argument("--json", action="store_true", help="输出结构化 JSON")
     parser.add_argument("--home", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--root", type=Path, default=REPO, help=argparse.SUPPRESS)
@@ -426,7 +502,10 @@ def main(argv=None):
         if args.operation == "inspect":
             result = manager.inspect()
         else:
-            result = manager.apply(manager.plan(args.operation), dry_run=args.dry_run)
+            result = manager.apply(
+                manager.plan(args.operation, adopt_existing=args.adopt_existing),
+                dry_run=args.dry_run,
+            )
 
         if not args.skill_only and args.operation != "uninstall":
             doctor = _load_doctor()

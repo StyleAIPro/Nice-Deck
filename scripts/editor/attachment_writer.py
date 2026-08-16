@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import struct
 import sys
@@ -19,33 +18,25 @@ try:
 except ImportError:  # pragma: no cover - 当前生产平台为 macOS/Linux
     fcntl = None
 
-
-MAXIMUM_BYTES = 25 * 1024 * 1024
-READ_CHUNK_BYTES = 1024 * 1024
-UUID_V4 = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-)
-SUFFIX = re.compile(r"^\.[a-z0-9]{1,16}$")
+try:
+    from attachment_writer_contract import (
+        AttachmentWriterError,
+        MAXIMUM_BYTES,
+        READ_CHUNK_BYTES,
+        unsafe_error as _unsafe,
+        validate_config as _validate_config,
+    )
+except ModuleNotFoundError:  # importlib 测试从仓库根目录直接加载本文件
+    from scripts.editor.attachment_writer_contract import (
+        AttachmentWriterError,
+        MAXIMUM_BYTES,
+        READ_CHUNK_BYTES,
+        unsafe_error as _unsafe,
+        validate_config as _validate_config,
+    )
 STATX_MNT_ID = 0x00001000
 AT_EMPTY_PATH = 0x00001000
 AT_STATX_DONT_SYNC = 0x00004000
-
-
-class AttachmentWriterError(RuntimeError):
-    def __init__(self, message, *, code="ATTACHMENT_WRITE_FAILED", stage="attachment-write"):
-        super().__init__(message)
-        self.code = code
-        self.stage = stage
-        self.cleanup_safe = False
-
-
-def _unsafe(message, error=None):
-    raised = AttachmentWriterError(
-        message, code="UNSAFE_SIDECAR_IO", stage="attachment-identity"
-    )
-    if error is not None:
-        raised.__cause__ = error
-    return raised
 
 
 def _linux_mount_id(fd):
@@ -96,81 +87,6 @@ def _trusted_fd_identity(fd):
         "mountDev": mount_dev,
         "mountId": mount_id,
     }
-
-
-def _validate_identity(value, label):
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"path", "dev", "ino"}
-        or any(not isinstance(value.get(key), str) for key in ("path", "dev", "ino"))
-    ):
-        raise _unsafe(f"{label} identity 格式无效")
-    path = value["path"]
-    if (
-        not os.path.isabs(path)
-        or path != os.path.normpath(path)
-        or path in {"", os.path.sep}
-    ):
-        raise _unsafe(f"{label} identity path 必须是规范绝对路径")
-    return {"path": path, "dev": value["dev"], "ino": value["ino"]}
-
-
-def _validate_config(value):
-    expected = {
-        "session", "attachments", "attachmentStaging", "uploadId",
-        "attachmentId", "suffix", "maximumBytes",
-    }
-    if not isinstance(value, dict) or set(value) != expected:
-        raise AttachmentWriterError(
-            "attachment writer config 格式无效",
-            code="ATTACHMENT_CONFIG_INVALID", stage="attachment-config",
-        )
-    config = {
-        "session": _validate_identity(value["session"], "session"),
-        "attachments": _validate_identity(value["attachments"], "attachments"),
-        "attachmentStaging": _validate_identity(
-            value["attachmentStaging"], "attachmentStaging"
-        ),
-        "uploadId": value["uploadId"],
-        "attachmentId": value["attachmentId"],
-        "suffix": value["suffix"],
-        "maximumBytes": value["maximumBytes"],
-    }
-    if not isinstance(config["uploadId"], str) or not UUID_V4.fullmatch(config["uploadId"]):
-        raise AttachmentWriterError(
-            "uploadId 不是规范小写 UUID v4",
-            code="ATTACHMENT_CONFIG_INVALID", stage="attachment-config",
-        )
-    if (
-        not isinstance(config["attachmentId"], str)
-        or not UUID_V4.fullmatch(config["attachmentId"])
-    ):
-        raise AttachmentWriterError(
-            "attachmentId 不是规范小写 UUID v4",
-            code="ATTACHMENT_CONFIG_INVALID", stage="attachment-config",
-        )
-    if not isinstance(config["suffix"], str) or not SUFFIX.fullmatch(config["suffix"]):
-        raise AttachmentWriterError(
-            "附件扩展名无效",
-            code="ATTACHMENT_CONFIG_INVALID", stage="attachment-config",
-        )
-    if (
-        not isinstance(config["maximumBytes"], int)
-        or isinstance(config["maximumBytes"], bool)
-        or config["maximumBytes"] != MAXIMUM_BYTES
-    ):
-        raise AttachmentWriterError(
-            "附件大小上限配置无效",
-            code="ATTACHMENT_CONFIG_INVALID", stage="attachment-config",
-        )
-    expected_attachments = os.path.join(config["session"]["path"], "attachments")
-    expected_staging = os.path.join(expected_attachments, ".staging")
-    if (
-        config["attachments"]["path"] != expected_attachments
-        or config["attachmentStaging"]["path"] != expected_staging
-    ):
-        raise _unsafe("附件目录路径未严格绑定 session identity")
-    return config
 
 
 def _directory_flags():

@@ -11,29 +11,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-# 依赖体检 doctor（动手前先跑；退出码：0 就绪 / 1 仍缺 / 2 工具或参数错误）
-python3 scripts/check_deps.py                # 缺失项自动装（pip/npx/npm 先打印再装），Node/Chrome/soffice 给提示
-python3 scripts/check_deps.py --check-only   # 只报告不改环境
+# 安装与依赖体检（退出码：0 就绪 / 1 仍缺 / 2 工具或参数错误）
+python3 scripts/install.py inspect                               # Skill + Editor Core 状态
+python3 scripts/check_deps.py --profile editor-core --check-only # 动手前基础体检
+python3 scripts/check_deps.py --profile full --check-only        # 全能力体检
+py -3 scripts\check_deps.py --profile editor-core --check-only   # Windows PowerShell
 
 # verify 三件套（退出码契约：0 通过 / 1 检测到问题 / 2 工具或参数错误）
 node scripts/verify/measure_overflow.mjs <deck.html> --all       # 全页溢出检测（也可只传若干 data-label）
 node scripts/verify/shot.mjs <deck.html> <页label> /tmp/p.jpg     # 单页 1920×1080 截图（build 全显）
 node scripts/verify/steps.mjs <deck.html> <页label> /tmp/steps    # 放映态动画逐拍截图
 
-# HTML → PPTX（layer 多标签页自动逐标签展开；SCALE/QUALITY/EMBED_HTML 可调）
-bash scripts/html2pptx/convert.sh <deck.html> [out.pptx]
+# HTML → PPTX（跨平台；layer 多标签页自动逐标签展开）
+python3 scripts/html2pptx/convert.py <deck.html> [out.pptx]  # macOS / Linux
+py -3 scripts\html2pptx\convert.py <deck.html> [out.pptx]   # Windows PowerShell
 
 # 品牌图替换（默认只打印预览，加 --yes 才落盘；target: bg|board|people|logo）
 python3 scripts/apply_bg.py <deck.html> <new-image> --target bg --yes
+
+# Editor 回归测试
+npm run test:editor:unit    # Node 单元测试
+npm run test:editor:python  # Python 单元测试
+npm run test:editor:e2e     # 真实 Chrome E2E
+npm run test:editor         # 全部串行执行
 ```
 
 依赖：Node ≥ 18 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；PPTX 导出另需 `python3 -m pip install python-pptx`。edit-bundle.py 只用 Python 标准库。解析外部参考材料（pptx/pdf）另需本机 LibreOffice（`soffice`，pptx → PDF）与 `pymupdf`（渲染逐页图 / 抽图）；PDF 进阶处理（合并 / 拆分 / 表格 / 表单）用仓库内置 pdf skill（`.agents/skills/pdf/`）。
 
-没有测试框架、lint 或构建步骤——验证方式就是对 deck 跑 verify 三件套，以及 `eb.verify(path)` 的结构一致性检查。
+仓库没有独立 lint 或构建步骤。Editor 回归测试由 Node 内置 test runner、Python unittest 与真实 Chrome E2E 组成，通过 `package.json` 的 `test:editor:*` 命令统一运行；模板 Deck 改动还必须跑 verify 三件套以及 `eb.verify(path)` 的结构一致性检查。
 
 ## 核心架构：单文件 bundle 格式
 
-deck HTML 是「独立版」bundle（约 187 行），关键在两个 `<script>`：
+deck HTML 是「独立版」bundle（当前三套模板均约 223 行），关键在两个 `<script>`：
 
 - `<script type="__bundler/manifest">`：一行 JSON dict `{uuid: {mime, compressed, data(base64)}}`，内联全部图片/字体/React 运行时。
 - `<script type="__bundler/template">`：一行 JSON 字符串，内容是**整份 deck 的 HTML**（所有 `<section data-label=...>` 幻灯片、`nav[]` 导航数组、`chapters[]` 章节起点都在这个字符串里）。
@@ -66,4 +75,4 @@ edit-bundle 的不变量（改该脚本时必须保持）：
 
 ## 本地试装
 
-skill 通过放入 `~/.claude/skills/huawei-deck` 生效；开发时用软链接 `ln -s "$(pwd)" ~/.claude/skills/huawei-deck`，改动即时同步。
+Claude Code 的兼容注册位置是 `~/.claude/skills/huawei-deck`。开发时运行 `python3 scripts/install.py repair --hosts claude-code --skill-only` 建立受控软链接；Windows PowerShell 使用 `py -3 scripts\install.py repair --hosts claude-code --skill-only` 建立 junction。改动会即时同步。

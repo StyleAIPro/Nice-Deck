@@ -207,7 +207,9 @@ export function createSupportCenter({
     ));
   };
 
-  const makeRow = ({ label, description, detail, state, repair, guidance = [] }) => {
+  const makeRow = ({
+    label, description, detail, state, repair, guidance = [], actionLabel = '修复并复检',
+  }) => {
     const row = createElement('div', 'diagnostic-row');
     row.dataset.state = state;
     const marker = createElement('span', 'diagnostic-state', state === 'ready' ? '✓' : '!');
@@ -215,9 +217,10 @@ export function createSupportCenter({
     copy.append(createElement('strong', '', label), createElement('small', '', description));
     row.append(marker, copy, createElement('span', 'diagnostic-detail', detail));
     if (repair && state !== 'ready') {
-      const button = createElement('button', 'diagnostic-action', '修复并复检');
+      const button = createElement('button', 'diagnostic-action', actionLabel);
       button.type = 'button';
       button.addEventListener('click', async () => {
+        if (repair.confirmation && !window.confirm(repair.confirmation)) return;
         button.disabled = true;
         button.textContent = '正在修复…';
         button.setAttribute('aria-busy', 'true');
@@ -245,7 +248,7 @@ export function createSupportCenter({
           diagnosticsLoading = false;
           ui.refreshDiagnostics.disabled = false;
           button.disabled = false;
-          button.textContent = '修复并复检';
+          button.textContent = actionLabel;
           button.removeAttribute('aria-busy');
         }
       });
@@ -273,7 +276,9 @@ export function createSupportCenter({
     const { environment, installation } = snapshot;
     const registration = installation.registrations?.find(item => item.host === 'codex');
     const skillState = registration?.state === 'ready' ? 'ready'
-      : registration?.state === 'occupied' ? 'manual-action-required' : 'repairable';
+      : ['occupied', 'adoption-required'].includes(registration?.state)
+        ? 'manual-action-required' : 'repairable';
+    const adoptionRequired = registration?.state === 'adoption-required';
     const profileRow = (profileId, description) => {
       const profile = environment.profiles[profileId];
       const missing = checksForProfile(environment, profileId);
@@ -301,7 +306,12 @@ export function createSupportCenter({
           description:'让 Codex 发现本仓库的工作流',
           detail:registration ? `${registration.targetPath} · ${registration.state}` : '未找到注册信息',
           state:skillState,
-          repair:{ kind:'skill' },
+          repair:adoptionRequired ? {
+            kind:'skill',
+            adoptExisting:true,
+            confirmation:'目标已经指向当前 Huawei Deck 仓库。确认由安装器接管该 Skill 注册，以便后续安全修复和卸载吗？',
+          } : { kind:'skill' },
+          actionLabel:adoptionRequired ? '接管此安装' : '修复并复检',
         }),
         profileRow('editor-core', '启动 Editor 与真实 Agent 终端'),
       ]),

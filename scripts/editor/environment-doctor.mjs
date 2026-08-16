@@ -69,11 +69,14 @@ export function inspectEnvironment({
 export function inspectInstallation({
   pythonExecutable = defaultPythonExecutable(),
   repair = false,
+  adoptExisting = false,
   runProcess = runJsonProcess,
 } = {}) {
-  return runProcess(pythonExecutable, [
+  const args = [
     join(PROJECT_ROOT, 'scripts/install.py'),
     repair ? 'repair' : 'inspect',
     '--skill-only', '--json',
-  ], { cwd:PROJECT_ROOT });
+  ];
+  if (adoptExisting) args.push('--adopt-existing');
+  return runProcess(pythonExecutable, args, { cwd:PROJECT_ROOT });
 }

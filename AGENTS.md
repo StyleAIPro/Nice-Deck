@@ -28,15 +28,21 @@ py -3 scripts\html2pptx\convert.py <deck.html> [out.pptx]  # Windows PowerShell
 
 # 品牌图替换（默认只打印预览，加 --yes 才落盘；target: bg|board|people|logo）
 python3 scripts/apply_bg.py <deck.html> <new-image> --target bg --yes
+
+# Editor 回归测试
+npm run test:editor:unit    # Node 单元测试
+npm run test:editor:python  # Python 单元测试
+npm run test:editor:e2e     # 真实 Chrome E2E
+npm run test:editor         # 全部串行执行
 ```
 
 依赖：Node ≥ 18 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；PPTX 导出另需 `python3 -m pip install python-pptx`。edit-bundle.py 只用 Python 标准库。解析外部参考材料（pptx/pdf）另需本机 LibreOffice（`soffice`，pptx → PDF）与 `pymupdf`（渲染逐页图 / 抽图）；PDF 进阶处理（合并 / 拆分 / 表格 / 表单）用仓库内置 pdf skill（`.agents/skills/pdf/`）。
 
-没有测试框架、lint 或构建步骤——验证方式就是对 deck 跑 verify 三件套，以及 `eb.verify(path)` 的结构一致性检查。
+仓库没有独立 lint 或构建步骤。Editor 回归测试由 Node 内置 test runner、Python unittest 与真实 Chrome E2E 组成，通过 `package.json` 的 `test:editor:*` 命令统一运行；模板 Deck 改动还必须跑 verify 三件套以及 `eb.verify(path)` 的结构一致性检查。
 
 ## 核心架构：单文件 bundle 格式
 
-deck HTML 是「独立版」bundle（约 187 行），关键在两个 `<script>`：
+deck HTML 是「独立版」bundle（当前三套模板均约 223 行），关键在两个 `<script>`：
 
 - `<script type="__bundler/manifest">`：一行 JSON dict `{uuid: {mime, compressed, data(base64)}}`，内联全部图片/字体/React 运行时。
 - `<script type="__bundler/template">`：一行 JSON 字符串，内容是**整份 deck 的 HTML**（所有 `<section data-label=...>` 幻灯片、`nav[]` 导航数组、`chapters[]` 章节起点都在这个字符串里）。

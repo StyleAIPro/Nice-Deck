@@ -272,6 +272,7 @@ async function requestJson(pathname, options) {
     error.revision = body.revision;
     error.groupId = body.groupId;
     error.binding = body.binding;
+    error.candidate = body.candidate;
     error.stage = body.stage;
     error.recovery = body.recovery;
     error.diagnostic = body.diagnostic;
@@ -768,11 +769,34 @@ async function chooseDeckBinding() {
   deckBindingRecheck.disabled = true;
   deckBindingChoose.disabled = true;
   try {
-    const result = await requestJson('/api/deck-binding/choose-file', {
-      method:'POST',
-      headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ expectedBindingRevision:deckBinding.revision }),
-    });
+    let result;
+    try {
+      result = await requestJson('/api/deck-binding/choose-file', {
+        method:'POST',
+        headers:{ 'content-type':'application/json' },
+        body:JSON.stringify({ expectedBindingRevision:deckBinding.revision }),
+      });
+    } catch (error) {
+      if (error.code !== 'DECK_BINDING_VERIFIED_COPY_CONFIRMATION_REQUIRED'
+        || typeof error.candidate !== 'string') throw error;
+      if (error.binding) renderDeckBinding(error.binding);
+      const confirmed = window.confirm(
+        '所选文件不是原来的物理文件，但内容与最后源版本完全一致。确认把这个内容一致的副本作为当前 Deck 源文件吗？',
+      );
+      if (!confirmed) {
+        showHistoryNotice('已取消绑定内容一致的副本', 'working');
+        return;
+      }
+      result = await requestJson('/api/deck-binding/choose-file', {
+        method:'POST',
+        headers:{ 'content-type':'application/json' },
+        body:JSON.stringify({
+          expectedBindingRevision:deckBinding.revision,
+          confirmation:'verified-copy',
+          candidatePath:error.candidate,
+        }),
+      });
+    }
     renderDeckBinding(result.binding, { announce:result.status === 'rebound' });
     if (result.status === 'rebound') {
       showHistoryNotice('源文件已重新绑定，可以继续固化', 'success');

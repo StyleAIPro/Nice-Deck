@@ -991,7 +991,10 @@ export async function startAppServer({
         const body = await readJson(request);
         if (body.kind === 'skill') {
           sendJson(response, 200, {
-            kind:'skill', result:await inspectInstallation({ repair:true }),
+            kind:'skill', result:await inspectInstallation({
+              repair:true,
+              adoptExisting:body.adoptExisting === true,
+            }),
           });
           return;
         }

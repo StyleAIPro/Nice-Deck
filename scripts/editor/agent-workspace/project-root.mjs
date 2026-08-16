@@ -235,7 +235,7 @@ export async function assertProjectRootIdentity(projectRoot) {
       || currentRealPath !== projectRoot.identity.realPath
       || String(info.dev) !== projectRoot.identity.dev
       || String(info.ino) !== projectRoot.identity.ino) {
-      throw new Error('identity changed');
+      throw new Error('项目目录身份已变化');
     }
     return projectRoot.path;
   } catch (error) {

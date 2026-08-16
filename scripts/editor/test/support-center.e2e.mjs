@@ -158,3 +158,52 @@ test('修复操作立即显示进度，复检后明确区分已修复和手动�
   await materialsRow.getByRole('button', { name:'查看安装方法' }).click();
   await page.getByText(/LibreOffice\(soffice\)：安装 LibreOffice/).waitFor();
 });
+
+
+test('已有同源 Skill 链接必须由用户明确确认后才接管', async t => {
+  let adopted = false;
+  let repairOptions = null;
+  const installationSnapshot = () => ({
+    schemaVersion:1,
+    ready:adopted,
+    state:adopted ? 'ready' : 'manual-action-required',
+    registrations:[{
+      host:'codex',
+      state:adopted ? 'ready' : 'adoption-required',
+      managed:adopted,
+      targetPath:'/test/.agents/skills/huawei-deck',
+    }],
+  });
+  const app = await startAppServer({
+    token:'support-adopt-install-secret',
+    inspectInstallation:async options => {
+      if (options?.repair) {
+        repairOptions = options;
+        adopted = true;
+      }
+      return installationSnapshot();
+    },
+    inspectEnvironment:async () => environmentSnapshot(),
+  });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1440, height:900 } });
+  let confirmationText = '';
+  page.once('dialog', async dialog => {
+    confirmationText = dialog.message();
+    await dialog.accept();
+  });
+
+  await page.goto(app.appUrl);
+  await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
+  await page.getByRole('button', { name:'安装与诊断', exact:true }).click();
+  const row = page.locator('.diagnostic-row', { hasText:'Huawei Deck Skill' });
+  await row.getByRole('button', { name:'接管此安装' }).click();
+
+  await page.getByText('Huawei Deck Skill已修复并通过复检。').waitFor();
+  assert.match(confirmationText, /由安装器接管/);
+  assert.equal(repairOptions?.adoptExisting, true);
+  assert.equal(await row.getAttribute('data-state'), 'ready');
+});

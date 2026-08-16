@@ -1945,8 +1945,15 @@ export async function startServer({
         return;
       }
       if (request.method === 'POST' && pathname === '/api/deck-binding/choose-file') {
-        const { expectedBindingRevision, confirmation = 'same-file' } = await readJson(request);
-        const candidatePath = await pickDeckFile({});
+        const {
+          expectedBindingRevision,
+          confirmation = 'same-file',
+          candidatePath:confirmedCandidatePath,
+        } = await readJson(request);
+        const candidatePath = confirmation === 'verified-copy'
+          && typeof confirmedCandidatePath === 'string'
+          ? confirmedCandidatePath
+          : await pickDeckFile({});
         if (candidatePath === null) {
           json(response, 200, { status:'cancelled', binding:bindingCoordinator.snapshot() });
           return;

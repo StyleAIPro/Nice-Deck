@@ -8,7 +8,13 @@
 python3 scripts/install.py inspect
 ```
 
-确认 `codex` 注册状态为 `ready`，再新开一个 Agent 任务。如果显示 `occupied`，目标目录属于其他安装，安装器不会覆盖。
+确认 `codex` 注册状态为 `ready`，再新开一个 Agent 任务。如果显示 `occupied`，目标目录属于其他安装，安装器不会覆盖。如果显示 `adoption-required`，说明链接已经指向当前仓库，但还没有安装器所有权记录；请在首页“安装与诊断”中点击“接管此安装”并确认，或明确运行：
+
+```bash
+python3 scripts/install.py repair --adopt-existing
+```
+
+接管只登记这个已经核对为同源的链接，让后续修复和卸载能按所有权安全执行，不会改动仓库或用户 Deck。
 
 ## Editor 无法启动
 
