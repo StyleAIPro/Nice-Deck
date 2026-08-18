@@ -25,6 +25,23 @@ python3 scripts/check_deps.py --profile editor-core --repair
 
 Node.js 或 Agent CLI 缺失时需要手工安装。Agent 已安装但未登录时，请先在普通终端完成登录。
 
+### Windows Editor 使用 WSL Codex 时提示找不到 CLI
+
+本机配置位于 `%USERPROFILE%\.huawei-deck-editor\settings.json`。确认其中的
+`wslDistribution`、`wslUser` 与实际环境一致，再在 PowerShell 运行：
+
+```powershell
+wsl.exe -d Ubuntu-26.04 -u root --exec bash -lic "command -v codex"
+wsl.exe -d Ubuntu-26.04 -u root --exec codex login status
+py -3 scripts\check_deps.py --profile editor-core --check-only
+```
+
+诊断应显示 `Codex: WSL <发行版>/<用户> · <版本>`。修改配置或更新 Editor 后要彻底
+退出旧后台并重新双击入口；只关掉启动命令窗口不会替换已经运行的 Node 服务。
+Codex 登录和会话继续保存在对应 WSL 用户的 `~/.codex`，无需复制到 Windows 用户目录。
+若 CLI 能打开但模型请求提示 DNS、证书或连接失败，确认代理变量由该用户的登录 shell
+加载；Editor 会通过 `bash -lic` 启动 Codex，以继承同一套代理环境。
+
 ## 验证或导出不可用
 
 Editor Core、质量验证和导出是独立能力：

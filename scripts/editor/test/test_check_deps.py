@@ -79,6 +79,51 @@ class CheckDepsTest(unittest.TestCase):
         self.assertTrue(ready)
         self.assertIn("Claude Code", detail)
 
+    def test_windows_doctor_recognizes_configured_wsl_codex(self):
+        settings = {
+            "codexRuntime": "wsl",
+            "wslDistribution": "Ubuntu-26.04",
+            "wslUser": "root",
+        }
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            stdout = "/usr/local/bin/codex\n" if "command -v codex" in command else "codex-cli 0.146.0\n"
+            return doctor.subprocess.CompletedProcess(command, 0, stdout, "")
+
+        with mock.patch.object(doctor.sys, "platform", "win32"), \
+                mock.patch.object(doctor, "load_agent_runtime_settings", return_value=settings), \
+                mock.patch.object(doctor, "run", side_effect=fake_run), \
+                mock.patch.object(doctor.shutil, "which", return_value=None):
+            ready, detail = doctor.probe_agent_cli()
+        self.assertTrue(ready)
+        self.assertIn("WSL Ubuntu-26.04/root", detail)
+        self.assertIn("codex-cli 0.146.0", detail)
+        self.assertEqual(commands[1][-2:], ["/usr/local/bin/codex", "--version"])
+
+    def test_configured_wsl_codex_failure_is_not_hidden_by_other_agent(self):
+        settings = {
+            "codexRuntime": "wsl",
+            "wslDistribution": "Ubuntu-26.04",
+            "wslUser": "root",
+        }
+
+        def which(name):
+            return r"C:\Tools\claude.cmd" if name == "claude.cmd" else None
+
+        failure = doctor.subprocess.CompletedProcess(
+            ["wsl.exe"], 1, "", "找不到具有所提供名称的分发版"
+        )
+        with mock.patch.object(doctor.sys, "platform", "win32"), \
+                mock.patch.object(doctor, "load_agent_runtime_settings", return_value=settings), \
+                mock.patch.object(doctor, "run", return_value=failure), \
+                mock.patch.object(doctor.shutil, "which", side_effect=which):
+            ready, detail = doctor.probe_agent_cli()
+        self.assertFalse(ready)
+        self.assertIn("Ubuntu-26.04/root", detail)
+        self.assertIn("Claude Code", detail)
+
     def test_windows_agent_is_found_in_user_npm_bin_when_path_is_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:
             appdata = Path(directory)

@@ -2631,7 +2631,11 @@ export async function startServer({
       }, current.workspaceRevision);
     };
     const resolveTerminalConversation = async (
-      provider, { newConversation = false, initialPrompt = '' } = {},
+      provider, {
+        newConversation = false,
+        initialPrompt = '',
+        environment = process.env,
+      } = {},
     ) => {
       const current = agentWorkspaceStore.snapshot();
       const providerState = current.providers[provider];
@@ -2649,6 +2653,7 @@ export async function startServer({
       const created = await createAgentTerminalConversation(provider, {
         projectRoot:current.projectRoot,
         initialPrompt,
+        environment,
       });
       if (created.resume) await persistTerminalConversation(provider, created.conversationId);
       return created;
@@ -2659,6 +2664,7 @@ export async function startServer({
     const terminalOptions = {
       projectRoot:agentWorkspaceStore.snapshot().projectRoot,
       cwd:agentTerminalCwd,
+      runtimePathRoots:[PROJECT_DIR],
       provider:storedTerminalProvider,
       environment:{
         ...process.env,

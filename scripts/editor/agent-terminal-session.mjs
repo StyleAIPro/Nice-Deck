@@ -7,6 +7,7 @@ import {
   buildRegisteredTerminalCommand,
   publicAgentProviders,
 } from './agent-provider-registry.mjs';
+import { prepareAgentTerminalRuntime } from './agent-terminal-runtime.mjs';
 
 const MAX_BUFFER_CHARS = 1024 * 1024;
 const MAX_INPUT_CHARS = 64 * 1024;
@@ -22,6 +23,9 @@ const DIRECTORY_TRUST_MESSAGE = '请在右侧终端确认是否信任当前项�
 function visibleTerminalText(output) {
   return String(output ?? '')
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    // Codex TUI 用 CSI n C/a 表示单词之间的水平空白；若直接删掉，
+    // `Do you trust` 会塌成 `Doyoutrust`，目录信任闸门无法识别。
+    .replace(/\u001b\[\d{0,4}[Ca]/g, ' ')
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\r/g, '\n');
 }
@@ -149,6 +153,8 @@ export class AgentTerminalSession {
     scheduleSubmit = setTimeout,
     cancelScheduledSubmit = clearTimeout,
     resolveExecutable = resolveAgentTerminalExecutable,
+    prepareRuntime = prepareAgentTerminalRuntime,
+    runtimePathRoots = [],
   }) {
     const absolutePath = platform === 'win32' ? win32.isAbsolute : isAbsolute;
     if (typeof projectRoot !== 'string' || !absolutePath(projectRoot)) {
@@ -169,6 +175,11 @@ export class AgentTerminalSession {
     if (typeof scheduleSubmit !== 'function') throw new TypeError('scheduleSubmit 必须是函数');
     if (typeof cancelScheduledSubmit !== 'function') throw new TypeError('cancelScheduledSubmit 必须是函数');
     if (typeof resolveExecutable !== 'function') throw new TypeError('resolveExecutable 必须是函数');
+    if (typeof prepareRuntime !== 'function') throw new TypeError('prepareRuntime 必须是函数');
+    if (!Array.isArray(runtimePathRoots)
+      || runtimePathRoots.some(value => typeof value !== 'string')) {
+      throw new TypeError('runtimePathRoots 必须是路径数组');
+    }
     this.projectRoot = projectRoot;
     this.cwd = cwd;
     this.provider = provider;
@@ -184,6 +195,8 @@ export class AgentTerminalSession {
     this.scheduleSubmit = scheduleSubmit;
     this.cancelScheduledSubmit = cancelScheduledSubmit;
     this.resolveExecutable = resolveExecutable;
+    this.prepareRuntime = prepareRuntime;
+    this.runtimePathRoots = [...runtimePathRoots];
     this.providerChangeListeners = new Set();
     this.stateListeners = new Set();
     this.interruptListeners = new Set();
@@ -208,6 +221,7 @@ export class AgentTerminalSession {
     this.discoveryController = null;
     this.closed = false;
     this.activeCommand = null;
+    this.activeRuntime = null;
   }
 
   snapshot() {
@@ -344,6 +358,25 @@ export class AgentTerminalSession {
     this.interactionScanOutput = '';
     this.state = 'starting';
     this.#publishState();
+    let runtime = null;
+    try {
+      runtime = await this.prepareRuntime(provider, {
+        platform:this.platform,
+        environment:this.environment,
+        projectRoot:this.projectRoot,
+        cwd:this.cwd,
+        pathRoots:this.runtimePathRoots,
+      });
+    } catch (error) {
+      this.state = 'failed';
+      this.exit = { code:null, signal:null, message:error?.message || 'Agent 运行环境准备失败' };
+      this.#publishState();
+      throw terminalError(
+        error?.code ?? 'AGENT_RUNTIME_PREPARE_FAILED',
+        error?.message ?? 'Agent 运行环境准备失败',
+      );
+    }
+    const runtimeEnvironment = runtime?.environment ?? this.environment;
     const hasExplicitPrompt = initialPrompt !== undefined;
     const prompt = initialPrompt ?? await this.initialPrompt(provider);
     let conversation = null;
@@ -351,7 +384,7 @@ export class AgentTerminalSession {
       conversation = await this.resolveConversation(provider, {
         newConversation:newConversation === true,
         initialPrompt:prompt,
-        environment:this.environment,
+        environment:runtimeEnvironment,
       });
       const hasConversationId = typeof conversation?.conversationId === 'string';
       const hasDiscoveryToken = conversation?.conversationId === null
@@ -376,24 +409,30 @@ export class AgentTerminalSession {
     const discoveryPrompt = conversation?.discoveryToken
       ? `[Huawei Deck 会话标识：${conversation.discoveryToken}]\n${prompt}`
       : prompt;
-    const startupPrompt = conversation?.initialPromptConsumed === true
+    const startupPromptSource = conversation?.initialPromptConsumed === true
         || (conversation?.resume === true && !hasExplicitPrompt)
       ? ''
       : discoveryPrompt;
+    const startupPrompt = runtime?.translateText
+      ? runtime.translateText(startupPromptSource)
+      : startupPromptSource;
     const registeredCommand = buildAgentTerminalCommand(provider, {
       // 先让 CLI 显示并接管输入框，再由 PTY 统一粘贴初始指令并回车。
       platform:this.platform,
       conversationId:conversation?.conversationId ?? null,
       resume:conversation?.resume === true,
     });
-    const command = {
-      ...registeredCommand,
-      executable:this.resolveExecutable(provider, {
-        platform:this.platform,
-        environment:this.environment,
-      }),
-    };
+    const command = runtime?.wrapCommand
+      ? runtime.wrapCommand(registeredCommand)
+      : {
+          ...registeredCommand,
+          executable:this.resolveExecutable(provider, {
+            platform:this.platform,
+            environment:this.environment,
+          }),
+        };
     this.activeCommand = command;
+    this.activeRuntime = runtime;
     const generation = ++this.generation;
     let child;
     try {
@@ -401,9 +440,9 @@ export class AgentTerminalSession {
         name:'xterm-256color',
         cols:Number.isInteger(cols) && cols > 0 ? Math.min(cols, 500) : 80,
         rows:Number.isInteger(rows) && rows > 0 ? Math.min(rows, 300) : 24,
-        cwd:this.cwd,
+        cwd:runtime?.spawnCwd ?? this.cwd,
         env:{
-          ...this.environment,
+          ...runtimeEnvironment,
           TERM:'xterm-256color',
           COLORTERM:'truecolor',
         },
@@ -411,6 +450,7 @@ export class AgentTerminalSession {
     } catch (error) {
       this.state = 'failed';
       this.exit = { code:null, signal:null, message:error?.message || 'Agent 终端启动失败' };
+      this.activeRuntime = null;
       this.#publishState();
       throw terminalError(
         error?.code === 'ENOENT' ? 'AGENT_NOT_FOUND' : 'AGENT_START_FAILED',
@@ -493,9 +533,9 @@ export class AgentTerminalSession {
         discoveryToken:conversation.discoveryToken,
         discoveryStartedAt:conversation.discoveryStartedAt,
         knownConversationIds:conversation.knownConversationIds,
-        projectRoot:this.projectRoot,
-        cwd:this.cwd,
-        environment:this.environment,
+        projectRoot:runtime?.projectRoot ?? this.projectRoot,
+        cwd:runtime?.conversationCwd ?? this.cwd,
+        environment:runtimeEnvironment,
         signal:discoveryController.signal,
         startedAt:this.startedAt,
       }).then(async conversationId => {
@@ -631,7 +671,10 @@ export class AgentTerminalSession {
     if (this.pendingSubmitTimer !== null) {
       throw terminalError('AGENT_PROMPT_PENDING', '上一条 Agent 任务仍在提交中');
     }
-    const safeText = text.replaceAll('\u001b', '');
+    const runtimeText = this.activeRuntime?.translateText
+      ? this.activeRuntime.translateText(text)
+      : text;
+    const safeText = runtimeText.replaceAll('\u001b', '');
     const child = this.process;
     const generation = this.generation;
     if (startup) {
@@ -737,6 +780,7 @@ export class AgentTerminalSession {
     this.interactionResponsePending = false;
     this.interactionScanOutput = '';
     this.activeCommand = null;
+    this.activeRuntime = null;
     if (!this.closed) this.state = 'stopped';
     this.exit = null;
     this.#publishState();

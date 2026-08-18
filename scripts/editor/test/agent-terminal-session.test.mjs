@@ -157,23 +157,34 @@ test('终端 provider 暴露 Codex、Claude Code 与 OpenCode，并使用固定�
 test('三种 Agent 遇到目录信任提示时等待用户确认且不误投初始任务', async t => {
   const scenarios = [
     {
+      name:'codex',
       provider:'codex',
       output:'Do you trust the contents of this directory?\r\n› 1. Yes, proceed\r\n  2. No, quit\u001b[?25h',
       readyOutput:'Codex ready',
     },
     {
+      name:'codex-wsl-cursor-positioned',
+      provider:'codex',
+      output:'\u001b[3;3HDo\u001b[1Cyou\u001b[1Ctrust\u001b[1Cthe\u001b[1Ccontents'
+        + '\u001b[1Cof\u001b[1Cthis\u001b[1Cdirectory?\r\n› 1. Yes, continue\r\n'
+        + '2.\u001b[1CNo,\u001b[1Cquit\u001b[?25h',
+      readyOutput:'Codex ready',
+    },
+    {
+      name:'claude-code',
       provider:'claude-code',
       output:'Do you trust the files in this folder?\r\n  Yes, proceed\r\n  No, exit',
       readyOutput:CLAUDE_READY_OUTPUT,
     },
     {
+      name:'opencode',
       provider:'opencode',
       output:'Do you trust this project directory?\r\n  Trust\r\n  Exit',
       readyOutput:'OpenCode ready',
     },
   ];
   for (const scenario of scenarios) {
-    await t.test(scenario.provider, async () => {
+    await t.test(scenario.name, async () => {
       const children = [];
       const session = new AgentTerminalSession({
         projectRoot:'/tmp/huawei-deck',
@@ -459,6 +470,75 @@ test('Windows PTY 对外保留可信 UNC 项目身份，但用映射盘 cwd 启�
   await session.start();
   assert.equal(session.snapshot().projectRoot, String.raw`\\server\share\huawei-deck`);
   assert.equal(children[0].options.cwd, String.raw`R:\huawei-deck`);
+  await session.close();
+});
+
+test('Windows Codex 通过 WSL runtime 启动并用 WSL 路径提交与发现会话', async () => {
+  const children = [];
+  const resolutions = [];
+  const discoveries = [];
+  const scheduled = [];
+  const session = new AgentTerminalSession({
+    projectRoot:String.raw`C:\Users\tester\workspace\project`,
+    cwd:String.raw`C:\Users\tester\workspace\project`,
+    provider:'codex',
+    platform:'win32',
+    environment:{ HUAWEI_DECK_EDITOR_TOKEN:'secret' },
+    runtimePathRoots:[String.raw`C:\Users\tester\workspace\AICO-PPT`],
+    prepareRuntime:async () => ({
+      kind:'wsl',
+      conversationCwd:'/mnt/c/Users/tester/workspace/project',
+      spawnCwd:String.raw`C:\Users\tester\workspace\project`,
+      environment:{
+        HUAWEI_DECK_EDITOR_TOKEN:'secret',
+        HUAWEI_DECK_CODEX_RUNTIME:'wsl',
+      },
+      translateText:text => text
+        .replaceAll(String.raw`C:\Users\tester\workspace\project`, '/mnt/c/Users/tester/workspace/project'),
+      wrapCommand:command => ({
+        ...command,
+        label:'Codex（WSL Ubuntu-26.04/root）',
+        executable:'wsl.exe',
+        args:['-d', 'Ubuntu-26.04', '--exec', 'codex', ...command.args],
+      }),
+    }),
+    initialPrompt:() => String.raw`读取 C:\Users\tester\workspace\project 中的 Skill`,
+    resolveConversation:async (provider, options) => {
+      resolutions.push([provider, options]);
+      return {
+        conversationId:null,
+        resume:false,
+        discoveryToken:'019ff4b7-0622-7272-b0e2-394f6316b52a',
+        discoveryStartedAt:'2026-08-17T00:00:00.000Z',
+        knownConversationIds:[],
+      };
+    },
+    identifyConversation:async (provider, options) => {
+      discoveries.push([provider, options]);
+      return 'wsl-codex-session';
+    },
+    scheduleSubmit:(callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return scheduled.length;
+    },
+    cancelScheduledSubmit:() => {},
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start();
+  assert.equal(children[0].executable, 'wsl.exe');
+  assert.equal(children[0].options.cwd, String.raw`C:\Users\tester\workspace\project`);
+  assert.deepEqual(resolutions[0][1].environment, {
+    HUAWEI_DECK_EDITOR_TOKEN:'secret',
+    HUAWEI_DECK_CODEX_RUNTIME:'wsl',
+  });
+  children[0].events.emit('data', 'Codex ready');
+  assert.match(children[0].writes[0], /\/mnt\/c\/Users\/tester\/workspace\/project/);
+  assert.equal(discoveries[0][1].cwd, '/mnt/c/Users/tester/workspace/project');
+  assert.equal(discoveries[0][1].environment.HUAWEI_DECK_CODEX_RUNTIME, 'wsl');
   await session.close();
 });
 

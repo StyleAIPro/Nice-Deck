@@ -548,6 +548,7 @@ export async function startAppServer({
     const terminal = createAgentTerminal({
       projectRoot:project.path,
       cwd:project.identity.originalPath,
+      runtimePathRoots:[PROJECT_DIR],
       provider,
       environment:{
         ...process.env,

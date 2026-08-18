@@ -62,6 +62,33 @@ class LauncherTest(unittest.TestCase):
             with self.assertRaisesRegex(launcher.LauncherError, "Codex、Claude Code 或 OpenCode"):
                 launcher.resolve_agent_provider("auto", platform="win32")
 
+    def test_windows_wsl_codex_configuration_selects_codex_without_native_cli(self):
+        with mock.patch.object(launcher, "_find_agent_command", return_value=None):
+            self.assertEqual(
+                launcher.resolve_agent_provider(
+                    "auto",
+                    platform="win32",
+                    runtime_settings={
+                        "codexRuntime": "wsl",
+                        "wslDistribution": "Ubuntu-26.04",
+                        "wslUser": "root",
+                    },
+                ),
+                "codex",
+            )
+
+    def test_invalid_local_agent_runtime_configuration_is_actionable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Path(directory) / "settings.json"
+            settings.write_text('{"codexRuntime":"wsl","wslDistribution":""}', encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"HUAWEI_DECK_EDITOR_STATE_ROOT": directory},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(launcher.LauncherError, "WSL 发行版"):
+                    launcher.load_agent_runtime_settings()
+
     def test_windows_auto_provider_finds_claude_in_user_npm_bin_without_path(self):
         with tempfile.TemporaryDirectory() as directory:
             appdata = Path(directory)

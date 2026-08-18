@@ -74,6 +74,106 @@ async function assertStableTerminalLayout(page, child, context) {
   return layout;
 }
 
+test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  const result = await page.evaluate(async () => {
+    const NativeWebSocket = globalThis.WebSocket;
+    const sockets = [];
+    class FakeWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = FakeWebSocket.CONNECTING;
+        this.listeners = new Map();
+        sockets.push(this);
+      }
+      addEventListener(type, listener) {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+      send() {}
+      close() { this.readyState = 3; }
+      emit(type, event = {}) {
+        if (type === 'open') this.readyState = FakeWebSocket.OPEN;
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+    globalThis.WebSocket = FakeWebSocket;
+    const root = document.createElement('aside');
+    root.className = 'agent-terminal-panel';
+    document.body.append(root);
+    const { AgentTerminalPanel } = await import('/editor/agent-terminal-panel.mjs');
+    const panel = new AgentTerminalPanel(root, {
+      token:'fixture-token', editorToken:'fixture-editor-token',
+    });
+    panel.open('codex');
+    const socket = sockets[0];
+    socket.emit('open');
+    const loading = root.querySelector('[data-agent-terminal-loading]');
+    const snapshot = () => ({
+      visible:root.dataset.terminalLoading === 'true' && !loading.hidden,
+      copy:loading.textContent,
+    });
+    const wslState = {
+      provider:'codex',
+      providerLabel:'Codex（WSL Ubuntu-26.04/root）',
+      state:'starting',
+      command:'wsl.exe -d Ubuntu-26.04 -u root --exec bash -lic codex',
+      promptReady:false,
+      startupPromptState:null,
+    };
+    socket.emit('message', { data:JSON.stringify({ type:'state', terminal:wslState }) });
+    const beforeOutput = snapshot();
+    socket.emit('message', { data:JSON.stringify({ type:'output', data:'[proxy ON] US\r\n' }) });
+    const afterOutput = snapshot();
+    socket.emit('message', { data:JSON.stringify({
+      type:'state',
+      terminal:{ ...wslState, state:'running', startupPromptState:'pending' },
+    }) });
+    const pending = snapshot();
+    socket.emit('message', { data:JSON.stringify({
+      type:'state',
+      terminal:{
+        ...wslState,
+        state:'running',
+        promptReady:true,
+        startupPromptState:'submitting',
+      },
+    }) });
+    const submitting = snapshot();
+    socket.emit('message', { data:JSON.stringify({
+      type:'state',
+      terminal:{
+        ...wslState,
+        state:'running',
+        promptReady:true,
+        startupPromptState:'submitted',
+      },
+    }) });
+    const submitted = snapshot();
+    panel.dispose();
+    root.remove();
+    globalThis.WebSocket = NativeWebSocket;
+    return { beforeOutput, afterOutput, pending, submitting, submitted };
+  });
+
+  assert.equal(result.beforeOutput.visible, true);
+  assert.equal(result.afterOutput.visible, true, '代理输出不能在回车前提前露出空终端');
+  assert.match(result.afterOutput.copy, /正在进入 root WSL/);
+  assert.equal(result.pending.visible, true);
+  assert.match(result.pending.copy, /正在进入 root WSL/);
+  assert.equal(result.submitting.visible, true);
+  assert.match(result.submitting.copy, /正在提交初始化指令/);
+  assert.equal(result.submitted.visible, false, '回车写入后应立即显示真实终端');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('bypass Agent 遇到目录信任提示时自动展开右侧终端并等待用户确认', async t => {
   const children = [];
   const app = await startFixtureServer({

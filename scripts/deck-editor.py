@@ -11,6 +11,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -45,6 +46,50 @@ WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 class LauncherError(RuntimeError):
     """可安全展示给用户的启动错误。"""
+
+
+def _normalize_agent_runtime_settings(value):
+    if value is None:
+        return {"codexRuntime": "native"}
+    if not isinstance(value, dict):
+        raise LauncherError("本机 Agent 配置必须是 JSON 对象")
+    runtime = value.get("codexRuntime", "native")
+    if runtime not in ("native", "wsl"):
+        raise LauncherError("codexRuntime 只支持 native 或 wsl")
+    if runtime == "native":
+        return {"codexRuntime": "native"}
+    distribution = value.get("wslDistribution")
+    user = value.get("wslUser")
+    if (
+        not isinstance(distribution, str)
+        or not distribution.strip()
+        or len(distribution) > 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in distribution)
+    ):
+        raise LauncherError("WSL 发行版名称无效")
+    if not isinstance(user, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", user):
+        raise LauncherError("WSL 用户名无效")
+    return {
+        "codexRuntime": "wsl",
+        "wslDistribution": distribution,
+        "wslUser": user,
+    }
+
+
+def load_agent_runtime_settings(environment=None):
+    """读取不随仓库提交的 Editor 本机 Agent runtime 配置。"""
+    environment = os.environ if environment is None else environment
+    state_root = environment.get("HUAWEI_DECK_EDITOR_STATE_ROOT")
+    settings_path = (
+        Path(state_root).resolve() if state_root else Path.home() / ".huawei-deck-editor"
+    ) / "settings.json"
+    if not settings_path.is_file():
+        return {"codexRuntime": "native"}
+    try:
+        value = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise LauncherError(f"无法读取本机 Agent 配置 {settings_path}：{error}") from error
+    return _normalize_agent_runtime_settings(value)
 
 
 def _windows_agent_directories():
@@ -96,12 +141,20 @@ def _find_agent_command(command, platform=sys.platform):
     return found
 
 
-def resolve_agent_provider(provider="auto", platform=sys.platform):
+def resolve_agent_provider(
+    provider="auto", platform=sys.platform, runtime_settings=None
+):
     """把桌面默认值解析为本机实际安装的 Agent，不做静默跨 provider 回退。"""
     if provider != "auto":
         if provider not in AGENT_PROVIDERS:
             raise LauncherError("Agent provider 不受支持：" + str(provider))
         return provider
+    settings = _normalize_agent_runtime_settings(
+        load_agent_runtime_settings() if runtime_settings is None else runtime_settings
+    )
+    if platform == "win32" and settings["codexRuntime"] == "wsl":
+        # 具体发行版、用户与 CLI 可用性由 doctor 和 Node runtime 在启动时复核。
+        return "codex"
     for candidate in AGENT_PROVIDERS:
         command = AGENT_COMMANDS[candidate]
         if _find_agent_command(command, platform=platform):

@@ -348,6 +348,42 @@ export class AgentTerminalPanel {
     this.root.dataset.terminalLoading = active ? 'true' : 'false';
   }
 
+  #wslUser(state = this.terminalState) {
+    if (state?.provider !== 'codex') return null;
+    const labelUser = /Codex（WSL [^/）]+\/([^）]+)）/.exec(state.providerLabel ?? '')?.[1];
+    if (labelUser) return labelUser;
+    const commandUser = /(?:^|\s)-u\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(
+      state.command ?? '',
+    );
+    if (!/^wsl(?:\.exe)?(?:\s|$)/i.test(state.command ?? '') || !commandUser) return null;
+    return commandUser[1] ?? commandUser[2] ?? commandUser[3] ?? null;
+  }
+
+  #syncLoading() {
+    const state = this.terminalState;
+    if (state.interactionRequired?.kind) {
+      this.#setLoading(false);
+      return;
+    }
+    const startupPromptState = state.startupPromptState;
+    if (startupPromptState === 'submitting') {
+      this.#setLoading(true, '正在提交初始化指令…');
+      return;
+    }
+    if (state.state === 'starting' || startupPromptState === 'pending') {
+      const wslUser = this.#wslUser(state);
+      this.#setLoading(true, wslUser
+        ? `正在进入 ${wslUser} WSL，等待 Codex 输入界面…`
+        : this.loadingCopy);
+      return;
+    }
+    if (state.state === 'running' && !this.hasTerminalOutput) {
+      this.#setLoading(true, 'CLI 已启动，正在等待输入界面…');
+      return;
+    }
+    this.#setLoading(false);
+  }
+
   #restart(provider, { newConversation = false } = {}) {
     const switchingProvider = provider !== this.terminalState.provider;
     this.restartPending = true;
@@ -416,9 +452,9 @@ export class AgentTerminalPanel {
         if (this.restartPending) return;
         if (message.data.length > 0) {
           this.hasTerminalOutput = true;
-          if (!['pending', 'submitting'].includes(this.terminalState.startupPromptState)) {
-            this.#setLoading(false);
-          }
+          // PTY 的首段输出可能早于 running/pending 状态到达浏览器。输出只说明
+          // shell 有内容，不代表初始化回车已经写入；遮罩必须统一由状态机决定。
+          this.#syncLoading();
         }
         const followOutput = this.#isAtBottom();
         this.terminal.write(message.data, () => {
@@ -481,15 +517,7 @@ export class AgentTerminalPanel {
       exited:state.exit?.message || '会话已退出', failed:state.exit?.message || '启动失败',
       stopped:'尚未启动', closed:'服务已关闭',
     };
-    const startupLocked = ['pending', 'submitting'].includes(state.startupPromptState);
-    if (!interactionRequired && (state.state === 'starting' || (state.state === 'running'
-      && (!this.hasTerminalOutput || startupLocked)))) {
-      this.#setLoading(true, state.startupPromptState === 'submitting'
-        ? '正在输入初始指令并回车…'
-        : this.loadingCopy);
-    } else {
-      this.#setLoading(false);
-    }
+    this.#syncLoading();
     this.detail.textContent = interactionRequired?.message ?? copies[state.state] ?? state.state;
     this.detail.title = interactionRequired?.message
       ?? state.conversationError

@@ -24,6 +24,27 @@ test('Codex 新会话立即返回发现标识，不先执行隐藏 Agent turn', 
   assert.ok(Array.isArray(result.knownConversationIds));
 });
 
+test('Windows WSL Codex 在 WSL 内建立 rollout 基线', async () => {
+  const calls = [];
+  const result = await createTerminalConversation('codex', {
+    idFactory:() => '019ff4b7-0622-7272-b0e2-394f6316b52a',
+    environment:{
+      HUAWEI_DECK_CODEX_RUNTIME:'wsl',
+      HUAWEI_DECK_WSL_DISTRO:'Ubuntu-26.04',
+      HUAWEI_DECK_WSL_USER:'root',
+      HUAWEI_DECK_WSL_NODE:'/usr/bin/node',
+      HUAWEI_DECK_WSL_CODEX_HOME:'/root/.codex',
+      HUAWEI_DECK_WSL_SESSION_HELPER:'/mnt/c/workspace/scripts/editor/wsl-codex-session-helper.mjs',
+    },
+    runWslCodexHelper:async (operation, args) => {
+      calls.push({ operation, args });
+      return { ids:['019ff4b7-0622-7272-b0e2-394f6316b52b'] };
+    },
+  });
+  assert.deepEqual(result.knownConversationIds, ['019ff4b7-0622-7272-b0e2-394f6316b52b']);
+  assert.deepEqual(calls, [{ operation:'list-rollouts', args:[] }]);
+});
+
 test('Codex 可见首轮落盘后按唯一标识发现真实 ID', async () => {
   let requests = 0;
   let closed = false;
@@ -48,6 +69,38 @@ test('Codex 可见首轮落盘后按唯一标识发现真实 ID', async () => {
   assert.deepEqual(await resumeTerminalConversation('codex', { conversationId:id }), {
     conversationId:id, resume:true,
   });
+});
+
+test('Windows WSL Codex 只在 WSL 内发现会话且不启动 Windows App Server', async () => {
+  const expected = '019ff4b7-0622-7272-b0e2-394f6316b52b';
+  let polls = 0;
+  const discovered = await discoverTerminalConversation('codex', {
+    discoveryToken:'019ff4b7-0622-7272-b0e2-394f6316b52a',
+    discoveryStartedAt:new Date().toISOString(),
+    knownConversationIds:[],
+    cwd:'/mnt/c/Users/测试 用户/演示 项目',
+    environment:{
+      HUAWEI_DECK_CODEX_RUNTIME:'wsl',
+      HUAWEI_DECK_WSL_DISTRO:'Ubuntu-26.04',
+      HUAWEI_DECK_WSL_USER:'root',
+      HUAWEI_DECK_WSL_NODE:'/usr/bin/node',
+      HUAWEI_DECK_WSL_CODEX_HOME:'/root/.codex',
+      HUAWEI_DECK_WSL_SESSION_HELPER:'/mnt/c/workspace/scripts/editor/wsl-codex-session-helper.mjs',
+    },
+    pollMs:1,
+    timeoutMs:1_000,
+    runWslCodexHelper:async (operation, args) => {
+      assert.equal(operation, 'find-rollout');
+      assert.equal(args[2], '/mnt/c/Users/测试 用户/演示 项目');
+      polls += 1;
+      return { conversationId:polls === 1 ? null : expected };
+    },
+    codexClientFactory:async () => {
+      throw new Error('WSL rollout 发现不应启动 Windows Codex App Server');
+    },
+  });
+  assert.equal(discovered, expected);
+  assert.equal(polls, 2);
 });
 
 test('OpenCode 可见 TUI 使用固定标识发现并恢复真实 session', async () => {

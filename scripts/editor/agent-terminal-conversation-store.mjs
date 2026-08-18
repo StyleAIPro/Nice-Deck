@@ -12,6 +12,58 @@ const PROVIDERS = new Set(AGENT_PROVIDER_IDS);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const execFileAsync = promisify(execFile);
 
+function wslCodexRuntime(environment) {
+  if (environment.HUAWEI_DECK_CODEX_RUNTIME !== 'wsl') return null;
+  const distribution = environment.HUAWEI_DECK_WSL_DISTRO;
+  const user = environment.HUAWEI_DECK_WSL_USER;
+  const node = environment.HUAWEI_DECK_WSL_NODE;
+  const codexHome = environment.HUAWEI_DECK_WSL_CODEX_HOME;
+  const helper = environment.HUAWEI_DECK_WSL_SESSION_HELPER;
+  if (typeof distribution !== 'string' || !distribution
+    || typeof user !== 'string' || !/^[a-z_][a-z0-9_-]{0,63}$/i.test(user)
+    || typeof node !== 'string' || !node.startsWith('/')
+    || typeof codexHome !== 'string' || !codexHome.startsWith('/')
+    || typeof helper !== 'string' || !helper.startsWith('/')
+    || [distribution, node, codexHome, helper].some(value => /[\0\r\n]/.test(value))) {
+    throw Object.assign(new Error('WSL Codex 会话配置不完整或无效'), {
+      code:'INVALID_WSL_CODEX_SESSION_CONFIG',
+    });
+  }
+  return { distribution, user, node, codexHome, helper };
+}
+
+async function defaultRunWslCodexHelper(operation, args = [], {
+  environment = process.env,
+} = {}) {
+  const runtime = wslCodexRuntime(environment);
+  if (!runtime) throw new TypeError('当前不是 WSL Codex runtime');
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync('wsl.exe', [
+      '-d', runtime.distribution,
+      '-u', runtime.user,
+      '--exec', runtime.node, runtime.helper,
+      operation, runtime.codexHome, ...args,
+    ], {
+      env:environment,
+      encoding:'utf8',
+      timeout:10_000,
+      maxBuffer:2 * 1024 * 1024,
+      windowsHide:true,
+    }));
+  } catch (error) {
+    throw Object.assign(new Error(
+      `无法在 WSL 内读取 Codex 会话：${String(error.stderr || error.message).trim()}`,
+    ), { code:'WSL_CODEX_SESSION_HELPER_FAILED', cause:error });
+  }
+  try { return JSON.parse(stdout); }
+  catch (error) {
+    throw Object.assign(new Error('WSL Codex 会话 helper 返回了无效 JSON'), {
+      code:'WSL_CODEX_SESSION_HELPER_INVALID_OUTPUT', cause:error,
+    });
+  }
+}
+
 function emptyState(taskId) {
   return { version:1, taskId, providers:{}, updatedAt:new Date(0).toISOString() };
 }
@@ -85,6 +137,7 @@ export async function createTerminalConversation(provider, {
   environment = process.env,
   projectRoot = process.cwd(),
   listOpenCodeSessions = defaultOpenCodeSessions,
+  runWslCodexHelper = defaultRunWslCodexHelper,
 } = {}) {
   if (!PROVIDERS.has(provider)) throw new TypeError(`Agent provider 不受支持：${String(provider)}`);
   if (provider === 'claude-code') {
@@ -110,7 +163,12 @@ export async function createTerminalConversation(provider, {
   }
   let knownConversationIds = [];
   try {
-    knownConversationIds = (await recentRollouts(codexSessionsRoot(environment))).map(item => item.id);
+    if (wslCodexRuntime(environment)) {
+      const value = await runWslCodexHelper('list-rollouts', [], { environment });
+      knownConversationIds = Array.isArray(value?.ids) ? value.ids.filter(id => UUID.test(id)) : [];
+    } else {
+      knownConversationIds = (await recentRollouts(codexSessionsRoot(environment))).map(item => item.id);
+    }
   } catch { /* 基线只用于加速，失败时仍可用标识发现 */ }
   // 不再先跑一轮隐藏的 `codex exec`。PTY 立即启动交互式 Codex，
   // 真实 ID 在首个可见 turn 落盘后异步发现并持久化。
@@ -161,6 +219,7 @@ export async function discoverTerminalConversation(provider, {
   timeoutMs = 45_000,
   pollMs = 150,
   listOpenCodeSessions = defaultOpenCodeSessions,
+  runWslCodexHelper = defaultRunWslCodexHelper,
 } = {}) {
   if (!['codex', 'opencode'].includes(provider)) {
     throw new TypeError('只有 Codex 与 OpenCode 需要异步发现会话 ID');
@@ -197,6 +256,33 @@ export async function discoverTerminalConversation(provider, {
     });
   }
   const startedAt = Date.parse(discoveryStartedAt ?? '');
+  if (wslCodexRuntime(environment)) {
+    if (!Number.isFinite(startedAt) || typeof cwd !== 'string' || !cwd.startsWith('/')) {
+      throw Object.assign(new Error('WSL Codex 会话发现缺少有效的开始时间或工作目录'), {
+        code:'INVALID_WSL_CODEX_SESSION_DISCOVERY',
+      });
+    }
+    while (Date.now() < deadline) {
+      assertActive();
+      try {
+        const response = await runWslCodexHelper('find-rollout', [
+          discoveryToken,
+          discoveryStartedAt,
+          cwd,
+          JSON.stringify(known ? [...known] : []),
+        ], { environment });
+        if (validConversationId(response?.conversationId)) return response.conversationId;
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.max(250, pollMs)));
+    }
+    throw Object.assign(new Error(lastError
+      ? `WSL Codex 会话 ID 发现超时：${lastError.message}`
+      : 'WSL Codex 会话 ID 发现超时'), {
+      code:'AGENT_SESSION_DISCOVERY_TIMEOUT', cause:lastError,
+    });
+  }
   if (known && Number.isFinite(startedAt)) {
     while (Date.now() < Math.min(deadline, startedAt + 30_000)) {
       assertActive();

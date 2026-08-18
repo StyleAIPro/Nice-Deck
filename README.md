@@ -138,7 +138,7 @@ Windows 的 Agent 终端会把可信目录 identity 与进程 cwd 分开处理�
 
 Editor 的全部 Node → Python 子进程通过 `scripts/editor/python-utf8.mjs` 固定 `PYTHONUTF8=1` 与 `PYTHONIOENCODING=utf-8`，并在 Windows 设置 `windowsHide`。会话 JSON、工作副本、附件、新建校验、固化结果与中文错误输出都不继承 Windows 控制台的 GBK/ACP，也不会因辅助进程额外弹出任务栏窗口；Windows 与 macOS 轮流操作同一项目时，仍以 UTF-8 作为唯一进程协议编码。
 
-桌面入口默认使用 `auto` provider：按当前系统实际可执行命令依次识别 Codex、Claude Code、OpenCode，只安装 Claude Code 的 Windows 环境会直接启动 `claude --dangerously-skip-permissions`，不会先尝试 Codex，也不会在 provider 缺失时静默切换。Codex 或 Claude Code 恢复持久会话时，只有可见 CLI 明确报告会话 ID 不存在，才自动创建并持久化替代会话；工作副本与待办原样保留，登录、网络或其他启动失败不会误清旧绑定。Claude Code 在 Windows 上只有画出真正的空 `❯` 输入行和光标后才算就绪；启动 banner、长历史恢复输出和 PTY 存活都不会触发任务，每次 Enter 后也会重新等待下一个输入提示符。ConPTY 正文再按 UTF-8 字节拆成不超过 512 B 的 bracketed-paste 分块并逐块节流；正文完整写入且单独关闭 paste 后才延迟发送 Enter，避免长会话恢复时前几块被启动画面吞掉，也避免部分 ConPTY / Ink 组合只保留大块写入末尾。
+桌面入口默认使用 `auto` provider：按当前系统实际可执行命令依次识别 Codex、Claude Code、OpenCode，只安装 Claude Code 的 Windows 环境会直接启动 `claude --dangerously-skip-permissions`，不会先尝试 Codex，也不会在 provider 缺失时静默切换。Windows 也可通过 `%USERPROFILE%\.huawei-deck-editor\settings.json` 把 Codex runtime 固定到指定 WSL2 发行版和用户；Editor 会用登录 `PATH` 定位 CLI、用 `wslpath` 转换项目与任务路径，并在 WSL 用户自己的 `~/.codex` 内发现和恢复会话，完整配置见 [`INSTALL.md`](INSTALL.md#windows-editor-使用安装在-wsl2-内的-codex)。这项本机配置不改变原生 Windows、macOS 或其他 provider。Codex 或 Claude Code 恢复持久会话时，只有可见 CLI 明确报告会话 ID 不存在，才自动创建并持久化替代会话；工作副本与待办原样保留，登录、网络或其他启动失败不会误清旧绑定。Claude Code 在 Windows 上只有画出真正的空 `❯` 输入行和光标后才算就绪；启动 banner、长历史恢复输出和 PTY 存活都不会触发任务，每次 Enter 后也会重新等待下一个输入提示符。ConPTY 正文再按 UTF-8 字节拆成不超过 512 B 的 bracketed-paste 分块并逐块节流；正文完整写入且单独关闭 paste 后才延迟发送 Enter，避免长会话恢复时前几块被启动画面吞掉，也避免部分 ConPTY / Ink 组合只保留大块写入末尾。
 
 命令式入口继续保留：`python3 scripts/deck-editor.py <deck.html>`。Skill / Agent 完成第一版 deck 并通过基础验证后可直接带路径启动，Windows / Linux 也使用这一入口：
 

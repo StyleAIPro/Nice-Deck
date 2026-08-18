@@ -75,6 +75,44 @@ def run(cmd, **kw):
         return cp
 
 
+def load_agent_runtime_settings(environment=None):
+    """读取 Editor 本机配置；doctor 与启动器必须使用同一契约。"""
+    environment = os.environ if environment is None else environment
+    state_root = environment.get("HUAWEI_DECK_EDITOR_STATE_ROOT")
+    settings_path = (
+        Path(state_root).resolve() if state_root else Path.home() / ".huawei-deck-editor"
+    ) / "settings.json"
+    if not settings_path.is_file():
+        return {"codexRuntime": "native"}
+    try:
+        value = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取本机 Agent 配置 {settings_path}：{error}") from error
+    if not isinstance(value, dict):
+        raise ValueError("本机 Agent 配置必须是 JSON 对象")
+    runtime = value.get("codexRuntime", "native")
+    if runtime not in ("native", "wsl"):
+        raise ValueError("codexRuntime 只支持 native 或 wsl")
+    if runtime == "native":
+        return {"codexRuntime": "native"}
+    distribution = value.get("wslDistribution")
+    user = value.get("wslUser")
+    if (
+        not isinstance(distribution, str)
+        or not distribution.strip()
+        or len(distribution) > 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in distribution)
+    ):
+        raise ValueError("WSL 发行版名称无效")
+    if not isinstance(user, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", user):
+        raise ValueError("WSL 用户名无效")
+    return {
+        "codexRuntime": "wsl",
+        "wslDistribution": distribution,
+        "wslUser": user,
+    }
+
+
 # ---- 各依赖的探测函数：返回 (present: bool, detail: str) ----
 
 def probe_pdf_skill():
@@ -251,16 +289,62 @@ def _windows_cli_directories():
 
 
 def probe_agent_cli():
-    candidates = (
-        ("Codex", ("codex.exe", "codex.cmd", "codex")),
-        ("Claude Code", ("claude.exe", "claude.cmd", "claude")),
-        ("OpenCode", ("opencode.exe", "opencode.cmd", "opencode")),
-    ) if sys.platform == "win32" else (
-        ("Codex", ("codex",)),
-        ("Claude Code", ("claude",)),
-        ("OpenCode", ("opencode",)),
-    )
+    try:
+        runtime = load_agent_runtime_settings()
+    except ValueError as error:
+        return False, str(error)
+
+    wsl_failure = None
     found = []
+    if sys.platform == "win32" and runtime["codexRuntime"] == "wsl":
+        target = f'{runtime["wslDistribution"]}/{runtime["wslUser"]}'
+        prefix = [
+            "wsl.exe", "-d", runtime["wslDistribution"],
+            "-u", runtime["wslUser"],
+        ]
+        try:
+            located = run(
+                [*prefix, "--exec", "bash", "-lic", "command -v codex"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            located = subprocess.CompletedProcess(prefix, 124, "", "WSL 环境检查超时")
+        codex_path = next((
+            line.strip() for line in reversed((located.stdout or "").splitlines())
+            if line.strip().startswith("/")
+        ), None)
+        if located.returncode != 0 or not codex_path:
+            reason = (located.stderr or located.stdout or "登录环境中找不到 codex").strip()
+            wsl_failure = f"Codex WSL {target} 不可用：{reason}"
+        else:
+            try:
+                version = run(
+                    [*prefix, "--exec", codex_path, "--version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                version = subprocess.CompletedProcess(prefix, 124, "", "codex --version 超时")
+            if version.returncode != 0:
+                reason = (version.stderr or version.stdout or "codex --version 失败").strip()
+                wsl_failure = f"Codex WSL {target} 不可用：{reason}"
+            else:
+                detail = (version.stdout or codex_path).strip().splitlines()[-1]
+                found.append(f"Codex: WSL {target} · {detail}")
+
+    if sys.platform == "win32":
+        candidates = []
+        if runtime["codexRuntime"] == "native":
+            candidates.append(("Codex", ("codex.exe", "codex.cmd", "codex")))
+        candidates.extend((
+            ("Claude Code", ("claude.exe", "claude.cmd", "claude")),
+            ("OpenCode", ("opencode.exe", "opencode.cmd", "opencode")),
+        ))
+    else:
+        candidates = (
+            ("Codex", ("codex",)),
+            ("Claude Code", ("claude",)),
+            ("OpenCode", ("opencode",)),
+        )
     for label, names in candidates:
         executable = next((shutil.which(name) for name in names if shutil.which(name)), None)
         if not executable and sys.platform == "win32":
@@ -272,6 +356,9 @@ def probe_agent_cli():
             ), None)
         if executable:
             found.append(f"{label}: {executable}")
+    if wsl_failure:
+        suffix = f"；另已找到：{'；'.join(found)}" if found else ""
+        return False, wsl_failure + suffix
     return (bool(found), "；".join(found) if found else "未找到 Codex、Claude Code 或 OpenCode")
 
 def probe_which(name):

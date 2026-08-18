@@ -49,6 +49,32 @@ py -3 scripts\install.py install
 python scripts\install.py install
 ```
 
+### Windows Editor 使用安装在 WSL2 内的 Codex
+
+如果 Editor 在 Windows 启动，而 Codex CLI 只安装在 WSL2，可在
+`%USERPROFILE%\.huawei-deck-editor\settings.json` 写入本机配置：
+
+```json
+{
+  "codexRuntime": "wsl",
+  "wslDistribution": "Ubuntu-26.04",
+  "wslUser": "root"
+}
+```
+
+先在对应 WSL 用户中完成一次登录并确认命令可用：
+
+```powershell
+wsl.exe -d Ubuntu-26.04 -u root --exec bash -lic "command -v codex"
+wsl.exe -d Ubuntu-26.04 -u root --exec codex login status
+```
+
+Editor 会进入该发行版用户的登录 shell，继承其 `PATH`、代理等环境后启动 Codex，
+并把 Windows 项目路径转换为 WSL 路径。会话继续从该 WSL 用户的 `~/.codex`
+发现和恢复；配置只在
+Windows 的 Codex provider 上生效，不改变 macOS、Linux、Claude Code 或 OpenCode。
+修改配置或更新 Editor 代码后，需要彻底退出旧 Editor 后台再重新双击启动。
+
 ## 4. 只安装 Skill
 
 如果暂时不使用窗口化 Editor：
@@ -213,3 +239,17 @@ python3 scripts/install.py uninstall
 ### Windows 运行后窗口一闪而过
 
 在 PowerShell 中运行 `py -3 scripts\install.py inspect` 查看结构化错误。若找不到 Python，请先安装 Python 3 并启用 `py` launcher。
+
+### Windows 已配置 WSL Codex，但 Editor 仍无法启动 Agent
+
+运行 `py -3 scripts\check_deps.py --profile editor-core --check-only`。诊断结果应显示
+`Codex: WSL <发行版>/<用户> · <版本>`。如果提示发行版、用户或 Codex 不可用，请先用
+上面的 `wsl.exe` 命令核对名称、登录状态和登录 `PATH`；不要在 Windows 侧复制
+`/root/.codex` 或登录凭据。
+
+如果 Codex 能打开但请求模型时提示 DNS、证书或连接失败，确认代理配置在登录 shell
+中生效，而不只是某个已经打开的终端会话中生效：
+
+```powershell
+wsl.exe -d Ubuntu-26.04 -u root --exec bash -lic "curl -I --max-time 12 https://chatgpt.com"
+```
