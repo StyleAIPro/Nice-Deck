@@ -58,6 +58,58 @@ function normalizePersistedTasks(tasks) {
   return (Array.isArray(tasks) ? tasks : []).map(normalizePersistedTask);
 }
 
+const AGENT_BATCH_OUTCOMES = new Set(['succeeded', 'partial', 'failed', 'cancelled']);
+
+function normalizePersistedAgentBatches(values) {
+  const batches = Array.isArray(values) ? values : [];
+  const ids = new Set();
+  const ordinals = new Set();
+  return batches.map(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+      || !UUID_V4.test(value.id)
+      || !Number.isSafeInteger(value.ordinal) || value.ordinal < 1
+      || typeof value.provider !== 'string' || !value.provider
+      || typeof value.mode !== 'string' || !value.mode
+      || !Array.isArray(value.taskIds) || value.taskIds.length === 0
+      || value.taskIds.some(id => !UUID_V4.test(id))
+      || new Set(value.taskIds).size !== value.taskIds.length
+      || typeof value.createdAt !== 'string' || Number.isNaN(Date.parse(value.createdAt))) {
+      throw new TypeError('持久化 Agent 执行批次格式无效');
+    }
+    if (ids.has(value.id) || ordinals.has(value.ordinal)) {
+      throw new TypeError('持久化 Agent 执行批次标识或序号重复');
+    }
+    ids.add(value.id);
+    ordinals.add(value.ordinal);
+    let settlement = null;
+    if (value.settlement !== undefined && value.settlement !== null) {
+      const candidate = value.settlement;
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+        || Object.getPrototypeOf(candidate) !== Object.prototype
+        || !AGENT_BATCH_OUTCOMES.has(candidate.outcome)
+        || typeof candidate.settledAt !== 'string'
+        || Number.isNaN(Date.parse(candidate.settledAt))
+        || (candidate.code !== undefined && typeof candidate.code !== 'string')
+        || (candidate.message !== undefined && typeof candidate.message !== 'string')) {
+        throw new TypeError('持久化 Agent 执行批次结算格式无效');
+      }
+      settlement = structuredClone(candidate);
+    }
+    return {
+      id:value.id,
+      ordinal:value.ordinal,
+      provider:value.provider,
+      mode:value.mode,
+      taskIds:[...value.taskIds],
+      expectedRevision:Number.isSafeInteger(value.expectedRevision)
+        ? value.expectedRevision : 0,
+      createdAt:value.createdAt,
+      settlement,
+    };
+  });
+}
+
 function normalizePersistedSourceEdit(value) {
   if (value === undefined || value === null) return undefined;
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -227,6 +279,7 @@ export class SessionStore {
         diagnosticsCurrent:persisted.diagnosticsCurrent ?? {},
         conflict:persisted.conflict ?? null,
         agentConnection:persisted.agentConnection ?? null,
+        agentBatches:normalizePersistedAgentBatches(persisted.agentBatches),
         sourceEdit:normalizePersistedSourceEdit(persisted.sourceEdit),
       };
       EditTimeline.open(store.state);
@@ -272,6 +325,7 @@ export class SessionStore {
       diagnosticsRevision: null,
       conflict: null,
       agentConnection: null,
+      agentBatches: [],
     };
   }
 
@@ -285,6 +339,7 @@ export class SessionStore {
     const persistedState = {
       ...state,
       tasks:normalizePersistedTasks(state.tasks),
+      agentBatches:normalizePersistedAgentBatches(state.agentBatches),
     };
     await this.sidecarGuard();
     if (typeof this.sidecarIO.writeSession === 'function') {
@@ -314,6 +369,7 @@ export class SessionStore {
   async persistState(state = this.state) {
     const candidate = structuredClone(state);
     candidate.tasks = normalizePersistedTasks(candidate.tasks);
+    candidate.agentBatches = normalizePersistedAgentBatches(candidate.agentBatches);
     EditTimeline.open(candidate);
     const sourceEdit = normalizePersistedSourceEdit(candidate.sourceEdit);
     if (sourceEdit) candidate.sourceEdit = sourceEdit;

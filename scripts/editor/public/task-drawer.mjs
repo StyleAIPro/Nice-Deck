@@ -49,6 +49,70 @@ function runMessage(run) {
   return run.message || defaults[run.status] || '';
 }
 
+function drawerBatchProjection(tasks, agentRun) {
+  const activeBatch = agentRun?.activeBatch ?? null;
+  const activeIds = new Set(activeBatch?.taskIds ?? []);
+  const batches = Array.isArray(agentRun?.batches) ? agentRun.batches : [];
+  const latestBatchByTask = new Map();
+  for (const batch of [...batches].sort((left, right) => left.ordinal - right.ordinal)) {
+    for (const taskId of batch.taskIds ?? []) latestBatchByTask.set(taskId, batch);
+  }
+  const residualSnapshots = new Map(
+    (agentRun?.residualBatches ?? []).map(batch => [batch.id, batch]),
+  );
+  const residualByTask = new Map();
+  for (const task of tasks) {
+    if (task.status === 'completed' || activeIds.has(task.id)) continue;
+    const batch = latestBatchByTask.get(task.id);
+    if (batch) residualByTask.set(task.id, residualSnapshots.get(batch.id) ?? batch);
+  }
+  // nextBatch.taskIds 是服务端事件时刻的便利投影；任务创建、撤销或完成可能
+  // 先于下一次批次事件到达。浏览器必须用不可变批次成员和当前任务状态重算，
+  // 不能把旧的派生数组当成权威列表。
+  const nextIds = new Set(tasks.filter(task => (
+    task.status !== 'completed' && !activeIds.has(task.id) && !latestBatchByTask.has(task.id)
+  )).map(task => task.id));
+  const taskById = new Map(tasks.map(task => [task.id, task]));
+  const residualBatches = [...new Map(
+    [...residualByTask.values()].map(batch => [batch.id, batch]),
+  ).values()].map(batch => {
+    const unfinishedTaskIds = [...residualByTask]
+      .filter(([, candidate]) => candidate.id === batch.id)
+      .map(([taskId]) => taskId);
+    return {
+      ...batch,
+      unfinishedTaskIds,
+      actionableTaskIds:unfinishedTaskIds.filter(taskId => {
+        const task = taskById.get(taskId);
+        return task?.targetMissing !== true && ['pending', 'failed'].includes(task?.status);
+      }),
+    };
+  }).sort((left, right) => right.ordinal - left.ordinal);
+  return { activeBatch, activeIds, residualByTask, residualBatches, nextIds };
+}
+
+function appendTaskSection(list, {
+  kind, title, detail = '', rows, batchId = '', actions = [],
+}) {
+  if (!rows.length) return;
+  const section = element('section', `task-batch-section task-batch-section-${kind}`);
+  section.dataset.taskBatchSection = kind;
+  if (batchId) section.dataset.agentBatchId = batchId;
+  const header = element('header', 'task-batch-header');
+  header.append(element('strong', '', title));
+  if (detail) header.append(element('span', '', detail));
+  section.append(header);
+  const body = element('div', 'task-batch-list');
+  body.append(...rows);
+  section.append(body);
+  if (actions.length) {
+    const controls = element('div', 'task-batch-actions');
+    controls.append(...actions);
+    section.append(controls);
+  }
+  list.append(section);
+}
+
 export function setTaskDrawerOpen(root, open) {
   const next = open === true;
   root.dataset.open = String(next);
@@ -71,6 +135,15 @@ export function renderTaskDrawer(root, {
   const unresolvedTargetMissingCount = tasks.filter(task => (
     task.targetMissing === true && task.status !== 'completed'
   )).length;
+  const batchProjection = drawerBatchProjection(tasks, agentRun);
+  const {
+    activeBatch, activeIds, residualByTask, residualBatches, nextIds,
+  } = batchProjection;
+  const activeUnfinishedCount = activeBatch?.taskIds?.filter(id => (
+    tasks.find(task => task.id === id)?.status !== 'completed'
+  )).length ?? 0;
+  const nextCount = [...nextIds].length;
+  const residualCount = residualByTask.size;
   const wasOpen = root.dataset.open === 'true';
   const previousCount = Number(root.dataset.taskCount ?? 0);
   const shouldOpen = wasOpen || (previousCount === 0 && tasks.length > 0);
@@ -91,7 +164,12 @@ export function renderTaskDrawer(root, {
   );
   toggle.append(element('span', 'task-drawer-agent', 'AGENT'));
   const counts = element('span', 'task-drawer-counts');
-  const pending = element('span', 'task-drawer-count task-drawer-count-pending', `待完成 ${pendingCount}`);
+  const pendingLabel = activeBatch
+    ? `处理中 ${activeUnfinishedCount}`
+    : residualCount > 0
+      ? `待重试 ${residualCount}`
+      : `下一批 ${nextCount}`;
+  const pending = element('span', 'task-drawer-count task-drawer-count-pending', pendingLabel);
   pending.dataset.taskPendingCount = String(pendingCount);
   if (needsConfirmationCount > 0) {
     pending.classList.add('task-drawer-count-attention');
@@ -103,7 +181,13 @@ export function renderTaskDrawer(root, {
     `已完成 ${completedCount}`,
   );
   completed.dataset.taskCompletedCount = String(completedCount);
-  counts.append(pending, completed);
+  counts.append(pending);
+  if (activeBatch || residualCount > 0) {
+    const next = element('span', 'task-drawer-count task-drawer-count-next', `下一批 ${nextCount}`);
+    next.dataset.taskNextCount = String(nextCount);
+    counts.append(next);
+  }
+  counts.append(completed);
   toggle.append(counts);
   toggle.append(element('span', 'task-drawer-chevron', shouldOpen ? '收起' : '展开'));
   const setOpen = open => setTaskDrawerOpen(root, open);
@@ -130,6 +214,9 @@ export function renderTaskDrawer(root, {
   const list = element('div', 'task-list');
   const activeRun = ['queued', 'running'].includes(agentRun.status);
   const completedRows = [];
+  const activeRows = [];
+  const nextRows = [];
+  const residualRows = new Map();
   if (!tasks.length) {
     list.append(element('p', 'task-empty', '拉框标记页面区域后，任务会记录在这里。'));
   }
@@ -139,6 +226,12 @@ export function renderTaskDrawer(root, {
     const needsConfirmation = task.status === 'needs-confirmation';
     const targetMissing = task.targetMissing === true;
     const unresolvedTargetMissing = targetMissing && task.status !== 'completed';
+    const residualBatch = residualByTask.get(task.id) ?? null;
+    const membership = activeIds.has(task.id)
+      ? 'active' : residualBatch ? 'residual' : nextIds.has(task.id) ? 'next' : 'other';
+    row.dataset.taskBatchMembership = membership;
+    if (activeIds.has(task.id)) row.dataset.agentBatchId = activeBatch.id;
+    else if (residualBatch) row.dataset.agentBatchId = residualBatch.id;
     if (needsConfirmation) row.dataset.needsConfirmation = '';
     if (unresolvedTargetMissing) row.dataset.targetMissing = '';
     const locate = element('button', 'task-locate');
@@ -150,11 +243,20 @@ export function renderTaskDrawer(root, {
       : `定位第 ${task.pageIndex} 页：${task.instruction}`);
     const meta = element('div', 'task-meta');
     meta.append(element('span', 'task-page', `${String(task.pageIndex).padStart(2, '0')} · ${task.pageLabel}`));
+    const membershipStatus = membership === 'active' && ['pending', 'failed'].includes(task.status)
+      ? '等待 Agent'
+      : membership === 'next' && ['pending', 'failed'].includes(task.status)
+        ? '未提交'
+        : membership === 'residual' && ['pending', 'failed'].includes(task.status)
+          ? '未完成'
+          : null;
     const status = element(
       'span',
       `task-status ${unresolvedTargetMissing
         ? 'task-status-target-missing' : `task-status-${task.status}`}`,
-      unresolvedTargetMissing ? '目标不可定位' : (STATUS_LABELS[task.status] ?? task.status),
+      unresolvedTargetMissing
+        ? '目标不可定位'
+        : (membershipStatus ?? STATUS_LABELS[task.status] ?? task.status),
     );
     meta.append(status);
     locate.append(meta, element('p', 'task-instruction', task.instruction));
@@ -202,7 +304,7 @@ export function renderTaskDrawer(root, {
         );
         edit.type = 'button';
         edit.dataset.taskEdit = task.id;
-        edit.disabled = activeRun;
+        edit.disabled = activeIds.has(task.id);
         applyPill(edit, { variant:'neutral', size:'sm', kind:'action' });
         edit.addEventListener('click', () => {
           const originalChildren = [...row.childNodes];
@@ -263,7 +365,7 @@ export function renderTaskDrawer(root, {
         const remove = element('button', 'task-delete', solidified ? '删除记录' : '删除');
         remove.type = 'button';
         remove.dataset.taskDelete = task.id;
-        remove.disabled = activeRun;
+        remove.disabled = activeIds.has(task.id);
         applyPill(remove, { variant:'danger', size:'sm', kind:'action' });
         remove.addEventListener('click', () => {
           if (row.querySelector('[data-task-delete-confirmation]')) return;
@@ -309,6 +411,7 @@ export function renderTaskDrawer(root, {
       const undo = element('button', 'task-undo', '撤销');
       undo.type = 'button';
       undo.dataset.taskUndo = task.id;
+      undo.disabled = activeIds.has(task.id);
       applyPill(undo, { variant:'neutral', size:'sm', kind:'action' });
       undo.addEventListener('click', () => onUndo(task));
       row.append(undo);
@@ -368,8 +471,71 @@ export function renderTaskDrawer(root, {
       });
       row.append(attachmentsToggle, attachments);
     }
-    if (task.status === 'completed') completedRows.push({ row, task, taskIndex });
-    else list.append(row);
+    if (membership === 'active') activeRows.push(row);
+    else if (membership === 'residual') {
+      const rows = residualRows.get(residualBatch.id) ?? [];
+      rows.push(row);
+      residualRows.set(residualBatch.id, rows);
+    } else if (task.status === 'completed') completedRows.push({ row, task, taskIndex });
+    else nextRows.push(row);
+  }
+  appendTaskSection(list, {
+    kind:'active',
+    title:`正在处理 · 批次 ${activeBatch?.ordinal ?? ''}`,
+    detail:activeBatch
+      ? `已完成 ${activeBatch.taskIds.length - activeUnfinishedCount}/${activeBatch.taskIds.length}`
+      : '',
+    rows:activeRows,
+    batchId:activeBatch?.id ?? '',
+  });
+  appendTaskSection(list, {
+    kind:'next',
+    title:'下一批 · 新标注',
+    detail:`${nextRows.length} 条`,
+    rows:nextRows,
+  });
+  const taskById = new Map(tasks.map(task => [task.id, task]));
+  for (const batch of residualBatches) {
+    const rows = residualRows.get(batch.id) ?? [];
+    if (!rows.length) continue;
+    const retryTasks = (batch.actionableTaskIds ?? [])
+      .map(id => taskById.get(id)).filter(Boolean);
+    const nextActionableTasks = [...nextIds]
+      .map(id => taskById.get(id))
+      .filter(task => task && task.targetMissing !== true
+        && ['pending', 'failed'].includes(task.status));
+    const actions = [];
+    if (retryTasks.length) {
+      const retry = element('button', 'task-batch-retry', `仅重试剩余 ${retryTasks.length} 条`);
+      retry.type = 'button';
+      retry.dataset.retryAgentBatch = batch.id;
+      retry.disabled = activeRun || submissionBlocked === true;
+      applyPill(retry, { variant:'secondary', size:'sm', kind:'action' });
+      retry.addEventListener('click', () => void onProcessAll?.(retryTasks));
+      actions.push(retry);
+      if (nextActionableTasks.length) {
+        const merge = element(
+          'button', 'task-batch-merge',
+          `合并到下一批 · 共 ${retryTasks.length + nextActionableTasks.length} 条`,
+        );
+        merge.type = 'button';
+        merge.dataset.mergeAgentBatch = batch.id;
+        merge.disabled = activeRun || submissionBlocked === true;
+        applyPill(merge, { variant:'neutral', size:'sm', kind:'action' });
+        merge.addEventListener('click', () => void onProcessAll?.([
+          ...retryTasks, ...nextActionableTasks,
+        ]));
+        actions.push(merge);
+      }
+    }
+    appendTaskSection(list, {
+      kind:'residual',
+      title:`批次 ${batch.ordinal} · 未完成`,
+      detail:`${rows.length} 条`,
+      rows,
+      batchId:batch.id,
+      actions,
+    });
   }
   if (completedRows.length > 0) {
     const orderedCompletedRows = [...completedRows]
@@ -402,14 +568,15 @@ export function renderTaskDrawer(root, {
   panel.append(list);
 
   const footer = element('div', 'task-drawer-footer');
-  const actionableTasks = tasks.filter(task => (
-    task.targetMissing !== true && ['pending', 'failed'].includes(task.status)
-  ));
+  const actionableTasks = [...nextIds]
+    .map(id => taskById.get(id))
+    .filter(task => task && task.targetMissing !== true
+      && ['pending', 'failed'].includes(task.status));
   const idleSubmissionBlocked = submissionBlocked === true && !activeRun;
   const buttonText = agentRun.status === 'queued'
-    ? `Agent 正在提交 ${agentRun.taskCount ?? actionableTasks.length} 条`
+    ? `批次 ${activeBatch?.ordinal ?? ''} 正在提交 · 下一批已积累 ${nextCount} 条`
     : agentRun.status === 'running'
-      ? `Agent 正在处理 ${agentRun.taskCount ?? actionableTasks.length} 条`
+      ? `批次 ${activeBatch?.ordinal ?? ''} 正在处理 · 下一批已积累 ${nextCount} 条`
     : actionableTasks.length === 0 && unresolvedTargetMissingCount > 0
       ? `有 ${unresolvedTargetMissingCount} 条任务的目标不可定位`
     : actionableTasks.length === 0 && needsConfirmationCount > 0
@@ -417,8 +584,8 @@ export function renderTaskDrawer(root, {
     : actionableTasks.length === 0
       ? '没有待处理任务'
     : idleSubmissionBlocked
-      ? '正在恢复 Agent 会话…'
-    : `交给 Agent 处理全部 ${actionableTasks.length} 条`;
+      ? 'Agent 暂不可接收下一批…'
+    : `交给 Agent 处理下一批 ${actionableTasks.length} 条`;
   const process = element('button', 'task-process-all', buttonText);
   process.type = 'button';
   process.dataset.processAll = '';

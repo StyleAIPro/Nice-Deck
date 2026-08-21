@@ -358,7 +358,14 @@ function updateRevision(value) {
 
 function adoptAgentRun(nextRun) {
   if (!nextRun?.status) return false;
-  if (agentRun.id && !nextRun.id) return false;
+  if (agentRun.id && !nextRun.id) {
+    // 后端重启后，进程内的 active run 会消失，但已经捕获的不可变批次仍会从
+    // SessionStore 恢复。只要服务端快照携带批次且 revision 不倒退，就应接受
+    // 这个 idle/residual 权威状态，不能让浏览器永远停留在旧的“正在处理”。
+    const currentRevision = Number(agentRun.sessionRevision ?? 0);
+    const nextRevision = Number(nextRun.sessionRevision ?? 0);
+    if (!Array.isArray(nextRun.batches) || nextRevision < currentRevision) return false;
+  }
   if (nextRun.id && agentRun.id && nextRun.id !== agentRun.id
     && Number(nextRun.generation ?? 0) <= Number(agentRun.generation ?? 0)) {
     return false;
@@ -391,6 +398,12 @@ function agentSubmissionGate(state = agentTerminalState) {
       message:'Agent 终端正在启动，等待输入界面后才能提交任务。',
     };
   }
+  if (['active', 'submitting'].includes(state.turnState)) {
+    return {
+      key:'busy', blocked:true,
+      message:'Agent 当前回合仍在处理；输入框可能只是 steer 输入框，等待真正空闲后再提交下一批。',
+    };
+  }
   return { key:'ready', blocked:false, message:'' };
 }
 
@@ -404,13 +417,14 @@ function renderAgentStatus() {
     ? runtime.interactionRequired
     : null;
   const startupLocked = ['pending', 'submitting'].includes(runtime.startupPromptState);
-  const promptReady = runtime.promptReady !== false;
+  const promptReady = runtime.promptReady !== false && runtime.turnState !== 'active';
   const initializing = runtime.state === 'starting'
     || (runtime.state === 'running' && !promptReady)
     || startupLocked;
   const busy = !interactionRequired && (initializing
     || ['queued', 'running'].includes(agentRun.status));
   const ready = runtime.state === 'running' && promptReady
+    && (runtime.turnState === undefined || runtime.turnState === 'idle')
     && !startupLocked && !interactionRequired;
   const failed = ['failed', 'exited'].includes(runtime.state);
   agentStatus.dataset.agentStatus = interactionRequired
@@ -661,6 +675,7 @@ async function processAllTasks(selectedTasks) {
         taskIds:selectedTasks.map(task => task.id),
       }),
     });
+    updateRevision(startedRun.sessionRevision);
     adoptAgentRun(startedRun);
     renderTasks();
     return agentRun.message;
@@ -2050,10 +2065,11 @@ function onTaskDrawerOutsidePointerDown(event) {
   setTaskDrawerOpen(taskDrawer, false);
 }
 
-function onEditorPointerMove() {
-  // iframe 内的 pointermove 会由 frame bridge 明确上报；父页面能收到移动时，
-  // 指针必然已经离开 Deck，及时恢复 Agent 终端的正常键盘输入。
-  deckSurfacePointerActive = false;
+function onEditorPointerMove(event) {
+  // 跨 iframe 边缘时 Chromium 可能先在父页面把 iframe 本身作为 pointermove
+  // 目标，再由 frame bridge 上报内部位置。iframe 目标仍属于 Deck；若无条件
+  // 清零，会在终端重排布局的同一帧吞掉用户的 R 临时模式快捷键。
+  deckSurfacePointerActive = event.target === deckFrame;
 }
 
 document.addEventListener('pointerdown', onTaskDrawerOutsidePointerDown, true);

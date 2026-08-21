@@ -341,7 +341,7 @@ test('任务 drawer 撤销已完成任务并同步权威任务与页面效果', 
   assert.equal(created.response.status, 201, JSON.stringify(created.body));
   const taskId = created.body.task.id;
   await page.waitForSelector(`[data-task-row="${taskId}"]`);
-  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '待完成 1');
+  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '下一批 1');
   assert.equal(await page.locator('[data-task-completed-count]').innerText(), '已完成 0');
   assert.deepEqual(await page.locator('[data-page-badge]').allTextContents(), ['1']);
 
@@ -369,7 +369,7 @@ test('任务 drawer 撤销已完成任务并同步权威任务与页面效果', 
   assert.equal(await completedGroup.count(), 1);
   assert.equal(await completedGroup.evaluate(node => node.open), false);
   assert.match(await completedGroup.locator('summary').innerText(), /已完成 1 条/);
-  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '待完成 0');
+  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '下一批 0');
   assert.equal(await page.locator('[data-task-completed-count]').innerText(), '已完成 1');
   assert.equal(await page.locator('[data-page-badge]').count(), 0);
 
@@ -383,7 +383,7 @@ test('任务 drawer 撤销已完成任务并同步权威任务与页面效果', 
     return row?.querySelector('.task-status-pending') && !row.querySelector('[data-task-undo]');
   }, taskId);
   assert.equal(await page.locator('[data-task-completed-group]').count(), 0);
-  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '待完成 1');
+  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '下一批 1');
   assert.equal(await page.locator('[data-task-completed-count]').innerText(), '已完成 0');
   assert.deepEqual(await page.locator('[data-page-badge]').allTextContents(), ['1']);
   const state = await session(app);

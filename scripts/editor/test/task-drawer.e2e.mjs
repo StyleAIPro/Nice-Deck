@@ -2,6 +2,86 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { startFixtureServer, openEditor } from './test-helpers.mjs';
 
+test('活动批次与下一批新标注分区显示，且只冻结在途任务', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  await page.evaluate(async token => {
+    const { renderTaskDrawer } = await import(
+      `/editor/task-drawer.mjs?token=${encodeURIComponent(token)}&test=agent-batches`
+    );
+    const root = document.createElement('aside');
+    root.className = 'task-drawer';
+    root.dataset.testAgentBatches = '';
+    root.dataset.open = 'true';
+    document.body.append(root);
+    const task = (id, instruction, status = 'pending') => ({
+      id, pageKey:`page-${id}`, pageIndex:1, pageLabel:'测试页',
+      rect:{ x:10, y:10, w:200, h:120 }, instruction, status,
+    });
+    const tasks = [
+      task('task-a', '批次一任务'),
+      task('task-b', '下一批新标注'),
+      task('task-c', '已经完成', 'completed'),
+    ];
+    window.__renderBatchDrawer = agentRun => renderTaskDrawer(root, {
+      tasks,
+      agentRun,
+      onEdit() {}, onDelete() {},
+      onProcessAll(selected) {
+        window.__submittedBatchTaskIds = selected.map(item => item.id);
+      },
+    });
+    window.__renderBatchDrawer({
+      id:'batch-1', status:'running', taskCount:1,
+      activeBatch:{ id:'batch-1', ordinal:1, taskIds:['task-a'] },
+      nextBatch:{ taskIds:['task-b'], actionableTaskIds:['task-b'], count:1 },
+      residualBatches:[],
+      batches:[{ id:'batch-1', ordinal:1, taskIds:['task-a'] }],
+    });
+  }, app.token);
+
+  const root = page.locator('[data-test-agent-batches]');
+  const active = root.locator('[data-task-batch-section="active"]');
+  const next = root.locator('[data-task-batch-section="next"]');
+  assert.match(await active.locator('.task-batch-header').innerText(), /正在处理 · 批次 1/);
+  assert.match(await active.innerText(), /批次一任务/);
+  assert.match(await next.locator('.task-batch-header').innerText(), /下一批 · 新标注/);
+  assert.match(await next.innerText(), /下一批新标注/);
+  assert.equal(await active.locator('.task-status').innerText(), '等待 Agent');
+  assert.equal(await next.locator('.task-status').innerText(), '未提交');
+  assert.equal(await active.locator('[data-task-edit]').isDisabled(), true);
+  assert.equal(await next.locator('[data-task-edit]').isDisabled(), false);
+  assert.equal(await root.locator('[data-process-all]').isDisabled(), true);
+  assert.match(
+    await root.locator('[data-process-all] .pill-nav-label-default').innerText(),
+    /批次 1 正在处理 · 下一批已积累 1 条/,
+  );
+
+  await page.evaluate(() => window.__renderBatchDrawer({
+    id:'batch-1', status:'failed', taskCount:1,
+    activeBatch:null,
+    nextBatch:{ taskIds:['task-b'], actionableTaskIds:['task-b'], count:1 },
+    residualBatches:[{
+      id:'batch-1', ordinal:1, taskIds:['task-a'],
+      unfinishedTaskIds:['task-a'], actionableTaskIds:['task-a'],
+    }],
+    batches:[{ id:'batch-1', ordinal:1, taskIds:['task-a'] }],
+  }));
+  const residual = root.locator('[data-task-batch-section="residual"]');
+  assert.match(await residual.locator('.task-batch-header').innerText(), /批次 1 · 未完成/);
+  assert.equal(await residual.locator('[data-retry-agent-batch]').count(), 1);
+  assert.equal(await residual.locator('[data-merge-agent-batch]').count(), 1);
+  await residual.locator('[data-retry-agent-batch]').click();
+  assert.deepEqual(await page.evaluate(() => window.__submittedBatchTaskIds), ['task-a']);
+  await residual.locator('[data-merge-agent-batch]').click();
+  assert.deepEqual(await page.evaluate(() => window.__submittedBatchTaskIds), ['task-a', 'task-b']);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('待确认任务显示原因、补充说明入口与提醒动画', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());
@@ -209,7 +289,7 @@ test('已完成任务按最近修改时间倒序展示，待处理任务保持�
 
   const root = page.locator('[data-test-completed-order]');
   assert.deepEqual(
-    await root.locator('.task-list > [data-task-row]').evaluateAll(
+    await root.locator('.task-batch-section-next .task-batch-list > [data-task-row]').evaluateAll(
       rows => rows.map(row => row.dataset.taskRow),
     ),
     ['pending-first', 'pending-second'],

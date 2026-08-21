@@ -1026,6 +1026,72 @@ test('Agent 提示词提交超时不误杀已经开始执行的长任务', async
   }
 });
 
+test('批次一执行期间新增任务进入下一批，且只冻结批次一成员', async t => {
+  const app = await makeApp(t, {
+    agentRunAdapter:{
+      id:'codex',
+      async run({ signal }) {
+        await new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(Object.assign(
+            new Error('测试结束'), { code:'AGENT_RUN_CANCELLED' },
+          )), { once:true });
+        });
+      },
+    },
+  });
+  const first = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ ...taskInput, instruction:'批次一任务' }),
+  }).then(response => response.json());
+  const startedResponse = await fetch(`${app.url}/api/agent-runs?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ expectedRevision:first.revision, taskIds:[first.task.id] }),
+  });
+  const started = await startedResponse.json();
+  assert.equal(startedResponse.status, 202, JSON.stringify(started));
+  assert.deepEqual(started.activeBatch.taskIds, [first.task.id]);
+
+  const secondResponse = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({
+      ...taskInput,
+      expectedRevision:started.sessionRevision,
+      instruction:'批次二新标注',
+    }),
+  });
+  const second = await secondResponse.json();
+  assert.equal(secondResponse.status, 201, JSON.stringify(second));
+
+  const active = await fetch(
+    `${app.url}/api/agent-runs/current?token=secret`,
+  ).then(response => response.json());
+  assert.deepEqual(active.activeBatch.taskIds, [first.task.id]);
+  assert.deepEqual(active.nextBatch.taskIds, [second.task.id]);
+  assert.equal(active.canSubmitNext, false);
+
+  const frozenResponse = await fetch(
+    `${app.url}/api/tasks/${encodeURIComponent(first.task.id)}?token=secret`,
+    {
+      method:'PATCH', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:second.revision, instruction:'不能修改在途任务' }),
+    },
+  );
+  assert.equal(frozenResponse.status, 409);
+  assert.equal((await frozenResponse.json()).error, 'AGENT_BATCH_TASK_LOCKED');
+
+  const editableResponse = await fetch(
+    `${app.url}/api/tasks/${encodeURIComponent(second.task.id)}?token=secret`,
+    {
+      method:'PATCH', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:second.revision, instruction:'继续完善下一批标注' }),
+    },
+  );
+  assert.equal(editableResponse.status, 200, JSON.stringify(await editableResponse.clone().json()));
+
+  app.agentRuns.cancel('测试结束');
+  await app.agentRuns.activePromise;
+});
+
 test('Agent CLI 按 Esc 取消当前批次、保留长期 PTY，并允许重新提交未完成任务', {
   timeout:5_000,
 }, async t => {

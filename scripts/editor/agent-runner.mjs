@@ -19,6 +19,27 @@ function publicRun(run) {
   return structuredClone(run);
 }
 
+function taskMap(session) {
+  return new Map((session?.tasks ?? []).map(task => [task.id, task]));
+}
+
+function persistedBatches(session, current) {
+  const batches = Array.isArray(session?.agentBatches)
+    ? session.agentBatches.map(batch => structuredClone(batch)) : [];
+  if (current && !batches.some(batch => batch.id === current.id)) {
+    batches.push({
+      id:current.id,
+      ordinal:current.ordinal,
+      provider:current.provider,
+      mode:current.mode,
+      taskIds:[...current.taskIds],
+      createdAt:current.createdAt,
+      settlement:null,
+    });
+  }
+  return batches.sort((left, right) => left.ordinal - right.ordinal);
+}
+
 export function buildAgentPrompt({
   deckPath, serviceUrl, token, taskIds, sourceThreadId, loadSkill = false,
   skillRoot = SKILL_ROOT, skillInvocation = '$huawei-deck', environmentCredentials = false,
@@ -87,8 +108,12 @@ export function buildSessionInitializationPrompt({
   ].join('\n');
 }
 
-export class AgentRunCoordinator {
-  constructor({ provider, adapter, getSession, getContext, onUpdate = () => {} }) {
+export class AgentBatchCoordinator {
+  constructor({
+    provider, adapter, getSession, getContext,
+    captureBatch = null, settleBatch = null,
+    onUpdate = () => {},
+  }) {
     if (!adapter || adapter.id !== provider || typeof adapter.run !== 'function') {
       throw new TypeError('Agent adapter 与 provider 不匹配');
     }
@@ -96,6 +121,8 @@ export class AgentRunCoordinator {
     this.adapter = adapter;
     this.getSession = getSession;
     this.getContext = getContext;
+    this.captureBatch = captureBatch;
+    this.settleBatch = settleBatch;
     this.onUpdate = onUpdate;
     this.current = null;
     this.activePromise = null;
@@ -103,9 +130,65 @@ export class AgentRunCoordinator {
     this.closed = false;
     this.runGeneration = 0;
     this.cancelMessage = null;
+    this.submissionPending = false;
   }
 
-  snapshot() { return publicRun(this.current); }
+  snapshot() {
+    const session = this.getSession();
+    const current = publicRun(this.current);
+    const batches = persistedBatches(session, this.current);
+    const tasks = taskMap(session);
+    const active = this.current && ACTIVE_STATUSES.has(this.current.status)
+      ? structuredClone(this.current) : null;
+    const activeIds = new Set(active?.taskIds ?? []);
+    const latestBatchByTask = new Map();
+    for (const batch of batches) {
+      for (const taskId of batch.taskIds) latestBatchByTask.set(taskId, batch);
+    }
+    const retryable = [...tasks.values()].filter(task => (
+      task.status !== 'completed' && !task.groupId
+    ));
+    const nextTasks = retryable.filter(task => (
+      !activeIds.has(task.id) && !latestBatchByTask.has(task.id)
+    ));
+    const residualByBatch = new Map();
+    for (const task of retryable) {
+      if (activeIds.has(task.id)) continue;
+      const batch = latestBatchByTask.get(task.id);
+      if (!batch) continue;
+      const group = residualByBatch.get(batch.id) ?? {
+        ...structuredClone(batch), unfinishedTaskIds:[], actionableTaskIds:[],
+      };
+      group.unfinishedTaskIds.push(task.id);
+      if (RETRYABLE_TASK_STATUSES.has(task.status) && task.targetMissing !== true) {
+        group.actionableTaskIds.push(task.id);
+      }
+      residualByBatch.set(batch.id, group);
+    }
+    const activeBatch = active ? {
+      ...active,
+      completedCount:active.taskIds.filter(id => tasks.get(id)?.status === 'completed').length,
+      unfinishedTaskIds:active.taskIds.filter(id => tasks.get(id)?.status !== 'completed'),
+    } : null;
+    const nextActionableTaskIds = nextTasks.filter(task => (
+      RETRYABLE_TASK_STATUSES.has(task.status) && task.targetMissing !== true
+    )).map(task => task.id);
+    return {
+      ...current,
+      sessionRevision:session?.revision,
+      activeBatch,
+      nextBatch:{
+        taskIds:nextTasks.map(task => task.id),
+        actionableTaskIds:nextActionableTaskIds,
+        count:nextTasks.length,
+      },
+      residualBatches:[...residualByBatch.values()].sort((left, right) => (
+        right.ordinal - left.ordinal
+      )),
+      canSubmitNext:active === null && nextActionableTaskIds.length > 0,
+      batches,
+    };
+  }
 
   #publish(patch = {}) {
     Object.assign(this.current, patch, {
@@ -117,9 +200,9 @@ export class AgentRunCoordinator {
     return snapshot;
   }
 
-  start({ expectedRevision, taskIds }) {
+  #validate({ expectedRevision, taskIds }) {
     if (this.closed) throw runnerError('SERVICE_CLOSED', 503, '编辑服务已关闭');
-    if (this.current && ACTIVE_STATUSES.has(this.current.status)) {
+    if (this.submissionPending || (this.current && ACTIVE_STATUSES.has(this.current.status))) {
       throw runnerError('AGENT_RUN_ACTIVE', 409, '已有一批反馈正在交给 Agent 处理');
     }
     const session = this.getSession();
@@ -149,14 +232,50 @@ export class AgentRunCoordinator {
     if (taskIds.some(id => !RETRYABLE_TASK_STATUSES.has(tasks.get(id).status))) {
       throw runnerError('TASK_NOT_PENDING', 409, '本批任务中包含无需再次处理的任务');
     }
+  }
+
+  async submit({ expectedRevision, taskIds }) {
+    this.#validate({ expectedRevision, taskIds });
+    if (typeof this.captureBatch !== 'function') {
+      return this.start({ expectedRevision, taskIds });
+    }
+    this.submissionPending = true;
+    try {
+      const captured = await this.captureBatch({
+        expectedRevision,
+        taskIds:[...taskIds],
+        provider:this.provider,
+        mode:this.adapter.mode ?? 'terminal',
+      });
+      return this.#launch(captured.batch, captured.revision);
+    } finally {
+      this.submissionPending = false;
+    }
+  }
+
+  start({ expectedRevision, taskIds }) {
+    this.#validate({ expectedRevision, taskIds });
     const now = new Date().toISOString();
+    const ordinals = persistedBatches(this.getSession(), null).map(batch => batch.ordinal);
+    const batch = {
+      id:randomUUID(), ordinal:Math.max(0, ...ordinals) + 1,
+      provider:this.provider, mode:this.adapter.mode ?? 'terminal',
+      taskIds:[...taskIds], expectedRevision, createdAt:now, settlement:null,
+    };
+    return this.#launch(batch, expectedRevision);
+  }
+
+  #launch(batch, sessionRevision) {
+    const now = batch.createdAt ?? new Date().toISOString();
     this.cancelMessage = null;
     this.current = {
-      id:randomUUID(), provider:this.provider, status:'queued',
+      id:batch.id, ordinal:batch.ordinal, provider:this.provider, status:'queued',
       generation:this.runGeneration += 1,
       mode:this.adapter.mode ?? 'terminal',
-      taskIds:[...taskIds], taskCount:taskIds.length,
-      expectedRevision, createdAt:now, updatedAt:now,
+      taskIds:[...batch.taskIds], taskCount:batch.taskIds.length,
+      expectedRevision:batch.expectedRevision ?? sessionRevision,
+      sessionRevision,
+      createdAt:now, updatedAt:now,
       sequence:0,
       message:'反馈已提交，正在启动 Agent',
     };
@@ -173,7 +292,7 @@ export class AgentRunCoordinator {
       });
       const result = await this.adapter.run({
         ...this.getContext(),
-        taskIds:[...taskIds],
+        taskIds:[...batch.taskIds],
         signal:this.abortController.signal,
         onProgress:progress => {
           if (this.current?.id !== runId || this.closed) return;
@@ -188,11 +307,20 @@ export class AgentRunCoordinator {
       });
       if (this.current?.id !== runId) return;
       const latestTasks = new Map(this.getSession().tasks.map(task => [task.id, task]));
-      const unfinishedTaskIds = taskIds.filter(id => (
-        RETRYABLE_TASK_STATUSES.has(latestTasks.get(id)?.status)
+      const unfinishedTaskIds = batch.taskIds.filter(id => (
+        latestTasks.get(id)?.status !== 'completed'
       ));
       if (unfinishedTaskIds.length) {
-        const unchanged = unfinishedTaskIds.length === taskIds.length;
+        const needsConfirmationCount = unfinishedTaskIds.filter(id => (
+          latestTasks.get(id)?.status === 'needs-confirmation'
+        )).length;
+        if (needsConfirmationCount > 0) {
+          throw runnerError(
+            'AGENT_TASKS_NEED_CONFIRMATION', 502,
+            `${needsConfirmationCount} 个任务需要补充说明，批次尚未完成`,
+          );
+        }
+        const unchanged = unfinishedTaskIds.length === batch.taskIds.length;
         throw runnerError(
           unchanged ? 'AGENT_TASKS_UNCHANGED' : 'AGENT_TASKS_INCOMPLETE',
           502,
@@ -201,6 +329,14 @@ export class AgentRunCoordinator {
             : `Agent 仅完成部分任务，仍有 ${unfinishedTaskIds.length} 个任务可重试`,
         );
       }
+      if (typeof this.settleBatch === 'function') {
+        const settled = await this.settleBatch({
+          batchId:batch.id,
+          outcome:'succeeded',
+          message:result?.summary || 'Agent 已完成本批处理',
+        });
+        if (Number.isSafeInteger(settled?.revision)) this.current.sessionRevision = settled.revision;
+      }
       this.#publish({
         status:'succeeded', finishedAt:new Date().toISOString(),
         message:result?.summary || 'Agent 已完成本批处理',
@@ -208,13 +344,27 @@ export class AgentRunCoordinator {
     }).catch(error => {
       if (this.current?.id !== runId) return;
       const cancelled = error?.code === 'AGENT_RUN_CANCELLED' || this.closed;
-      this.#publish({
-        status:cancelled ? 'cancelled' : 'failed',
-        finishedAt:new Date().toISOString(),
-        code:error?.code ?? 'AGENT_RUN_FAILED',
-        message:cancelled
-          ? (this.cancelMessage || 'Agent 任务已取消')
-          : (error?.message || 'Agent 批处理失败'),
+      const status = cancelled ? 'cancelled' : 'failed';
+      const message = cancelled
+        ? (this.cancelMessage || 'Agent 任务已取消')
+        : (error?.message || 'Agent 批处理失败');
+      return Promise.resolve(typeof this.settleBatch === 'function'
+        ? this.settleBatch({
+            batchId:batch.id,
+            outcome:['AGENT_TASKS_INCOMPLETE', 'AGENT_TASKS_NEED_CONFIRMATION'].includes(error?.code)
+              ? 'partial' : status,
+            code:error?.code ?? 'AGENT_RUN_FAILED',
+            message,
+          })
+        : null).catch(settlementError => ({ settlementError })).then(settled => {
+        if (Number.isSafeInteger(settled?.revision)) this.current.sessionRevision = settled.revision;
+        this.#publish({
+          status,
+          finishedAt:new Date().toISOString(),
+          code:error?.code ?? 'AGENT_RUN_FAILED',
+          message,
+          ...(settled?.settlementError ? { settlementPending:true } : {}),
+        });
       });
     }).finally(() => {
       if (this.current?.id === runId) {
@@ -240,3 +390,6 @@ export class AgentRunCoordinator {
     await this.activePromise?.catch(() => {});
   }
 }
+
+// 兼容既有调用名；新的领域名称统一使用 AgentBatchCoordinator。
+export const AgentRunCoordinator = AgentBatchCoordinator;

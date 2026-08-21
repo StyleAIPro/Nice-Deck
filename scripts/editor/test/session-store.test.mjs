@@ -14,6 +14,7 @@ const PNG_BYTES = Buffer.from([
 const TASK_ID = '11111111-1111-4111-8111-111111111111';
 const ATTACHMENT_ID = '22222222-2222-4222-8222-222222222222';
 const SOURCE_EDIT_ID = '33333333-3333-4333-8333-333333333333';
+const AGENT_BATCH_ID = '44444444-4444-4444-8444-444444444444';
 const WORKING_FINGERPRINT = 'a'.repeat(64);
 const TASK_INPUT = {
   pageKey:'page-001-a', pageIndex:1, pageLabel:'A',
@@ -84,6 +85,37 @@ test('活动源码事务严格持久化并在重开后恢复', async () => {
   assert.deepEqual(reopened.state.sourceEdit, candidate.sourceEdit);
   assert.equal(reopened.state.workingDeckFingerprint, WORKING_FINGERPRINT);
   assert.equal(reopened.state.revision, 1);
+});
+
+test('Agent 执行批次成员与结算结果在重开后保持不变', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-agent-batch-'));
+  const deck = join(root, 'deck.html');
+  const rootDir = join(root, '.huawei-deck-editor');
+  await writeFile(deck, 'deck-v1');
+  const store = await SessionStore.open({ deckPath:deck, rootDir });
+  const created = await store.createTask(TASK_INPUT, 0);
+  const candidate = structuredClone(store.state);
+  candidate.agentBatches = [{
+    id:AGENT_BATCH_ID,
+    ordinal:1,
+    provider:'codex',
+    mode:'terminal',
+    taskIds:[created.task.id],
+    expectedRevision:created.revision,
+    createdAt:'2026-08-21T08:00:00.000Z',
+    settlement:{
+      outcome:'failed',
+      code:'AGENT_TASKS_INCOMPLETE',
+      message:'仍有一个任务未完成',
+      settledAt:'2026-08-21T08:05:00.000Z',
+    },
+  }];
+  candidate.revision += 1;
+  await store.persistState(candidate);
+
+  const reopened = await SessionStore.open({ deckPath:deck, rootDir });
+  assert.deepEqual(reopened.state.agentBatches, candidate.agentBatches);
+  assert.equal(reopened.state.revision, 2);
 });
 
 test('持久化源码事务拒绝未知字段和无效身份', async () => {

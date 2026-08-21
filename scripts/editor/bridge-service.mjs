@@ -570,6 +570,75 @@ export class BridgeService {
     return true;
   }
 
+  captureAgentBatch({ expectedRevision, taskIds, provider, mode }) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      this.#assertSourceEditInactive();
+      this.assertRevision(expectedRevision);
+      if (!Array.isArray(taskIds) || taskIds.length === 0
+        || taskIds.some(id => typeof id !== 'string' || !id)
+        || new Set(taskIds).size !== taskIds.length) {
+        throw serviceError('INVALID_AGENT_BATCH', 400, '执行批次必须包含不重复的任务 ID');
+      }
+      if (typeof provider !== 'string' || !provider
+        || typeof mode !== 'string' || !mode) {
+        throw serviceError('INVALID_AGENT_BATCH', 400, '执行批次缺少 Agent 信息');
+      }
+      const tasks = new Map(this.sessionStore.state.tasks.map(task => [task.id, task]));
+      if (taskIds.some(id => !tasks.has(id))) {
+        throw serviceError('TASK_NOT_FOUND', 404, '执行批次包含不存在的任务');
+      }
+      if (taskIds.some(id => tasks.get(id).targetMissing === true)) {
+        throw serviceError(
+          'TASK_TARGET_MISSING', 409,
+          '执行批次包含原目标当前不可定位的任务，请删除或重新标记后提交',
+        );
+      }
+      if (taskIds.some(id => !['pending', 'failed'].includes(tasks.get(id).status))) {
+        throw serviceError('TASK_NOT_PENDING', 409, '执行批次包含无需再次处理的任务');
+      }
+      const candidate = structuredClone(this.sessionStore.state);
+      candidate.agentBatches ??= [];
+      const ordinal = Math.max(0, ...candidate.agentBatches.map(batch => batch.ordinal)) + 1;
+      const batch = {
+        id:randomUUID(), ordinal, provider, mode,
+        taskIds:[...taskIds], expectedRevision,
+        createdAt:new Date().toISOString(), settlement:null,
+      };
+      candidate.agentBatches.push(batch);
+      candidate.revision += 1;
+      await this.#persistCandidate(candidate, { operation:'agent-batch-capture' });
+      return { batch:structuredClone(batch), revision:this.sessionStore.state.revision };
+    });
+  }
+
+  settleAgentBatch({ batchId, outcome, code, message }) {
+    return this.#enqueue(async () => {
+      this.#assertMutable();
+      if (!['succeeded', 'partial', 'failed', 'cancelled'].includes(outcome)) {
+        throw serviceError('INVALID_AGENT_BATCH_SETTLEMENT', 400, '执行批次结算状态无效');
+      }
+      const candidate = structuredClone(this.sessionStore.state);
+      const batch = candidate.agentBatches?.find(item => item.id === batchId);
+      if (!batch) throw serviceError('AGENT_BATCH_NOT_FOUND', 404, '找不到执行批次');
+      if (batch.settlement) {
+        if (batch.settlement.outcome !== outcome) {
+          throw serviceError('AGENT_BATCH_ALREADY_SETTLED', 409, '执行批次已经按其他结果结算');
+        }
+        return { batch:structuredClone(batch), revision:this.sessionStore.state.revision };
+      }
+      batch.settlement = {
+        outcome,
+        settledAt:new Date().toISOString(),
+        ...(typeof code === 'string' && code ? { code:code.slice(0, 160) } : {}),
+        ...(typeof message === 'string' && message ? { message:message.slice(0, 500) } : {}),
+      };
+      candidate.revision += 1;
+      await this.#persistCandidate(candidate, { operation:'agent-batch-settlement' });
+      return { batch:structuredClone(batch), revision:this.sessionStore.state.revision };
+    });
+  }
+
   createTask(input, expectedRevision, options) {
     return this.#enqueue(async () => {
       this.#assertMutable();

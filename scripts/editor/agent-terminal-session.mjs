@@ -163,6 +163,24 @@ function terminalAcknowledgesPrompt(provider, output) {
   return true;
 }
 
+function terminalKeepsTurnActive(provider, output) {
+  if (provider !== 'codex') return false;
+  const visibleOutput = visibleTerminalText(output);
+  if (/codex ready/i.test(visibleOutput)) return false;
+  const activeMatches = [...visibleOutput.matchAll(
+    /(?:^|\n)[^\n]{0,160}\b(?:working|thinking)\b[^\n]{0,160}|esc to interrupt/gim,
+  )];
+  const finishedMatches = [...visibleOutput.matchAll(
+    /worked for\b|conversation interrupted|stream disconnected|error sending request/gim,
+  )];
+  const lastActive = activeMatches.at(-1)?.index ?? -1;
+  const lastFinished = finishedMatches.at(-1)?.index ?? -1;
+  const lastPrompt = visibleOutput.lastIndexOf('›');
+  return lastActive > lastFinished
+    && lastPrompt > lastActive
+    && lastPrompt - lastActive < 2_048;
+}
+
 function terminalError(code, message) {
   return Object.assign(new Error(message), { code });
 }
@@ -289,6 +307,8 @@ export class AgentTerminalSession {
     this.conversationError = null;
     this.startupPromptState = null;
     this.promptReady = false;
+    this.inputVisible = false;
+    this.turnState = 'stopped';
     this.interactionRequired = null;
     this.interactionResponsePending = false;
     this.interactionScanOutput = '';
@@ -329,6 +349,8 @@ export class AgentTerminalSession {
       startupPromptState:this.startupPromptState,
       promptSubmission:this.promptSubmission ? { ...this.promptSubmission } : null,
       promptReady:this.promptReady,
+      inputVisible:this.inputVisible,
+      turnState:this.turnState,
       interactionRequired:this.interactionRequired ? { ...this.interactionRequired } : null,
       startedAt:this.startedAt,
       exit:this.exit ? { ...this.exit } : null,
@@ -443,6 +465,8 @@ export class AgentTerminalSession {
     this.startupPromptState = null;
     this.promptSubmission = null;
     this.promptReady = false;
+    this.inputVisible = false;
+    this.turnState = 'starting';
     this.promptCapabilityConfirmed = false;
     this.interactionRequired = null;
     this.interactionResponsePending = false;
@@ -580,6 +604,9 @@ export class AgentTerminalSession {
           error:null,
         };
         if (this.promptSubmission.startup) this.startupPromptState = 'submitted';
+        this.promptReady = false;
+        this.inputVisible = false;
+        this.turnState = 'active';
         acknowledgedPrompt = true;
         this.#publishState();
       }
@@ -594,6 +621,11 @@ export class AgentTerminalSession {
             && this.output.length >= MAX_BUFFER_CHARS,
         },
       );
+      const inputVisible = acceptsPrompt;
+      if (inputVisible !== this.inputVisible) {
+        this.inputVisible = inputVisible;
+        this.#publishState();
+      }
       if (!acceptsPrompt && provider === 'codex' && this.conversationResumed
         && !resumeRedrawRequested && codexResumePromptVisible(this.output)) {
         // Codex 0.148 恢复完成时偶尔只画出输入框和光标，却把启动卡片留在
@@ -626,9 +658,12 @@ export class AgentTerminalSession {
         this.interactionResponsePending = false;
         this.#publishState();
       }
-      if (!acknowledgedPrompt && !this.promptReady
-        && acceptsPrompt) {
+      const idlePrompt = acceptsPrompt
+        && (this.turnState !== 'active'
+          || !terminalKeepsTurnActive(provider, this.interactionScanOutput || this.output));
+      if (!acknowledgedPrompt && !this.promptReady && idlePrompt) {
         this.promptReady = true;
+        this.turnState = 'idle';
         this.promptCapabilityConfirmed = true;
         if (this.startupPromptState === 'pending') {
           this.#queuePrompt(startupPrompt, { startup:true });
@@ -652,6 +687,8 @@ export class AgentTerminalSession {
       }
       this.state = 'exited';
       this.promptReady = false;
+      this.inputVisible = false;
+      this.turnState = 'exited';
       this.promptCapabilityConfirmed = false;
       this.interactionRequired = null;
       this.interactionResponsePending = false;
@@ -741,6 +778,7 @@ export class AgentTerminalSession {
     }
     const ready = () => this.state === 'running'
       && this.promptReady
+      && this.turnState === 'idle'
       && !this.interactionRequired
       && !['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState)
       && !['writing', 'awaiting-confirmation'].includes(this.promptSubmission?.state);
@@ -760,6 +798,7 @@ export class AgentTerminalSession {
       const onState = state => {
         if (state.state === 'running'
           && state.promptReady
+          && state.turnState === 'idle'
           && !state.interactionRequired
           && !['pending', 'submitting', 'awaiting-confirmation'].includes(state.startupPromptState)
           && !['writing', 'awaiting-confirmation'].includes(state.promptSubmission?.state)) {
@@ -878,7 +917,13 @@ export class AgentTerminalSession {
       );
     }
     if (!startup && !this.promptReady) {
-      throw terminalError('AGENT_TERMINAL_INITIALIZING', 'Agent 终端输入框尚未就绪');
+      throw terminalError(
+        this.turnState === 'active' ? 'AGENT_TERMINAL_BUSY' : 'AGENT_TERMINAL_INITIALIZING',
+        this.turnState === 'active' ? 'Agent 当前回合仍在处理，不能提交下一批任务' : 'Agent 终端输入框尚未就绪',
+      );
+    }
+    if (!startup && this.turnState !== 'idle') {
+      throw terminalError('AGENT_TERMINAL_BUSY', 'Agent 当前回合仍在处理，不能提交下一批任务');
     }
     if (!startup && ['pending', 'submitting', 'awaiting-confirmation'].includes(
       this.startupPromptState,
@@ -908,6 +953,7 @@ export class AgentTerminalSession {
       acceptedAt:null,
       error:null,
     };
+    this.turnState = 'submitting';
     if (startup) {
       this.startupPromptState = 'submitting';
       this.#publishState();
@@ -938,6 +984,8 @@ export class AgentTerminalSession {
       if (!submissionActive()) return;
       const attempts = this.promptSubmission.attempts + 1;
       this.promptReady = false;
+      this.inputVisible = false;
+      this.turnState = 'submitting';
       this.interactionScanOutput = '';
       this.promptSubmission = {
         ...this.promptSubmission,
@@ -1030,6 +1078,8 @@ export class AgentTerminalSession {
     this.startupPromptState = null;
     this.promptSubmission = null;
     this.promptReady = false;
+    this.inputVisible = false;
+    this.turnState = this.closed ? 'exited' : 'stopped';
     this.interactionRequired = null;
     this.interactionResponsePending = false;
     this.interactionScanOutput = '';

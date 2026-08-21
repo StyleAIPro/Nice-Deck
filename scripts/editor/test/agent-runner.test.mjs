@@ -2,10 +2,119 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  AgentBatchCoordinator,
   AgentRunCoordinator,
   buildAgentPrompt,
   buildSessionInitializationPrompt,
 } from '../agent-runner.mjs';
+
+test('活动执行批次冻结成员，新标注进入下一批候选任务', async () => {
+  let release;
+  const completion = new Promise(resolve => { release = resolve; });
+  const session = {
+    revision:2,
+    tasks:[{ id:'task-a', status:'pending' }],
+    agentBatches:[],
+  };
+  const coordinator = new AgentBatchCoordinator({
+    provider:'agent-terminal',
+    adapter:{
+      id:'agent-terminal',
+      async run() {
+        await completion;
+        session.tasks[0].status = 'completed';
+        return { summary:'第一批完成' };
+      },
+    },
+    getSession:() => session,
+    captureBatch:async ({ taskIds, provider, mode }) => {
+      const batch = {
+        id:'batch-1', ordinal:1, provider, mode,
+        taskIds:[...taskIds], createdAt:'2026-08-21T08:00:00.000Z',
+        settlement:null,
+      };
+      session.agentBatches.push(batch);
+      session.revision += 1;
+      return { batch, revision:session.revision };
+    },
+    settleBatch:async () => ({ revision:session.revision }),
+    getContext:() => ({ deckPath:'/tmp/deck.html' }),
+  });
+
+  const started = await coordinator.submit({ expectedRevision:2, taskIds:['task-a'] });
+  assert.deepEqual(started.activeBatch.taskIds, ['task-a']);
+  session.tasks.push({ id:'task-b', status:'pending' });
+  assert.deepEqual(coordinator.snapshot().activeBatch.taskIds, ['task-a']);
+  assert.deepEqual(coordinator.snapshot().nextBatch.taskIds, ['task-b']);
+  assert.equal(coordinator.snapshot().canSubmitNext, false);
+
+  release();
+  await coordinator.activePromise;
+  assert.equal(coordinator.snapshot().activeBatch, null);
+  assert.deepEqual(coordinator.snapshot().nextBatch.taskIds, ['task-b']);
+  assert.equal(coordinator.snapshot().canSubmitNext, true);
+  await coordinator.close();
+});
+
+test('服务重启后未完成的持久化批次恢复为批次剩余任务', async () => {
+  const session = {
+    revision:8,
+    tasks:[
+      { id:'task-old', status:'pending' },
+      { id:'task-new', status:'pending' },
+    ],
+    agentBatches:[{
+      id:'batch-old', ordinal:1, provider:'agent-terminal', mode:'terminal',
+      taskIds:['task-old'], createdAt:'2026-08-21T08:00:00.000Z',
+      settlement:{
+        outcome:'cancelled', settledAt:'2026-08-21T08:01:00.000Z',
+        message:'Editor 已重启',
+      },
+    }],
+  };
+  const coordinator = new AgentBatchCoordinator({
+    provider:'agent-terminal',
+    adapter:{ id:'agent-terminal', run:async () => ({}) },
+    getSession:() => session,
+    getContext:() => ({ deckPath:'/tmp/deck.html' }),
+  });
+
+  const snapshot = coordinator.snapshot();
+  assert.equal(snapshot.status, 'idle');
+  assert.equal(snapshot.activeBatch, null);
+  assert.deepEqual(snapshot.residualBatches.map(batch => ({
+    id:batch.id, unfinishedTaskIds:batch.unfinishedTaskIds,
+  })), [{ id:'batch-old', unfinishedTaskIds:['task-old'] }]);
+  assert.deepEqual(snapshot.nextBatch.taskIds, ['task-new']);
+  assert.equal(snapshot.canSubmitNext, true);
+  await coordinator.close();
+});
+
+test('需要用户补充说明的在途任务不能把批次冒充为成功', async () => {
+  const session = {
+    revision:3,
+    tasks:[{ id:'task-a', status:'pending' }],
+  };
+  const coordinator = new AgentRunCoordinator({
+    provider:'agent-terminal',
+    adapter:{
+      id:'agent-terminal',
+      async run() {
+        session.tasks[0].status = 'needs-confirmation';
+        return { summary:'需要用户确认目标' };
+      },
+    },
+    getSession:() => session,
+    getContext:() => ({ deckPath:'/tmp/deck.html' }),
+  });
+
+  coordinator.start({ expectedRevision:3, taskIds:['task-a'] });
+  await coordinator.activePromise;
+  assert.equal(coordinator.snapshot().status, 'failed');
+  assert.equal(coordinator.snapshot().code, 'AGENT_TASKS_NEED_CONFIRMATION');
+  assert.match(coordinator.snapshot().message, /1 个任务需要补充说明/);
+  await coordinator.close();
+});
 
 test('终端任务 Prompt 限定批次、Skill 与写回边界', () => {
   const prompt = buildAgentPrompt({

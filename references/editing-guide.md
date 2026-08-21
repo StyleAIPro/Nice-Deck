@@ -82,7 +82,7 @@ open -n "Huawei Deck 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" 
 
 处于编辑模式时，可以按住 `R` 临时切换到区域标记；完成拉框后松开 `R` 会自动回到编辑模式，已打开的标注输入框继续保留。临时 `R` 快捷键按物理 `KeyR` 识别，中文输入法组合态也有效；焦点位于直接文字编辑、任务说明或其他真实输入框时，`R` 保持普通输入，不触发临时模式。
 
-区域任务可以跨页连续添加；左侧文字页序列表的 badge 只统计待处理、处理中、失败和待确认任务，完成项不再保留页码标号。右下角 Agent 任务 drawer 负责任务记录、定位和状态展示，可定位回原页和原区域。已完成任务默认收进闭合的“已完成”分组；未固化时展开后仍显示撤回按钮，撤回后回到未完成列表并恢复对应页码 badge；固化后完成项仍保留供查看，但撤回入口随固化检查点清除。待处理、失败和待确认任务可在任务行二次编辑说明或经二次确认删除；编辑后回到待处理，删除同步清理对应局部截图与附件。Agent 批处理期间禁止改删，已完成任务需先撤回。直接文字、移动、缩放与 Agent 动作进入同一 `EditTimeline`，因此共享 revision、唯一历史游标和固化边界。
+区域任务可以跨页连续添加；左侧文字页序列表的 badge 只统计待处理、处理中、失败和待确认任务，完成项不再保留页码标号。右下角 Agent 任务 drawer 负责任务记录、定位和状态展示，可定位回原页和原区域。已完成任务默认收进闭合的“已完成”分组；未固化时展开后仍显示撤回按钮，撤回后回到未完成列表并恢复对应页码 badge；固化后完成项仍保留供查看，但撤回入口随固化检查点清除。待处理、失败和待确认任务可在任务行二次编辑说明或经二次确认删除；编辑后回到待处理，删除同步清理对应局部截图与附件。当前执行批次的任务禁止改删；批次运行期间新增的“下一批 · 新标注”仍可继续编辑和删除，已完成任务需先撤回。直接文字、移动、缩放与 Agent 动作进入同一 `EditTimeline`，因此共享 revision、唯一历史游标和固化边界。
 
 任务完成时把实际关联的 entryId、影响页和修改类型摘要写入任务记录；drawer 展示这份提交时事实，不再根据当前页面能否匹配旧 pageKey 反推“页面已删除”。后续删页、换页或恢复页面只改变当前定位能力；不会把原本的删字、改样式任务批量误标为整页删除。
 
@@ -102,7 +102,7 @@ open -n "Huawei Deck 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" 
 
 编辑器打开时默认进入区域标记，左侧页面栏默认折叠为窄页码轨道，可按顶部箭头展开完整标题。区域说明弹窗可选“继续添加任务”只保存当前标记，或选“直接提交任务”将累计的全部待完成任务作为一批交给 Agent。区域标记模式下按住 `R` 会临时进入预览，可直接操作 Deck 内按钮，松开后恢复区域标记；输入控件继续把 `R` 当普通文字。拉框时会把当前页的 layer、分步显示、展开项等交互状态写入任务，定位任务时先恢复标记画面，再显示原区域。历史 Deck 的 `data-mod` 目录仍可兼容恢复，但三套当前模板与新页面统一使用固定 DOM 的 layer 协议。Deck 内导航与主舞台滚动也会主动同步左侧当前页，同页内容重绘不会再触发页面重定位，缩略图副本不参与页面身份。
 
-任务批次执行期间，可以直接在右侧 Agent CLI 按独立的 `Esc` 停止本轮。编辑器会同步退出“Agent 正在处理”状态，保留未完成任务并重新开放“交给 Agent 处理”按钮；右侧长期 PTY 不会因此关闭。方向键、功能键等多字节控制序列不算独立 Esc，不会误取消批次。
+任务批次执行期间，可以直接在右侧 Agent CLI 按独立的 `Esc` 停止本轮。编辑器会同步退出“Agent 正在处理”状态，把未完成成员保留到“批次 N · 未完成”，并提供“仅重试剩余”与“合并到下一批”两个显式入口；右侧长期 PTY 不会因此关闭。方向键、功能键等多字节控制序列不算独立 Esc，不会误取消批次。
 
 ### 0.3 外部 Agent 协作与撤销 / 重做
 
@@ -110,7 +110,7 @@ open -n "Huawei Deck 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" 
 
 已完成任务可直接从 drawer 撤回：时间线末尾任务执行普通 `undo`，非末尾 Agent ActionMutation 追加补偿修改；全局 `undo` 也可通过 CLI 或 HTTP 执行，`redo` 通过 HTTP 执行。
 
-外部 Codex / Claude Code / Agent 不是内置聊天机器人。drawer 的“交给 Agent 处理全部”向 `POST /api/agent-runs` 提交当前 revision 和未完成任务 ID；服务端冻结本批范围并立即启动 Agent，`GET /api/agent-runs/current` 与 `agent-run-updated` 事件提供 queued / running / succeeded / failed 状态。同一时间只允许一批运行；按钮之后新增的任务不会混入当前批次。
+外部 Codex / Claude Code / Agent 不是内置聊天机器人。drawer 的“交给 Agent 处理下一批”向 `POST /api/agent-runs` 提交当前 revision 和下一批候选任务 ID；服务端先在同一 mutation queue 中持久化成员不可变的执行批次，再启动 Agent，`GET /api/agent-runs/current` 与 `agent-run-updated` 事件同时投影活动批次、下一批候选和历史批次剩余任务。同一时间只允许一批运行；按钮之后新增的任务不会混入当前批次。终端出现 Codex steer 输入框时回合仍是 active，只有真正回到空闲输入态才开放下一批提交；失败、取消或重启后的未完成成员保留原批次归属，不自动并入新标注。
 
 Agent 只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`GET /api/text-locations` 定位文字节点，`POST /api/actions` 提交带 `commandId` 的幂等动作命令，`POST /api/source-edits` 开始源码事务，`POST /api/source-edits/<SOURCE_EDIT_ID>/commit|cancel` 提交或取消事务，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 建立受控检查点。显式正式发布先调用 `POST /api/solidify-preflight`，再携带一次性令牌调用 `POST /api/solidify-deck`。可见 Editor 由用户点击“固化修改”确认；无窗口 Skill 在用户要求完成 / 保存 / 正式写入时由 Agent 显式调用 `solidify`，若用户要求仅预览则不得固化。相同 `commandId` 和相同 payload 的动作重试返回首次结果；同 ID 不同 payload 返回 `COMMAND_ID_REUSED`。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。真实 PTY 使用独立 `/agent-terminal` capability WebSocket；浏览器只允许选择产品注册表中的 Codex / Claude Code / OpenCode、发送键盘输入和终端尺寸，不能提交 executable、额外参数、环境变量或历史会话 ID。provider 未安装或未登录时必须返回清晰错误，不能静默切到 Codex。
 

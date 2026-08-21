@@ -359,6 +359,44 @@ test('Codex 完成长输出后再次出现输入框即可接收下一批任务',
   await session.close();
 });
 
+test('Codex 工作期间出现 steer 输入框仍保持活动回合，不能接收下一批任务', async () => {
+  const children = [];
+  const scheduledSubmits = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    initialPrompt:() => '',
+    scheduleSubmit:(callback, delayMs) => {
+      const entry = { callback, delayMs, handle:scheduledSubmits.length + 1 };
+      scheduledSubmits.push(entry);
+      return entry.handle;
+    },
+    cancelScheduledSubmit:() => {},
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+
+  await session.start();
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  session.submitPrompt('处理第一批任务');
+  drainUntilEnter(scheduledSubmits, children[0]);
+  children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
+  children[0].events.emit('data', '\r\nWorking (1s • esc to interrupt) · /tmp/huawei-deck'
+    + CODEX_DRAFT_OUTPUT);
+
+  assert.equal(session.snapshot().inputVisible, true);
+  assert.equal(session.snapshot().turnState, 'active');
+  assert.equal(session.snapshot().promptReady, false);
+  assert.throws(
+    () => session.submitPrompt('不能注入的第二批任务'),
+    error => error.code === 'AGENT_TERMINAL_BUSY',
+  );
+  await session.close();
+});
+
 test('OpenCode 启动 banner 不算就绪，必须等到真实输入框再注入提示词', async () => {
   const children = [];
   const scheduledSubmits = [];

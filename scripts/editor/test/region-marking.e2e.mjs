@@ -15,15 +15,20 @@ function inertAgentPty() {
 
 test('鼠标位于 Deck 时 R 快捷键优先于仍持有焦点的 Agent 终端', async t => {
   const terminalWrites = [];
+  let terminalOutput;
   const app = await startFixtureServer({
     spawnAgentTerminal:() => ({
       pid:4322,
       onData(listener) {
+        terminalOutput = listener;
         queueMicrotask(() => listener('\r\ncodex READY\r\n'));
         return { dispose() {} };
       },
       onExit() { return { dispose() {} }; },
-      write(data) { terminalWrites.push(data); },
+      write(data) {
+        terminalWrites.push(data);
+        if (data === '\r') queueMicrotask(() => terminalOutput?.('• Working'));
+      },
       resize() {}, kill() {},
     }),
   });
@@ -454,7 +459,7 @@ test('拉框弹输入框并跨页持久化两条任务', async t => {
   await frame.locator('[data-task-highlight]').waitFor({ state: 'detached', timeout: 1_200 });
   assert.equal(
     await page.locator('[data-process-all] .pill-nav-label-default').innerText(),
-    '交给 Agent 处理全部 2 条',
+    '交给 Agent 处理下一批 2 条',
   );
   await page.locator('[data-process-all]').click();
   await page.waitForFunction(() => (

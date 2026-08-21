@@ -3198,6 +3198,18 @@ p {
   font-weight: 600;
 }
 
+.task-drawer-count-next {
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.task-drawer-count-next::before {
+  width: 1px;
+  height: 12px;
+  background: var(--line);
+  content: '';
+}
+
 .task-drawer-count-completed::before {
   width: 1px;
   height: 12px;
@@ -3254,6 +3266,67 @@ p {
 
 .task-row:last-child {
   margin-bottom: 0;
+}
+
+.task-batch-section + .task-batch-section,
+.task-batch-section + .task-completed-group {
+  margin-top: 9px;
+}
+
+.task-batch-section {
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: rgb(255 255 255 / 34%);
+}
+
+.task-batch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-secondary);
+}
+
+.task-batch-header strong {
+  font-size: 11px;
+}
+
+.task-batch-header span {
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.task-batch-section-active {
+  border-color: rgb(199 0 11 / 24%);
+  background: rgb(199 0 11 / 3%);
+}
+
+.task-batch-section-active .task-batch-header strong {
+  color: var(--brand-red);
+}
+
+.task-batch-section-residual {
+  border-color: rgb(180 93 0 / 22%);
+  background: rgb(255 244 226 / 32%);
+}
+
+.task-batch-list {
+  padding: 6px;
+}
+
+.task-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 7px 7px;
+}
+
+.task-batch-retry,
+.task-batch-merge {
+  min-height: 30px;
 }
 
 .task-completed-group {

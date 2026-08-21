@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { isMainModule } from './main-module.mjs';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
-  AgentRunCoordinator, buildAgentPrompt, buildSessionInitializationPrompt,
+  AgentBatchCoordinator, buildAgentPrompt, buildSessionInitializationPrompt,
 } from './agent-runner.mjs';
 import { AgentTerminalSession } from './agent-terminal-session.mjs';
 import {
@@ -1778,7 +1778,7 @@ export async function startServer({
                 `${terminalState.providerLabel} 终端已退出，仍有 ${remaining.size} 个任务未完成`,
               );
             }
-            if (terminalState.promptReady === true) {
+            if (terminalState.turnState === 'idle') {
               const partial = remaining.size < context.taskIds.length;
               throw httpError(
                 partial ? 'AGENT_TASKS_INCOMPLETE' : 'AGENT_TASKS_UNCHANGED',
@@ -1800,11 +1800,13 @@ export async function startServer({
         },
     };
     const runAdapter = agentRunAdapter ?? terminalAdapter;
-    agentRuns = new AgentRunCoordinator({
+    agentRuns = new AgentBatchCoordinator({
       provider:runAdapter.id,
       adapter:runAdapter,
       getSession:() => sessionStore.state,
       getContext:agentContext,
+      captureBatch:input => bridge.captureAgentBatch(input),
+      settleBatch:input => bridge.settleAgentBatch(input),
       onUpdate:run => broadcast('agent-run-updated', sessionStore.state.revision, run),
     });
   } catch (error) {
@@ -2124,7 +2126,13 @@ export async function startServer({
             'Agent 终端正在启动，等待输入界面就绪后再提交任务',
           );
         }
-        const run = agentRuns.start({ expectedRevision, taskIds });
+        if (['active', 'submitting'].includes(terminalState?.turnState)) {
+          throw httpError(
+            'AGENT_TERMINAL_BUSY', 409,
+            'Agent 当前回合仍在处理，等待真正返回空闲输入界面后再提交下一批任务',
+          );
+        }
+        const run = await agentRuns.submit({ expectedRevision, taskIds });
         json(response, 202, run);
         return;
       }
@@ -2186,10 +2194,10 @@ export async function startServer({
       }
       const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
       if (taskMatch && ['PATCH', 'DELETE'].includes(request.method)) {
-        if (['queued', 'running'].includes(agentRuns.snapshot().status)) {
-          throw httpError('AGENT_RUN_ACTIVE', 409, 'Agent 正在处理反馈，完成后才能修改任务列表');
-        }
         const id = decodeURIComponent(taskMatch[1]);
+        if (agentRuns.snapshot().activeBatch?.taskIds?.includes(id)) {
+          throw httpError('AGENT_BATCH_TASK_LOCKED', 409, '这个任务已经属于正在执行的批次，完成后才能修改');
+        }
         const body = await readJson(request);
         requireRevision(body.expectedRevision);
         await guardWorkingRevision(body.expectedRevision);

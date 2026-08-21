@@ -820,8 +820,14 @@ test('任务批次进入同一 bypass PTY，权威 action 完成后退出 pendin
   assert.match(startupPrompt, new RegExp(created.task.id));
   assert.match(startupPrompt, /huawei-deck/);
 
+  const capturedRunResponse = await fetch(
+    `${app.url}/api/agent-runs/current?token=${encodeURIComponent(app.token)}`,
+  );
+  const capturedRun = await capturedRunResponse.json();
+  assert.ok(Number.isSafeInteger(capturedRun.sessionRevision), JSON.stringify(capturedRun));
+
   await postApi(app, '/api/actions', {
-    expectedRevision:1,
+    expectedRevision:capturedRun.sessionRevision,
     taskId:created.task.id,
     actions:[{
       id:'terminal-agent-move',
