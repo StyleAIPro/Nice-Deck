@@ -60,6 +60,7 @@ export function setTaskDrawerOpen(root, open) {
 
 export function renderTaskDrawer(root, {
   tasks, agentRun = { status:'idle' },
+  submissionBlocked = false, submissionBlockedMessage = '',
   onLocate, onProcessAll, onUndo, onEdit, onDelete,
 }) {
   const completedCount = tasks.filter(task => task.status === 'completed').length;
@@ -404,6 +405,7 @@ export function renderTaskDrawer(root, {
   const actionableTasks = tasks.filter(task => (
     task.targetMissing !== true && ['pending', 'failed'].includes(task.status)
   ));
+  const idleSubmissionBlocked = submissionBlocked === true && !activeRun;
   const buttonText = agentRun.status === 'queued'
     ? `Agent 正在提交 ${agentRun.taskCount ?? actionableTasks.length} 条`
     : agentRun.status === 'running'
@@ -414,11 +416,13 @@ export function renderTaskDrawer(root, {
       ? `有 ${needsConfirmationCount} 条任务需要补充说明`
     : actionableTasks.length === 0
       ? '没有待处理任务'
+    : idleSubmissionBlocked
+      ? '正在恢复 Agent 会话…'
     : `交给 Agent 处理全部 ${actionableTasks.length} 条`;
   const process = element('button', 'task-process-all', buttonText);
   process.type = 'button';
   process.dataset.processAll = '';
-  process.disabled = actionableTasks.length === 0 || activeRun;
+  process.disabled = actionableTasks.length === 0 || activeRun || submissionBlocked === true;
   process.setAttribute('aria-busy', String(activeRun));
   applyPill(process, { variant:'primary', size:'md', kind:'action' });
   const note = element('p', 'task-process-note');
@@ -432,7 +436,10 @@ export function renderTaskDrawer(root, {
     ? `${unresolvedTargetMissingCount} 条任务的原目标当前无法定位；`
       + '请撤销相关结构修改，或删除任务后重新标记。'
     : '';
-  note.textContent = [runMessage(agentRun), targetMissingMessage, confirmationMessage]
+  const blockedMessage = idleSubmissionBlocked
+    ? submissionBlockedMessage || 'Agent 输入界面尚未就绪，请稍候再提交任务。'
+    : '';
+  note.textContent = [runMessage(agentRun), blockedMessage, targetMissingMessage, confirmationMessage]
     .filter(Boolean).join('；');
   if (needsConfirmationCount > 0 || unresolvedTargetMissingCount > 0) {
     note.dataset.attention = '';

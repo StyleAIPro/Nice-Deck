@@ -2105,6 +2105,25 @@ export async function startServer({
         const { expectedRevision, taskIds } = await readJson(request);
         requireRevision(expectedRevision);
         await guardWorkingRevision(expectedRevision);
+        const terminalState = agentTerminal?.snapshot();
+        if (terminalState?.interactionRequired?.kind) {
+          throw httpError(
+            'AGENT_TERMINAL_INTERACTION_REQUIRED', 409,
+            terminalState.interactionRequired.message || '请先完成 Agent 终端中的确认',
+          );
+        }
+        if (terminalState?.resumePending === true) {
+          throw httpError(
+            'AGENT_TERMINAL_RESUMING', 409,
+            'Codex 会话正在恢复，等待输入界面就绪后再提交任务',
+          );
+        }
+        if (terminalState?.initialInputPending === true) {
+          throw httpError(
+            'AGENT_TERMINAL_INITIALIZING', 409,
+            'Agent 终端正在启动，等待输入界面就绪后再提交任务',
+          );
+        }
         const run = agentRuns.start({ expectedRevision, taskIds });
         json(response, 202, run);
         return;

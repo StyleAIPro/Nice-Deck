@@ -21,6 +21,7 @@ const MISSING_AGENT_SESSION = Object.freeze({
 });
 const INTERACTION_SCAN_CHARS = 8 * 1024;
 const DIRECTORY_TRUST_MESSAGE = '请在右侧终端确认是否信任当前项目目录';
+const CODEX_UPDATE_MESSAGE = '请在右侧终端处理 Codex 更新提示';
 
 function visibleTerminalText(output) {
   return String(output ?? '')
@@ -43,6 +44,15 @@ function directoryTrustRequested(output) {
     /(?:是否|请)[\s\S]{0,40}信任[\s\S]{0,80}(?:目录|文件夹|项目|工作区)/,
     /(?:目录|文件夹|项目|工作区)[\s\S]{0,80}(?:是否|请)[\s\S]{0,40}信任/,
   ].some(pattern => pattern.test(text));
+}
+
+function codexUpdateInteractionRequested(output) {
+  const text = visibleTerminalText(output).replace(/[ \t]+/g, ' ');
+  if (!/update available!/i.test(text)) return false;
+  // 普通版本通知只打印安装命令，不需要用户输入。只有更新面板同时给出
+  // “跳过到下一版本”和“按键继续”时才开放终端交互，避免遮罩拦住回车。
+  return /skip until next version/i.test(text)
+    && /press(?:\s+\S+)?\s+to continue/i.test(text);
 }
 
 function missingAgentSession(provider, output) {
@@ -69,6 +79,7 @@ function splitUtf8(text, maxBytes) {
 
 function terminalAcceptsPrompt(provider, output, {
   codexModelConfirmed = false,
+  codexResumed = false,
   codexResumedHistoryFallback = false,
 } = {}) {
   const visibleOutput = visibleTerminalText(output);
@@ -101,8 +112,11 @@ function terminalAcceptsPrompt(provider, output, {
   // 目录信任页也用 `› 1. Yes` 表示当前选项；它不是任务输入框。恢复历史
   // 时若前面还残留模型状态栏，只看“› + 光标”会把确认页误判成 ready。
   if (/^›\s*(?:\d+[.)]|yes\b|no\b|trust\b|exit\b)/i.test(promptLine)) return false;
-  const hasReadyStatus = /[^\n]{1,120}\s[·•]\s(?:\/|~\/|[A-Za-z]:[\\/])/m.test(visibleOutput);
-  if (!hasReadyStatus) return false;
+  const readyStatusMatches = [...visibleOutput.matchAll(
+    /([^\n]{1,120}?)\s[·•]\s(?:\/|~\/|[A-Za-z]:[\\/])/gm,
+  )];
+  const readyStatusPrefix = readyStatusMatches.at(-1)?.[1]?.trim() ?? '';
+  if (!readyStatusPrefix) return false;
   // 同一进程已经通过过一次完整 model 闸门后，长任务输出可能把启动时的
   // `model:` 行挤出短扫描窗口。此后再次出现“输入框 + 光标 + 模型/目录状态栏”
   // 就足以证明 CLI 已回到空闲态，不能让下一批任务永久等待。
@@ -114,10 +128,26 @@ function terminalAcceptsPrompt(provider, output, {
   const modelMatches = [...visibleOutput.matchAll(/model:\s*(\S{1,80})/gim)];
   const currentModel = modelMatches.at(-1)?.[1] ?? '';
   if (currentModel.trim()) return !/^loading\b/i.test(currentModel.trim());
+  // Codex 恢复普通长度历史时可能只重绘最终输入区，不再重放启动卡片中的
+  // `model:` 行。此时不能要求缓冲先膨胀到 1 MiB：新版空输入框的固定
+  // placeholder、可见光标，以及同一终端画面中的非 loading 模型/目录状态栏
+  // 已共同构成足够强的恢复就绪证据。新会话和旧版普通草稿仍保持严格闸门。
+  if (codexResumed
+    && /^›\s*Ask Codex to do anything\b/i.test(promptLine)
+    && !/\bloading\b/i.test(readyStatusPrefix)) return true;
   // 恢复超长历史时 node-pty 的 1 MiB 环形缓冲会把启动 model 行裁掉。
   // 只有已确认是 resume、缓冲确实满载，且最终输入框与模型/目录状态栏都在
   // 尾部成立时才启用兜底；短输出中的显式 loading 仍走上面的严格闸门。
   return codexResumedHistoryFallback;
+}
+
+function codexResumePromptVisible(output) {
+  const promptMarker = output.lastIndexOf('›');
+  if (promptMarker < 0 || output.indexOf('\u001b[?25h', promptMarker) < 0) return false;
+  const promptLine = visibleTerminalText(output.slice(promptMarker, promptMarker + 240))
+    .split('\n', 1)[0]
+    .trim();
+  return /^›\s*Ask Codex to do anything\b/i.test(promptLine);
 }
 
 function terminalAcknowledgesPrompt(provider, output) {
@@ -270,6 +300,8 @@ export class AgentTerminalSession {
     this.promptSubmissionSequence = 0;
     this.promptSubmission = null;
     this.promptCapabilityConfirmed = false;
+    this.terminalCols = 80;
+    this.terminalRows = 24;
     this.discoveryController = null;
     this.closed = false;
     this.activeCommand = null;
@@ -279,6 +311,8 @@ export class AgentTerminalSession {
   snapshot() {
     const command = this.activeCommand
       ?? buildAgentTerminalCommand(this.provider, { platform:this.platform });
+    const initialInputPending = ['starting', 'running'].includes(this.state)
+      && !this.promptCapabilityConfirmed;
     return {
       runtimeId:this.runtimeId,
       provider:this.provider,
@@ -289,6 +323,8 @@ export class AgentTerminalSession {
       pid:this.process?.pid ?? null,
       conversationId:this.conversationId,
       conversationResumed:this.conversationResumed,
+      initialInputPending,
+      resumePending:this.conversationResumed && initialInputPending,
       conversationError:this.conversationError,
       startupPromptState:this.startupPromptState,
       promptSubmission:this.promptSubmission ? { ...this.promptSubmission } : null,
@@ -489,12 +525,14 @@ export class AgentTerminalSession {
     this.activeCommand = command;
     this.activeRuntime = runtime;
     const generation = ++this.generation;
+    this.terminalCols = Number.isInteger(cols) && cols > 0 ? Math.min(cols, 500) : 80;
+    this.terminalRows = Number.isInteger(rows) && rows > 0 ? Math.min(rows, 300) : 24;
     let child;
     try {
       child = this.spawnPty(command.executable, command.args, {
         name:'xterm-256color',
-        cols:Number.isInteger(cols) && cols > 0 ? Math.min(cols, 500) : 80,
-        rows:Number.isInteger(rows) && rows > 0 ? Math.min(rows, 300) : 24,
+        cols:this.terminalCols,
+        rows:this.terminalRows,
         cwd:runtime?.spawnCwd ?? this.cwd,
         env:{
           ...runtimeEnvironment,
@@ -520,6 +558,7 @@ export class AgentTerminalSession {
     this.startupPromptState = startupPrompt ? 'pending' : null;
     this.state = 'running';
     this.startedAt = new Date().toISOString();
+    let resumeRedrawRequested = false;
     child.onData(data => {
       if (generation !== this.generation || this.process !== child) return;
       const chunk = String(data);
@@ -549,24 +588,40 @@ export class AgentTerminalSession {
         this.interactionScanOutput || this.output,
         {
           codexModelConfirmed:this.promptCapabilityConfirmed,
+          codexResumed:this.conversationResumed,
           codexResumedHistoryFallback:provider === 'codex'
             && this.conversationResumed
             && this.output.length >= MAX_BUFFER_CHARS,
         },
       );
-      const trustRequested = (!this.promptReady || this.interactionRequired)
+      if (!acceptsPrompt && provider === 'codex' && this.conversationResumed
+        && !resumeRedrawRequested && codexResumePromptVisible(this.output)) {
+        // Codex 0.148 恢复完成时偶尔只画出输入框和光标，却把启动卡片留在
+        // `model: loading`，直到下一次 SIGWINCH 才补画真实模型状态栏。遮罩下
+        // 轻微改变一行再恢复，促使 TUI 交付最终屏幕；仍由后续输出的严格
+        // provider 闸门决定是否就绪，不能因这次重绘本身提前放行。
+        resumeRedrawRequested = true;
+        const redrawRows = this.terminalRows > 2 ? this.terminalRows - 1 : this.terminalRows + 1;
+        try {
+          child.resize(this.terminalCols, redrawRows);
+          child.resize(this.terminalCols, this.terminalRows);
+        } catch { /* 重绘失败只保持现有加载闸门，不改变终端生命周期 */ }
+      }
+      const interactionRequested = (!this.promptReady || this.interactionRequired)
         && !acceptsPrompt
-        && directoryTrustRequested(this.interactionScanOutput);
-      if (trustRequested && !this.interactionRequired) {
-        this.interactionRequired = {
-          kind:'directory-trust',
-          message:DIRECTORY_TRUST_MESSAGE,
-        };
+        && (directoryTrustRequested(this.interactionScanOutput)
+          ? { kind:'directory-trust', message:DIRECTORY_TRUST_MESSAGE }
+          : provider === 'codex' && codexUpdateInteractionRequested(this.interactionScanOutput)
+            ? { kind:'codex-update', message:CODEX_UPDATE_MESSAGE }
+            : null);
+      if (interactionRequested
+        && interactionRequested.kind !== this.interactionRequired?.kind) {
+        this.interactionRequired = interactionRequested;
         this.interactionResponsePending = false;
         this.#publishState();
       }
       if (this.interactionRequired) {
-        if (trustRequested || !acceptsPrompt) return;
+        if (interactionRequested || !acceptsPrompt) return;
         this.interactionRequired = null;
         this.interactionResponsePending = false;
         this.#publishState();
@@ -651,9 +706,12 @@ export class AgentTerminalSession {
     if (typeof data !== 'string' || data.length === 0 || data.length > MAX_INPUT_CHARS) {
       throw terminalError('INVALID_TERMINAL_INPUT', '终端输入长度无效');
     }
-    // 一般初始化阶段仍锁住键盘，避免用户输入与自动任务粘在一起；但目录信任
-    // 是 CLI 在任务输入框之前设置的交互闸门，必须让用户能在右侧终端作答。
-    if (['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState)
+    // 当前进程第一次确认真实输入框之前一律锁住键盘，覆盖新建和恢复会话；
+    // 后续 Agent turn 工作时 promptReady 虽会暂时为 false，但能力闸门已经确认，
+    // Esc/Ctrl+C 等交互仍可正常传给 CLI。目录信任与 Codex 更新面板是输入框
+    // 之前的显式交互，必须例外允许用户作答。
+    if ((!this.promptCapabilityConfirmed
+      || ['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState))
       && !this.interactionRequired) return;
     this.process.write(data);
     if (this.interactionRequired && /[\r\nyYnN12]/.test(data)) {
@@ -935,6 +993,8 @@ export class AgentTerminalSession {
     if (!this.process || this.state !== 'running') return;
     if (!Number.isInteger(cols) || !Number.isInteger(rows)
       || cols < 2 || cols > 500 || rows < 2 || rows > 300) return;
+    this.terminalCols = cols;
+    this.terminalRows = rows;
     this.process.resize(cols, rows);
   }
 

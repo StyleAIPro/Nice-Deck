@@ -371,6 +371,29 @@ function adoptAgentRun(nextRun) {
   return true;
 }
 
+function agentSubmissionGate(state = agentTerminalState) {
+  if (state.interactionRequired?.kind) {
+    return {
+      key:'interaction', blocked:true,
+      message:state.interactionRequired.message || '请先完成 Agent 终端中的确认。',
+    };
+  }
+  if (state.resumePending === true) {
+    return {
+      key:'resuming', blocked:true,
+      message:'正在恢复 Codex 会话，等待 Codex 输入界面后才能提交任务。',
+    };
+  }
+  if (state.initialInputPending === true
+    || ['pending', 'submitting', 'awaiting-confirmation'].includes(state.startupPromptState)) {
+    return {
+      key:'initializing', blocked:true,
+      message:'Agent 终端正在启动，等待输入界面后才能提交任务。',
+    };
+  }
+  return { key:'ready', blocked:false, message:'' };
+}
+
 function renderAgentStatus() {
   const runtime = agentTerminalState;
   const workspaceProvider = runtime.provider ?? 'codex';
@@ -432,9 +455,12 @@ function ensureAgentTerminalOpen() {
 
 function adoptAgentTerminalState(state) {
   if (!state?.provider || !state?.state) return false;
+  const previousGate = agentSubmissionGate(agentTerminalState);
   agentTerminalState = state;
   if (state.interactionRequired?.kind) ensureAgentTerminalOpen();
-  renderAgentStatus();
+  const nextGate = agentSubmissionGate(state);
+  if (previousGate.key !== nextGate.key) renderTasks();
+  else renderAgentStatus();
   return true;
 }
 
@@ -1382,9 +1408,12 @@ async function deleteTask(task) {
 }
 
 function renderTasks() {
+  const submissionGate = agentSubmissionGate();
   renderTaskDrawer(taskDrawer, {
     tasks,
     agentRun,
+    submissionBlocked:submissionGate.blocked,
+    submissionBlockedMessage:submissionGate.message,
     onLocate: locateTask,
     onProcessAll: processAllTasks,
     onUndo: task => { void undoTask(task); },

@@ -10,6 +10,7 @@ import { startAppServer } from '../app-server.mjs';
 import { startFixtureServer } from './test-helpers.mjs';
 
 const VISUAL_OUTPUT = [
+  'codex READY',
   '\u001b[33m★\u001b[0m 终端视觉基准',
   '普通终端文字',
   '❯ ',

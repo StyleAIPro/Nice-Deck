@@ -389,6 +389,13 @@ export class AgentTerminalPanel {
         : this.loadingCopy);
       return;
     }
+    if (state.resumePending === true) {
+      const wslUser = this.#wslUser(state);
+      this.#setLoading(true, wslUser
+        ? `正在恢复 ${wslUser} WSL 会话，等待 Codex 输入界面…`
+        : '正在恢复 Codex 会话，正在等待输入界面…');
+      return;
+    }
     if (state.state === 'running' && !this.hasTerminalOutput) {
       this.#setLoading(true, 'CLI 已启动，正在等待输入界面…');
       return;

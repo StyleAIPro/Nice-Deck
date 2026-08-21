@@ -133,6 +133,35 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
     const afterOutput = snapshot();
     socket.emit('message', { data:JSON.stringify({
       type:'state',
+      terminal:{
+        ...wslState,
+        state:'running',
+        conversationResumed:true,
+        initialInputPending:true,
+        resumePending:true,
+      },
+    }) });
+    const resuming = snapshot();
+    socket.emit('message', { data:JSON.stringify({
+      type:'state',
+      terminal:{
+        ...wslState,
+        state:'running',
+        conversationResumed:true,
+        initialInputPending:true,
+        resumePending:true,
+        interactionRequired:{
+          kind:'codex-update',
+          message:'请在右侧终端处理 Codex 更新提示',
+        },
+      },
+    }) });
+    const updateInteraction = {
+      ...snapshot(),
+      detail:root.querySelector('.agent-terminal-detail')?.textContent ?? '',
+    };
+    socket.emit('message', { data:JSON.stringify({
+      type:'state',
       terminal:{ ...wslState, state:'running', startupPromptState:'pending' },
     }) });
     const pending = snapshot();
@@ -170,12 +199,19 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
     panel.dispose();
     root.remove();
     globalThis.WebSocket = NativeWebSocket;
-    return { beforeOutput, afterOutput, pending, submitting, awaitingConfirmation, submitted };
+    return {
+      beforeOutput, afterOutput, resuming, pending,
+      updateInteraction, submitting, awaitingConfirmation, submitted,
+    };
   });
 
   assert.equal(result.beforeOutput.visible, true);
   assert.equal(result.afterOutput.visible, true, '代理输出不能在回车前提前露出空终端');
   assert.match(result.afterOutput.copy, /正在进入 root WSL/);
+  assert.equal(result.resuming.visible, true);
+  assert.match(result.resuming.copy, /正在恢复 root WSL 会话，等待 Codex 输入界面/);
+  assert.equal(result.updateInteraction.visible, false, '升级选择页不能被恢复遮罩挡住');
+  assert.match(result.updateInteraction.detail, /处理 Codex 更新提示/);
   assert.equal(result.pending.visible, true);
   assert.match(result.pending.copy, /正在进入 root WSL/);
   assert.equal(result.submitting.visible, true);
@@ -222,6 +258,13 @@ test('bypass Agent 遇到目录信任提示时自动展开右侧终端并等待�
   await page.waitForTimeout(40);
   assert.deepEqual(children[0].writes, ['\r']);
   children[0].events.emit('data', '\r\nCodex ready\r\n');
+  for (let attempt = 0; attempt < 700
+    && (!children[0].writes.some(value => value.includes('Huawei Deck'))
+      || children[0].writes.at(-1) !== '\r'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  children[0].events.emit('data', '\r\n• Working\r\n');
+  children[0].events.emit('data', '\r\nCodex ready\r\n');
   await page.waitForFunction(() => (
     document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
   ));
@@ -229,6 +272,95 @@ test('bypass Agent 遇到目录信任提示时自动展开右侧终端并等待�
     children[0].writes.some(value => value.includes('Huawei Deck')),
     '确认信任并进入正常输入框后才应提交初始化任务',
   );
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('恢复旧 Codex 会话进入输入框前保持遮罩并拒绝输入与 Agent 任务', async t => {
+  const children = [];
+  let releaseReady;
+  const app = await startFixtureServer({
+    autoStartAgentTerminal:true,
+    createAgentTerminalConversation:async () => ({
+      conversationId:'codex-resuming-gate-e2e',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnAgentTerminal:(executable, args, options) => {
+      const child = new FakePty(executable, args, options, 4870);
+      children.push(child);
+      releaseReady = () => child.events.emit('data', '\r\ncodex READY\r\n');
+      return child;
+    },
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  await page.click('[data-agent-status]');
+  const panel = page.locator('[data-agent-terminal-panel]');
+  const loading = panel.locator('[data-agent-terminal-loading]');
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-terminal-panel]')?.dataset.terminalState === 'running'
+  ), null, { timeout:2_000 });
+  await loading.waitFor({ state:'visible', timeout:1_000 });
+  assert.match(await loading.innerText(), /正在等待输入界面/);
+
+  await page.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.type('恢复期间不能进入终端');
+  await page.waitForTimeout(80);
+  assert.deepEqual(children[0].writes, [], '恢复输入框就绪前不得把用户输入发给 PTY');
+
+  const pageKey = await page.locator('[data-page-key]').first().getAttribute('data-page-key');
+  const createdResponse = await fetch(
+    `${app.url}/api/tasks?token=${encodeURIComponent(app.token)}`,
+    {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:0,
+        pageKey,
+        pageIndex:1,
+        pageLabel:'01 目录页',
+        instruction:'恢复完成后再交给 Agent',
+        rect:{ x:80, y:80, w:500, h:160 },
+      }),
+    },
+  );
+  const created = await createdResponse.json();
+  assert.equal(createdResponse.status, 201, JSON.stringify(created));
+  await page.waitForSelector(`[data-task-row="${created.task.id}"]`);
+  assert.equal(await page.locator('[data-process-all]').isDisabled(), true);
+  assert.match(
+    await page.locator('[data-process-note]').innerText(),
+    /正在恢复 Codex 会话|等待 Codex 输入界面/,
+  );
+
+  const runResponse = await fetch(
+    `${app.url}/api/agent-runs?token=${encodeURIComponent(app.token)}`,
+    {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:created.revision,
+        taskIds:[created.task.id],
+      }),
+    },
+  );
+  const rejectedRun = await runResponse.json();
+  assert.equal(runResponse.status, 409, JSON.stringify(rejectedRun));
+  assert.equal(rejectedRun.code, 'AGENT_TERMINAL_RESUMING');
+
+  releaseReady();
+  await loading.waitFor({ state:'hidden' });
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
+  ));
+  assert.equal(await page.locator('[data-process-all]').isDisabled(), false);
+  await page.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.type('恢复完成后可以输入');
+  await page.waitForTimeout(80);
+  assert.match(children[0].writes.join(''), /恢复完成后可以输入/);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
@@ -325,6 +457,15 @@ test('Editor 后台预启动 bypass 终端，右上角负责展开、重连、�
       children.push(child);
       if (children.length === 2) {
         releaseFreshOutput = () => child.events.emit('data', '\r\ncodex READY\r\n');
+        const write = child.write.bind(child);
+        child.write = data => {
+          write(data);
+          if (data !== '\r') return;
+          queueMicrotask(() => {
+            child.events.emit('data', '\r\n• Working\r\n');
+            queueMicrotask(() => child.events.emit('data', '\r\ncodex READY\r\n'));
+          });
+        };
       } else {
         queueMicrotask(() => child.events.emit('data', '\r\ncodex READY\r\n'));
       }

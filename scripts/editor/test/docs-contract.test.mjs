@@ -322,6 +322,10 @@ test('四份文档统一声明三种 Agent 的可靠 Prompt 提交边界', async
       'Codex 0.148 草稿框不是就绪': /Codex 0\.148[^。\n]{0,180}(?:草稿框|草稿输入框)[^。\n]{0,180}(?:完整状态栏|不算就绪|不能触发)/i,
       'OpenCode 等真实 placeholder': /OpenCode[^。\n]{0,180}Ask anything[^。\n]{0,100}(?:光标|placeholder)/i,
       'Enter 后等回执且只重试一次': /Enter[^。\n]{0,220}(?:回执|重绘|处理中)[^。\n]{0,180}重试一次/i,
+      '恢复阶段同时阻断人工输入与任务提交': /恢复旧会话[^。\n]{0,180}人工键盘输入[^。\n]{0,100}Agent 任务提交/,
+      '服务端拒绝恢复期任务': /AGENT_TERMINAL_RESUMING/,
+      '恢复陈旧状态只重绘不直接放行': /陈旧的 `model: loading`[^。\n]{0,160}尺寸重绘[^。\n]{0,160}重绘本身不(?:算就绪|设置 `promptReady`)/,
+      'Codex 交互更新页开放终端但阻断任务': /Codex 的普通更新通知[^。\n]{0,180}`interactionRequired: \{kind: "codex-update"\}`[^。\n]{0,180}仅开放终端输入[^。\n]{0,80}Agent 任务仍保持阻断/,
     });
   }
 });

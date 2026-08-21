@@ -86,6 +86,15 @@ const CODEX_DRAFT_OUTPUT = '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mExplain
 const CODEX_LOADING_WITH_STATUS_OUTPUT = '\u001b[3;1Hmodel: loading   /model to change'
   + '\u001b[23;1Hgpt-5.6-sol default · /tmp/huawei-deck'
   + CODEX_DRAFT_OUTPUT;
+const CODEX_RESUMED_STALE_LOADING_OUTPUT = '\u001b[3;1Hmodel: loading   /model to change'
+  + '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mAsk Codex to do anything'
+  + '\u001b[?25h\u001b[11;3H\u001b[?2026l';
+const CODEX_UPDATE_NOTICE_OUTPUT = '✨ Update available! 0.148.0 -> 0.149.0\r\n'
+  + 'Run npm install -g @openai/codex to update.\r\n'
+  + 'See full release notes: https://github.com/openai/codex/releases/latest\r\n';
+const CODEX_UPDATE_INTERACTION_OUTPUT = 'Update available! Release notes: '
+  + 'https://github.com/openai/codex/releases/latest\r\n'
+  + 'Skip until next version\r\nPress \u001b[1mEnter\u001b[0m to continue\u001b[?25h';
 const CODEX_READY_OUTPUT = '\u001b[3;1Hmodel: gpt-5.6-sol xhigh   /model to change'
   + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
   + CODEX_DRAFT_OUTPUT;
@@ -514,6 +523,127 @@ test('恢复超长 Codex 历史时模型标题被裁掉仍可识别最终输入�
   await session.close();
 });
 
+test('恢复普通长度 Codex 历史时最终输入框不因缺少启动 model 行而永久锁定', async () => {
+  const children = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    resolveConversation:async () => ({
+      conversationId:'codex-resumed-visible-input-session',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start({ provider:'codex' });
+  children[0].events.emit(
+    'data',
+    '历史会话内容已经恢复\r\n'
+      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+      + '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mAsk Codex to do anything'
+      + '\u001b[?25h\u001b[11;3H\u001b[?2026l',
+  );
+  assert.equal(session.snapshot().resumePending, false);
+  assert.equal(session.snapshot().promptReady, true);
+  await session.close();
+});
+
+test('恢复 Codex 已画出输入框但状态栏仍陈旧时只触发一次尺寸重绘', async () => {
+  const children = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    resolveConversation:async () => ({
+      conversationId:'codex-resumed-stale-loading-session',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start({ provider:'codex', cols:90, rows:30 });
+  children[0].events.emit('data', CODEX_RESUMED_STALE_LOADING_OUTPUT);
+  assert.equal(session.snapshot().promptReady, false);
+  assert.deepEqual(children[0].resizes, [[90, 29], [90, 30]]);
+
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  assert.equal(session.snapshot().promptReady, true);
+  assert.equal(session.snapshot().resumePending, false);
+  await session.close();
+});
+
+test('Codex 恢复时升级通知不误放行，交互升级页开放键盘并继续阻断任务', async t => {
+  await t.test('纯通知继续等待真实输入框', async () => {
+    const children = [];
+    const session = new AgentTerminalSession({
+      projectRoot:'/tmp/huawei-deck',
+      provider:'codex',
+      resolveConversation:async () => ({
+        conversationId:'codex-update-notice-session',
+        resume:true,
+        initialPromptConsumed:true,
+      }),
+      spawnPty:(executable, args, options) => {
+        const child = new FakePty(executable, args, options);
+        children.push(child);
+        return child;
+      },
+    });
+    await session.start({ provider:'codex' });
+    children[0].events.emit('data', CODEX_UPDATE_NOTICE_OUTPUT);
+    assert.equal(session.snapshot().interactionRequired, null);
+    assert.equal(session.snapshot().resumePending, true);
+    session.input('\r');
+    assert.deepEqual(children[0].writes, [], '纯通知期间仍禁止误输入');
+
+    children[0].events.emit('data', CODEX_READY_OUTPUT);
+    assert.equal(session.snapshot().resumePending, false);
+    assert.equal(session.snapshot().promptReady, true);
+    await session.close();
+  });
+
+  await t.test('需要按键的升级页进入受控交互态', async () => {
+    const children = [];
+    const session = new AgentTerminalSession({
+      projectRoot:'/tmp/huawei-deck',
+      provider:'codex',
+      resolveConversation:async () => ({
+        conversationId:'codex-update-interaction-session',
+        resume:true,
+        initialPromptConsumed:true,
+      }),
+      spawnPty:(executable, args, options) => {
+        const child = new FakePty(executable, args, options);
+        children.push(child);
+        return child;
+      },
+    });
+    await session.start({ provider:'codex' });
+    children[0].events.emit('data', CODEX_UPDATE_INTERACTION_OUTPUT);
+    assert.deepEqual(session.snapshot().interactionRequired, {
+      kind:'codex-update',
+      message:'请在右侧终端处理 Codex 更新提示',
+    });
+    assert.equal(session.snapshot().promptReady, false);
+    assert.equal(session.snapshot().resumePending, true);
+    session.input('\r');
+    assert.deepEqual(children[0].writes, ['\r'], '升级交互页必须允许用户按键继续');
+
+    children[0].events.emit('data', CODEX_READY_OUTPUT);
+    assert.equal(session.snapshot().interactionRequired, null);
+    assert.equal(session.snapshot().resumePending, false);
+    assert.equal(session.snapshot().promptReady, true);
+    await session.close();
+  });
+});
+
 test('恢复 Codex 会话时显式 model loading 仍不能提前接收任务', async () => {
   const children = [];
   const session = new AgentTerminalSession({
@@ -816,6 +946,7 @@ test('独立 Escape 输入发布批次中断事件，方向键转义序列不误
     : '/tmp/huawei-deck';
   const session = new AgentTerminalSession({
     projectRoot,
+    initialPrompt:() => '',
     spawnPty:(executable, args, options) => {
       const child = new FakePty(executable, args, options);
       children.push(child);
@@ -824,6 +955,12 @@ test('独立 Escape 输入发布批次中断事件，方向键转义序列不误
   });
   session.addInterruptListener(value => interrupts.push(value));
   await session.start();
+  session.input('\u001b[A');
+  session.input('\u001b');
+  assert.deepEqual(children[0].writes, [], '首次输入框就绪前必须拦住所有误输入');
+  assert.equal(interrupts.length, 0, '被闸门拦下的 Escape 不能误中断 Agent 批次');
+
+  children[0].events.emit('data', 'Codex ready');
   session.input('\u001b[A');
   session.input('\u001b');
   assert.deepEqual(children[0].writes, ['\u001b[A', '\u001b']);
