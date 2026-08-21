@@ -62,7 +62,7 @@ test('待确认任务显示原因、补充说明入口与提醒动画', async t 
   assert.deepEqual(resourceProblems, []);
 });
 
-test('目标页面已删除的任务保留记录但不能定位或交给 Agent', async t => {
+test('待处理任务的原目标不可定位时保留记录但不能定位或交给 Agent', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());
   const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
@@ -98,14 +98,71 @@ test('目标页面已删除的任务保留记录但不能定位或交给 Agent',
   const root = page.locator('[data-test-missing-task-drawer]');
   const row = root.locator('[data-task-row="task-target-missing"]');
   assert.equal(await row.locator('[data-task-locate]').isDisabled(), true);
-  assert.match(await row.locator('[data-task-target-missing]').innerText(), /页面已删除/);
+  assert.match(await row.locator('[data-task-target-missing]').innerText(), /原目标当前无法定位/);
   assert.equal(await row.locator('[data-task-edit]').count(), 0);
   assert.equal(await row.locator('[data-task-delete]').count(), 1);
   assert.equal(await root.locator('[data-process-all]').isDisabled(), true);
-  assert.match(await root.locator('[data-process-note]').innerText(), /删除任务记录或撤销删页/);
+  assert.equal(
+    await root.locator('[data-process-all] .pill-nav-label-default').innerText(),
+    '有 1 条任务的目标不可定位',
+  );
+  assert.match(await root.locator('[data-process-note]').innerText(), /撤销相关结构修改/);
   assert.deepEqual(await page.evaluate(() => ({
     located:Boolean(window.__missingTaskLocated),
     processed:Boolean(window.__missingTaskProcessed),
+  })), { located:false, processed:false });
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('已完成任务的旧目标不可定位时仍显示完成且不触发缺页告警', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  await page.evaluate(async token => {
+    const { renderTaskDrawer } = await import(
+      `/editor/task-drawer.mjs?token=${encodeURIComponent(token)}&test=completed-target-missing`
+    );
+    const root = document.createElement('aside');
+    root.className = 'task-drawer';
+    root.dataset.testCompletedMissingTaskDrawer = '';
+    root.dataset.open = 'true';
+    root.dataset.completedOpen = 'true';
+    document.body.append(root);
+    renderTaskDrawer(root, {
+      tasks:[{
+        id:'task-completed-target-missing',
+        pageKey:'page-replaced',
+        pageIndex:12,
+        pageLabel:'替换前页面',
+        rect:{ x:10, y:10, w:200, h:120 },
+        instruction:'插入新页后删除旧页',
+        status:'completed',
+        targetMissing:true,
+        groupId:'group-replacement',
+      }],
+      onLocate() { window.__completedMissingTaskLocated = true; },
+      onProcessAll() { window.__completedMissingTaskProcessed = true; },
+      onUndo() {},
+    });
+  }, app.token);
+
+  const root = page.locator('[data-test-completed-missing-task-drawer]');
+  const row = root.locator('[data-task-row="task-completed-target-missing"]');
+  assert.equal(await row.locator('[data-task-locate]').isDisabled(), true);
+  assert.equal(await row.locator('.task-status').innerText(), '已完成');
+  assert.equal(await row.locator('[data-task-target-missing]').count(), 0);
+  assert.equal(await row.locator('[data-task-undo]').count(), 1);
+  assert.equal(
+    await root.locator('[data-process-all] .pill-nav-label-default').innerText(),
+    '没有待处理任务',
+  );
+  assert.doesNotMatch(await root.locator('[data-process-note]').innerText(), /页面已删除|目标不可定位/);
+  assert.deepEqual(await page.evaluate(() => ({
+    located:Boolean(window.__completedMissingTaskLocated),
+    processed:Boolean(window.__completedMissingTaskProcessed),
   })), { located:false, processed:false });
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);

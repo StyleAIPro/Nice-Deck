@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,6 +14,7 @@ import {
 } from '../app-server.mjs';
 import { createRecentDeckStore } from '../recent-deck-store.mjs';
 import { WorkCatalog } from '../work-catalog.mjs';
+import { openDeckBinding } from '../deck-binding-coordinator.mjs';
 import { createWorkHistoryStore } from '../work-history-store.mjs';
 
 function post(app, path) {
@@ -63,6 +65,39 @@ test('系统选择器分别使用文件与目录契约，并把取消保持为 n
   assert.equal(calls[0].args.at(-1), '--pick-only');
   assert.equal(calls[0].options.windowsHide, true);
   assert.equal(calls[1].args.at(-1), '--pick-directory-only');
+});
+
+test('目录选择器子进程不响应 AbortSignal 时仍会被显式终止并收敛 Promise', async () => {
+  let child;
+  const spawnProcess = () => {
+    child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.killCount = 0;
+    child.kill = () => {
+      child.killCount += 1;
+      return true;
+    };
+    return child;
+  };
+  const controller = new AbortController();
+  const picking = pickProjectDirectoryWithSystemPicker({
+    pythonExecutable:'python-test', spawnProcess, signal:controller.signal,
+  }).then(
+    () => ({ state:'resolved' }),
+    error => ({ state:'rejected', code:error.code }),
+  );
+
+  controller.abort();
+  const result = await Promise.race([
+    picking,
+    new Promise(resolvePromise => setTimeout(
+      () => resolvePromise({ state:'timeout' }), 80,
+    )),
+  ]);
+
+  assert.deepEqual(result, { state:'rejected', code:'PICK_ABORTED' });
+  assert.equal(child.killCount, 1);
 });
 
 test('启动器可查询页面租约，并区分从未连接与已经关闭', async t => {
@@ -161,6 +196,11 @@ test('导入页声明一次只添加一份 HTML，并要求随机令牌', async 
     /style-src 'self' 'unsafe-inline'/,
     'xterm DOM renderer 需要运行时注入字体、色板和光标样式',
   );
+  assert.match(
+    response.headers.get('content-security-policy') ?? '',
+    /worker-src 'self'/,
+    '流体背景需要在同源 Worker 中初始化 WebGL，避免阻塞启动页主线程',
+  );
   const html = await response.text();
   assert.match(html, /添加 Deck HTML/);
   assert.match(html, /一次只处理一份文件/);
@@ -173,6 +213,18 @@ test('导入页声明一次只添加一份 HTML，并要求随机令牌', async 
   assert.equal(liquidAsset.status, 200);
   assert.match(liquidAsset.headers.get('content-type') ?? '', /text\/javascript/);
   assert.match(await liquidAsset.text(), /createLiquidEtherBackground/);
+
+  const liquidEngineAsset = await fetch(
+    `${app.url}/app/liquid-ether-engine.mjs?token=${encodeURIComponent(app.token)}`,
+  );
+  assert.equal(liquidEngineAsset.status, 200);
+  assert.match(await liquidEngineAsset.text(), /class LiquidEtherEngine/);
+
+  const liquidWorkerAsset = await fetch(
+    `${app.url}/app/liquid-ether-worker.mjs?token=${encodeURIComponent(app.token)}`,
+  );
+  assert.equal(liquidWorkerAsset.status, 200);
+  assert.match(await liquidWorkerAsset.text(), /type:'ready'/);
 
   const threeAsset = await fetch(
     `${app.url}/app/three.module.min.js?token=${encodeURIComponent(app.token)}`,
@@ -304,6 +356,210 @@ test('修改 Deck 切换项目时保留后台 Editor，并在再次打开时复�
   assert.equal(invalid.status, 400);
   await app.close();
   assert.equal(editorClosed, 1);
+});
+
+test('明确重新打开已隐藏 Deck 后返回首页仍可继续正在运行的任务', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-app-reopen-hidden-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, '进行中.html');
+  await writeFile(deckPath, '<!doctype html>');
+  let editing = [{ deckPath, projectRoot:root, provider:'codex' }];
+  const workHistoryStore = {
+    async list() { return { version:1, creation:[], editing:[...editing] }; },
+    async recordDeck(entry) { editing = [{ ...entry, projectRoot:root }]; },
+    async dismissDeck() { editing = []; },
+  };
+  const workCatalog = new WorkCatalog({
+    filePath:join(root, 'work-catalog.json'),
+    legacyHistory:workHistoryStore,
+  });
+  const original = (await workCatalog.list()).editing[0];
+  await workHistoryStore.dismissDeck(deckPath);
+  await workCatalog.dismiss({
+    workId:original.workId,
+    expectedRevision:original.revision,
+  });
+
+  const app = await startAppServer({
+    token:'workspace-reopen-hidden-secret',
+    pickDeck:async () => deckPath,
+    workHistoryStore,
+    workCatalog,
+    resolveAgentProject:async () => ({
+      path:root, source:'explicit', needsConfirmation:false, warning:null,
+      identity:{ originalPath:root, realPath:root, dev:'1', ino:'2' },
+    }),
+    assertAgentProject:async project => project.path,
+    startEditor:async () => ({
+      url:'http://127.0.0.1:45690', token:'deck-token', editorToken:'editor-token',
+      close:async () => {},
+    }),
+  });
+  t.after(() => app.close());
+
+  const selected = await post(app, '/api/choose-deck').then(response => response.json());
+  await postJson(app, '/api/open-deck', {
+    candidateNonce:selected.candidateNonce,
+    selectionRevision:selected.selectionRevision,
+    provider:'codex',
+  });
+  await postJson(app, '/api/leave-workspace', { destination:'home' });
+
+  const history = await fetch(`${app.url}/api/work-history?token=${encodeURIComponent(app.token)}`)
+    .then(response => response.json());
+  assert.equal(history.editing.length, 1);
+  assert.equal(history.editing[0].workId, original.workId);
+  assert.equal(history.editing[0].runtimeState, 'background');
+
+  const replacementPath = join(root, '替换文件.html');
+  await writeFile(replacementPath, '<!doctype html><title>外部替换</title>');
+  await rename(replacementPath, deckPath);
+  const conflictedHistory = await fetch(
+    `${app.url}/api/work-history?token=${encodeURIComponent(app.token)}`,
+  ).then(response => response.json());
+  assert.equal(conflictedHistory.editing[0].binding.state, 'conflict');
+  assert.equal(conflictedHistory.editing[0].binding.reason, 'replaced');
+
+  const resumed = await postJson(app, '/api/resume-deck', { workId:original.workId });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json()).runtimeReused, true);
+});
+
+test('活动 Editor 已接受固化文件但目录写回遗漏时首页自动补齐可信绑定', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-app-runtime-binding-recovery-'));
+  const deckPath = join(root, '活动固化.html');
+  await writeFile(deckPath, '<!doctype html><title>固化前</title>');
+  let editing = [{ deckPath, projectRoot:root, provider:'codex' }];
+  const workHistoryStore = {
+    async list() { return { version:1, creation:[], editing:[...editing] }; },
+    async recordDeck(entry) { editing = [{ ...entry, projectRoot:root }]; },
+  };
+  const workCatalog = new WorkCatalog({
+    filePath:join(root, 'work-catalog.json'),
+    legacyHistory:workHistoryStore,
+  });
+  await workCatalog.list();
+  let runtimeBinding = null;
+  const app = await startAppServer({
+    token:'workspace-runtime-binding-recovery-secret',
+    pickDeck:async () => deckPath,
+    workHistoryStore,
+    workCatalog,
+    resolveAgentProject:async () => ({
+      path:root, source:'explicit', needsConfirmation:false, warning:null,
+      identity:{ originalPath:root, realPath:root, dev:'1', ino:'2' },
+    }),
+    assertAgentProject:async project => project.path,
+    startEditor:async options => {
+      runtimeBinding = await openDeckBinding({
+        deckId:options.deckId,
+        initialBinding:options.deckBinding,
+        storageRoot:root,
+        watch:false,
+      });
+      return {
+        url:'http://127.0.0.1:45691', token:'deck-token', editorToken:'editor-token',
+        deckId:options.deckId,
+        binding:runtimeBinding,
+        close:async () => {},
+      };
+    },
+  });
+  t.after(async () => {
+    await app.close();
+    await runtimeBinding?.close();
+    await rm(root, { recursive:true, force:true });
+  });
+
+  const selected = await post(app, '/api/choose-deck').then(response => response.json());
+  await postJson(app, '/api/open-deck', {
+    candidateNonce:selected.candidateNonce,
+    selectionRevision:selected.selectionRevision,
+    provider:'codex',
+  });
+  await postJson(app, '/api/leave-workspace', { destination:'home' });
+
+  const published = '<!doctype html><title>可信固化结果</title>';
+  const replacement = deckPath + '.published';
+  await writeFile(replacement, published);
+  await rename(replacement, deckPath);
+  await runtimeBinding.acceptPublishedFile({
+    expectedPath:deckPath,
+    expectedFingerprint:'sha256:' + createHash('sha256').update(published).digest('hex'),
+  });
+
+  const history = await fetch(`${app.url}/api/work-history?token=${encodeURIComponent(app.token)}`)
+    .then(response => response.json());
+  const [workItem] = history.editing;
+  assert.equal(workItem.binding.state, 'bound');
+  assert.equal(workItem.binding.reason, 'none');
+  assert.equal(workItem.binding.sourceFingerprint, runtimeBinding.snapshot().sourceFingerprint);
+
+  const persisted = await workCatalog.resolve(workItem.workId);
+  assert.deepEqual(persisted.binding.witness, runtimeBinding.snapshot().witness);
+  assert.equal(persisted.binding.sourceFingerprint, runtimeBinding.snapshot().sourceFingerprint);
+
+  const external = deckPath + '.external';
+  await writeFile(external, '<!doctype html><title>未经 Editor 接受的外部版本</title>');
+  await rename(external, deckPath);
+  const rejectedHistory = await fetch(
+    `${app.url}/api/work-history?token=${encodeURIComponent(app.token)}`,
+  ).then(response => response.json());
+  assert.equal(rejectedHistory.editing[0].binding.state, 'conflict');
+  assert.equal(rejectedHistory.editing[0].binding.reason, 'replaced');
+});
+
+test('没有活动 runtime 时 replaced 冲突仍可进入安全工作副本完成启动对账', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-app-replaced-resume-'));
+  const deckPath = join(root, '待对账.html');
+  await writeFile(deckPath, '<!doctype html><title>旧源文件</title>');
+  const workHistoryStore = {
+    async list() {
+      return { version:1, creation:[], editing:[{
+        deckPath, projectRoot:root, provider:'codex',
+      }] };
+    },
+    async recordDeck() {},
+    async resolveDeck() { return deckPath; },
+  };
+  const workCatalog = new WorkCatalog({
+    filePath:join(root, 'work-catalog.json'),
+    legacyHistory:workHistoryStore,
+  });
+  const workItem = (await workCatalog.list()).editing[0];
+  const replacement = deckPath + '.replacement';
+  await writeFile(replacement, '<!doctype html><title>新源文件</title>');
+  await rename(replacement, deckPath);
+  assert.equal((await workCatalog.list()).editing[0].binding.state, 'conflict');
+  let editorStarts = 0;
+  const app = await startAppServer({
+    token:'workspace-replaced-resume-secret',
+    workHistoryStore,
+    workCatalog,
+    resolveAgentProject:async () => ({
+      path:root, source:'explicit', needsConfirmation:false, warning:null,
+      identity:{ originalPath:root, realPath:root, dev:'1', ino:'2' },
+    }),
+    assertAgentProject:async project => project.path,
+    startEditor:async options => {
+      editorStarts += 1;
+      assert.equal(options.deckBinding.state, 'conflict');
+      return {
+        url:'http://127.0.0.1:45692', token:'deck-token', editorToken:'editor-token',
+        deckId:options.deckId,
+        close:async () => {},
+      };
+    },
+  });
+  t.after(async () => {
+    await app.close();
+    await rm(root, { recursive:true, force:true });
+  });
+
+  const resumed = await postJson(app, '/api/resume-deck', { workId:workItem.workId });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json()).status, 'selected');
+  assert.equal(editorStarts, 1);
 });
 
 test('用户直接关闭工作台页面时统一回收后台任务和初始页服务', async t => {

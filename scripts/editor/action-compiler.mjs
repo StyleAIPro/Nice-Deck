@@ -231,8 +231,16 @@ export function compileActionGroups(groups = []) {
           }
         }
       }
-      final.set(actionKey(action), {
+      const key = actionKey(action);
+      const previous = final.get(key);
+      final.set(key, {
         ...action,
+        // 同一属性的连续动作只发布最终值，但离线固化和
+        // replace 撤销必须从这条链的最早基线重放，不能把中间态
+        // 误当成 Deck 基线。源码修改判定为 superseded 时，旧动作
+        // 已在上方跳过，因此不会把跨源码边界的旧 before 带进来。
+        ...(previous && Object.hasOwn(previous, 'before')
+          ? { before:structuredClone(previous.before) } : {}),
         target:{
           ...(stableTargets.get(stableElementKey(action)) ?? action.target),
           ...(action.target.textPath === undefined ? {} : { textPath:action.target.textPath }),

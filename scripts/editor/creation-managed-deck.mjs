@@ -105,13 +105,24 @@ export class CreationManagedDeck {
     if (state.groups.length === 0) {
       return { solidified:false, revision:state.revision, clearedGroupCount:0 };
     }
-    const response = await fetch(`${this.editor.url}/api/solidify-deck`, {
+    const authorization = `Bearer ${this.editor.token}`;
+    const preflightResponse = await fetch(`${this.editor.url}/api/solidify-preflight`, {
       method:'POST',
       headers:{
-        authorization:`Bearer ${this.editor.token}`,
+        authorization,
         'content-type':'application/json',
       },
       body:JSON.stringify({ expectedRevision:state.revision }),
+    });
+    const preflight = await responseJson(preflightResponse);
+    const response = await fetch(`${this.editor.url}/api/solidify-deck`, {
+      method:'POST',
+      headers:{ authorization, 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:state.revision,
+        expectedBindingRevision:preflight.bindingRevision,
+        preflightToken:preflight.preflightToken,
+      }),
     });
     return { solidified:true, ...await responseJson(response) };
   }

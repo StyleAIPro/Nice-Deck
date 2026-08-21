@@ -5,6 +5,7 @@ import {
 } from '/editor/attachment-protocol.mjs';
 import { enhanceColorInput, enhanceSelect } from '/editor/native-controls.mjs';
 import { applyPill, installPillNav, setPillLabel } from '/editor/pill-nav.mjs';
+import { isRegionShortcutKey } from '/editor/editor-shortcuts.mjs';
 
 const pillStyles = document.querySelector('link[href="/editor/pill-nav.css"]')
   ?? document.createElement('link');
@@ -133,6 +134,7 @@ const onPatchReplayFailure = event => {
   }, location.origin);
 };
 const INTERACTIVE_TRANSFORM_SELECTOR = 'svg,a,button,input,select,textarea,iframe,[role="button"],.layer-panel';
+const TRANSFORM_DRAG_START_PX = 7;
 const EDIT_MODE_ALIASES = new Set(['edit', 'text', 'move', 'resize']);
 const INSPECTOR_STYLE_PROPERTIES = new Set([
   'color', 'background-color', 'font-family', 'font-size', 'font-style', 'font-weight',
@@ -402,7 +404,7 @@ style.textContent = `
   [data-direct-status]{position:fixed;z-index:2147483641;left:50%;bottom:24px;max-width:520px;padding:10px 16px;border-radius:8px;background:#24262b;color:#fff;box-shadow:0 10px 26px rgba(0,0,0,.24);font:600 14px/1.45 "Huawei Deck UI","Noto Sans SC",sans-serif;transform:translateX(-50%);pointer-events:none}
   [data-direct-status][data-state="error"]{background:#8f1018}
   [data-text-format-toolbar]{position:fixed;z-index:2147483642;display:flex;align-items:center;gap:5px;width:max-content;max-width:620px;padding:7px;border:1px solid rgba(25,25,25,.16);border-radius:10px;background:rgba(255,255,255,.98);box-shadow:0 10px 30px rgba(25,25,25,.24);box-sizing:border-box;transform-origin:0 0;font:600 12px/1 "Huawei Deck UI","Noto Sans SC",sans-serif}
-  [data-text-format-toolbar] button:not(.pill-nav-control),[data-text-format-toolbar] select{height:28px;border:1px solid rgba(25,25,25,.13);border-radius:6px;background:#fff;color:#34363a;font:inherit;cursor:pointer}
+  [data-text-format-toolbar] button:not(.pill-nav-control):not(.ui-color-trigger),[data-text-format-toolbar] select{height:28px;border:1px solid rgba(25,25,25,.13);border-radius:6px;background:#fff;color:#34363a;font:inherit;cursor:pointer}
   [data-text-format-toolbar] button:not(.pill-nav-control){min-width:28px;padding:0 7px}
   [data-text-format-toolbar] button:not(.pill-nav-control)[aria-pressed="true"],[data-text-format-toolbar] button:not(.pill-nav-control)[aria-pressed="mixed"]{border-color:rgba(199,0,11,.35);background:rgba(199,0,11,.09);color:#a10d15}
   [data-text-format-toolbar] select{width:112px;padding:0 6px}
@@ -412,9 +414,16 @@ style.textContent = `
   [data-text-format-toolbar] input[type="color"]{position:absolute;inset:-8px;width:44px;height:44px;padding:0;border:0;cursor:pointer;opacity:0}
   [data-text-format-toolbar] [data-toolbar-divider]{width:1px;height:20px;background:rgba(25,25,25,.12)}
   [data-transform-selection]{position:fixed;z-index:2147483637;box-sizing:border-box;border:2px solid #c7000b;background:rgba(199,0,11,.035);pointer-events:none}
+  [data-transform-move-handle]{position:fixed;z-index:2147483639;background:transparent;cursor:grab;touch-action:none}
   [data-resize-handle]{position:fixed;z-index:2147483640;box-sizing:border-box;border:2px solid #fff;border-radius:3px;background:#c7000b;box-shadow:0 1px 5px rgba(0,0,0,.3);cursor:nwse-resize;touch-action:none}
+  html[data-deck-editor-mode="edit"][data-deck-editor-move-cursor] .slide-canvas,
+  html[data-deck-editor-mode="edit"][data-deck-editor-move-cursor] .slide-canvas *{cursor:grab!important}
+  html[data-deck-editor-mode="edit"][data-deck-editor-text-cursor] .slide-canvas,
+  html[data-deck-editor-mode="edit"][data-deck-editor-text-cursor] .slide-canvas *{cursor:text!important}
   [data-direct-editing]{cursor:text!important}
   html[data-deck-editor-dragging="translate"],html[data-deck-editor-dragging="translate"] *{cursor:grabbing!important}
+  [data-transform-commit-source]{visibility:hidden!important}
+  [data-transform-commit-preview]{pointer-events:none!important;user-select:none!important}
   html[data-deck-editor-dragging="resize"],html[data-deck-editor-dragging="resize"] *{cursor:nwse-resize!important}
   @keyframes deck-editor-pulse{from{box-shadow:0 0 0 0 rgba(230,0,18,.35)}to{box-shadow:0 0 0 8px rgba(230,0,18,0)}}
 `;
@@ -453,6 +462,17 @@ function onPageActivation(event) {
   const tracked = trackedPageActivation(event);
   if (!tracked) return;
   pageActivations.set(runtime.pageKey(tracked.canvas), tracked.activation);
+}
+
+function suppressDeckClickDuringEdit(event) {
+  if (!isEditMode()) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest('.slide-canvas') || target.closest('[data-deck-editor-ui]')) return;
+  // 编辑态的一次点击只能属于 Editor。若继续交给 Deck 自身的 click 监听器，
+  // 放映步进、layer 切换等逻辑会在选中文字/元素的同时改写页面 DOM，随后让
+  // 活跃历史动作在另一套版面上重放，造成视觉跳变和 TARGET_AMBIGUOUS。
+  event.preventDefault();
+  event.stopImmediatePropagation();
 }
 
 function capturePageState(canvas) {
@@ -818,6 +838,8 @@ function onPointerOut(event) {
   if (!event.relatedTarget) {
     setSurfacePointerPresence(false);
     removeRegionClickHint();
+    delete document.documentElement.dataset.deckEditorMoveCursor;
+    delete document.documentElement.dataset.deckEditorTextCursor;
   }
 }
 
@@ -1307,7 +1329,11 @@ function locateTextCandidates(query, requestedPageKey = null) {
 
 function directTextTarget(event) {
   const selected = transformSelection?.element;
-  const element = selected?.isConnected && selected.contains(event.target)
+  // 调整表格行高后 selection 暂时指向 TR。下一次点击行内文字时
+  // 必须重新定位到单元格内的文字框，不能把整行设为 contenteditable。
+  const reusableSelection = selected?.isConnected
+    && !selected.matches('table,thead,tbody,tfoot,tr,colgroup,col');
+  const element = reusableSelection && selected.contains(event.target)
     ? selected : editableTransformTarget(event);
   const rejection = textRejection(element, { allowChildren:true });
   if (rejection) return { rejection };
@@ -1348,6 +1374,50 @@ function placeDirectEditCaret(element, event) {
   selection.addRange(range);
 }
 
+function minimalTextReplacement(before, after) {
+  let start = 0;
+  const sharedLength = Math.min(before.length, after.length);
+  while (start < sharedLength && before[start] === after[start]) start += 1;
+  let beforeEnd = before.length;
+  let afterEnd = after.length;
+  while (beforeEnd > start && afterEnd > start
+    && before[beforeEnd - 1] === after[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  return {
+    text:after.slice(start, afterEnd),
+    sourceRange:{ start, end:beforeEnd },
+  };
+}
+
+function richTextRunChanges(state, nextText) {
+  const replacement = minimalTextReplacement(state.originalText, nextText);
+  const { start, end } = replacement.sourceRange;
+  let affected = state.originalRuns.filter(run => (
+    start === end
+      ? run.sourceRange.start <= start && run.sourceRange.end >= start
+      : run.sourceRange.end > start && run.sourceRange.start < end
+  ));
+  if (affected.length === 0 && start === end && state.originalRuns.length > 0) {
+    affected = [state.originalRuns.at(-1)];
+  }
+  return affected.flatMap((run, index) => {
+    const localStart = Math.max(0, Math.min(run.text.length, start - run.sourceRange.start));
+    const localEnd = Math.max(localStart, Math.min(run.text.length, end - run.sourceRange.start));
+    const first = index === 0;
+    const last = index === affected.length - 1;
+    const text = `${first ? run.text.slice(0, localStart) : ''}`
+      + `${first ? replacement.text : ''}`
+      + `${last ? run.text.slice(localEnd) : ''}`;
+    if (text === run.text) return [];
+    return [{
+      target:{ ...state.target, textPath:run.path }, text,
+      sourceRange:run.sourceRange,
+    }];
+  });
+}
+
 function commitDirectEdit() {
   if (!directEdit || directEdit.committing) return;
   directEdit.committing = true;
@@ -1367,7 +1437,9 @@ function commitDirectEdit() {
       }]
     ));
   } else if (nextText !== state.originalText) {
-    changes = [{ target:state.target, text:nextText }];
+    // 富文本内部结构被浏览器重新组织时，只提交实际变化的文字范围。
+    // 整容器 setText 会抹掉全部子节点，并使既有样式动作的稳定目标失效。
+    changes = richTextRunChanges(state, nextText);
   }
   finishDirectEdit({ restore: true });
   if (requiresAuthoritativeReload) return;
@@ -1388,26 +1460,26 @@ function commitDirectEdit() {
   });
 }
 
-function onDoubleClick(event) {
-  if (!isEditMode()) return;
-  if (directEdit?.element?.contains(event.target)) return;
+function beginDirectTextEdit(event, { useNativePointer = false } = {}) {
+  if (!isEditMode()) return false;
+  if (directEdit?.element?.contains(event.target)) return true;
   const directTarget = directTextTarget(event);
   const rejection = directTarget.rejection;
   if (rejection) {
     showStatus(rejection, 'error');
-    event.preventDefault();
-    return;
+    if (!useNativePointer) event.preventDefault();
+    return false;
   }
-  finishDirectEdit();
+  if (directEdit) commitDirectEdit();
   cancelTransformDrag();
   clearTextRangeSelection({ notify:false });
-  removeTransformSelection();
   const { element } = directTarget;
   let target;
   try {
     target = runtime.makeLocator(element);
   }
-  catch { showStatus('无法定位该文字，请改用区域标记', 'error'); return; }
+  catch { showStatus('无法定位该文字，请改用区域标记', 'error'); return false; }
+  if (transformSelection?.element !== element) selectTransformElement(element, true, target);
   directEdit = {
     element, target, originalText: element.textContent ?? '',
     originalHTML:element.innerHTML, originalRuns:directTextRuns(element),
@@ -1416,15 +1488,23 @@ function onDoubleClick(event) {
     formatRoot:element, formatTarget:target,
     resumeReplay: runtime.suspendTarget?.(target),
   };
+  delete document.documentElement.dataset.deckEditorMoveCursor;
+  document.documentElement.dataset.deckEditorTextCursor = '';
   element.setAttribute('contenteditable', 'plaintext-only');
   element.dataset.directEditing = '';
   element.spellcheck = false;
   element.addEventListener('blur', onDirectEditBlur);
   updateUiScale();
   element.focus({ preventScroll: true });
-  placeDirectEditCaret(element, event);
+  if (!useNativePointer) placeDirectEditCaret(element, event);
   showStatus('点击别处或 Cmd/Ctrl+Enter 提交 · Escape 取消');
-  event.preventDefault();
+  if (!useNativePointer) event.preventDefault();
+  return true;
+}
+
+function onDoubleClick(event) {
+  if (directEdit?.element?.contains(event.target)) return;
+  beginDirectTextEdit(event);
 }
 
 function editableTransformTarget(event) {
@@ -1529,18 +1609,24 @@ function clearTextRangeSelection({ notify = true } = {}) {
   if (notify) publishInspectorSelection();
 }
 
+function textFormatToolbarOwnsFocus() {
+  return Boolean(document.activeElement?.closest?.(
+    '[data-text-format-toolbar], [data-text-format-toolbar-owner]',
+  ));
+}
+
 function updateTextRangeSelection() {
   if (!directEdit?.formatRoot?.isConnected) return;
   const selection = document.getSelection();
   if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) {
-    if (document.activeElement?.closest?.('[data-text-format-toolbar]')) return;
+    if (textFormatToolbarOwnsFocus()) return;
     if (document.hasFocus()) clearTextRangeSelection();
     return;
   }
   const range = selection.getRangeAt(0);
   const root = directEdit.formatRoot;
   if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
-    if (document.activeElement?.closest?.('[data-text-format-toolbar]')) return;
+    if (textFormatToolbarOwnsFocus()) return;
     if (document.hasFocus()) clearTextRangeSelection();
     return;
   }
@@ -1700,6 +1786,7 @@ function publishInspectorSelection() {
 
 function removeTransformSelection({ notify = true } = {}) {
   transformSelection?.overlay.remove();
+  for (const moveHandle of transformSelection?.moveHandles ?? []) moveHandle.remove();
   transformSelection?.handle?.remove();
   transformSelection = null;
   if (notify) publishInspectorSelection();
@@ -1725,8 +1812,19 @@ function positionTransformSelection() {
   if (!transformSelection?.element.isConnected) return removeTransformSelection();
   const rect = transformSelection.element.getBoundingClientRect();
   setBox(transformSelection.overlay, rect);
-  if (!transformSelection.handle) return;
   const scale = frameVisualScale();
+  const hitWidth = 10 / scale.x;
+  const hitHeight = 10 / scale.y;
+  const moveBoxes = {
+    top:{ left:rect.left, top:rect.top - hitHeight / 2, width:rect.width, height:hitHeight },
+    right:{ left:rect.right - hitWidth / 2, top:rect.top, width:hitWidth, height:rect.height },
+    bottom:{ left:rect.left, top:rect.bottom - hitHeight / 2, width:rect.width, height:hitHeight },
+    left:{ left:rect.left - hitWidth / 2, top:rect.top, width:hitWidth, height:rect.height },
+  };
+  for (const moveHandle of transformSelection.moveHandles) {
+    setBox(moveHandle, moveBoxes[moveHandle.dataset.transformMoveHandle]);
+  }
+  if (!transformSelection.handle) return;
   const width = 14 / scale.x;
   const height = 14 / scale.y;
   setBox(transformSelection.handle, {
@@ -1759,6 +1857,13 @@ function selectTransformElement(element, withHandle, target) {
   const overlay = document.createElement('div');
   overlay.dataset.deckEditorUi = '';
   overlay.dataset.transformSelection = '';
+  const moveHandles = ['top', 'right', 'bottom', 'left'].map(side => {
+    const moveHandle = document.createElement('div');
+    moveHandle.dataset.deckEditorUi = '';
+    moveHandle.dataset.transformMoveHandle = side;
+    moveHandle.setAttribute('aria-hidden', 'true');
+    return moveHandle;
+  });
   let handle = null;
   if (withHandle) {
     handle = document.createElement('div');
@@ -1767,17 +1872,17 @@ function selectTransformElement(element, withHandle, target) {
     handle.setAttribute('role', 'button');
     handle.setAttribute('aria-label', '拖动缩放元素');
   }
-  document.body.append(overlay);
+  document.body.append(overlay, ...moveHandles);
   if (handle) document.body.append(handle);
   transformSelection = {
-    element, overlay, handle, target:target ?? runtime.makeLocator(element),
+    element, overlay, moveHandles, handle, target:target ?? runtime.makeLocator(element),
     selectionId:crypto.randomUUID(),
   };
   positionTransformSelection();
   publishInspectorSelection();
 }
 
-function restoreTransformPreview(state) {
+function restoreTransformPreview(state, { position = true } = {}) {
   if (state.kind === 'translate') {
     if (state.originalTranslate) state.element.style.translate = state.originalTranslate;
     else state.element.style.removeProperty('translate');
@@ -1790,7 +1895,41 @@ function restoreTransformPreview(state) {
     if (state.originalHeight) state.element.style.height = state.originalHeight;
     else state.element.style.removeProperty('height');
   }
-  positionTransformSelection();
+  if (position) positionTransformSelection();
+}
+
+function retainTransformCommitPreview(state) {
+  const preview = state.element.cloneNode(true);
+  const sourceNodes = [state.element, ...state.element.querySelectorAll('*')];
+  const previewNodes = [preview, ...preview.querySelectorAll('*')];
+  for (const [index, node] of previewNodes.entries()) {
+    node.removeAttribute('id');
+    node.removeAttribute('data-editor-id');
+    node.removeAttribute('contenteditable');
+    const computed = getComputedStyle(sourceNodes[index]);
+    for (let propertyIndex = 0; propertyIndex < computed.length; propertyIndex += 1) {
+      const property = computed[propertyIndex];
+      node.style.setProperty(property, computed.getPropertyValue(property), 'important');
+    }
+  }
+  const rect = state.element.getBoundingClientRect();
+  Object.entries({
+    position:'fixed', left:`${rect.left}px`, top:`${rect.top}px`, right:'auto', bottom:'auto',
+    margin:'0', width:`${rect.width}px`, height:`${rect.height}px`, 'box-sizing':'border-box',
+    transform:'none', translate:'none', scale:'none', rotate:'none', 'z-index':'2147483639',
+  }).forEach(([property, value]) => preview.style.setProperty(property, value, 'important'));
+  preview.dataset.deckEditorUi = '';
+  preview.dataset.transformCommitPreview = '';
+  preview.setAttribute('aria-hidden', 'true');
+  state.element.dataset.transformCommitSource = '';
+  document.body.append(preview);
+  let removed = false;
+  return () => {
+    if (removed) return;
+    removed = true;
+    delete state.element.dataset.transformCommitSource;
+    preview.remove();
+  };
 }
 
 function cancelTransformDrag() {
@@ -1807,14 +1946,37 @@ function beginMove(event, element) {
   let target;
   try { target = runtime.makeLocator(element); } catch { return; }
   const canvas = element.closest('.slide-canvas');
-  selectTransformElement(element, true, target);
+  clearTextRangeSelection({ notify:false });
+  if (transformSelection?.element !== element) selectTransformElement(element, true, target);
+  else positionTransformSelection();
+  const capture = event.target.closest?.('[data-transform-move-handle]') ?? element;
   transformDrag = {
-    kind: 'translate', pointerId: event.pointerId, capture: element, element, target, canvas,
+    kind: 'translate', pointerId: event.pointerId, capture, element, target, canvas,
     start: { x: event.clientX, y: event.clientY }, base: currentTranslate(element),
     current: currentTranslate(element), originalTranslate: element.style.translate, changed: false,
   };
-  element.setPointerCapture?.(event.pointerId);
+  capture.setPointerCapture?.(event.pointerId);
   event.preventDefault();
+}
+
+function updateEditPointerCursor(event) {
+  const moving = transformDrag?.kind === 'translate';
+  const directText = directEdit?.element?.contains(event.target);
+  const element = mode === 'edit' && !directText && !moving
+    ? editableTransformTarget(event) : null;
+  const textTarget = Boolean(directText || (element && inspectorKind(element) === 'text'
+    && !textRejection(element, { allowChildren:true })));
+  const moveTarget = Boolean(moving || (element && !textTarget));
+  if (mode === 'edit' && moveTarget) {
+    document.documentElement.dataset.deckEditorMoveCursor = '';
+  } else {
+    delete document.documentElement.dataset.deckEditorMoveCursor;
+  }
+  if (mode === 'edit' && textTarget) {
+    document.documentElement.dataset.deckEditorTextCursor = '';
+  } else {
+    delete document.documentElement.dataset.deckEditorTextCursor;
+  }
 }
 
 function isScaleTarget(element) {
@@ -1824,15 +1986,25 @@ function isScaleTarget(element) {
 
 function beginResize(event) {
   if (!transformSelection?.element) return;
-  const element = transformSelection.element;
+  const selectedElement = transformSelection.element;
+  // HTML 表格单元格的宽高由整列/整行联动计算，直接给 TD/TH
+  // 同时写 width/height 会让其他行的计算尺寸漂移，并破坏历史重放。
+  // 用户从单元格右下控制点拖动时，改为调整该表格行的高度。
+  const tableRow = selectedElement.matches('td,th') ? selectedElement.closest('tr') : null;
+  const element = tableRow ?? selectedElement;
   let target;
   try { target = runtime.makeLocator(element); } catch { return; }
   const rect = element.getBoundingClientRect();
-  const scaleTarget = isScaleTarget(element);
+  const scaleTarget = !tableRow && isScaleTarget(element);
+  if (tableRow) {
+    transformSelection.element = tableRow;
+    transformSelection.target = target;
+    positionTransformSelection();
+  }
   transformDrag = {
     kind: 'resize', pointerId: event.pointerId, capture: event.target, element, target,
     canvas: element.closest('.slide-canvas'), start: { x: event.clientX, y: event.clientY },
-    scaleTarget, changed: false,
+    scaleTarget, lockWidth:Boolean(tableRow), changed: false,
     baseScale: Number.parseFloat(getComputedStyle(element).scale) || 1,
     baseSize: { width: rect.width, height: rect.height },
     current: scaleTarget ? { scale: Number.parseFloat(getComputedStyle(element).scale) || 1 }
@@ -1852,7 +2024,7 @@ function onTransformPointerMove(event) {
   const visualScale = frameVisualScale();
   const screenDx = (event.clientX - state.start.x) * visualScale.x;
   const screenDy = (event.clientY - state.start.y) * visualScale.y;
-  if (!state.changed && Math.hypot(screenDx, screenDy) < 3) {
+  if (!state.changed && Math.hypot(screenDx, screenDy) <= TRANSFORM_DRAG_START_PX) {
     event.preventDefault();
     return true;
   }
@@ -1869,7 +2041,9 @@ function onTransformPointerMove(event) {
     state.element.style.scale = String(state.current.scale);
   } else {
     state.current = {
-      width: Math.max(1, Math.round(state.baseSize.width + dx)),
+      width: state.lockWidth
+        ? Math.max(1, Math.round(state.baseSize.width))
+        : Math.max(1, Math.round(state.baseSize.width + dx)),
       height: Math.max(1, Math.round(state.baseSize.height + dy)),
     };
     state.element.style.width = `${state.current.width}px`;
@@ -1886,20 +2060,31 @@ function finishTransformPointer(event) {
   transformDrag = null;
   delete document.documentElement.dataset.deckEditorDragging;
   state.capture?.releasePointerCapture?.(state.pointerId);
-  restoreTransformPreview(state);
   if (requiresAuthoritativeReload) {
+    restoreTransformPreview(state);
     requestAuthoritativeReloadIfSettled();
     event.preventDefault();
     return true;
   }
-  if (!state.changed && state.kind === 'resize') return true;
+  if (!state.changed && state.kind === 'resize') {
+    restoreTransformPreview(state);
+    return true;
+  }
   if (state.kind === 'translate'
-    && state.current.x === state.base.x && state.current.y === state.base.y) return true;
+    && state.current.x === state.base.x && state.current.y === state.base.y) {
+    restoreTransformPreview(state);
+    return true;
+  }
+  // 真实元素必须先回到权威基线，让 runtime 读到正确 before；
+  // 同时保留一份最终位置的纯视觉副本，避免服务端确认期间闪回。
+  const releaseCommitPreview = retainTransformCommitPreview(state);
+  restoreTransformPreview(state, { position:false });
   const action = {
     id: crypto.randomUUID(), taskId: null, target: state.target,
     kind: state.kind, payload: state.current,
   };
   submitManualActions([action], result => {
+    releaseCommitPreview();
     if (result.ok && (result.sessionRefreshPending || result.syncPending || result.recoveredBySync)) {
       showStatus(manualSuccessMessage(result, '变换已记录'));
     } else if (!result.ok) showStatus(manualFailureMessage(result, '变换失败，已恢复原状态'), 'error');
@@ -1914,14 +2099,27 @@ function onPointerDown(event) {
   parent.postMessage({ type:'editor-surface-pointerdown' }, location.origin);
   removeRegionClickHint();
   const currentMode = effectiveMode();
-  if (directEdit) return;
-  if (currentMode === 'edit' && event.target.closest?.('[data-resize-handle]')) {
+  const moveHandle = event.target.closest?.('[data-transform-move-handle]');
+  if (currentMode === 'edit' && event.button === 0 && moveHandle && transformSelection?.element) {
+    if (directEdit) commitDirectEdit();
+    beginMove(event, transformSelection.element);
+    return;
+  }
+  if (currentMode === 'edit' && event.button === 0
+    && event.target.closest?.('[data-resize-handle]')) {
+    if (directEdit) commitDirectEdit();
     beginResize(event);
     return;
   }
+  if (event.target.closest?.('[data-deck-editor-ui]')) return;
+  if (directEdit?.element?.contains(event.target)) return;
+  if (directEdit) commitDirectEdit();
   if (currentMode === 'edit' && event.button === 0) {
     const element = editableTransformTarget(event);
-    if (element) beginMove(event, element);
+    if (element && inspectorKind(element) === 'text'
+      && !textRejection(element, { allowChildren:true })) {
+      beginDirectTextEdit(event, { useNativePointer:true });
+    } else if (element) beginMove(event, element);
     else removeTransformSelection();
     return;
   }
@@ -1949,6 +2147,7 @@ function onPointerDown(event) {
 
 function onPointerMove(event) {
   setSurfacePointerPresence(true);
+  updateEditPointerCursor(event);
   updateRegionClickHint(event);
   if (onTransformPointerMove(event)) return;
   if (!dragging || event.pointerId !== dragging.pointerId) return;
@@ -2091,7 +2290,9 @@ function toolbarColor(value) {
   return `#${match.slice(1, 4).map(part => Number(part).toString(16).padStart(2, '0')).join('')}`;
 }
 
-function submitToolbarStyles(state, changes, { elementScope = false } = {}) {
+function submitToolbarStyles(state, changes, {
+  elementScope = false, coalesceKey = '',
+} = {}) {
   const actionState = elementScope
     ? { element:state.element, target:state.target } : state;
   const actions = styleActionsForState(actionState, changes);
@@ -2104,7 +2305,7 @@ function submitToolbarStyles(state, changes, { elementScope = false } = {}) {
     restoreTextRangeSelection(state);
     publishInspectorSelection();
     if (!result.ok) showStatus(manualFailureMessage(result, '文字格式修改失败'), 'error');
-  });
+  }, { coalesceKey });
 }
 
 function positionTextFormatToolbar(state) {
@@ -2184,13 +2385,23 @@ function renderTextFormatToolbar(state) {
   fontSelect.addEventListener('change', () => submitToolbarStyles(state, [{
     property:'font-family', value:fontSelect.value,
   }]));
-  const fontSelectControl = enhanceSelect(fontSelect, { minimumMenuWidth:180 }).root;
+  const enhancedFontSelect = enhanceSelect(fontSelect, { minimumMenuWidth:180 });
+  enhancedFontSelect.menu.dataset.textFormatToolbarOwner = '';
+  const fontSelectControl = enhancedFontSelect.root;
   const divider = () => {
     const node = document.createElement('span');
     node.dataset.toolbarDivider = '';
     return node;
   };
-  const fontSize = Number.parseFloat(styleStateForShortcut(state, 'font-size')) || 24;
+  // 工具条在请求完成前仍可继续点按。字号必须在每次点击时先更新本地步进值，
+  // 不能捕获一次旧字号后反复提交同一个值。
+  let steppedFontSize = Number.parseFloat(styleStateForShortcut(state, 'font-size')) || 24;
+  const adjustFontSize = delta => {
+    steppedFontSize = Math.max(6, Math.min(240, Math.round(steppedFontSize + delta)));
+    submitToolbarStyles(state, [{
+      property:'font-size', value:`${steppedFontSize}px`,
+    }], { coalesceKey:`文字选区:${state.selectionId}:font-size` });
+  };
   const colorLabel = document.createElement('label');
   const colorInput = document.createElement('input');
   colorInput.type = 'color';
@@ -2202,19 +2413,16 @@ function renderTextFormatToolbar(state) {
     colorLabel.style.setProperty('--toolbar-color', colorInput.value);
     submitToolbarStyles(state, [{ property:'color', value:colorInput.value }]);
   });
-  enhanceColorInput(colorInput);
+  const enhancedColorInput = enhanceColorInput(colorInput);
+  enhancedColorInput.popover.dataset.textFormatToolbarOwner = '';
   const align = (value, label, text) => button(label, text, () => submitToolbarStyles(state, [{
     property:'text-align', value,
   }], { elementScope:true }), String(getComputedStyle(state.element).textAlign === value));
   toolbar.append(
     fontSelectControl,
     toggle('b', '加粗', 'B'), toggle('i', '斜体', 'I'), toggle('u', '下划线', 'U'),
-    button('字号减小', 'A−', () => submitToolbarStyles(state, [{
-      property:'font-size', value:`${Math.max(6, Math.round(fontSize - 1))}px`,
-    }])),
-    button('字号增大', 'A+', () => submitToolbarStyles(state, [{
-      property:'font-size', value:`${Math.min(240, Math.round(fontSize + 1))}px`,
-    }])),
+    button('字号减小', 'A−', () => adjustFontSize(-1)),
+    button('字号增大', 'A+', () => adjustFontSize(1)),
     divider(),
     colorLabel, divider(),
     align('left', '左对齐', '≡←'), align('center', '居中', '≡'), align('right', '右对齐', '→≡'),
@@ -2249,10 +2457,68 @@ function applyFormattingShortcut(event) {
   return true;
 }
 
+function deleteSelectedTransform(selectionId) {
+  if (!isEditMode() || directEdit || transformDrag
+    || pendingManual.size > 0 || tentativeCommands.size > 0
+    || !transformSelection?.element?.isConnected || !transformSelection.target
+    || transformSelection.selectionId !== selectionId) return false;
+  const selected = transformSelection;
+  showStatus('正在删除所选元素…');
+  submitManualActions([{
+    id:crypto.randomUUID(), taskId:null, target:selected.target,
+    kind:'hide', payload:{},
+  }], result => {
+    if (result.ok) {
+      if (transformSelection?.selectionId === selected.selectionId) {
+        removeTransformSelection();
+      }
+      showStatus(manualSuccessMessage(result, '元素已删除，可用 Cmd/Ctrl+Z 撤销'));
+      return;
+    }
+    if (transformSelection?.selectionId === selected.selectionId) {
+      positionTransformSelection();
+      publishInspectorSelection();
+    }
+    showStatus(manualFailureMessage(result, '元素删除失败'), 'error');
+  });
+  return true;
+}
+
+function deleteTransformSelection(event, acceptsNativeShortcut) {
+  if (acceptsNativeShortcut || !['Delete', 'Backspace'].includes(event.key)
+    || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
+  if (event.repeat) {
+    if (!transformSelection) return false;
+    event.preventDefault();
+    return true;
+  }
+  if (!deleteSelectedTransform(transformSelection?.selectionId)) return false;
+  event.preventDefault();
+  return true;
+}
+
 function onKeyDown(event) {
   if (applyFormattingShortcut(event)) return;
+  const shortcutKey = event.key.toLowerCase();
+  const shortcutMethod = !event.altKey && (event.metaKey || event.ctrlKey)
+    ? (shortcutKey === 'z' ? (event.shiftKey ? 'redo' : 'undo')
+      : (shortcutKey === 'y' && event.ctrlKey && !event.metaKey && !event.shiftKey
+        ? 'redo' : null))
+    : null;
   if (directEdit) {
-    if (event.key === 'Escape') {
+    if (shortcutMethod) {
+      event.preventDefault();
+      // contenteditable 的原生 undo 栈也会记录 runtime 插入的文字范围样式节点，
+      // 让浏览器自行撤销可能把选中文字或富文本结构一起删掉。尚未提交的键入
+      // 先恢复进入编辑时的内容；纯格式操作则交给 Editor 的统一历史队列。
+      if ((directEdit.element.textContent ?? '') !== directEdit.originalText) {
+        clearTextRangeSelection();
+        finishDirectEdit();
+        showStatus('已撤销尚未提交的文字输入');
+      } else {
+        parent.postMessage({ type:'history-shortcut', method:shortcutMethod }, location.origin);
+      }
+    } else if (event.key === 'Escape') {
       event.preventDefault();
       clearTextRangeSelection();
       finishDirectEdit();
@@ -2263,17 +2529,12 @@ function onKeyDown(event) {
     }
     return;
   }
-  const shortcutKey = event.key.toLowerCase();
-  const shortcutMethod = !event.altKey && (event.metaKey || event.ctrlKey)
-    ? (shortcutKey === 'z' ? (event.shiftKey ? 'redo' : 'undo')
-      : (shortcutKey === 'y' && event.ctrlKey && !event.metaKey && !event.shiftKey
-        ? 'redo' : null))
-    : null;
   const shortcutElement = event.target instanceof Element ? event.target : event.target?.parentElement;
   const acceptsNativeShortcut = shortcutElement?.closest(
     'input,textarea,select,[role="textbox"],[contenteditable]:not([contenteditable="false"])',
   );
-  if (shortcutKey === 'r' && (isEditMode() || mode === 'region')
+  if (deleteTransformSelection(event, acceptsNativeShortcut)) return;
+  if (isRegionShortcutKey(event) && (isEditMode() || mode === 'region')
     && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
     && !acceptsNativeShortcut) {
     event.preventDefault();
@@ -2295,7 +2556,7 @@ function onKeyDown(event) {
 }
 
 function onKeyUp(event) {
-  if (event.key.toLowerCase() !== 'r') return;
+  if (!isRegionShortcutKey(event)) return;
   parent.postMessage({ type:'temporary-region-shortcut', active:false }, location.origin);
 }
 
@@ -2311,6 +2572,11 @@ function rollbackAllTentative() {
 
 function onParentMessage(event) {
   if (event.origin !== location.origin || event.source !== parent) return;
+  if (event.data?.type === 'delete-transform-selection'
+    && typeof event.data.selectionId === 'string') {
+    deleteSelectedTransform(event.data.selectionId);
+    return;
+  }
   if (event.data?.type === 'show-authoritative-reload-notice') {
     showStatus('页面重建，未提交编辑已取消');
     return;
@@ -2331,6 +2597,8 @@ function onParentMessage(event) {
     mode = nextMode;
     document.documentElement.dataset.deckEditorMode = mode;
     document.documentElement.style.cursor = mode === 'region' ? 'crosshair' : '';
+    delete document.documentElement.dataset.deckEditorMoveCursor;
+    delete document.documentElement.dataset.deckEditorTextCursor;
     if (mode !== 'region') removeRegionClickHint();
     if (mode !== 'region' && event.data.preserveRegionPopover !== true) removePopover();
     return;
@@ -2601,10 +2869,13 @@ function teardown() {
   pillStyles.remove();
   document.documentElement.style.cursor = '';
   delete document.documentElement.dataset.deckEditorDragging;
+  delete document.documentElement.dataset.deckEditorMoveCursor;
+  delete document.documentElement.dataset.deckEditorTextCursor;
   delete document.documentElement.dataset.deckEditorMode;
   document.documentElement.style.removeProperty('--deck-editor-ui-scale-x');
   document.documentElement.style.removeProperty('--deck-editor-ui-scale-y');
   window.removeEventListener('message', onParentMessage);
+  window.removeEventListener('click', suppressDeckClickDuringEdit, true);
   window.removeEventListener('dblclick', onDoubleClick, true);
   window.removeEventListener('keydown', onKeyDown, true);
   window.removeEventListener('keyup', onKeyUp, true);
@@ -2624,6 +2895,7 @@ function teardown() {
 
 if (parent !== window) {
   window.addEventListener('message', onParentMessage);
+  window.addEventListener('click', suppressDeckClickDuringEdit, true);
   window.addEventListener('dblclick', onDoubleClick, true);
   window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('keyup', onKeyUp, true);

@@ -166,6 +166,8 @@ export function verifyWorkingPatchReplay(path, {
       try { report = JSON.parse(stdout.trim()); } catch { /* 保留原始诊断。 */ }
       const failedActionId = typeof report?.error?.failedActionId === 'string'
         && report.error.failedActionId ? report.error.failedActionId : undefined;
+      const replayCode = typeof report?.error?.code === 'string'
+        && report.error.code ? report.error.code : undefined;
       const replayFailed = code === 1;
       reject(Object.assign(new Error(replayFailed
         ? '历史修改无法安全重放，已停止固化且原 Deck 未被改动'
@@ -177,10 +179,59 @@ export function verifyWorkingPatchReplay(path, {
           ? '原 Deck 未被改动；撤销或重新执行提示中的冲突修改后再固化'
           : '确认本机 Chrome 与 Node.js 可用后重试',
         ...(failedActionId ? { failedActionId } : {}),
+        ...(replayCode ? { replayCode } : {}),
         ...(diagnostic ? { diagnostic } : {}),
       }));
     });
   });
+}
+
+export async function writeVerifiedPatches(store, patches, {
+  verify=path => verifyWorkingPatchReplay(path), droppableActionIds=[],
+} = {}) {
+  if (!store || typeof store.writePatches !== 'function'
+    || typeof store.restore !== 'function' || typeof store.path !== 'string') {
+    throw new TypeError('补丁固化需要可写、可恢复的工作副本');
+  }
+  if (!Array.isArray(patches) || !Array.isArray(droppableActionIds)
+    || droppableActionIds.some(id => typeof id !== 'string' || !id)) {
+    throw new TypeError('补丁和可取代动作标识必须是数组');
+  }
+  const droppable = new Set(droppableActionIds);
+  const effectivePatches = structuredClone(patches);
+  const droppedActionIds = [];
+  while (true) {
+    const written = await store.writePatches(effectivePatches);
+    try {
+      await verify(store.path);
+      return {
+        ...written,
+        effectivePatches:structuredClone(effectivePatches),
+        droppedActionIds:[...droppedActionIds],
+      };
+    } catch (error) {
+      try {
+        await store.restore(written.previousFingerprint, written.fingerprint);
+      } catch (restoreError) {
+        throw Object.assign(new Error(
+          '补丁验证失败且工作副本无法恢复，请重启 Editor 完成对账',
+        ), {
+          code:'RECOVERY_REQUIRED', statusCode:503,
+          committed:true, commitScope:'working-deck',
+          cause:restoreError, originalError:error,
+        });
+      }
+      const failedActionId = error?.failedActionId;
+      const canDrop = error?.code === 'PATCH_REPLAY_FAILED'
+        && ['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND'].includes(error?.replayCode)
+        && droppable.has(failedActionId);
+      const failedIndex = canDrop
+        ? effectivePatches.findIndex(patch => patch?.id === failedActionId) : -1;
+      if (failedIndex < 0) throw error;
+      effectivePatches.splice(failedIndex, 1);
+      droppedActionIds.push(failedActionId);
+    }
+  }
 }
 
 function templateFromBundle(bytes) {

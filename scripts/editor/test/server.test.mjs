@@ -887,6 +887,10 @@ test('默认 Codex 使用一个长期 bypass PTY，首次加载 Skill，后续�
       write(data) {
         this.writes.push(data);
         completePendingTasks(data);
+        if (data === '\r') queueMicrotask(() => {
+          events.emit('data', '\u001b[?25l\u001b[2K• Working');
+          queueMicrotask(() => events.emit('data', '\r\ncodex READY\r\n'));
+        });
       },
       resize() {},
       kill() { this.killed = true; },
@@ -955,6 +959,73 @@ test('默认 Codex 使用一个长期 bypass PTY，首次加载 Skill，后续�
   );
 });
 
+test('Agent 提示词提交超时不误杀已经开始执行的长任务', async t => {
+  let app;
+  const events = new EventEmitter();
+  const child = {
+    pid:7750, writes:[], killed:false,
+    onData(listener) { events.on('data', listener); return { dispose() {} }; },
+    onExit(listener) { events.on('exit', listener); return { dispose() {} }; },
+    write(data) {
+      this.writes.push(data);
+      if (/本批任务 ID/.test(data)) {
+        setTimeout(() => {
+          for (const task of app.session.tasks) {
+            if (task.status === 'pending') task.status = 'completed';
+          }
+        }, 900);
+      }
+      if (data === '\r') queueMicrotask(() => {
+        events.emit('data', '\u001b[?25l\u001b[2K• Working');
+      });
+    },
+    resize() {},
+    kill() { this.killed = true; },
+  };
+  app = await makeApp(t, {
+    agentRunTimeoutMs:500,
+    spawnAgentTerminal:() => {
+      queueMicrotask(() => events.emit('data', '\r\ncodex READY\r\n'));
+      return child;
+    },
+    createAgentTerminalConversation:async () => ({
+      conversationId:'long-running-codex-session', resume:true,
+    }),
+  });
+
+  const created = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ ...taskInput, instruction:'执行超过提交超时的长任务' }),
+  }).then(response => response.json());
+  const response = await fetch(`${app.url}/api/agent-runs?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({
+      expectedRevision:created.revision,
+      taskIds:[created.task.id],
+    }),
+  });
+  assert.equal(response.status, 202, JSON.stringify(await response.clone().json()));
+
+  await new Promise(resolve => setTimeout(resolve, 650));
+  const active = await fetch(
+    `${app.url}/api/agent-runs/current?token=secret`,
+  ).then(value => value.json());
+  assert.equal(active.status, 'running', JSON.stringify(active));
+
+  const deadline = Date.now() + 1_000;
+  for (;;) {
+    const run = await fetch(
+      `${app.url}/api/agent-runs/current?token=secret`,
+    ).then(value => value.json());
+    if (!['queued', 'running'].includes(run.status)) {
+      assert.equal(run.status, 'succeeded', JSON.stringify(run));
+      break;
+    }
+    if (Date.now() > deadline) assert.fail('等待长任务完成超时');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
+
 test('Agent CLI 按 Esc 取消当前批次、保留长期 PTY，并允许重新提交未完成任务', {
   timeout:5_000,
 }, async t => {
@@ -966,7 +1037,13 @@ test('Agent CLI 按 Esc 取消当前批次、保留长期 PTY，并允许重新�
       writes:[], killed:false,
       onData(listener) { events.on('data', listener); return { dispose() {} }; },
       onExit(listener) { events.on('exit', listener); return { dispose() {} }; },
-      write(data) { this.writes.push(data); },
+      write(data) {
+        this.writes.push(data);
+        if (data === '\r') queueMicrotask(() => {
+          events.emit('data', '\u001b[?25l\u001b[2K• Working');
+          queueMicrotask(() => events.emit('data', '\r\ncodex READY\r\n'));
+        });
+      },
       resize() {},
       kill() { this.killed = true; },
     };
@@ -2404,12 +2481,38 @@ test('solidify write 原子固化累计动作、增加 revision 并清空历史 
     diagnostics:[page],
   }));
   let writtenActions;
+  const preflight = await bridge.preflightSolidify(7, {
+    fingerprint:async () => 'old',
+    bindingRevision:4,
+  });
+  assert.equal(preflight.revision, 7);
+  assert.equal(preflight.bindingRevision, 4);
+  assert.match(preflight.preflightToken, /^[0-9a-f-]{36}$/);
+  await assert.rejects(
+    bridge.writeDeck(7, {
+      solidify:true,
+      preflightToken:preflight.preflightToken,
+      bindingRevision:5,
+      fingerprint:async () => 'old',
+      writer:async () => assert.fail('过期预检不得进入 writer'),
+    }),
+    error => error.code === 'SOLIDIFY_PREFLIGHT_STALE',
+  );
+  const refreshedPreflight = await bridge.preflightSolidify(7, {
+    fingerprint:async () => 'old',
+    bindingRevision:4,
+  });
   const result = await bridge.writeDeck(7, {
     solidify:true,
+    preflightToken:refreshedPreflight.preflightToken,
+    bindingRevision:4,
     fingerprint:async () => 'old',
     writer:async patches => {
       writtenActions = patches;
-      return { fingerprint:'new', backup:'/tmp/solidify-backup.html' };
+      return {
+        fingerprint:'new', backup:'/tmp/solidify-backup.html',
+        effectivePatches:structuredClone(patches), droppedActionIds:[],
+      };
     },
     restore:async () => {},
   });
@@ -2417,7 +2520,12 @@ test('solidify write 原子固化累计动作、增加 revision 并清空历史 
   assert.equal(result.solidified, true);
   assert.equal(result.revision, 8);
   assert.equal(result.clearedGroupCount, 1);
-  assert.equal(result.clearedRedoCount, 1);
+  assert.equal('effectivePatches' in result, false,
+    '内部补丁正文不得回传到固化 API 响应');
+  assert.equal('droppedActionIds' in result, false,
+    '内部修复字段只允许通过摘要返回');
+  assert.equal(result.clearedRedoCount, 0,
+    '严格时间线迁移会丢弃没有对应历史条目的孤立 redo 标识');
   assert.equal(writtenActions.length, 1);
   assert.equal(writtenActions[0].payload.text, '新文案');
   assert.equal(state.revision, 8);
@@ -2430,7 +2538,64 @@ test('solidify write 原子固化累计动作、增加 revision 并清空历史 
     '请求并发字段不得进入持久化动作基线');
   assert.equal(state.tasks[0].status, 'completed');
   assert.equal(state.tasks[0].groupId, undefined);
+  assert.equal(state.tasks[0].effectState, 'solidified');
+  assert.deepEqual(state.tasks[0].checkpointIds, [result.checkpointId]);
+  assert.equal(state.checkpoints.at(-1).checkpointId, result.checkpointId);
   assert.deepEqual(bridge.compiledActions(), []);
+});
+
+test('solidify 以验证后有效补丁为 session 基线并只返回修复摘要', async () => {
+  const page = {
+    pageKey:'page-001-a', sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+  };
+  const state = {
+    version:2, sessionId:'session-solidify-repaired', deckPath:'/tmp/deck.html',
+    deckFingerprint:'old', workingDeckFingerprint:'working', revision:3,
+    tasks:[], groups:[{
+      id:'legacy-group', taskId:null, active:true, actions:[action],
+    }], redo:[], solidifiedActions:[],
+    diagnosticsBaseline:{ [page.pageKey]:page },
+    diagnosticsCurrent:{ [page.pageKey]:page }, diagnosticsRevision:3, conflict:null,
+  };
+  const sessionStore = {
+    state, sessionPath:'/tmp/session-solidify-repaired.json',
+    async persistState() {},
+  };
+  const bridge = new BridgeService({ sessionStore });
+  const socket = {
+    readyState:1,
+    send(data) {
+      const message = JSON.parse(data);
+      if (message.type !== 'diagnose-pages') return;
+      queueMicrotask(() => bridge.handleMessage(socket, JSON.stringify({
+        type:'diagnostics-result', commandId:message.commandId,
+        revision:message.revision, pages:[page],
+      })));
+    },
+  };
+  bridge.setEditorSocket(socket);
+  bridge.handleMessage(socket, JSON.stringify({
+    type:'deck-ready', pages:[{ index:1, label:'测试页', pageKey:page.pageKey }],
+    diagnostics:[page],
+  }));
+  const preflight = await bridge.preflightSolidify(3, {
+    fingerprint:async () => 'old', bindingRevision:1,
+  });
+  const result = await bridge.writeDeck(3, {
+    solidify:true, preflightToken:preflight.preflightToken, bindingRevision:1,
+    fingerprint:async () => 'old',
+    writer:async () => ({
+      fingerprint:'new', backup:'/tmp/repaired-backup.html',
+      effectivePatches:[], droppedActionIds:[action.id],
+    }),
+    restore:async () => {},
+  });
+
+  assert.deepEqual(state.solidifiedActions, []);
+  assert.deepEqual(state.historyRepair.droppedActionIds, [action.id]);
+  assert.deepEqual(result.droppedLegacyActionIds, [action.id]);
+  assert.equal('effectivePatches' in result, false);
+  assert.equal('droppedActionIds' in result, false);
 });
 
 test('actions-prepared 只接受与动作数一致的安全非负整数', async t => {
@@ -2682,6 +2847,120 @@ test('成功 action 原子完成任务且 undo/redo 同步任务生命周期', a
   assert.equal(extraCommands, 0);
   assert.equal(app.session.revision, 4);
   assert.equal(app.session.groups.length, 1);
+});
+
+test('重复 commandId 返回同一耐久结果且不会二次发送浏览器动作', async t => {
+  const app = await makeApp(t);
+  const editor = await connectCanonicalActionEditor(t, app);
+  let applyCount = 0;
+  editor.on('message', data => {
+    if (JSON.parse(data).type === 'apply-actions') applyCount += 1;
+  });
+  const commandId = '11111111-1111-4111-8111-111111111111';
+  const body = { expectedRevision:0, commandId, taskId:null, actions:[action] };
+
+  let response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify(body),
+  });
+  const first = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(first));
+  assert.equal(first.revision, 1);
+
+  response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify(body),
+  });
+  const duplicate = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(duplicate));
+  assert.equal(duplicate.idempotent, true);
+  assert.equal(duplicate.groupId, first.groupId);
+  assert.equal(app.session.groups.length, 1);
+  assert.equal(applyCount, 1);
+
+  const laterTask = await createTask(app, { expectedRevision:1 });
+  assert.equal(laterTask.revision, 2);
+  response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify(body),
+  });
+  const delayedDuplicate = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(delayedDuplicate));
+  assert.equal(delayedDuplicate.idempotent, true);
+  assert.equal(delayedDuplicate.commandRevision, 1);
+  assert.equal(delayedDuplicate.revision, 2,
+    '延迟重试必须返回当前 revision，不能让客户端版本倒退');
+  assert.equal(applyCount, 1);
+
+  response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      ...body, expectedRevision:2,
+      actions:[{ ...action, payload:{ text:'另一份内容' }, after:'另一份内容' }],
+    }),
+  });
+  const reused = await response.json();
+  assert.equal(response.status, 409);
+  assert.equal(reused.error, 'COMMAND_ID_REUSED');
+});
+
+test('非末尾 Agent 任务撤销追加补偿条目，后续人工修改不回退', async t => {
+  const app = await makeApp(t);
+  const created = await createTask(app);
+  const taskId = created.task.id;
+  const editor = await connectCanonicalActionEditor(t, app);
+  const agentAction = {
+    ...action, id:'agent-text', taskId,
+    payload:{ text:'Agent 标题' }, before:'旧文案', after:'Agent 标题',
+  };
+  let response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:1, taskId, actions:[agentAction],
+    }),
+  });
+  const agentResult = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(agentResult));
+
+  const styleAction = {
+    ...action, id:'manual-size', taskId:null, kind:'setStyle',
+    payload:{ property:'font-size', value:'48px' }, before:'32px', after:'48px',
+  };
+  response = await fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:2, taskId:null, actions:[styleAction],
+    }),
+  });
+  assert.equal(response.status, 200, await response.text());
+
+  response = await fetch(
+    `${app.url}/api/groups/${agentResult.groupId}/undo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:3,
+    }) },
+  );
+  const compensated = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(compensated));
+  assert.equal(compensated.compensatedGroupId, agentResult.groupId);
+  assert.notEqual(compensated.groupId, agentResult.groupId);
+  assert.equal(compensated.task.status, 'pending');
+  assert.equal(compensated.task.effectState, 'compensated');
+  assert.deepEqual(compensated.task.entryIds, [
+    agentResult.groupId, compensated.groupId,
+  ]);
+  assert.equal(app.session.groups.length, 3);
+  assert.equal(app.session.groups.every(group => group.active === true), true);
+  const compiled = app.session.groups
+    .flatMap(group => group.actions ?? [])
+    .filter(candidate => candidate.id === 'manual-size'
+      || candidate.id === app.session.groups.at(-1).actions[0].id);
+  assert.equal(compiled.some(candidate => candidate.after === '48px'), true);
+
+  response = await fetch(
+    `${app.url}/api/groups/${compensated.groupId}/undo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:4,
+    }) },
+  );
+  const restored = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(restored));
+  assert.equal(restored.task.status, 'completed');
+  assert.equal(restored.task.groupId, agentResult.groupId);
 });
 
 test('不存在的 taskId 在发送浏览器 tentative action 前拒绝', async t => {
@@ -4349,6 +4628,112 @@ test('固化结构历史才会原子发布托管工作副本并清空撤销队�
   assert.deepEqual(app.session.groups, []);
   assert.deepEqual(app.session.redo, []);
   assert.match(await readFile(app.deckPath, 'utf8'), /已固化结构文案/);
+});
+
+test('固化成功但目录见证未持久化时重启按会话检查点自动恢复绑定', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-binding-checkpoint-recovery-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, 'deck.html');
+  const deckId = '623e4567-e89b-42d3-a456-426614174000';
+  await writeFile(deckPath, managedBundle());
+  const initialCoordinator = await openDeckBinding({
+    deckId,
+    initialBinding:{ currentPath:deckPath, trustedRoot:root, revision:0 },
+    storageRoot:root,
+    watch:false,
+  });
+  const staleCatalogBinding = initialCoordinator.snapshot();
+  await initialCoordinator.close();
+
+  const first = await startServer({
+    deckPath, deckId, deckBinding:staleCatalogBinding,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'checkpoint-first-secret', editorToken:'checkpoint-first-editor-secret',
+    managedWorkingDeck:true, autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+    updateWorkItemBinding:null,
+  });
+  const editor = await connect(first.editorWsUrl);
+  const workingBefore = await readFile(first.workingDeckPath, 'utf8');
+  const pageKey = workingBefore.match(/data-page-id=\\"(page-[0-9a-f]{32})\\"/)?.[1];
+  assert.ok(pageKey);
+  editor.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.type !== 'diagnose-pages') return;
+    editor.send(JSON.stringify({
+      type:'diagnostics-result', commandId:message.commandId,
+      revision:message.revision,
+      pages:message.pageKeys.map(requested => ({
+        pageKey:requested, sectionOverflow:{ x:0, y:0 }, nestedClips:[],
+      })),
+    }));
+  });
+  const sendReady = revision => editor.send(JSON.stringify({
+    type:'deck-ready', revision,
+    pages:[{ index:1, label:'测试页', pageKey }],
+    diagnostics:[{ pageKey, sectionOverflow:{ x:0, y:0 }, nestedClips:[] }],
+  }));
+  sendReady(0);
+  await writeFile(first.workingDeckPath, workingBefore.replace('旧文案', '检查点恢复文案'));
+  const groupDeadline = Date.now() + 3_000;
+  while (first.session.groups.length === 0 && Date.now() < groupDeadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 40));
+  }
+  assert.equal(first.session.groups[0]?.mutationType, 'source');
+  sendReady(first.session.revision);
+  const diagnosticsDeadline = Date.now() + 1_000;
+  while (!Object.keys(first.session.diagnosticsBaseline ?? {}).length
+    && Date.now() < diagnosticsDeadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+  }
+  const solidified = await fetch(
+    `${first.url}/api/solidify-deck?token=${encodeURIComponent(first.token)}`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:first.session.revision,
+    }) },
+  );
+  const solidifiedResult = await solidified.json();
+  assert.equal(solidified.status, 200, JSON.stringify(solidifiedResult));
+  const publishedFingerprint = first.session.deckFingerprint;
+  assert.equal(first.session.checkpoints.at(-1)?.fingerprint, publishedFingerprint);
+  editor.close();
+  await first.close();
+
+  const publishedBytes = await readFile(deckPath);
+  const externalReplacement = deckPath + '.external';
+  await writeFile(externalReplacement, managedBundle('外部替换文案'));
+  await rename(externalReplacement, deckPath);
+  const rejected = await startServer({
+    deckPath, deckId, deckBinding:staleCatalogBinding,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    managedWorkingDeck:true, autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+  });
+  assert.equal(rejected.binding.snapshot().state, 'conflict',
+    '当前源文件不匹配已固化检查点时必须继续阻断');
+  await rejected.close();
+
+  const restoredPublished = deckPath + '.published';
+  await writeFile(restoredPublished, publishedBytes);
+  await rename(restoredPublished, deckPath);
+
+  let recoveredBinding = null;
+  const reopened = await startServer({
+    deckPath, deckId, deckBinding:staleCatalogBinding,
+    host:'127.0.0.1', port:0, openBrowser:false,
+    token:'checkpoint-reopen-secret', editorToken:'checkpoint-reopen-editor-secret',
+    managedWorkingDeck:true, autoStartAgentTerminal:false,
+    workingPatchVerifier:async () => ({ ok:true }),
+    updateWorkItemBinding:async binding => { recoveredBinding = binding; },
+  });
+  try {
+    assert.equal(reopened.binding.snapshot().state, 'bound');
+    assert.equal(reopened.binding.snapshot().reason, 'recovered-published-checkpoint');
+    assert.equal(reopened.binding.snapshot().sourceFingerprint, `sha256:${publishedFingerprint}`);
+    assert.equal(recoveredBinding?.sourceFingerprint, `sha256:${publishedFingerprint}`);
+  } finally {
+    await reopened.close();
+  }
 });
 
 test('未固化删除任务目标页后可安全重开并撤销恢复', async t => {

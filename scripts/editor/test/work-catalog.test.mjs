@@ -172,6 +172,33 @@ test('删除工作项后即使旧历史仍存在也不会被重新导入', async
   assert.deepEqual((await catalog.list()).editing, []);
 });
 
+test('用户明确重新打开已隐藏的 Deck 时恢复原工作项身份和首页入口', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-work-catalog-reopen-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, '重新打开.html');
+  await writeFile(deckPath, '<!doctype html>');
+  const catalog = new WorkCatalog({
+    filePath:join(root, 'catalog.json'),
+    legacyHistory:{ async list() { return { version:1, creation:[], editing:[{ deckPath }] }; } },
+  });
+
+  const initial = (await catalog.list()).editing[0];
+  await catalog.dismiss({
+    workId:initial.workId,
+    expectedRevision:initial.revision,
+  });
+  assert.deepEqual((await catalog.list()).editing, [], '普通历史同步不得复活已隐藏任务');
+
+  const reopened = await catalog.reopenEditing({ deckPath });
+  assert.equal(reopened.workId, initial.workId);
+  assert.equal(reopened.deckId, initial.deckId);
+  assert.equal(reopened.revision, initial.revision + 2);
+
+  const history = await catalog.list();
+  assert.equal(history.editing.length, 1);
+  assert.equal(history.editing[0].workId, initial.workId);
+});
+
 test('Editor 关闭期间 Deck 被外部改名，任务以原 deckId 自动恢复到新路径', async t => {
   const root = await mkdtemp(join(tmpdir(), 'deck-work-catalog-rebind-'));
   t.after(() => rm(root, { recursive:true, force:true }));

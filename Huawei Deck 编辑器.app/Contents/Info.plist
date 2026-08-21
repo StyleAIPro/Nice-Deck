@@ -8,6 +8,8 @@
   <string>Huawei Deck 编辑器</string>
   <key>CFBundleExecutable</key>
   <string>HuaweiDeckEditor</string>
+  <key>CFBundleIconFile</key>
+  <string>HuaweiDeckEditor</string>
   <key>CFBundleIdentifier</key>
   <string>com.local.huawei-deck-editor</string>
   <key>CFBundleInfoDictionaryVersion</key>

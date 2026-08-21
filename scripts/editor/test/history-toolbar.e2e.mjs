@@ -50,13 +50,16 @@ async function createManualTextAction(page, text) {
 }
 
 async function createManualMoveAction(page) {
+  const frame = page.frameLocator('#deck-frame');
   const heading = page.frameLocator('#deck-frame').locator('h2').first();
   await page.locator('[data-mode="edit"]').click();
-  const box = await heading.boundingBox();
-  const startX = Math.max(box.x, 0) + Math.min(100, box.width / 2);
-  await page.mouse.move(startX, box.y + box.height / 2);
+  await heading.click({ position:{ x:20, y:10 } });
+  const handle = frame.locator('[data-transform-move-handle="left"]');
+  const box = await handle.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
-  await page.mouse.move(startX + 40, box.y + box.height / 2 + 20, { steps:8 });
+  await page.mouse.move(box.x + box.width / 2 + 40,
+    box.y + box.height / 2 + 20, { steps:8 });
   await page.mouse.up();
 }
 
@@ -619,6 +622,7 @@ test('键盘快捷键跨 parent 与画布撤销重做，文字输入保留原生
   t.after(() => browser.close());
   page.setDefaultTimeout(4_000);
   const heading = page.frameLocator('#deck-frame').locator('h2').first();
+  const canvas = page.frameLocator('#deck-frame').locator('.stage .slide-canvas').first();
 
   await createManualTextAction(page, '快捷键标题');
   await waitForRevision(page, 1);
@@ -629,7 +633,9 @@ test('键盘快捷键跨 parent 与画布撤销重做，文字输入保留原生
   await waitForRevision(page, 2);
   assert.equal(await heading.textContent(), '第一页标题');
 
-  await heading.click();
+  // 单击文字现在会进入原生文字编辑；此处只需把键盘焦点送入画布，
+  // 因此点击不属于任何文本框的空白位置。
+  await canvas.click({ position:{ x:1000, y:900 } });
   await page.keyboard.press('Meta+Shift+z');
   await waitForRevision(page, 3);
   assert.equal(await heading.textContent(), '快捷键标题');
@@ -647,7 +653,7 @@ test('键盘快捷键跨 parent 与画布撤销重做，文字输入保留原生
   await waitForRevision(page, 4);
   assert.equal(await heading.textContent(), '第一页标题');
 
-  await heading.click();
+  await canvas.click({ position:{ x:1000, y:900 } });
   await page.keyboard.press('Control+y');
   await waitForRevision(page, 5);
   assert.equal(await heading.textContent(), '快捷键标题');

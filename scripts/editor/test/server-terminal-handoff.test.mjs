@@ -225,10 +225,15 @@ test('应用重启恢复已发布 Draft 时先启动终端，再按顺序发送 
     await terminal.start();
     children[0].events.emit('data', 'Codex ready');
     assert.match(children[0].writes[0], /Creation 恢复说明/);
-    scheduledSubmits[0].callback();
+    scheduledSubmits.shift().callback();
+    children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
+    children[0].events.emit('data', 'Codex ready');
     await new Promise(resolve => setImmediate(resolve));
     assert.match(children[0].writes[2], /同一个任务，不是新的制作项目/);
-    scheduledSubmits[1].callback();
+    while (children[0].writes.filter(value => value === '\r').length < 2) {
+      scheduledSubmits.shift().callback();
+    }
+    children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
   } finally {
     await app.close();
     await terminal.close();

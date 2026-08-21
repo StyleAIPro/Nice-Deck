@@ -283,6 +283,7 @@ async function execute(options) {
     const match = located.results[0];
     return requestJson(options, '/api/actions', { method:'POST', body:{
       expectedRevision:located.revision,
+      commandId:randomUUID(),
       taskId:null,
       actions:[{
         id:randomUUID(), taskId:null, target:match.target,
@@ -296,7 +297,9 @@ async function execute(options) {
     let body = input;
     if (Array.isArray(input)) {
       const expectedRevision = await mutationRevision(options);
-      body = { expectedRevision, taskId: null, actions: input };
+      body = { expectedRevision, commandId:randomUUID(), taskId: null, actions: input };
+    } else if (body.commandId === undefined) {
+      body = { ...body, commandId:randomUUID() };
     }
     return requestJson(options, '/api/actions', { method: 'POST', body });
   }
@@ -320,10 +323,23 @@ async function execute(options) {
       `/api/tasks/${encodeURIComponent(args[0])}/source-edit/cancel`,
       { method:'POST', body:{ expectedRevision } });
   }
-  if (command === 'verify' || command === 'solidify') {
+  if (command === 'verify') {
     const expectedRevision = await mutationRevision(options);
-    return requestJson(options, command === 'verify' ? '/api/write-deck' : '/api/solidify-deck', {
+    return requestJson(options, '/api/write-deck', {
       method:'POST', body:{ expectedRevision },
+    });
+  }
+  if (command === 'solidify') {
+    const expectedRevision = await mutationRevision(options);
+    const preflight = await requestJson(options, '/api/solidify-preflight', {
+      method:'POST', body:{ expectedRevision },
+    });
+    return requestJson(options, '/api/solidify-deck', {
+      method:'POST', body:{
+        expectedRevision,
+        expectedBindingRevision:preflight.bindingRevision,
+        preflightToken:preflight.preflightToken,
+      },
     });
   }
   const expectedRevision = await mutationRevision(options);

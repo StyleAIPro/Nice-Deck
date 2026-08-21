@@ -197,6 +197,114 @@ test('启动页流体背景遵守减少动态效果，并在启动页隐藏时�
   assert.equal(await reducedBackground.locator('canvas').count(), 0);
 });
 
+test('不支持 OffscreenCanvas 时保留主线程兼容动效', async t => {
+  const app = await startAppServer({ token:'browser-liquid-fallback-secret' });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1280, height:800 } });
+  await page.addInitScript(() => {
+    Object.defineProperty(HTMLCanvasElement.prototype, 'transferControlToOffscreen', {
+      configurable:true,
+      value:undefined,
+    });
+  });
+  await page.goto(app.appUrl);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-liquid-ether-background]')?.dataset.state === 'running'
+  ));
+  const background = page.locator('[data-liquid-ether-background]');
+  assert.equal(await background.getAttribute('data-renderer'), 'main-thread');
+  assert.equal(await background.locator('canvas').count(), 1);
+});
+
+test('启动页流体背景保留动效且不以超长任务阻塞首次交互', async t => {
+  const app = await startAppServer({ token:'browser-liquid-performance-secret' });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+
+  await page.addInitScript(() => {
+    window.__huaweiDeckLongTasks = [];
+    new PerformanceObserver(entries => {
+      for (const entry of entries.getEntries()) {
+        window.__huaweiDeckLongTasks.push(entry.duration);
+      }
+    }).observe({ type:'longtask', buffered:true });
+  });
+  await page.goto(app.appUrl);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-liquid-ether-background]')?.dataset.state === 'running'
+  ));
+  await page.mouse.move(240, 180);
+  await page.mouse.move(1480, 820, { steps:16 });
+  await page.waitForTimeout(120);
+
+  const snapshot = await page.evaluate(() => ({
+    canvasCount:document.querySelectorAll('[data-liquid-ether-background] canvas').length,
+    renderer:document.querySelector('[data-liquid-ether-background]')?.dataset.renderer,
+    longestTask:Math.max(0, ...window.__huaweiDeckLongTasks),
+    longTasks:window.__huaweiDeckLongTasks,
+  }));
+  assert.equal(snapshot.canvasCount, 1, '性能优化后仍必须保留流体背景 canvas');
+  assert.equal(snapshot.renderer, 'worker', '支持 OffscreenCanvas 时应在 Worker 中渲染流体背景');
+  assert.ok(
+    snapshot.longestTask < 220,
+    `启动页首次交互出现 ${snapshot.longestTask.toFixed(1)}ms 长任务：${JSON.stringify(snapshot.longTasks)}`,
+  );
+});
+
+test('Windows 可见 Chrome 的流体动效不拖慢页面合成帧', {
+  skip:process.platform !== 'win32' || process.env.HUAWEI_DECK_HEADED_PERF !== '1',
+}, async t => {
+  const app = await startAppServer({ token:'browser-liquid-headed-performance-secret' });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:false });
+  t.after(() => browser.close());
+  const page = await browser.newPage({
+    viewport:{ width:1920, height:1080 },
+    deviceScaleFactor:1.5,
+  });
+
+  await page.goto(app.appUrl);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-liquid-ether-background]')?.dataset.state === 'running'
+  ));
+  await page.mouse.move(180, 160);
+  await page.mouse.move(1540, 860, { steps:24 });
+  const intervals = await page.evaluate(() => new Promise(resolve => {
+    const values = [];
+    let previous = performance.now();
+    const sample = now => {
+      values.push(now - previous);
+      previous = now;
+      if (values.length === 180) resolve(values);
+      else requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }));
+  const snapshot = await page.evaluate(values => {
+    const sorted = values.toSorted((left, right) => left - right);
+    const background = document.querySelector('[data-liquid-ether-background]');
+    return {
+      renderer:background?.dataset.renderer,
+      qualityProfile:background?.dataset.qualityProfile,
+      frameP95:sorted[Math.floor(sorted.length * 0.95)],
+      frameMax:sorted.at(-1),
+    };
+  }, intervals);
+  assert.equal(snapshot.renderer, 'worker');
+  assert.equal(snapshot.qualityProfile, 'windows-balanced');
+  assert.ok(
+    snapshot.frameP95 < 25,
+    `Windows 可见 Chrome 流体背景帧间隔过高：${JSON.stringify(snapshot)}`,
+  );
+});
+
 test('新建与修改入口的返回和主按钮使用 PillNav 悬停效果', async t => {
   const app = await startAppServer({ token:'browser-pill-action-secret' });
   t.after(() => app.close());

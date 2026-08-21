@@ -5,6 +5,7 @@ import {
 } from './agent-provider-registry.mjs';
 import { enhanceSelect } from './native-controls.mjs';
 import { applyPill } from './pill-nav.mjs';
+import { shouldForwardTerminalKey } from './terminal-keyboard.mjs';
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -198,6 +199,13 @@ export class AgentTerminalPanel {
       },
     });
     this.terminal.open(this.host);
+    // xterm 默认会把 Ctrl+V 编码成 0x16 送给 PTY，Codex 会把它解释为
+    // “粘贴图片”。Windows / Linux 下让浏览器继续产生 paste 事件，
+    // xterm 的既有 paste handler 再把剪贴板文字向 PTY 交付一次。
+    this.terminal.attachCustomKeyEventHandler(event => shouldForwardTerminalKey(event, {
+      platform:navigator.platform,
+      hasSelection:this.terminal.hasSelection(),
+    }));
     this.loading = element('div', 'agent-terminal-loading');
     this.loading.dataset.agentTerminalLoading = '';
     this.loading.hidden = true;
@@ -366,6 +374,10 @@ export class AgentTerminalPanel {
       return;
     }
     const startupPromptState = state.startupPromptState;
+    if (startupPromptState === 'awaiting-confirmation') {
+      this.#setLoading(true, '正在确认初始化指令已发送…');
+      return;
+    }
     if (startupPromptState === 'submitting') {
       this.#setLoading(true, '正在提交初始化指令…');
       return;
@@ -508,12 +520,18 @@ export class AgentTerminalPanel {
     const interactionRequired = state.interactionRequired?.kind
       ? state.interactionRequired
       : null;
+    const promptSubmissionError = state.promptSubmission?.state === 'failed'
+      ? state.promptSubmission.error || 'Agent 没有确认收到提示词'
+      : null;
     const copies = {
-      starting:'正在启动 bypass 会话…', running:state.promptReady === false
+      starting:'正在启动 bypass 会话…', running:promptSubmissionError
+        ?? (state.startupPromptState === 'awaiting-confirmation'
+          ? '初始化指令已回车，正在等待 Agent 接收…'
+          : state.promptReady === false
         ? 'CLI 已启动，正在等待输入界面…'
         : state.conversationError
         ? '会话已启动 · 恢复标识保存失败'
-        : `${state.projectRoot?.split('/').filter(Boolean).at(-1) || '项目'}${conversationLabel} · PID ${state.pid ?? '—'}`,
+        : `${state.projectRoot?.split('/').filter(Boolean).at(-1) || '项目'}${conversationLabel} · PID ${state.pid ?? '—'}`),
       exited:state.exit?.message || '会话已退出', failed:state.exit?.message || '启动失败',
       stopped:'尚未启动', closed:'服务已关闭',
     };

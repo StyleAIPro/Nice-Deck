@@ -11,8 +11,28 @@ test('同一属性只编译最终值，整组可撤销重做', () => {
     { id:'a2', taskId:'task-1', target, kind:'setText', payload:{text:'更新'}, before:'新', after:'更新', appliedAt:'t2' }
   ]);
   assert.equal(journal.compile()[0].after, '更新');
+  assert.equal(journal.compile()[0].before, '旧');
   assert.deepEqual(journal.undo(group.id).map(x => x.payload.text), ['新','旧']);
   assert.deepEqual(journal.redo(group.id).map(x => x.payload.text), ['新','更新']);
+});
+
+test('连续移动只保留最终位置，但固化与撤销仍从最早基线重放', () => {
+  const journal = new PatchJournal();
+  journal.appendGroup(null, [{
+    id:'move-first', taskId:null, target, kind:'translate',
+    payload:{ x:85, y:30 }, before:{ x:0, y:0 }, after:{ x:85, y:30 }, appliedAt:'t1',
+  }]);
+  journal.appendGroup(null, [{
+    id:'move-final', taskId:null, target:{ ...target, fingerprint:'after-first-move' },
+    kind:'translate', payload:{ x:-5, y:-14 },
+    before:{ x:85, y:30 }, after:{ x:-5, y:-14 }, appliedAt:'t2',
+  }]);
+
+  const [compiled] = journal.compile();
+  assert.deepEqual(compiled.before, { x:0, y:0 });
+  assert.deepEqual(compiled.after, { x:-5, y:-14 });
+  assert.deepEqual(compiled.payload, { x:-5, y:-14 });
+  assert.deepEqual(compiled.target, target);
 });
 
 test('连续控件动作追加到最新历史组并保持一次撤销重做', () => {
@@ -22,9 +42,15 @@ test('连续控件动作追加到最新历史组并保持一次撤销重做', ()
     payload:{ property:'font-size', value:after }, before, after, appliedAt:id,
   });
   const group = journal.appendGroup(null, [makeSize('size-53', '48px', '53px')]);
-  assert.equal(journal.appendToLatestGroup(group.id, [makeSize('size-52', '53px', '52px')]), group);
-  assert.equal(journal.appendToLatestGroup(group.id, [makeSize('size-51', '52px', '51px')]), group);
-  assert.equal(group.actions.length, 3);
+  assert.equal(
+    journal.appendToLatestGroup(group.id, [makeSize('size-52', '53px', '52px')]).id,
+    group.id,
+  );
+  assert.equal(
+    journal.appendToLatestGroup(group.id, [makeSize('size-51', '52px', '51px')]).id,
+    group.id,
+  );
+  assert.equal(journal.group(group.id).actions.length, 3);
   assert.equal(journal.compile()[0].after, '51px');
   assert.deepEqual(journal.undo(group.id).map(action => action.after), ['52px', '53px', '48px']);
   assert.deepEqual(journal.redo(group.id).map(action => action.after), ['53px', '52px', '51px']);
@@ -108,7 +134,7 @@ test('旧历史中以运行时局部格式 span 为目标的动作会归一到�
   }]);
 });
 
-test('编译时跨 inactive 历史组与动作 kind 复用最早安全 locator', () => {
+test('已被后续修改完全覆盖的旧条目不制造空补偿', () => {
   const journal = new PatchJournal();
   const first = journal.appendGroup('task-stable-target', [{
     id:'stable-text-first', taskId:'task-stable-target', target,
@@ -124,7 +150,10 @@ test('编译时跨 inactive 历史组与动作 kind 复用最早安全 locator',
     id:'stable-translate', taskId:'task-stable-target', target:modifiedAgainTarget,
     kind:'translate', payload:{x:20,y:10}, before:{x:0,y:0}, after:{x:20,y:10}, appliedAt:'t3',
   }]);
-  journal.undo(first.id);
+  assert.throws(
+    () => journal.compensate(first.id),
+    error => error.code === 'NOTHING_TO_COMPENSATE',
+  );
 
   const compiled = journal.compile();
   assert.deepEqual(compiled.map(action => action.kind), ['setText','translate']);
@@ -171,9 +200,9 @@ test('结构修改只进入统一历史，不会被编译成元素动作', () =>
   assert.equal(source.taskId, 'task-delete-page');
   assert.deepEqual(journal.compile(), []);
   assert.deepEqual(journal.undo(source.id), []);
-  assert.equal(source.active, false);
+  assert.equal(journal.group(source.id).active, false);
   assert.deepEqual(journal.redo(source.id), []);
-  assert.equal(source.active, true);
+  assert.equal(journal.group(source.id).active, true);
   assert.throws(() => journal.appendSourceGroup({
     beforeFingerprint:'a'.repeat(64), afterFingerprint:'a'.repeat(64),
   }), /不同的前后/);

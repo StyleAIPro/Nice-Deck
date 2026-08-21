@@ -64,6 +64,77 @@ test('同一服务进程固定编辑器资源快照，避免新前端连接旧�
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), pinned);
 });
 
+test('页面抽屉箭头使用统一圆形样式并随状态反向', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  const toggle = page.locator('[data-page-panel-toggle]');
+  await page.waitForFunction(() => (
+    document.querySelector('[data-page-panel-toggle]')?.dataset.pillNavReady === 'true'
+  ));
+  await page.waitForFunction(() => (
+    getComputedStyle(document.querySelector('[data-page-panel-toggle]')).color === 'rgb(25, 25, 25)'
+  ));
+  assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(await toggle.getAttribute('data-pill-arrow-direction'), 'right');
+  assert.deepEqual(await toggle.evaluate(button => {
+    const style = getComputedStyle(button);
+    const hover = getComputedStyle(button.querySelector('.pill-nav-label-hover'));
+    const arrow = getComputedStyle(button.querySelector('.pill-nav-label-default .pill-nav-arrow-icon'));
+    return {
+      width:style.width,
+      height:style.height,
+      borderRadius:style.borderRadius,
+      color:style.color,
+      pillText:style.getPropertyValue('--pill-nav-text').trim(),
+      hoverDisplay:hover.display,
+      arrowTransition:arrow.transitionProperty,
+    };
+  }), {
+    width:'30px', height:'30px', borderRadius:'999px', color:'rgb(25, 25, 25)', pillText:'#191919',
+    hoverDisplay:'none', arrowTransition:'transform',
+  });
+  assert.ok(await page.locator('.page-panel')
+    .evaluate(element => element.getBoundingClientRect().width <= 72));
+
+  const arrowBeforeHover = await toggle.locator('.pill-nav-label-default .pill-nav-arrow-icon')
+    .evaluate(element => getComputedStyle(element).transform);
+  const fillBeforeHover = await toggle.locator('.pill-nav-fill')
+    .evaluate(element => getComputedStyle(element).transform);
+  await toggle.hover();
+  await page.waitForFunction(before => (
+    getComputedStyle(document.querySelector('[data-page-panel-toggle] .pill-nav-fill')).transform
+      !== before
+  ), fillBeforeHover);
+  await page.waitForTimeout(340);
+  assert.equal(await toggle.locator('.pill-nav-label-default')
+    .evaluate(element => getComputedStyle(element).opacity), '1');
+  assert.equal(await toggle.locator('.pill-nav-label-default .pill-nav-arrow-icon')
+    .evaluate(element => getComputedStyle(element).transform), arrowBeforeHover);
+
+  await page.emulateMedia({ reducedMotion:'reduce' });
+  await page.mouse.move(500, 500);
+  await toggle.hover();
+  assert.equal(await toggle.locator('.pill-nav-label-default')
+    .evaluate(element => getComputedStyle(element).opacity), '1');
+  await page.emulateMedia({ reducedMotion:'no-preference' });
+
+  await toggle.click();
+  assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(await toggle.getAttribute('data-pill-arrow-direction'), 'left');
+  await page.waitForFunction(before => (
+    getComputedStyle(document.querySelector(
+      '[data-page-panel-toggle] .pill-nav-label-default .pill-nav-arrow-icon',
+    )).transform !== before
+  ), arrowBeforeHover);
+  assert.ok(await page.locator('.page-panel')
+    .evaluate(element => element.getBoundingClientRect().width >= 200));
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('画布工具栏用品牌导出图标下载当前工作副本 PPTX', async t => {
   let exportCalls = 0;
   const app = await startFixtureServer({

@@ -15,6 +15,55 @@ function inertAgentPty() {
   };
 }
 
+test('编辑模式点击画布元素不会同时触发 Deck 自身的点击切版', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:html => html
+      .replace(
+        '<h2>第一页标题</h2>',
+        '<h2 data-test-layout-trigger>第一页标题</h2><div data-test-layout-state="base">基线版面</div>',
+      )
+      .replace(
+        '<script src="../../runtime/patch-runtime.js"></script>',
+        `<script>
+document.addEventListener('click', event => {
+  if (!event.target.closest('[data-test-layout-trigger]')) return;
+  const state = document.querySelector('[data-test-layout-state]');
+  state.dataset.testLayoutState = state.dataset.testLayoutState === 'base' ? 'alternate' : 'base';
+  state.textContent = state.dataset.testLayoutState === 'base' ? '基线版面' : '切换版面';
+});
+</script><script src="../../runtime/patch-runtime.js"></script>`,
+      ),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  const frame = page.frameLocator('#deck-frame');
+  const heading = frame.locator('.stage .slide-canvas').first().locator('h2');
+  const layout = frame.locator('[data-test-layout-state]');
+
+  await page.click('[data-mode="edit"]');
+  await heading.click({ position:{ x:20, y:10 } });
+  assert.equal(await heading.getAttribute('data-direct-editing'), '');
+  assert.equal(await layout.getAttribute('data-test-layout-state'), 'base');
+  assert.equal(await layout.textContent(), '基线版面');
+
+  await page.click('[data-mode="preview"]');
+  await heading.click({ position:{ x:20, y:10 } });
+  assert.equal(await layout.getAttribute('data-test-layout-state'), 'alternate');
+  assert.equal(await layout.textContent(), '切换版面');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+async function assertArrowVisibleOnHover(page, selector) {
+  const button = page.locator(selector);
+  await button.hover();
+  await page.waitForTimeout(340);
+  assert.equal(await button.locator('.pill-nav-label-default')
+    .evaluate(element => getComputedStyle(element).opacity), '1');
+  await page.mouse.move(0, 0);
+}
+
 test('顶部属性工具栏常驻高频文字操作并以互斥抽屉展开分类', async t => {
   const app = await startFixtureServer({ spawnAgentTerminal:inertAgentPty });
   t.after(() => app.close());
@@ -186,6 +235,9 @@ test('终端展开时属性面板停靠到画布上方，关闭后恢复右侧�
   });
   assert.ok(closed.inspector.x - closed.canvas.right >= 7, JSON.stringify(closed));
   assert.ok(Math.abs(closed.inspector.y - closed.canvas.y) <= 1, JSON.stringify(closed));
+  assert.equal(await page.locator('[data-inspector-collapse]')
+    .getAttribute('data-pill-arrow-direction'), 'right');
+  await assertArrowVisibleOnHover(page, '[data-inspector-collapse]');
   if (process.env.INSPECTOR_RIGHT_SCREENSHOT) {
     await page.screenshot({ path:process.env.INSPECTOR_RIGHT_SCREENSHOT, fullPage:true });
   }
@@ -193,6 +245,13 @@ test('终端展开时属性面板停靠到画布上方，关闭后恢复右侧�
   await page.click('[data-inspector-collapse]');
   assert.equal(await page.locator('.inspector-panel').isHidden(), true);
   assert.equal(await page.locator('[data-inspector-reopen]').isVisible(), true);
+  assert.equal(await page.locator('[data-inspector-reopen]')
+    .getAttribute('data-pill-arrow-direction'), 'left');
+  assert.deepEqual(await page.locator('[data-inspector-reopen]').evaluate(button => {
+    const style = getComputedStyle(button);
+    return { width:style.width, height:style.height, borderRadius:style.borderRadius };
+  }), { width:'30px', height:'30px', borderRadius:'999px' });
+  await assertArrowVisibleOnHover(page, '[data-inspector-reopen]');
   await page.click('[data-inspector-reopen]');
   assert.equal(await page.locator('.inspector-panel').isVisible(), true);
 
@@ -228,6 +287,9 @@ test('终端展开时属性面板停靠到画布上方，关闭后恢复右侧�
   assert.ok(opened.sectionCount > 0);
   assert.ok(opened.inspector.height <= 92, JSON.stringify(opened));
   assert.equal(opened.fields.length, 5, JSON.stringify(opened));
+  assert.equal(await page.locator('[data-inspector-collapse]')
+    .getAttribute('data-pill-arrow-direction'), 'up');
+  await assertArrowVisibleOnHover(page, '[data-inspector-collapse]');
   assert.ok(opened.bodyScrollWidth <= opened.bodyClientWidth + 1,
     `横版属性面板不应依赖横向拖动：${JSON.stringify(opened)}`);
   assert.equal(new Set(opened.fields.map(field => Math.round(field.top))).size, 1,
@@ -267,6 +329,9 @@ test('终端展开时属性面板停靠到画布上方，关闭后恢复右侧�
   await page.click('[data-inspector-collapse]');
   assert.equal(await page.locator('.inspector-panel').isHidden(), true);
   assert.equal(await page.locator('[data-inspector-reopen]').isVisible(), true);
+  assert.equal(await page.locator('[data-inspector-reopen]')
+    .getAttribute('data-pill-arrow-direction'), 'down');
+  await assertArrowVisibleOnHover(page, '[data-inspector-reopen]');
   await page.click('[data-inspector-reopen]');
   assert.equal(await page.locator('.inspector-panel').isVisible(), true);
 
@@ -1020,6 +1085,205 @@ test('局部混合格式后重新选中整个文本框仍可连续修改全部�
   assert.deepEqual(resourceProblems, []);
 });
 
+test('文字选区浮动工具条的色块显示当前选区颜色', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace(
+      '<h2>第一页标题</h2>',
+      '<h2 style="color:#123456">第一页标题</h2>',
+    ),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(5_000);
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+
+  await page.click('[data-mode="edit"]');
+  await heading.dblclick();
+  await heading.evaluate(element => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 0);
+    range.setEnd(element.firstChild, 2);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  const color = page.frameLocator('#deck-frame')
+    .locator('[data-text-format-toolbar]')
+    .getByRole('button', { name:'文字颜色' });
+  await color.waitFor();
+  assert.deepEqual(await color.evaluate(element => ({
+    inputValue:element.parentElement.querySelector('input').value,
+    inlineColor:element.style.getPropertyValue('--ui-color'),
+    computedVariable:getComputedStyle(element).getPropertyValue('--ui-color').trim(),
+    backgroundColor:getComputedStyle(element).backgroundColor,
+  })), {
+    inputValue:'#123456',
+    inlineColor:'#123456',
+    computedVariable:'#123456',
+    backgroundColor:'rgb(18, 52, 86)',
+  });
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('文字选区浮动工具条可连续调节字号并合并为一次撤销', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace(
+      '<h2>第一页标题</h2>',
+      '<h2 style="font-size:22px">From individual troubleshooting to a reusable delivery system</h2>',
+    ),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.frameLocator('#deck-frame');
+  const heading = frame.locator('h2').first();
+
+  await page.click('[data-mode="edit"]');
+  await heading.dblclick();
+  await heading.evaluate(element => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 0);
+    range.setEnd(element.firstChild, element.firstChild.data.length);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  const decrease = frame.getByRole('button', { name:'字号减小' });
+  await decrease.waitFor();
+
+  // 用户可以连续点按，三次应从 22px 依次变成 21/20/19px，而不是重复提交 21px。
+  await decrease.click();
+  await decrease.click();
+  await decrease.click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '3');
+  await page.waitForFunction(() => document.querySelector('.inspector-body')?.dataset.busy === 'false');
+
+  const current = await session(app);
+  assert.deepEqual({
+    groups:current.groups.length,
+    actions:current.groups[0]?.actions.length,
+    size:await heading.evaluate(element => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        if (walker.currentNode.data.length > 0) {
+          return getComputedStyle(walker.currentNode.parentElement ?? element).fontSize;
+        }
+      }
+      return getComputedStyle(element).fontSize;
+    }),
+    text:await heading.textContent(),
+  }, {
+    groups:1,
+    actions:3,
+    size:'19px',
+    text:'From individual troubleshooting to a reusable delivery system',
+  });
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('文字选区格式化后快捷撤销走编辑器历史且不破坏文字结构', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace(
+      '<h2>第一页标题</h2>',
+      '<h2 style="font-size:22px"><span>From individual troubleshooting</span> to a reusable delivery system</h2>',
+    ),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.frameLocator('#deck-frame');
+  const heading = frame.locator('h2').first();
+
+  await page.click('[data-mode="edit"]');
+  await heading.dblclick();
+  await heading.evaluate(element => {
+    const range = document.createRange();
+    const text = element.querySelector('span').firstChild;
+    range.setStart(text, 0);
+    range.setEnd(text, text.data.length);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await frame.getByRole('button', { name:'字号减小' }).click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+
+  await heading.press('Control+z');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+  const current = await session(app);
+  assert.deepEqual({
+    groups:current.groups.length,
+    redo:current.redo.length,
+    text:await heading.textContent(),
+    childText:await heading.locator('span').first().textContent(),
+  }, {
+    groups:1,
+    redo:1,
+    text:'From individual troubleshooting to a reusable delivery system',
+    childText:'From individual troubleshooting',
+  });
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('富文本结构变化只提交差异范围且撤销可恢复原节点', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:fixture => fixture.replace(
+      '<h2>第一页标题</h2>',
+      '<h2><span>CAPABILITY FORMED</span><strong>From individual troubleshooting</strong><em>Platform coordinates work</em></h2>',
+    ),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+
+  await page.click('[data-mode="edit"]');
+  await heading.dblclick();
+  await heading.evaluate(element => {
+    element.textContent = 'CAPABILITY FORMEDPlatform coordinates work';
+    element.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'deleteContentBackward' }));
+  });
+  await heading.press('Control+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+
+  const afterEdit = await session(app);
+  assert.deepEqual({
+    text:await heading.textContent(),
+    sourceRange:afterEdit.groups[0]?.actions[0]?.payload?.sourceRange,
+    wholeText:afterEdit.groups[0]?.actions[0]?.payload?.text,
+  }, {
+    text:'CAPABILITY FORMEDPlatform coordinates work',
+    sourceRange:{ start:17, end:48 },
+    wholeText:'',
+  });
+
+  await page.locator('[data-history-undo]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+  assert.deepEqual(await heading.evaluate(element => ({
+    text:element.textContent,
+    children:[...element.children].map(child => ({ tag:child.tagName, text:child.textContent })),
+  })), {
+    text:'CAPABILITY FORMEDFrom individual troubleshootingPlatform coordinates work',
+    children:[
+      { tag:'SPAN', text:'CAPABILITY FORMED' },
+      { tag:'STRONG', text:'From individual troubleshooting' },
+      { tag:'EM', text:'Platform coordinates work' },
+    ],
+  });
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('连续调整同一字号合并为一个可撤销历史组', async t => {
   const app = await startFixtureServer({
     fixtureTransform:fixture => fixture.replace(
@@ -1128,6 +1392,15 @@ test('文字面板提供常用字形与段落控件，选区旁显示快捷工�
   )), ['字体', '加粗', '斜体', '下划线', '字号减小', '字号增大', '文字颜色', '左对齐', '居中', '右对齐']);
   assert.equal(await toolbar.getByRole('combobox', { name:'字体' }).count(), 1);
   assert.equal(await toolbar.getByRole('button', { name:'文字颜色' }).count(), 1);
+  await toolbar.getByRole('button', { name:'文字颜色' }).click();
+  const colorDialog = page.frameLocator('#deck-frame').getByRole('dialog', { name:'文字颜色' });
+  await colorDialog.waitFor();
+  await page.waitForTimeout(80);
+  assert.equal(await toolbar.isVisible(), true);
+  assert.equal(await colorDialog.isVisible(), true);
+  await toolbar.getByRole('button', { name:'文字颜色' }).click();
+  await colorDialog.waitFor({ state:'hidden' });
+  assert.equal(await toolbar.isVisible(), true);
   await toolbar.locator('button[aria-label="加粗"]').click();
   await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '7');
   await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument

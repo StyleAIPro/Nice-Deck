@@ -221,6 +221,11 @@
       if (Object.hasOwn(action.payload,'scale')) {
         return {scale:parseFloat(getComputedStyle(el).scale)||1};
       }
+      const inlineWidth=parseFloat(el.style.width),inlineHeight=parseFloat(el.style.height);
+      if (Number.isFinite(inlineWidth) && inlineWidth>0
+        && Number.isFinite(inlineHeight) && inlineHeight>0) {
+        return {width:inlineWidth,height:inlineHeight};
+      }
       const computed=getComputedStyle(el);
       return {width:parseFloat(computed.width),height:parseFloat(computed.height)};
     }
@@ -250,9 +255,7 @@
     return (Object.hasOwn(action,'before') && sameCanonicalValue(current,action.before))
       || (Object.hasOwn(action,'after') && sameCanonicalValue(current,action.after));
   };
-  function resolve(locator,{allowSourceRebase=false,action=null}={}) {
-    const cached = resolved.get(locatorKey(locator));
-    if (cached?.isConnected) return cached;
+  function locateTarget(locator) {
     const canvas = slides().find(c => pageKey(c) === locator.pageKey);
     if (!canvas) throw runtimeError('PAGE_NOT_FOUND');
     let el;
@@ -271,6 +274,12 @@
     if (!el || el.tagName !== locator.tag) {
       throw runtimeError('TARGET_NOT_FOUND', candidateLocators(locator, canvas));
     }
+    return {el,canvas};
+  }
+  function resolve(locator,{allowSourceRebase=false,action=null}={}) {
+    const cached = resolved.get(locatorKey(locator));
+    if (cached?.isConnected) return cached;
+    const {el,canvas}=locateTarget(locator);
     if (fingerprint(el) !== locator.fingerprint
       && !(allowSourceRebase && sourceRebaseMatches(locator,action,el,canvas))) {
       throw runtimeError('TARGET_AMBIGUOUS', candidateLocators(locator, canvas));
@@ -528,8 +537,9 @@
         ? {
           text:(el.textContent ?? '').slice(textTarget.start,textTarget.end),
           textRange:{start:textTarget.start,end:textTarget.end},
+          html:el.innerHTML,
         }
-        : { text:el.textContent };
+        : { text:el.textContent,html:el.innerHTML };
     }
     if (action.kind==='translate') return { translate:inlineProperty(el,'translate') };
     if (action.kind==='resize') return {
@@ -550,7 +560,10 @@
   function restoreBaseline(action,baseline) {
     const el=baseline.el?.isConnected ? baseline.el : resolve(action.target);
     if (action.kind==='setText') {
-      if (baseline.textRange) {
+      // setText 可能跨越富文本后代。只恢复 textContent 无法重建被删除的 span，
+      // 也会让更早的范围样式动作丢失目标；基线必须按结构快照恢复。
+      if (Object.hasOwn(baseline,'html')) el.innerHTML=baseline.html;
+      else if (baseline.textRange) {
         const start=baseline.textRange.start;
         replaceTextRange(el,start,start+action.payload.text.length,baseline.text);
       }
@@ -593,7 +606,9 @@
     el.innerHTML=snapshot.html;
     if (snapshot.style===null) el.removeAttribute('style'); else el.setAttribute('style',snapshot.style);
   };
-  function prepareActions(actions,{allowEmpty=false,rebaseActionIds=[]}={}) {
+  function prepareActions(actions,{
+    allowEmpty=false,rebaseActionIds=[],resolveTargets=true,
+  }={}) {
     if (!Array.isArray(actions) || (!allowEmpty && !actions.length)) throw runtimeError('INVALID_ACTION');
     if (!Array.isArray(rebaseActionIds)
       || rebaseActionIds.some(id => typeof id!=='string' || !id)
@@ -603,12 +618,20 @@
     for (const action of actions) {
       try {
         validatePayload(action);
-        prepared.push({
-          action,
-          el:resolve(action.target,{
+        const item={
+          action,allowSourceRebase:sourceRebaseIds.has(action.id),
+        };
+        if (resolveTargets) {
+          item.el=resolve(action.target,{
             allowSourceRebase:sourceRebaseIds.has(action.id), action,
-          }),
-        });
+          });
+        } else {
+          // 只按 page/editorId/path/tag 提前取得回滚对象，不在此时校验
+          // 依赖前置动作的指纹。所有快照都必须在任何动作生效前完成，
+          // 否则子节点先改、父节点后失败时无法原子回滚。
+          item.el=locateTarget(action.target).el;
+        }
+        prepared.push(item);
       }
       catch (error) { error.failedActionId=action?.id; throw error; }
     }
@@ -673,7 +696,10 @@
   }
   function beginTransaction(actions,{replace=false,rebaseActionIds=[]}={}) {
     if (replace) return beginReplaceTransaction(actions,{rebaseActionIds});
-    const prepared=prepareActions(actions,{rebaseActionIds});
+    // locator 的指纹可能包含同一批次中较早动作造成的内容变化。
+    // 因此先校验全部 payload，再按历史顺序逐条解析和应用目标；
+    // 一次性预解析会在前置修改尚未生效时产生伪 TARGET_AMBIGUOUS。
+    const prepared=prepareActions(actions,{rebaseActionIds,resolveTargets:false});
     const oldActions=[...activeActions];
     const oldBaselines=new Map(activeBaselines);
     const snapshots=new Map(prepared.map(({el}) => [el,snapshotElement(el)]));
@@ -683,7 +709,14 @@
     let settled=false;
     tentativeCount+=1;
     try {
-      for (const {action,el} of prepared) {
+      for (const {action,allowSourceRebase} of prepared) {
+        let el;
+        try {
+          el=resolve(action.target,{allowSourceRebase,action});
+        } catch (error) {
+          error.failedActionId=action?.id;
+          throw error;
+        }
         const key=actionKey(action);
         const existingBaseline=activeBaselines.get(key) ?? transactionBaselines.get(key);
         const baseline=existingBaseline ?? { ...captureBaseline(action,el),el };
@@ -697,7 +730,7 @@
         currentByKey.set(key,result);
       }
     } catch (error) {
-      for (const [el,snapshot] of snapshots) {
+      for (const [el,snapshot] of [...snapshots].reverse()) {
         restoreElementSnapshot(el,snapshot);
       }
       activeActions=oldActions;
@@ -715,7 +748,7 @@
           recordActive(action,transactionBaselines.get(actionKey(actions[index])));
         }
       } else {
-        for (const [el,snapshot] of snapshots) {
+        for (const [el,snapshot] of [...snapshots].reverse()) {
           restoreElementSnapshot(el,snapshot);
         }
         activeActions=oldActions;
@@ -786,7 +819,13 @@
     if (tentativeCount>0) return;
     for (const action of activeActions) {
       if (suspendedTargets.has(stableTargetKey(action.target))) continue;
-      try { applyOne(action); }
+      try {
+        // 大容器结束文字编辑时可能按 innerHTML 重建后代节点。
+        // 此时元素的稳定 ID 不变，而指纹已经包含动作 after 状态；
+        // 允许按 before/after 幂等值安全重建 runtime 缓存。
+        const el=resolve(action.target,{allowSourceRebase:true,action});
+        applyOne(action,el);
+      }
       catch (error) {
         const detail={
           code:String(error?.code ?? error?.message ?? 'ACTION_REPLAY_FAILED'),

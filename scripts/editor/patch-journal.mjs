@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { compileActionGroups } from './action-compiler.mjs';
+import { EditTimeline } from './edit-timeline.mjs';
 
 function inverse(action) {
   let kind = action.kind;
@@ -17,15 +18,13 @@ function inverse(action) {
 }
 
 export class PatchJournal {
-  constructor(state = { groups:[], redo:[] }) { this.state = state; }
+  constructor(state = { groups:[], redo:[] }) {
+    this.state = state;
+    this.timeline = EditTimeline.open(state);
+  }
 
-  appendGroup(taskId, actions) {
-    const group = {
-      id:randomUUID(), mutationType:'action', taskId, actions, active:true,
-    };
-    this.state.groups.push(group);
-    this.state.redo = [];
-    return group;
+  appendGroup(taskId, actions, { commandId=null } = {}) {
+    return this.timeline.appendActions(taskId, actions, { commandId });
   }
 
   appendSourceGroup(source, taskId = null) {
@@ -38,25 +37,28 @@ export class PatchJournal {
     if (taskId !== null && (typeof taskId !== 'string' || !taskId)) {
       throw new TypeError('source mutation taskId 必须是非空字符串或 null');
     }
-    const group = {
-      id:randomUUID(), mutationType:'source', taskId, actions:[],
-      source:structuredClone(source), active:true,
-    };
-    this.state.groups.push(group);
-    this.state.redo = [];
-    return group;
+    return this.timeline.appendSource(source, taskId);
   }
 
   appendToLatestGroup(id, actions) {
-    const group = this.state.groups.at(-1);
-    if (!group || group.mutationType === 'source'
-      || group.id !== id || !group.active || this.state.redo.length > 0) return null;
-    group.actions.push(...actions);
-    return group;
+    return this.timeline.appendToLatest(id, actions);
+  }
+
+  replaceHistory(other) {
+    if (!(other instanceof PatchJournal)) {
+      throw new TypeError('replaceHistory 需要另一个 PatchJournal');
+    }
+    this.state.timeline = structuredClone(other.state.timeline);
+    this.timeline = EditTimeline.open(this.state);
+    return this;
+  }
+
+  group(id) {
+    return this.timeline.groups().find(group => group.id === id) ?? null;
   }
 
   compile() {
-    return compileActionGroups(this.state.groups);
+    return compileActionGroups(this.timeline.groups());
   }
 
   compileForWrite() {
@@ -64,34 +66,35 @@ export class PatchJournal {
       ? this.state.solidifiedActions : [];
     return compileActionGroups([
       { id:'solidified-baseline', taskId:null, active:true, actions:solidifiedActions },
-      ...(Array.isArray(this.state.groups) ? this.state.groups : []),
+      ...this.timeline.groups(),
     ]);
   }
 
-  solidify() {
+  solidify(checkpoint = {}) {
     const actions = this.compileForWrite();
     const clearedGroupCount = Array.isArray(this.state.groups) ? this.state.groups.length : 0;
     const clearedRedoCount = Array.isArray(this.state.redo) ? this.state.redo.length : 0;
     this.state.solidifiedActions = structuredClone(actions);
-    this.state.groups = [];
-    this.state.redo = [];
-    return { actions, clearedGroupCount, clearedRedoCount };
+    const archive = this.timeline.archiveAndReset(checkpoint);
+    return {
+      actions, clearedGroupCount, clearedRedoCount,
+      checkpointId:archive.checkpointId,
+      archivedEntryIds:archive.entries.map(entry => entry.entryId),
+    };
   }
 
   undo(id) {
-    const group = this.state.groups.find(x => x.id === id && x.active);
-    if (!group) throw new Error('找不到可撤销动作组');
-    group.active = false;
-    this.state.redo.push(id);
+    const group = this.timeline.undo(id);
     return group.mutationType === 'source'
       ? [] : [...group.actions].reverse().map(inverse);
   }
 
   redo(id) {
-    const group = this.state.groups.find(x => x.id === id && !x.active);
-    if (!group || !this.state.redo.includes(id)) throw new Error('找不到可重做动作组');
-    group.active = true;
-    this.state.redo = this.state.redo.filter(x => x !== id);
+    const group = this.timeline.redo(id);
     return group.mutationType === 'source' ? [] : group.actions;
+  }
+
+  compensate(id) {
+    return this.timeline.compensate(id);
   }
 }

@@ -52,3 +52,28 @@ test('内容条目保持 surface item，不被强制改成 Pill', async () => {
   assert.doesNotMatch(tasks, /applyPill\(locate/);
   assert.doesNotMatch(switcher, /applyPill\(button/);
 });
+
+test('页面与属性抽屉共用单一 PillNav 箭头契约', async () => {
+  const [editorHtml, editorModule, styles] = await Promise.all([
+    readFile(new URL('index.html', PUBLIC), 'utf8'),
+    readFile(new URL('editor.mjs', PUBLIC), 'utf8'),
+    readFile(new URL('pill-nav.css', PUBLIC), 'utf8'),
+  ]);
+
+  assert.equal(editorHtml.match(/data-pill-arrow(?:\s|>)/g)?.length, 3);
+  assert.equal(editorHtml.match(/class="pill-nav-arrow-icon"/g)?.length, 3);
+  assert.equal(editorHtml.match(/<svg[^>]*class="pill-nav-arrow-icon"/g)?.length, 3);
+  assert.equal(editorHtml.match(/<polyline[^>]*points="6 4 10 8 6 12"/g)?.length, 3);
+  assert.equal(editorHtml.match(/stroke-linecap="round"/g)?.length, 3);
+  assert.equal(editorHtml.match(/stroke-linejoin="round"/g)?.length, 3);
+  assert.doesNotMatch(editorHtml, /data-(?:page-panel-toggle|inspector-collapse|inspector-reopen)[\s\S]{0,300}[←→↑↓‹›]/);
+  assert.match(editorModule, /dataset\.pillArrowDirection = collapsed \? 'right' : 'left'/);
+  assert.match(editorModule, /collapseDirection = dock === 'top' \? 'up' : 'right'/);
+  assert.match(editorModule, /reopenDirection = dock === 'top' \? 'down' : 'left'/);
+  assert.match(styles, /\.pill-nav-control\[data-pill-arrow\]/);
+  assert.match(styles, /data-pill-arrow-direction="left"/);
+  assert.match(styles, /data-pill-arrow-direction="right"/);
+  assert.match(styles, /data-pill-arrow-direction="up"/);
+  assert.match(styles, /data-pill-arrow-direction="down"/);
+  assert.match(styles, /data-pill-arrow[\s\S]{0,500}\.pill-nav-label-hover\s*\{\s*display:\s*none/);
+});

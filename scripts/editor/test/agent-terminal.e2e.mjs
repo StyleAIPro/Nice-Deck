@@ -151,6 +151,17 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
       terminal:{
         ...wslState,
         state:'running',
+        promptReady:false,
+        startupPromptState:'awaiting-confirmation',
+        promptSubmission:{ state:'awaiting-confirmation' },
+      },
+    }) });
+    const awaitingConfirmation = snapshot();
+    socket.emit('message', { data:JSON.stringify({
+      type:'state',
+      terminal:{
+        ...wslState,
+        state:'running',
         promptReady:true,
         startupPromptState:'submitted',
       },
@@ -159,7 +170,7 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
     panel.dispose();
     root.remove();
     globalThis.WebSocket = NativeWebSocket;
-    return { beforeOutput, afterOutput, pending, submitting, submitted };
+    return { beforeOutput, afterOutput, pending, submitting, awaitingConfirmation, submitted };
   });
 
   assert.equal(result.beforeOutput.visible, true);
@@ -169,7 +180,9 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
   assert.match(result.pending.copy, /正在进入 root WSL/);
   assert.equal(result.submitting.visible, true);
   assert.match(result.submitting.copy, /正在提交初始化指令/);
-  assert.equal(result.submitted.visible, false, '回车写入后应立即显示真实终端');
+  assert.equal(result.awaitingConfirmation.visible, true);
+  assert.match(result.awaitingConfirmation.copy, /正在确认初始化指令已发送/);
+  assert.equal(result.submitted.visible, false, 'Agent 确认接收后应显示真实终端');
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
@@ -216,6 +229,65 @@ test('bypass Agent 遇到目录信任提示时自动展开右侧终端并等待�
     children[0].writes.some(value => value.includes('Huawei Deck')),
     '确认信任并进入正常输入框后才应提交初始化任务',
   );
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('Windows 终端的 Ctrl+V 只粘贴一次，选中文字后 Ctrl+C 只复制且不中断 Codex', async t => {
+  const children = [];
+  const app = await startFixtureServer({
+    autoStartAgentTerminal:true,
+    createAgentTerminalConversation:async provider => ({
+      conversationId:`${provider}-clipboard-e2e`,
+      resume:false,
+      initialPromptConsumed:true,
+    }),
+    spawnAgentTerminal:(executable, args, options) => {
+      const child = new FakePty(executable, args, options, 4950 + children.length);
+      children.push(child);
+      queueMicrotask(() => child.events.emit('data', '\r\nCodex ready\r\n'));
+      return child;
+    },
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
+    origin:new URL(app.url).origin,
+  });
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
+  ));
+  await page.click('[data-agent-status]');
+  const host = page.locator('[data-agent-terminal-host]');
+  await host.waitFor({ state:'visible' });
+  await page.evaluate(() => navigator.clipboard.writeText('只粘贴一次'));
+  children[0].writes.length = 0;
+
+  await host.click();
+  await page.keyboard.press('Control+V');
+  await page.waitForTimeout(80);
+
+  assert.deepEqual(children[0].writes, ['只粘贴一次']);
+
+  children[0].events.emit('data', '\r\nCOPY_SENTINEL_TEXT\r\n');
+  await page.waitForFunction(() => [...document.querySelectorAll('.xterm-rows > div')]
+    .some(row => row.textContent.includes('COPY_SENTINEL_TEXT')));
+  const copyPoint = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('.xterm-rows > div')]
+      .find(candidate => candidate.textContent.includes('COPY_SENTINEL_TEXT'));
+    const bounds = row.getBoundingClientRect();
+    return { x:bounds.left + 60, y:bounds.top + bounds.height / 2 };
+  });
+  await page.evaluate(() => navigator.clipboard.writeText('旧剪贴板'));
+  await page.mouse.dblclick(copyPoint.x, copyPoint.y);
+  children[0].writes.length = 0;
+  await page.keyboard.press('Control+C');
+  await page.waitForTimeout(80);
+
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'COPY_SENTINEL_TEXT');
+  assert.doesNotMatch(children[0].writes.join(''), /\u0003/, '复制选区不能向 Codex 发送 Ctrl+C');
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
@@ -544,10 +616,17 @@ test('任务批次进入同一 bypass PTY，权威 action 完成后退出 pendin
     }),
     spawnAgentTerminal:(executable, args, options) => {
       const child = new FakePty(executable, args, options, 6000 + children.length);
+      child.write = data => {
+        child.writes.push(data);
+        if (data === '\r') queueMicrotask(() => {
+          child.events.emit('data', '\u001b[?25l\u001b[2K• Working');
+          setTimeout(() => child.events.emit('data', '\r\ncodex READY\r\n'), 300);
+        });
+      };
       children.push(child);
       queueMicrotask(() => child.events.emit(
         'data',
-        `\r\n${executable} TASK READY\r\n`
+        '\r\ncodex READY\r\n'
           + '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[?25h\u001b[11;3H\u001b[?2026l',
       ));
       return child;

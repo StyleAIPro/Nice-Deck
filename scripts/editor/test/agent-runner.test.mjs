@@ -81,6 +81,37 @@ test('任务协调器拒绝并发，并在任务确实完成后发布成功', as
   await coordinator.close();
 });
 
+test('感知提交回执的 Agent 在提示词真正发出前保持排队态', async () => {
+  let publishProgress;
+  let finish;
+  const completion = new Promise(resolve => { finish = resolve; });
+  const session = { revision:5, tasks:[{ id:'task-a', status:'pending' }] };
+  const coordinator = new AgentRunCoordinator({
+    provider:'agent-terminal',
+    adapter:{
+      id:'agent-terminal', submissionAware:true,
+      async run({ onProgress }) {
+        publishProgress = onProgress;
+        await completion;
+        session.tasks[0].status = 'completed';
+        return { summary:'处理完成' };
+      },
+    },
+    getSession:() => session,
+    getContext:() => ({ deckPath:'/tmp/deck.html' }),
+  });
+
+  coordinator.start({ expectedRevision:5, taskIds:['task-a'] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(coordinator.snapshot().status, 'queued');
+  publishProgress({ status:'running', message:'任务已确认提交到终端' });
+  assert.equal(coordinator.snapshot().status, 'running');
+  finish();
+  await coordinator.activePromise;
+  assert.equal(coordinator.snapshot().status, 'succeeded');
+  await coordinator.close();
+});
+
 test('任务协调器拒绝把正常退出冒充任务完成', async () => {
   const session = {
     revision:4,

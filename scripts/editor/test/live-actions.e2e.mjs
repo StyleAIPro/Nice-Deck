@@ -7,11 +7,42 @@ import { promisify } from 'node:util';
 import WebSocket from 'ws';
 import { dragInFrame, startFixtureServer, openEditor } from './test-helpers.mjs';
 import { PatchJournal } from '../patch-journal.mjs';
+import { verifyWorkingPatchReplay } from '../working-deck-store.mjs';
 
 const execFileAsync = promisify(execFile);
 
 async function session(app) {
   return fetch(`${app.url}/api/session?token=${app.token}`).then(response => response.json());
+}
+
+async function dragSelectionBorder(page, frame, { dx, dy, side = 'left', release = true }) {
+  const handle = frame.locator(`[data-transform-move-handle="${side}"]`);
+  await handle.waitFor();
+  const box = await handle.boundingBox();
+  const start = { x:box.x + box.width / 2, y:box.y + box.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + dx, start.y + dy, { steps:8 });
+  if (release) await page.mouse.up();
+  return { handle, start };
+}
+
+async function frameTextScreenRect(page, selector) {
+  return page.locator('#deck-frame').evaluate((frame, targetSelector) => {
+    const element = frame.contentDocument.querySelector(targetSelector);
+    const range = frame.contentDocument.createRange();
+    range.selectNodeContents(element);
+    const rect = range.getBoundingClientRect();
+    const frameRect = frame.getBoundingClientRect();
+    const scaleX = frameRect.width / frame.offsetWidth;
+    const scaleY = frameRect.height / frame.offsetHeight;
+    return {
+      left:frameRect.left + rect.left * scaleX,
+      right:frameRect.left + rect.right * scaleX,
+      top:frameRect.top + rect.top * scaleY,
+      bottom:frameRect.top + rect.bottom * scaleY,
+    };
+  }, selector);
 }
 
 async function postJson(app, pathname, body) {
@@ -442,22 +473,86 @@ test('文字编辑全选删除会提交空字符串且刷新后不恢复原文',
   assert.deepEqual(resourceProblems, []);
 });
 
-test('文字编辑交互：双击只放置光标而不自动全选', async t => {
+test('文字编辑交互：单击文字放置光标而不自动全选', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());
   const { browser, page } = await openEditor(app);
   t.after(() => browser.close());
   const heading = page.frameLocator('#deck-frame').locator('h2').first();
   await page.click('[data-mode="edit"]');
-  await heading.dblclick();
+  await heading.click({ position:{ x:20, y:10 } });
   assert.deepEqual(await heading.evaluate(element => {
     const selection = element.ownerDocument.getSelection();
     return {
+      editable:element.getAttribute('contenteditable'),
       collapsed:selection.isCollapsed,
       text:selection.toString(),
       inside:element.contains(selection.anchorNode),
     };
-  }), { collapsed:true, text:'', inside:true });
+  }), { editable:'plaintext-only', collapsed:true, text:'', inside:true });
+});
+
+test('文字内部拖选文本且只有选框边缘能移动文字盒', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  await page.setViewportSize({ width:1920, height:1080 });
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.click('[data-mode="edit"]');
+  await heading.hover();
+  assert.equal(await heading.evaluate(element => getComputedStyle(element).cursor), 'text');
+  await heading.click({ position:{ x:20, y:10 } });
+  assert.equal(await heading.getAttribute('contenteditable'), 'plaintext-only');
+
+  const textRect = await frameTextScreenRect(page, 'h2');
+  const start = { x:textRect.right - 2, y:(textRect.top + textRect.bottom) / 2 };
+  const end = { x:textRect.left + 2, y:start.y };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps:8 });
+  await page.mouse.up();
+  assert.ok((await heading.evaluate(element => element.ownerDocument.getSelection().toString())).length > 0);
+  assert.deepEqual({ revision:(await session(app)).revision,
+    translate:await heading.evaluate(element => element.style.translate) },
+  { revision:0, translate:'' });
+
+  const moveHandle = frame.locator('[data-transform-move-handle="left"]');
+  await moveHandle.waitFor();
+  await moveHandle.hover();
+  assert.equal(await moveHandle.evaluate(element => getComputedStyle(element).cursor), 'grab');
+  const handleBox = await moveHandle.boundingBox();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 40,
+    handleBox.y + handleBox.height / 2 + 20, { steps:8 });
+  await page.mouse.up();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  assert.notEqual(await heading.evaluate(element => element.style.translate), '');
+});
+
+test('文字修改后直接拖动选框边缘会依次保存文字与位移', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(5_000);
+  await page.setViewportSize({ width:1920, height:1080 });
+  const frame = page.frameLocator('#deck-frame');
+  const heading = frame.locator('h2').first();
+
+  await page.click('[data-mode="edit"]');
+  await heading.click({ position:{ x:20, y:10 } });
+  await heading.fill('边缘移动前修改');
+  await dragSelectionBorder(page, frame, { dx:36, dy:18 });
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+
+  const state = await session(app);
+  assert.deepEqual(state.groups.map(group => group.actions[0].kind), ['setText', 'translate']);
+  assert.equal(await heading.textContent(), '边缘移动前修改');
+  assert.notEqual(await heading.evaluate(element => element.style.translate), '');
 });
 
 test('文字编辑交互：白字进入编辑态仍保留原背景且只显示光标', async t => {
@@ -523,24 +618,12 @@ test('统一编辑模式直接移动与缩放，单击抖动不误提交且控�
   const heading = frame.locator('h2').first();
 
   await page.click('[data-mode="edit"]');
-  const headingBox = await heading.boundingBox();
-  const headingStartX = Math.max(headingBox.x, 0) + Math.min(100, headingBox.width / 2);
-  const headingStartY = headingBox.y + headingBox.height / 2;
-  await page.mouse.move(headingStartX, headingStartY);
-  await page.mouse.down();
-  await page.mouse.move(headingStartX + 2, headingStartY + 1, { steps:3 });
-  await page.mouse.up();
+  await heading.click({ position:{ x:20, y:10 } });
+  await dragSelectionBorder(page, frame, { dx:2, dy:1 });
   assert.equal((await session(app)).revision, 0);
   assert.equal(await frame.locator('[data-resize-handle]').count(), 1);
 
-  const selectedHeadingBox = await heading.boundingBox();
-  const selectedStartX = Math.max(selectedHeadingBox.x, 0)
-    + Math.min(100, selectedHeadingBox.width / 2);
-  const selectedStartY = selectedHeadingBox.y + selectedHeadingBox.height / 2;
-  await page.mouse.move(selectedStartX, selectedStartY);
-  await page.mouse.down();
-  await page.mouse.move(selectedStartX + 40, selectedStartY + 20, { steps:8 });
-  await page.mouse.up();
+  await dragSelectionBorder(page, frame, { dx:40, dy:20 });
   await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
   let state = await session(app);
   const move = state.groups[0].actions[0];
@@ -552,13 +635,7 @@ test('统一编辑模式直接移动与缩放，单击抖动不误提交且控�
     `${move.after.x}px ${move.after.y}px`,
   );
 
-  const movedBox = await heading.boundingBox();
-  const movedStartX = Math.max(movedBox.x, 0) + Math.min(100, movedBox.width / 2);
-  const movedStartY = movedBox.y + movedBox.height / 2;
-  await page.mouse.move(movedStartX, movedStartY);
-  await page.mouse.down();
-  await page.mouse.move(movedStartX + 20, movedStartY + 10, { steps:6 });
-  await page.mouse.up();
+  await dragSelectionBorder(page, frame, { dx:20, dy:10 });
   await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
   state = await session(app);
   const repeatedMove = state.groups[1].actions[0];
@@ -590,6 +667,189 @@ test('统一编辑模式直接移动与缩放，单击抖动不误提交且控�
   assert.deepEqual(resourceProblems, []);
 });
 
+test('拖动松手到服务端确认期间保持最终位置，确认后可撤销', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(4_000);
+  await page.setViewportSize({ width:1920, height:1080 });
+  const frame = page.frameLocator('#deck-frame');
+  const heading = frame.locator('h2').first();
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    frameElement.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+
+  let releaseRequest;
+  let markRequestSeen;
+  const requestGate = new Promise(resolvePromise => { releaseRequest = resolvePromise; });
+  const requestSeen = new Promise(resolvePromise => { markRequestSeen = resolvePromise; });
+  await page.route('**/api/actions*', async route => {
+    markRequestSeen();
+    await requestGate;
+    await route.continue();
+  });
+
+  await page.click('[data-mode="edit"]');
+  await heading.click({ position:{ x:20, y:10 } });
+  await dragSelectionBorder(page, frame, { dx:0, dy:20 });
+  await requestSeen;
+  const pending = await page.locator('#deck-frame').evaluate(frameElement => {
+    const document = frameElement.contentDocument;
+    const preview = document.querySelector('[data-transform-commit-preview]');
+    const selection = document.querySelector('[data-transform-selection]');
+    if (!preview || !selection) return { preview:false };
+    const previewRect = preview.getBoundingClientRect();
+    const selectionRect = selection.getBoundingClientRect();
+    return {
+      preview:true,
+      sourceHidden:Boolean(document.querySelector('[data-transform-commit-source]')),
+      delta:{
+        x:previewRect.left - selectionRect.left,
+        y:previewRect.top - selectionRect.top,
+      },
+    };
+  });
+  assert.equal(pending.preview, true);
+  assert.equal(pending.sourceHidden, true);
+  assert.ok(Math.abs(pending.delta.x) < 1 && Math.abs(pending.delta.y) < 1,
+    JSON.stringify(pending));
+
+  releaseRequest();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  assert.equal(await frame.locator('[data-transform-commit-preview]').count(), 0);
+  assert.equal(await heading.getAttribute('data-transform-commit-source'), null);
+  await page.click('[data-history-undo]');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+  assert.equal(await heading.evaluate(element => element.style.translate), '');
+  await page.click('[data-history-redo]');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '3');
+  const solidified = await postJson(app, '/api/solidify-deck', { expectedRevision:3 });
+  assert.equal(solidified.response.status, 200, JSON.stringify(solidified.body));
+  assert.equal(solidified.body.solidified, true);
+  assert.deepEqual((await session(app)).groups, []);
+});
+
+test('表格内容修改后调整尺寸仍可安全重放并固化', async t => {
+  const app = await startFixtureServer({
+    bundle:true,
+    workingPatchVerifier:path => verifyWorkingPatchReplay(path),
+    fixtureTransform:source => source.replace(
+      '<div class="card" style="width:300px;height:100px;overflow:hidden">卡片 A</div>',
+      '<table style="position:absolute;left:100px;top:120px;width:720px;border-collapse:collapse">'
+        + '<tbody><tr><td style="height:120px;border:1px solid #999;padding:12px">'
+        + '<div class="table-copy">原始单元格文字</div>'
+        + '</td></tr><tr><td style="height:120px;border:1px solid #999;padding:12px">'
+        + '<div>第二行</div></td></tr></tbody></table>',
+    ),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(5_000);
+  await page.setViewportSize({ width:1920, height:1080 });
+  const frame = page.frameLocator('#deck-frame');
+  const copy = frame.locator('.table-copy');
+  const cell = frame.locator('td').first();
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    frameElement.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+
+  const copyTarget = await copy.evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  let applied = await postJson(app, '/api/actions', {
+    expectedRevision:0, taskId:null,
+    actions:[{
+      id:'table-copy-update', taskId:null, target:copyTarget,
+      kind:'setText', payload:{ text:'更新后的单元格文字' }, expectedRevision:0,
+    }],
+  });
+  assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  await copy.getByText('更新后的单元格文字').waitFor();
+  await reloadDeckFrame(page);
+  await copy.getByText('更新后的单元格文字').waitFor();
+  await page.locator('#deck-frame').evaluate(frameElement => {
+    frameElement.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+
+  await page.click('[data-mode="edit"]');
+  await cell.click({ position:{ x:300, y:100 } });
+  const handle = frame.locator('[data-resize-handle]');
+  const handleBox = await handle.boundingBox();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 18,
+    handleBox.y + handleBox.height / 2 + 36, { steps:8 });
+  await page.mouse.up();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+
+  const state = await session(app);
+  assert.equal(state.groups[1].actions[0].kind, 'resize');
+  assert.equal(state.groups[1].actions[0].target.tag, 'TR');
+  assert.ok(Math.abs(
+    state.groups[1].actions[0].after.width - state.groups[1].actions[0].before.width,
+  ) < 1, JSON.stringify(state.groups[1].actions[0]));
+  assert.ok(state.groups[1].actions[0].after.height > state.groups[1].actions[0].before.height);
+  await copy.click({ position:{ x:100, y:10 } });
+  assert.equal(await copy.getAttribute('contenteditable'), 'plaintext-only');
+  assert.equal(await frame.locator('tr').first().getAttribute('contenteditable'), null);
+  await copy.press('Escape');
+  assert.doesNotMatch(
+    (await page.locator('[data-history-notice]').allTextContents()).join(' '),
+    /TARGET_AMBIGUOUS/,
+  );
+  const solidified = await postJson(app, '/api/solidify-deck', { expectedRevision:2 });
+  assert.equal(solidified.response.status, 200, JSON.stringify(solidified.body));
+  assert.equal(solidified.body.solidified, true);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+test('编辑模式用 Delete 或 Backspace 删除整个选中元素并可撤销', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(3_000);
+  const frame = page.frameLocator('#deck-frame');
+  const card = frame.locator('.card').first();
+  const heading = frame.locator('h2').first();
+
+  await page.click('[data-mode="edit"]');
+  await card.click();
+  await frame.locator('[data-transform-selection]').waitFor();
+  await frame.locator('[data-transform-move-handle="left"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-selection-state]')?.dataset.selected === 'true');
+  await page.keyboard.press('Delete');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  await card.waitFor({ state:'hidden' });
+  assert.equal(await frame.locator('[data-transform-selection]').count(), 0);
+  let state = await session(app);
+  assert.deepEqual(
+    state.groups[0].actions.map(action => ({
+      kind:action.kind, payload:action.payload, before:action.before, after:action.after,
+    })),
+    [{ kind:'hide', payload:{}, before:'', after:'none' }],
+  );
+
+  await page.locator('[data-history-undo]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
+  await card.waitFor({ state:'visible' });
+  assert.equal(await card.evaluate(element => element.style.display), '');
+
+  await heading.click();
+  await frame.locator('[data-transform-selection]').waitFor();
+  await frame.locator('[data-transform-move-handle="left"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-selection-state]')?.dataset.selected === 'true');
+  await page.keyboard.press('Backspace');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '3');
+  await heading.waitFor({ state:'hidden' });
+  state = await session(app);
+  assert.equal(state.groups[1].actions[0].kind, 'hide');
+  assert.deepEqual(state.groups[1].actions[0].payload, {});
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 for (const scenario of [
   { mode:'move', target:'h2', kind:'translate', handle:true },
   { mode:'resize', target:'.card', kind:'resize', handle:true },
@@ -613,6 +873,7 @@ for (const scenario of [
     await frame.locator(scenario.target).first().click();
     assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
     assert.equal(await frame.locator('[data-resize-handle]').count(), scenario.handle ? 1 : 0);
+    await frame.locator('[data-transform-move-handle="left"]').click();
 
     await page.waitForTimeout(900);
     await page.locator('#deck-frame').evaluate(frameElement => {
@@ -628,11 +889,8 @@ for (const scenario of [
 
     const nextTarget = frame.locator(scenario.target).first();
     if (scenario.mode === 'move') {
-      const box = await nextTarget.boundingBox();
-      await page.mouse.move(box.x + 10, box.y + 10);
-      await page.mouse.down();
-      await page.mouse.move(box.x + 42, box.y + 26);
-      await page.mouse.up();
+      await nextTarget.click({ position:{ x:20, y:10 } });
+      await dragSelectionBorder(page, frame, { dx:32, dy:16 });
     } else {
       await nextTarget.click();
       const handleBox = await frame.locator('[data-resize-handle]').boundingBox();
@@ -761,12 +1019,8 @@ test('transformDrag preview 被 clone 后安全取消并通过权威 reload 清�
   const frame = page.frameLocator('#deck-frame');
   let heading = frame.locator('h2').first();
   await page.click('[data-mode="edit"]');
-  const box = await heading.boundingBox();
-  const startX = Math.max(box.x, 0) + Math.min(100, box.width / 2);
-  const startY = box.y + box.height / 2;
-  await page.mouse.move(startX, startY);
-  await page.mouse.down();
-  await page.mouse.move(startX + 40, startY + 20, { steps:8 });
+  await heading.click({ position:{ x:20, y:10 } });
+  await dragSelectionBorder(page, frame, { dx:40, dy:20, release:false });
   await page.locator('#deck-frame').evaluate(frameElement => {
     window.__documentBeforeTransientClone = frameElement.contentDocument;
     const stage = frameElement.contentDocument.querySelector('.stage');
@@ -783,11 +1037,8 @@ test('transformDrag preview 被 clone 后安全取消并通过权威 reload 清�
   assert.equal((await session(app)).revision, 0);
 
   await frame.locator('html[data-deck-editor-mode="edit"]').waitFor();
-  const nextBox = await heading.boundingBox();
-  await page.mouse.move(nextBox.x + 8, nextBox.y + 8);
-  await page.mouse.down();
-  await page.mouse.move(nextBox.x + 38, nextBox.y + 23);
-  await page.mouse.up();
+  await heading.click({ position:{ x:20, y:10 } });
+  await dragSelectionBorder(page, frame, { dx:30, dy:15 });
   await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
   assert.equal((await session(app)).groups[0].actions[0].kind, 'translate');
 });
@@ -816,6 +1067,7 @@ for (const scenario of [
     const target = frame.locator(scenario.target).nth(1);
     await target.click();
     assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
+    await frame.locator('[data-transform-move-handle="left"]').click();
     await target.evaluate(element => {
       const marker = document.createElement('span');
       marker.dataset.connectedStructureMarker = '';
@@ -864,11 +1116,7 @@ for (const scenario of [
     assert.equal(await page.evaluate(() => window.__connectedDiagnostics.type), 'diagnostics-result');
 
     if (scenario.mode === 'move') {
-      const box = await target.boundingBox();
-      await page.mouse.move(box.x + 8, box.y + 8);
-      await page.mouse.down();
-      await page.mouse.move(box.x + 38, box.y + 23);
-      await page.mouse.up();
+      await dragSelectionBorder(page, frame, { dx:30, dy:15 });
     } else {
       const handleBox = await frame.locator('[data-resize-handle]').boundingBox();
       await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
@@ -891,10 +1139,8 @@ test('复杂 SVG 使用 scale 且模式切换与 pagehide 清理预览和覆盖 
   const heading = frame.locator('h2').first();
 
   await page.click('[data-mode="edit"]');
-  const headingBox = await heading.boundingBox();
-  await page.mouse.move(headingBox.x + 8, headingBox.y + 8);
-  await page.mouse.down();
-  await page.mouse.move(headingBox.x + 48, headingBox.y + 28);
+  await heading.click({ position:{ x:20, y:10 } });
+  await dragSelectionBorder(page, frame, { dx:40, dy:20, release:false });
   await page.evaluate(() => {
     const iframe = document.querySelector('#deck-frame');
     iframe.contentWindow.postMessage({ type: 'set-editor-mode', mode: 'preview' }, location.origin);
@@ -1361,11 +1607,7 @@ test('文字识别兼容：classless 文字块可直接修改和拖动', async t
   await page.click('[data-mode="edit"]');
   await plain.click();
   await frame.locator('[data-transform-selection]').waitFor();
-  const before = await plain.boundingBox();
-  await page.mouse.move(before.x + 8, before.y + 8);
-  await page.mouse.down();
-  await page.mouse.move(before.x + 38, before.y + 28);
-  await page.mouse.up();
+  await dragSelectionBorder(page, frame, { dx:30, dy:20 });
   await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '2');
   assert.notEqual(await plain.evaluate(element => element.style.translate), '');
 });
@@ -1410,10 +1652,8 @@ test('CSS translate/scale 是移动与交互组件缩放的真实基值', async 
     document.querySelector('section').append(link);
   });
   await page.click('[data-mode="edit"]');
-  const box=await heading.boundingBox();
-  const startX=Math.max(box.x,0)+Math.min(100,box.width/2), startY=box.y+box.height/2;
-  await page.mouse.move(startX,startY); await page.mouse.down();
-  await page.mouse.move(startX+20,startY+10,{steps:6}); await page.mouse.up();
+  await heading.click({ position:{ x:20, y:10 } });
+  await dragSelectionBorder(page, frame, { dx:20, dy:10 });
   await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent==='1');
   let state=await session(app);
   assert.deepEqual(state.groups[0].actions[0].before,{x:30,y:20});

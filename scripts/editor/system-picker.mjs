@@ -19,33 +19,50 @@ function pickPathWithSystemPicker({
   spawnProcess = spawn,
 } = {}) {
   return new Promise((resolvePromise, reject) => {
+    if (signal?.aborted) {
+      reject(pickerError('文件选择器已取消', 'PICK_ABORTED'));
+      return;
+    }
     const child = spawnProcess(
       pythonExecutable,
       [join(PROJECT_DIR, 'scripts/deck-editor.py'), pickerFlag],
-      pythonUtf8SpawnOptions({ cwd:PROJECT_DIR, stdio:['ignore', 'pipe', 'pipe'], signal }),
+      pythonUtf8SpawnOptions({ cwd:PROJECT_DIR, stdio:['ignore', 'pipe', 'pipe'] }),
     );
     const stdout = [];
     const stderr = [];
     let outputBytes = 0;
+    let settled = false;
+    const settle = (method, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abortPicker);
+      method(value);
+    };
+    const abortPicker = () => {
+      try { child.kill(); } catch { /* Promise 仍必须立即收敛。 */ }
+      settle(reject, pickerError('文件选择器已取消', 'PICK_ABORTED'));
+    };
+    signal?.addEventListener('abort', abortPicker, { once:true });
     const collect = target => chunk => {
+      if (settled) return;
       outputBytes += chunk.length;
       if (outputBytes > 64 * 1024) {
         child.kill();
-        reject(pickerError('文件选择器返回内容过大'));
+        settle(reject, pickerError('文件选择器返回内容过大'));
         return;
       }
       target.push(chunk);
     };
     child.stdout.on('data', collect(stdout));
     child.stderr.on('data', collect(stderr));
-    child.once('error', reject);
+    child.once('error', error => settle(reject, error));
     child.once('close', code => {
       if (code === 3) {
-        resolvePromise(null);
+        settle(resolvePromise, null);
         return;
       }
       if (code !== 0) {
-        reject(pickerError(
+        settle(reject, pickerError(
           Buffer.concat(stderr).toString('utf8').trim() || '系统文件选择器异常退出',
         ));
         return;
@@ -55,9 +72,9 @@ function pickPathWithSystemPicker({
         if (typeof payload[resultKey] !== 'string' || !payload[resultKey]) {
           throw new Error(`缺少 ${resultKey}`);
         }
-        resolvePromise(payload[resultKey]);
+        settle(resolvePromise, payload[resultKey]);
       } catch (error) {
-        reject(pickerError(`无法解析${resultLabel}选择结果：${error.message}`));
+        settle(reject, pickerError(`无法解析${resultLabel}选择结果：${error.message}`));
       }
     });
   });

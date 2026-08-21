@@ -67,7 +67,9 @@ export function renderTaskDrawer(root, {
   const needsConfirmationCount = tasks.filter(
     task => task.status === 'needs-confirmation',
   ).length;
-  const targetMissingCount = tasks.filter(task => task.targetMissing === true).length;
+  const unresolvedTargetMissingCount = tasks.filter(task => (
+    task.targetMissing === true && task.status !== 'completed'
+  )).length;
   const wasOpen = root.dataset.open === 'true';
   const previousCount = Number(root.dataset.taskCount ?? 0);
   const shouldOpen = wasOpen || (previousCount === 0 && tasks.length > 0);
@@ -135,21 +137,23 @@ export function renderTaskDrawer(root, {
     row.dataset.taskRow = task.id;
     const needsConfirmation = task.status === 'needs-confirmation';
     const targetMissing = task.targetMissing === true;
+    const unresolvedTargetMissing = targetMissing && task.status !== 'completed';
     if (needsConfirmation) row.dataset.needsConfirmation = '';
-    if (targetMissing) row.dataset.targetMissing = '';
+    if (unresolvedTargetMissing) row.dataset.targetMissing = '';
     const locate = element('button', 'task-locate');
     locate.type = 'button';
     locate.dataset.taskLocate = task.id;
     locate.disabled = targetMissing;
     locate.setAttribute('aria-label', targetMissing
-      ? `目标页面已删除：${task.instruction}`
+      ? `原目标当前不可定位：${task.instruction}`
       : `定位第 ${task.pageIndex} 页：${task.instruction}`);
     const meta = element('div', 'task-meta');
     meta.append(element('span', 'task-page', `${String(task.pageIndex).padStart(2, '0')} · ${task.pageLabel}`));
     const status = element(
       'span',
-      `task-status ${targetMissing ? 'task-status-target-missing' : `task-status-${task.status}`}`,
-      targetMissing ? '页面已删除' : (STATUS_LABELS[task.status] ?? task.status),
+      `task-status ${unresolvedTargetMissing
+        ? 'task-status-target-missing' : `task-status-${task.status}`}`,
+      unresolvedTargetMissing ? '目标不可定位' : (STATUS_LABELS[task.status] ?? task.status),
     );
     meta.append(status);
     locate.append(meta, element('p', 'task-instruction', task.instruction));
@@ -157,15 +161,13 @@ export function renderTaskDrawer(root, {
       if (!targetMissing) onLocate?.(task);
     });
     row.append(locate);
-    if (targetMissing) {
+    if (unresolvedTargetMissing) {
       const notice = element('aside', 'task-target-missing-notice');
       notice.dataset.taskTargetMissing = task.id;
       notice.setAttribute('role', 'status');
       notice.append(
-        element('strong', '', '这个任务的目标页面已删除。'),
-        element('span', '', task.groupId
-          ? '撤销本次删页即可恢复页面和任务。'
-          : '可以删除任务记录，或在页面恢复后重新标记。'),
+        element('strong', '', '这个任务的原目标当前无法定位。'),
+        element('span', '', '页面结构可能已经变化；请撤销相关结构修改，或删除任务后重新标记。'),
       );
       row.append(notice);
     } else if (needsConfirmation) {
@@ -402,12 +404,16 @@ export function renderTaskDrawer(root, {
   const actionableTasks = tasks.filter(task => (
     task.targetMissing !== true && ['pending', 'failed'].includes(task.status)
   ));
-  const buttonText = activeRun
-    ? `Agent 正在处理 ${agentRun.taskCount ?? actionableTasks.length} 条`
-    : actionableTasks.length === 0 && targetMissingCount > 0
-      ? `有 ${targetMissingCount} 条任务的页面已删除`
+  const buttonText = agentRun.status === 'queued'
+    ? `Agent 正在提交 ${agentRun.taskCount ?? actionableTasks.length} 条`
+    : agentRun.status === 'running'
+      ? `Agent 正在处理 ${agentRun.taskCount ?? actionableTasks.length} 条`
+    : actionableTasks.length === 0 && unresolvedTargetMissingCount > 0
+      ? `有 ${unresolvedTargetMissingCount} 条任务的目标不可定位`
     : actionableTasks.length === 0 && needsConfirmationCount > 0
       ? `有 ${needsConfirmationCount} 条任务需要补充说明`
+    : actionableTasks.length === 0
+      ? '没有待处理任务'
     : `交给 Agent 处理全部 ${actionableTasks.length} 条`;
   const process = element('button', 'task-process-all', buttonText);
   process.type = 'button';
@@ -422,12 +428,15 @@ export function renderTaskDrawer(root, {
   const confirmationMessage = needsConfirmationCount > 0
     ? `${needsConfirmationCount} 条任务因修改目标定位不唯一而暂停，补充说明后可重新提交。`
     : '';
-  const targetMissingMessage = targetMissingCount > 0
-    ? `${targetMissingCount} 条任务的页面已删除；请删除任务记录或撤销删页。`
+  const targetMissingMessage = unresolvedTargetMissingCount > 0
+    ? `${unresolvedTargetMissingCount} 条任务的原目标当前无法定位；`
+      + '请撤销相关结构修改，或删除任务后重新标记。'
     : '';
   note.textContent = [runMessage(agentRun), targetMissingMessage, confirmationMessage]
     .filter(Boolean).join('；');
-  if (needsConfirmationCount > 0 || targetMissingCount > 0) note.dataset.attention = '';
+  if (needsConfirmationCount > 0 || unresolvedTargetMissingCount > 0) {
+    note.dataset.attention = '';
+  }
   process.addEventListener('click', () => {
     process.disabled = true;
     note.textContent = '正在把本批反馈交给 Agent…';

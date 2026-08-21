@@ -28,7 +28,11 @@ import {
   resolveSelectedProjectRoot,
 } from './agent-workspace/project-root.mjs';
 import { isAgentProviderId } from './agent-provider-registry.mjs';
-import { defaultPythonExecutable, pythonUtf8SpawnOptions } from './python-utf8.mjs';
+import { defaultPythonExecutable } from './python-utf8.mjs';
+import {
+  pickDeckWithSystemPicker as pickDeckPathWithSystemPicker,
+  pickProjectDirectoryWithSystemPicker as pickProjectPathWithSystemPicker,
+} from './system-picker.mjs';
 import { buildHelpCatalog } from './help-catalog.mjs';
 import {
   inspectEnvironment as inspectEnvironmentWithPython,
@@ -61,6 +65,14 @@ const APP_ASSETS = new Map([
     path:join(APP_PUBLIC_DIR, 'liquid-ether-background.mjs'),
     type:'text/javascript; charset=utf-8',
   }],
+  ['/app/liquid-ether-engine.mjs', {
+    path:join(APP_PUBLIC_DIR, 'liquid-ether-engine.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/liquid-ether-worker.mjs', {
+    path:join(APP_PUBLIC_DIR, 'liquid-ether-worker.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
   ['/app/three.module.min.js', {
     path:join(PROJECT_DIR, 'node_modules/three/build/three.module.min.js'),
     type:'text/javascript; charset=utf-8',
@@ -86,6 +98,10 @@ const APP_ASSETS = new Map([
   }],
   ['/app/agent-terminal-panel.mjs', {
     path:join(EDITOR_DIR, 'public/agent-terminal-panel.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/terminal-keyboard.mjs', {
+    path:join(EDITOR_DIR, 'public/terminal-keyboard.mjs'),
     type:'text/javascript; charset=utf-8',
   }],
   ['/app/agent-provider-registry.mjs', {
@@ -156,10 +172,6 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-function pickerError(message, code = 'PICK_FAILED') {
-  return Object.assign(new Error(message), { code });
-}
-
 async function readJson(request, maximum = 32 * 1024) {
   const chunks = [];
   let total = 0;
@@ -176,76 +188,15 @@ async function readJson(request, maximum = 32 * 1024) {
   return value;
 }
 
-function pickPathWithSystemPicker({
-  pythonExecutable = DEFAULT_PYTHON_EXECUTABLE,
-  pickerFlag,
-  resultKey,
-  resultLabel,
-  signal,
-  spawnProcess = spawn,
-} = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawnProcess(
-      pythonExecutable,
-      [join(PROJECT_DIR, 'scripts/deck-editor.py'), pickerFlag],
-      pythonUtf8SpawnOptions({
-        cwd:PROJECT_DIR, stdio:['ignore', 'pipe', 'pipe'], signal,
-      }),
-    );
-    const stdout = [];
-    const stderr = [];
-    let outputBytes = 0;
-    const collect = target => chunk => {
-      outputBytes += chunk.length;
-      if (outputBytes > 64 * 1024) {
-        child.kill();
-        reject(pickerError('文件选择器返回内容过大'));
-        return;
-      }
-      target.push(chunk);
-    };
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
-    child.once('error', error => reject(error));
-    child.once('close', code => {
-      if (code === 3) {
-        resolvePromise(null);
-        return;
-      }
-      if (code !== 0) {
-        reject(pickerError(
-          Buffer.concat(stderr).toString('utf8').trim() || '系统文件选择器异常退出',
-        ));
-        return;
-      }
-      try {
-        const payload = JSON.parse(Buffer.concat(stdout).toString('utf8'));
-        if (typeof payload[resultKey] !== 'string' || !payload[resultKey]) {
-          throw new Error(`缺少 ${resultKey}`);
-        }
-        resolvePromise(payload[resultKey]);
-      } catch (error) {
-        reject(pickerError(`无法解析${resultLabel}选择结果：${error.message}`));
-      }
-    });
-  });
-}
-
 export function pickDeckWithSystemPicker(options = {}) {
-  return pickPathWithSystemPicker({
-    ...options,
-    pickerFlag:'--pick-only',
-    resultKey:'deckPath',
-    resultLabel:'文件',
+  return pickDeckPathWithSystemPicker({
+    pythonExecutable:DEFAULT_PYTHON_EXECUTABLE, ...options,
   });
 }
 
 export function pickProjectDirectoryWithSystemPicker(options = {}) {
-  return pickPathWithSystemPicker({
-    ...options,
-    pickerFlag:'--pick-directory-only',
-    resultKey:'directoryPath',
-    resultLabel:'目录',
+  return pickProjectPathWithSystemPicker({
+    pythonExecutable:DEFAULT_PYTHON_EXECUTABLE, ...options,
   });
 }
 
@@ -496,8 +447,45 @@ export async function startAppServer({
     }
     return null;
   };
+  const synchronizeEditingRuntimeBinding = async (entry, runtime) => {
+    const coordinator = runtime?.app?.binding;
+    if (!coordinator || typeof coordinator.snapshot !== 'function'
+      || typeof coordinator.reconcile !== 'function') return entry;
+    const runtimeDeckId = runtime.app.deckId ?? runtime.candidate?.deckId ?? null;
+    if (!entry.deckId || runtimeDeckId !== entry.deckId) return entry;
+    const cached = coordinator.snapshot();
+    if (entry.binding?.state === 'bound' && cached.state === 'bound'
+      && entry.binding.currentPath === cached.currentPath
+      && entry.binding.sourceFingerprint === cached.sourceFingerprint
+      && JSON.stringify(entry.binding.witness) === JSON.stringify(cached.witness)) return entry;
+    let binding;
+    try {
+      binding = await coordinator.reconcile({ cause:'workspace-history' });
+    } catch {
+      return entry;
+    }
+    if (binding.deckId !== entry.deckId || binding.state !== 'bound') return entry;
+    try {
+      return await activeWorkCatalog.updateEditingBinding({
+        workId:entry.workId,
+        deckId:entry.deckId,
+        binding,
+      });
+    } catch {
+      return entry;
+    }
+  };
   const runtimeAwareHistory = async () => {
     const history = await activeWorkCatalog.list();
+    const editing = await Promise.all(history.editing.map(async entry => {
+      const runtime = findEditingRuntime(entry);
+      if (!runtime) return entry;
+      const synchronized = await synchronizeEditingRuntimeBinding(entry, runtime);
+      return {
+        ...synchronized,
+        runtimeState:runtime.key === activeEditingRuntimeKey ? 'foreground' : 'background',
+      };
+    }));
     return {
       ...history,
       creation:history.creation.map(entry => {
@@ -509,14 +497,7 @@ export async function startAppServer({
           runtimeState:key === activeCreationRuntimeKey ? 'foreground' : 'background',
         };
       }),
-      editing:history.editing.map(entry => {
-        const runtime = findEditingRuntime(entry);
-        if (!runtime) return entry;
-        return {
-          ...entry,
-          runtimeState:runtime.key === activeEditingRuntimeKey ? 'foreground' : 'background',
-        };
-      }),
+      editing,
     };
   };
   const workItemForCreation = async snapshot => {
@@ -640,6 +621,9 @@ export async function startAppServer({
       deckPath:selectedCandidate.deckPath,
       provider,
     }).catch(() => {});
+    await activeWorkCatalog.reopenEditing({
+      deckPath:selectedCandidate.deckPath,
+    });
     const history = await activeWorkCatalog.list();
     const canonicalDeckPath = await realpath(selectedCandidate.deckPath)
       .catch(() => resolve(selectedCandidate.deckPath));
@@ -745,7 +729,7 @@ export async function startAppServer({
         'cache-control':'no-store',
         'content-security-policy':[
           "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'",
-          "img-src 'self' data:", "connect-src 'self'",
+          "img-src 'self' data:", "connect-src 'self'", "worker-src 'self'",
           "frame-src 'self' http://127.0.0.1:* http://localhost:*",
           "base-uri 'none'",
           "form-action 'none'", "frame-ancestors 'none'",
@@ -1238,7 +1222,25 @@ export async function startAppServer({
             code:'INVALID_WORK_ITEM_KIND', statusCode:400,
           });
         }
-        if (resolvedWorkItem && resolvedWorkItem.binding.state !== 'bound') {
+        const resolvedRuntime = resolvedWorkItem ? findEditingRuntime({
+          deckId:resolvedWorkItem.deckId,
+          deckPath:resolvedWorkItem.deckPath,
+        }) : null;
+        if (resolvedRuntime) {
+          activateEditingRuntime(resolvedRuntime);
+          state = 'selected';
+          sendJson(response, 200, {
+            ...publicCandidate('selected'),
+            editorUrl:resolvedRuntime.editorUrl,
+            resumed:true,
+            runtimeReused:true,
+          });
+          return;
+        }
+        const canOpenProtectedWorkingCopy = resolvedWorkItem?.binding.state === 'conflict'
+          && resolvedWorkItem.binding.reason === 'replaced';
+        if (resolvedWorkItem && resolvedWorkItem.binding.state !== 'bound'
+          && !canOpenProtectedWorkingCopy) {
           throw Object.assign(new Error('这份 Deck 需要先重新绑定源文件'), {
             code:'DECK_REBIND_REQUIRED', statusCode:409,
             binding:resolvedWorkItem.binding,

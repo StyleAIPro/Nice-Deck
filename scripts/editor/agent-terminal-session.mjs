@@ -11,8 +11,10 @@ import { prepareAgentTerminalRuntime } from './agent-terminal-runtime.mjs';
 
 const MAX_BUFFER_CHARS = 1024 * 1024;
 const MAX_INPUT_CHARS = 64 * 1024;
-const WINDOWS_CLAUDE_PASTE_CHUNK_BYTES = 512;
-const WINDOWS_CLAUDE_PASTE_CHUNK_DELAY_MS = 30;
+const WINDOWS_PROMPT_CHUNK_BYTES = 512;
+const WINDOWS_PROMPT_CHUNK_DELAY_MS = 30;
+const PROMPT_ACK_TIMEOUT_MS = 1_500;
+const PROMPT_ACK_MAX_ATTEMPTS = 2;
 const MISSING_AGENT_SESSION = Object.freeze({
   codex:/No saved session found|no rollout found for thread id/i,
   'claude-code':/No conversation found with session ID/i,
@@ -65,7 +67,10 @@ function splitUtf8(text, maxBytes) {
   return chunks;
 }
 
-function terminalAcceptsPrompt(provider, output) {
+function terminalAcceptsPrompt(provider, output, {
+  codexModelConfirmed = false,
+  codexResumedHistoryFallback = false,
+} = {}) {
   const visibleOutput = visibleTerminalText(output);
   if (!visibleOutput.trim()) return false;
   if (provider === 'claude-code') {
@@ -75,13 +80,57 @@ function terminalAcceptsPrompt(provider, output) {
     // 把任务前几个分块灌进尚未接管键盘的启动画面。
     return /❯(?:\u00a0| )?(?:\u001b\[[0-?]*[ -/]*[@-~])*\u001b\[7m /.test(output);
   }
-  if (provider !== 'codex') return true;
+  if (provider === 'opencode') {
+    // OpenCode 启动后会先输出标题、同步状态和模型加载进度；只有真正的
+    // prompt placeholder 与可见光标同时出现时才允许自动注入。保留明确的
+    // ready 文本供兼容终端和确定性测试使用。
+    return /opencode ready/i.test(visibleOutput)
+      || (/(?:Ask anything|随便问点什么)/i.test(visibleOutput)
+        && output.includes('\u001b[?25h'));
+  }
+  if (provider !== 'codex') return false;
   // Codex 启动时会先输出终端模式、标题和模型加载信息；这些首批字节并不代表
   // Ink 输入框已经接管键盘。真正可输入的屏幕会绘制粗体 ›，并在它之后显示
   // 光标。测试和不带完整 ANSI 能力的兼容终端可使用明确的 ready 文本。
+  if (/codex ready/i.test(visibleOutput)) return true;
   const promptMarker = output.lastIndexOf('›');
-  if (promptMarker >= 0 && output.indexOf('\u001b[?25h', promptMarker) >= 0) return true;
-  return /codex ready/i.test(output);
+  if (promptMarker < 0 || output.indexOf('\u001b[?25h', promptMarker) < 0) return false;
+  const promptLine = visibleTerminalText(output.slice(promptMarker, promptMarker + 240))
+    .split('\n', 1)[0]
+    .trim();
+  // 目录信任页也用 `› 1. Yes` 表示当前选项；它不是任务输入框。恢复历史
+  // 时若前面还残留模型状态栏，只看“› + 光标”会把确认页误判成 ready。
+  if (/^›\s*(?:\d+[.)]|yes\b|no\b|trust\b|exit\b)/i.test(promptLine)) return false;
+  const hasReadyStatus = /[^\n]{1,120}\s[·•]\s(?:\/|~\/|[A-Za-z]:[\\/])/m.test(visibleOutput);
+  if (!hasReadyStatus) return false;
+  // 同一进程已经通过过一次完整 model 闸门后，长任务输出可能把启动时的
+  // `model:` 行挤出短扫描窗口。此后再次出现“输入框 + 光标 + 模型/目录状态栏”
+  // 就足以证明 CLI 已回到空闲态，不能让下一批任务永久等待。
+  if (codexModelConfirmed) return true;
+  // Codex 0.148 起会在模型和 MCP 尚未完成初始化时提前画出可编辑草稿框，
+  // 并刻意忽略启动阶段缓存的 Enter；此时底部状态栏甚至可能已经出现，但
+  // 顶部 model 仍是 loading。以最后一次 model 绘制为准，必须同时看到
+  // 非 loading 模型和“模型 · 工作目录”状态栏，不能只认“› + 光标”。
+  const modelMatches = [...visibleOutput.matchAll(/model:\s*(\S{1,80})/gim)];
+  const currentModel = modelMatches.at(-1)?.[1] ?? '';
+  if (currentModel.trim()) return !/^loading\b/i.test(currentModel.trim());
+  // 恢复超长历史时 node-pty 的 1 MiB 环形缓冲会把启动 model 行裁掉。
+  // 只有已确认是 resume、缓冲确实满载，且最终输入框与模型/目录状态栏都在
+  // 尾部成立时才启用兜底；短输出中的显式 loading 仍走上面的严格闸门。
+  return codexResumedHistoryFallback;
+}
+
+function terminalAcknowledgesPrompt(provider, output) {
+  if (!String(output ?? '').trim()) return false;
+  const visibleOutput = visibleTerminalText(output);
+  if (provider === 'codex') {
+    return /(?:^|\n)\s*[•◦]\s|esc to interrupt|working|thinking|stream disconnected|error sending request/i
+      .test(visibleOutput);
+  }
+  // Claude Code 与 OpenCode 都会在接受 Enter 后立刻重绘输入区或活动区。
+  // 提交前已经经过各自的空输入框闸门，因此此后的首段 PTY 输出就是接收回执；
+  // 若完全没有输出，超时状态机会重试 Enter 并最终显式失败。
+  return true;
 }
 
 function terminalError(code, message) {
@@ -218,6 +267,9 @@ export class AgentTerminalSession {
     this.generation = 0;
     this.startPromise = null;
     this.pendingSubmitTimer = null;
+    this.promptSubmissionSequence = 0;
+    this.promptSubmission = null;
+    this.promptCapabilityConfirmed = false;
     this.discoveryController = null;
     this.closed = false;
     this.activeCommand = null;
@@ -239,6 +291,7 @@ export class AgentTerminalSession {
       conversationResumed:this.conversationResumed,
       conversationError:this.conversationError,
       startupPromptState:this.startupPromptState,
+      promptSubmission:this.promptSubmission ? { ...this.promptSubmission } : null,
       promptReady:this.promptReady,
       interactionRequired:this.interactionRequired ? { ...this.interactionRequired } : null,
       startedAt:this.startedAt,
@@ -352,7 +405,9 @@ export class AgentTerminalSession {
     this.conversationResumed = false;
     this.conversationError = null;
     this.startupPromptState = null;
+    this.promptSubmission = null;
     this.promptReady = false;
+    this.promptCapabilityConfirmed = false;
     this.interactionRequired = null;
     this.interactionResponsePending = false;
     this.interactionScanOutput = '';
@@ -472,7 +527,35 @@ export class AgentTerminalSession {
       this.interactionScanOutput = `${this.interactionScanOutput}${chunk}`
         .slice(-INTERACTION_SCAN_CHARS);
       this.#broadcast({ type:'output', data:chunk });
+      let acknowledgedPrompt = false;
+      if (this.promptSubmission?.state === 'awaiting-confirmation'
+        && terminalAcknowledgesPrompt(provider, chunk)) {
+        if (this.pendingSubmitTimer !== null) {
+          this.cancelScheduledSubmit(this.pendingSubmitTimer);
+          this.pendingSubmitTimer = null;
+        }
+        this.promptSubmission = {
+          ...this.promptSubmission,
+          state:'submitted',
+          acceptedAt:new Date().toISOString(),
+          error:null,
+        };
+        if (this.promptSubmission.startup) this.startupPromptState = 'submitted';
+        acknowledgedPrompt = true;
+        this.#publishState();
+      }
+      const acceptsPrompt = terminalAcceptsPrompt(
+        provider,
+        this.interactionScanOutput || this.output,
+        {
+          codexModelConfirmed:this.promptCapabilityConfirmed,
+          codexResumedHistoryFallback:provider === 'codex'
+            && this.conversationResumed
+            && this.output.length >= MAX_BUFFER_CHARS,
+        },
+      );
       const trustRequested = (!this.promptReady || this.interactionRequired)
+        && !acceptsPrompt
         && directoryTrustRequested(this.interactionScanOutput);
       if (trustRequested && !this.interactionRequired) {
         this.interactionRequired = {
@@ -483,15 +566,15 @@ export class AgentTerminalSession {
         this.#publishState();
       }
       if (this.interactionRequired) {
-        if (!this.interactionResponsePending || trustRequested
-          || !terminalAcceptsPrompt(provider, this.interactionScanOutput)) return;
+        if (trustRequested || !acceptsPrompt) return;
         this.interactionRequired = null;
         this.interactionResponsePending = false;
         this.#publishState();
       }
-      if (!this.promptReady
-        && terminalAcceptsPrompt(provider, this.interactionScanOutput || this.output)) {
+      if (!acknowledgedPrompt && !this.promptReady
+        && acceptsPrompt) {
         this.promptReady = true;
+        this.promptCapabilityConfirmed = true;
         if (this.startupPromptState === 'pending') {
           this.#queuePrompt(startupPrompt, { startup:true });
         } else {
@@ -514,6 +597,7 @@ export class AgentTerminalSession {
       }
       this.state = 'exited';
       this.promptReady = false;
+      this.promptCapabilityConfirmed = false;
       this.interactionRequired = null;
       this.interactionResponsePending = false;
       this.exit = { code:exitCode, signal, message:`${command.label} 会话已退出` };
@@ -569,7 +653,7 @@ export class AgentTerminalSession {
     }
     // 一般初始化阶段仍锁住键盘，避免用户输入与自动任务粘在一起；但目录信任
     // 是 CLI 在任务输入框之前设置的交互闸门，必须让用户能在右侧终端作答。
-    if (['pending', 'submitting'].includes(this.startupPromptState)
+    if (['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState)
       && !this.interactionRequired) return;
     this.process.write(data);
     if (this.interactionRequired && /[\r\nyYnN12]/.test(data)) {
@@ -590,7 +674,7 @@ export class AgentTerminalSession {
   }
 
   submitPrompt(text) {
-    this.#queuePrompt(text);
+    return this.#queuePrompt(text);
   }
 
   waitUntilReady({ timeoutMs = 10_000 } = {}) {
@@ -600,7 +684,8 @@ export class AgentTerminalSession {
     const ready = () => this.state === 'running'
       && this.promptReady
       && !this.interactionRequired
-      && !['pending', 'submitting'].includes(this.startupPromptState);
+      && !['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState)
+      && !['writing', 'awaiting-confirmation'].includes(this.promptSubmission?.state);
     if (ready()) return Promise.resolve(this.snapshot());
     if (['failed', 'exited', 'closed'].includes(this.state)) {
       return Promise.reject(terminalError(
@@ -618,7 +703,8 @@ export class AgentTerminalSession {
         if (state.state === 'running'
           && state.promptReady
           && !state.interactionRequired
-          && !['pending', 'submitting'].includes(state.startupPromptState)) {
+          && !['pending', 'submitting', 'awaiting-confirmation'].includes(state.startupPromptState)
+          && !['writing', 'awaiting-confirmation'].includes(state.promptSubmission?.state)) {
           cleanup();
           resolve(state);
         } else if (['failed', 'exited', 'closed'].includes(state.state)) {
@@ -649,6 +735,80 @@ export class AgentTerminalSession {
     });
   }
 
+  waitUntilStartupPromptSubmitted({ timeoutMs = 10_000 } = {}) {
+    return this.#waitForPromptSubmission({ startup:true, timeoutMs });
+  }
+
+  waitUntilPromptSubmission(submissionId, { timeoutMs = 10_000 } = {}) {
+    if (typeof submissionId !== 'string' || !submissionId) {
+      throw new TypeError('Agent Prompt 提交标识无效');
+    }
+    return this.#waitForPromptSubmission({ submissionId, timeoutMs });
+  }
+
+  #waitForPromptSubmission({ submissionId = null, startup = false, timeoutMs }) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new TypeError('等待 Agent Prompt 提交的超时时间无效');
+    }
+    const matches = state => state.promptSubmission
+      && (startup ? state.promptSubmission.startup === true : state.promptSubmission.id === submissionId);
+    const settle = state => {
+      if (!matches(state)) return null;
+      if (state.promptSubmission.state === 'submitted') return { status:'resolved', state };
+      if (state.promptSubmission.state === 'failed') {
+        return {
+          status:'rejected',
+          error:terminalError(
+            'AGENT_PROMPT_NOT_SUBMITTED',
+            state.promptSubmission.error || 'Agent 没有确认收到提示词',
+          ),
+        };
+      }
+      return null;
+    };
+    const immediate = settle(this.snapshot());
+    if (immediate?.status === 'resolved') return Promise.resolve(immediate.state);
+    if (immediate?.status === 'rejected') return Promise.reject(immediate.error);
+    if (['failed', 'exited', 'closed'].includes(this.state)) {
+      return Promise.reject(terminalError(
+        'AGENT_TERMINAL_UNAVAILABLE',
+        this.exit?.message || 'Agent 终端不可用',
+      ));
+    }
+    return new Promise((resolve, reject) => {
+      let timer;
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.stateListeners.delete(onState);
+      };
+      const onState = state => {
+        const result = settle(state);
+        if (result?.status === 'resolved') {
+          cleanup();
+          resolve(result.state);
+        } else if (result?.status === 'rejected') {
+          cleanup();
+          reject(result.error);
+        } else if (['failed', 'exited', 'closed'].includes(state.state)) {
+          cleanup();
+          reject(terminalError(
+            'AGENT_TERMINAL_UNAVAILABLE',
+            state.exit?.message || 'Agent 终端不可用',
+          ));
+        }
+      };
+      this.stateListeners.add(onState);
+      timer = setTimeout(() => {
+        cleanup();
+        reject(terminalError(
+          'AGENT_PROMPT_SUBMIT_TIMEOUT',
+          '等待 Agent 确认收到提示词超时',
+        ));
+      }, timeoutMs);
+      onState(this.snapshot());
+    });
+  }
+
   #queuePrompt(text, { startup = false } = {}) {
     if (!this.process || this.state !== 'running') {
       throw terminalError('AGENT_TERMINAL_STOPPED', 'Agent 终端尚未启动');
@@ -662,13 +822,16 @@ export class AgentTerminalSession {
     if (!startup && !this.promptReady) {
       throw terminalError('AGENT_TERMINAL_INITIALIZING', 'Agent 终端输入框尚未就绪');
     }
-    if (!startup && ['pending', 'submitting'].includes(this.startupPromptState)) {
+    if (!startup && ['pending', 'submitting', 'awaiting-confirmation'].includes(
+      this.startupPromptState,
+    )) {
       throw terminalError('AGENT_TERMINAL_INITIALIZING', 'Agent 终端正在提交初始指令');
     }
     if (typeof text !== 'string' || !text.trim() || text.length > MAX_INPUT_CHARS) {
       throw terminalError('INVALID_AGENT_PROMPT', 'Agent 任务提示长度无效');
     }
-    if (this.pendingSubmitTimer !== null) {
+    if (this.pendingSubmitTimer !== null
+      || ['writing', 'awaiting-confirmation'].includes(this.promptSubmission?.state)) {
       throw terminalError('AGENT_PROMPT_PENDING', '上一条 Agent 任务仍在提交中');
     }
     const runtimeText = this.activeRuntime?.translateText
@@ -677,6 +840,16 @@ export class AgentTerminalSession {
     const safeText = runtimeText.replaceAll('\u001b', '');
     const child = this.process;
     const generation = this.generation;
+    const submissionId = `prompt-${this.promptSubmissionSequence += 1}`;
+    this.promptSubmission = {
+      id:submissionId,
+      state:'writing',
+      startup,
+      attempts:0,
+      createdAt:new Date().toISOString(),
+      acceptedAt:null,
+      error:null,
+    };
     if (startup) {
       this.startupPromptState = 'submitting';
       this.#publishState();
@@ -684,58 +857,78 @@ export class AgentTerminalSession {
     const windowsClaude = this.platform === 'win32' && this.provider === 'claude-code';
     const submitDelay = windowsClaude
       ? Math.min(6_000, 3_000 + Math.ceil(Buffer.byteLength(safeText, 'utf8') / 4_000) * 500)
-      : (this.platform === 'win32' ? 1_000 : 120);
-    const submit = () => {
+      : (this.platform === 'win32'
+          ? Math.min(4_000, 1_000 + Math.ceil(Buffer.byteLength(safeText, 'utf8') / 4_000) * 500)
+          : 120);
+    const submissionActive = () => this.process === child
+      && this.generation === generation
+      && this.state === 'running'
+      && this.promptSubmission?.id === submissionId;
+    const failSubmission = () => {
       this.pendingSubmitTimer = null;
-      if (this.process !== child || this.generation !== generation || this.state !== 'running') return;
-      if (this.provider === 'claude-code') {
-        // Enter 之后上一个空输入框已经失效。清空扫描窗口，只有
-        // Claude 完成当前 turn 并重新画出空“❯”输入行后才恢复
-        // promptReady，避免相邻两批任务串入尚未就绪的 Ink 界面。
-        this.promptReady = false;
-        this.interactionScanOutput = '';
-      }
-      child.write('\r');
-      if (startup) {
-        this.startupPromptState = 'submitted';
-      }
+      if (!submissionActive()) return;
+      this.promptSubmission = {
+        ...this.promptSubmission,
+        state:'failed',
+        error:'自动回车后 Agent 没有确认收到提示词，请在终端中检查并手动提交',
+      };
+      if (startup) this.startupPromptState = 'failed';
       this.#publishState();
     };
-    if (!windowsClaude) {
+    const sendEnter = () => {
+      this.pendingSubmitTimer = null;
+      if (!submissionActive()) return;
+      const attempts = this.promptSubmission.attempts + 1;
+      this.promptReady = false;
+      this.interactionScanOutput = '';
+      this.promptSubmission = {
+        ...this.promptSubmission,
+        state:'awaiting-confirmation',
+        attempts,
+      };
+      if (startup) this.startupPromptState = 'awaiting-confirmation';
+      this.pendingSubmitTimer = this.scheduleSubmit(() => {
+        this.pendingSubmitTimer = null;
+        if (!submissionActive() || this.promptSubmission.state !== 'awaiting-confirmation') return;
+        if (this.promptSubmission.attempts < PROMPT_ACK_MAX_ATTEMPTS) sendEnter();
+        else failSubmission();
+      }, PROMPT_ACK_TIMEOUT_MS);
+      this.#publishState();
+      child.write('\r');
+    };
+    const beginSubmit = () => {
+      this.pendingSubmitTimer = null;
+      if (!submissionActive()) return;
+      sendEnter();
+    };
+    const windowsPty = this.platform === 'win32';
+    if (!windowsPty) {
       child.write(`\u001b[200~${safeText}\u001b[201~`);
-      this.pendingSubmitTimer = this.scheduleSubmit(submit, submitDelay);
-      return;
+      this.pendingSubmitTimer = this.scheduleSubmit(beginSubmit, submitDelay);
+      return submissionId;
     }
 
-    // Windows ConPTY 与 Claude Code 的 Ink 输入框之间没有 write drain 回执。
-    // 单次灌入长中文会把正文、paste 结束符一起截在输入边界外；即使随后
-    // 延迟发送 Enter，输入框仍处于 paste 状态，因此看起来既缺字也不提交。
-    // Windows Claude/ConPTY 的实际输入边界可能只保留大块写入的末尾约
-    // 1 KiB；这里按 UTF-8 字节边界分块并节流，每块限制为 512 B，给不同
-    // 终端版本留出两倍余量。正文全部
-    // 交付后再单独关闭 bracketed paste，最后才开始等待并发送 Enter。
-    const chunks = splitUtf8(safeText, WINDOWS_CLAUDE_PASTE_CHUNK_BYTES);
+    // Windows ConPTY 没有 write drain 回执。三种 TUI 都可能在一次大块
+    // bracketed paste 中丢掉头尾或紧随其后的 Enter，因此统一按 UTF-8
+    // 字节分块；Claude Code 保留更长的渲染等待，Codex / OpenCode 则使用
+    // 同一可靠写入边界和较短的 settle 时间。
+    const chunks = splitUtf8(safeText, WINDOWS_PROMPT_CHUNK_BYTES);
     let chunkIndex = 0;
     const writeNext = () => {
       this.pendingSubmitTimer = null;
-      if (this.process !== child || this.generation !== generation || this.state !== 'running') return;
+      if (!submissionActive()) return;
       if (chunkIndex < chunks.length) {
         child.write(chunks[chunkIndex]);
         chunkIndex += 1;
-        this.pendingSubmitTimer = this.scheduleSubmit(
-          writeNext,
-          WINDOWS_CLAUDE_PASTE_CHUNK_DELAY_MS,
-        );
+        this.pendingSubmitTimer = this.scheduleSubmit(writeNext, WINDOWS_PROMPT_CHUNK_DELAY_MS);
         return;
       }
       child.write('\u001b[201~');
-      this.pendingSubmitTimer = this.scheduleSubmit(submit, submitDelay);
+      this.pendingSubmitTimer = this.scheduleSubmit(beginSubmit, submitDelay);
     };
     child.write('\u001b[200~');
-    this.pendingSubmitTimer = this.scheduleSubmit(
-      writeNext,
-      WINDOWS_CLAUDE_PASTE_CHUNK_DELAY_MS,
-    );
+    this.pendingSubmitTimer = this.scheduleSubmit(writeNext, WINDOWS_PROMPT_CHUNK_DELAY_MS);
+    return submissionId;
   }
 
   resize(cols, rows) {
@@ -775,6 +968,7 @@ export class AgentTerminalSession {
     }
     if (clear) this.output = '';
     this.startupPromptState = null;
+    this.promptSubmission = null;
     this.promptReady = false;
     this.interactionRequired = null;
     this.interactionResponsePending = false;

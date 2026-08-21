@@ -10,7 +10,7 @@
 
 ## 操作步骤
 
-1. 双击 `Huawei Deck 编辑器.app`（macOS）或 `Huawei Deck 编辑器.cmd`（Windows）。
+1. 双击 `Huawei Deck 编辑器.app`（macOS）或 `Huawei Deck 编辑器.cmd`（Windows）；Windows 首次运行后可改用同目录自动生成的带图标快捷方式。
 2. 第一次使用先点击“安装与诊断”，确认“基础使用”没有阻塞项。
 3. 点击“开始使用”，再点击“创建示例副本”。
 4. 选择一个空目录；Editor 会复制一份示例 Deck，不修改内置模板。

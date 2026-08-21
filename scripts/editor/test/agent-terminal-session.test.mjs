@@ -68,7 +68,29 @@ function drainScheduledCallbacks(queue) {
   while (queue.length) queue.shift().callback();
 }
 
+function drainUntilEnter(queue, child) {
+  const previous = child.writes.filter(value => value === '\r').length;
+  while (queue.length && child.writes.filter(value => value === '\r').length === previous) {
+    queue.shift().callback();
+  }
+  assert.equal(
+    child.writes.filter(value => value === '\r').length,
+    previous + 1,
+    '提交链必须写入一次 Enter',
+  );
+}
+
 const CLAUDE_READY_OUTPUT = '\u001b[5;1H────\r\n❯\u00a0\u001b[7m \u001b[27m';
+const CODEX_DRAFT_OUTPUT = '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mExplain this codebase'
+  + '\u001b[?25h\u001b[11;3H\u001b[?2026l';
+const CODEX_LOADING_WITH_STATUS_OUTPUT = '\u001b[3;1Hmodel: loading   /model to change'
+  + '\u001b[23;1Hgpt-5.6-sol default · /tmp/huawei-deck'
+  + CODEX_DRAFT_OUTPUT;
+const CODEX_READY_OUTPUT = '\u001b[3;1Hmodel: gpt-5.6-sol xhigh   /model to change'
+  + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+  + CODEX_DRAFT_OUTPUT;
+const OPENCODE_READY_OUTPUT = '\u001b[20;2HAsk anything: Ask a question, move files, explore your code...'
+  + '\u001b[?25h';
 
 test('生产 node-pty 可以真实创建子进程且不遗留测试句柄', () => {
   // ConPTY 的 native handle 必须隔离在短进程内；否则 Windows test worker 即使
@@ -243,6 +265,163 @@ test('Claude Code 启动输出不能误当成可输入提示符', async () => {
   await session.close();
 });
 
+test('Codex 0.148 初始化草稿框不算就绪，自动回车收到终端回执后才算提交', async () => {
+  const children = [];
+  const scheduledSubmits = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    initialPrompt:() => '这是必须自动发出的初始化说明',
+    scheduleSubmit:(callback, delayMs) => {
+      const entry = { callback, delayMs, handle:scheduledSubmits.length + 1 };
+      scheduledSubmits.push(entry);
+      return entry.handle;
+    },
+    cancelScheduledSubmit:() => {},
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+
+  await session.start();
+  children[0].events.emit('data', CODEX_DRAFT_OUTPUT);
+  assert.equal(session.snapshot().startupPromptState, 'pending');
+  assert.equal(session.snapshot().promptReady, false);
+  assert.deepEqual(children[0].writes, [], '初始化期间可编辑的草稿框不能触发自动任务');
+
+  children[0].events.emit('data', CODEX_LOADING_WITH_STATUS_OUTPUT);
+  assert.equal(session.snapshot().startupPromptState, 'pending');
+  assert.equal(session.snapshot().promptReady, false);
+  assert.deepEqual(children[0].writes, [], '底部状态栏已出现但 model 仍为 loading 时也不能触发任务');
+
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  assert.equal(session.snapshot().startupPromptState, 'submitting');
+  assert.deepEqual(children[0].writes, [
+    '\u001b[200~这是必须自动发出的初始化说明\u001b[201~',
+  ]);
+  scheduledSubmits.shift().callback();
+  assert.equal(session.snapshot().startupPromptState, 'awaiting-confirmation');
+  assert.equal(session.snapshot().promptReady, false);
+  assert.equal(children[0].writes.at(-1), '\r');
+
+  children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
+  assert.equal(session.snapshot().startupPromptState, 'submitted');
+  assert.equal(session.snapshot().promptSubmission?.state, 'submitted');
+  await session.close();
+});
+
+test('Codex 完成长输出后再次出现输入框即可接收下一批任务', async () => {
+  const children = [];
+  const scheduledSubmits = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    initialPrompt:() => '',
+    scheduleSubmit:(callback, delayMs) => {
+      const entry = { callback, delayMs, handle:scheduledSubmits.length + 1 };
+      scheduledSubmits.push(entry);
+      return entry.handle;
+    },
+    cancelScheduledSubmit:() => {},
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+
+  await session.start();
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  assert.equal(session.snapshot().promptReady, true);
+  session.submitPrompt('处理第一批任务');
+  drainUntilEnter(scheduledSubmits, children[0]);
+  children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
+  assert.equal(session.snapshot().promptReady, false);
+
+  // 长输出会把启动时的 `model:` 行挤出短扫描窗口；返回输入框本身仍应恢复 ready。
+  children[0].events.emit('data', `\r\n${'处理过程 '.repeat(1_500)}`);
+  children[0].events.emit('data', '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+    + CODEX_DRAFT_OUTPUT);
+  assert.equal(session.snapshot().promptReady, true);
+  assert.doesNotThrow(() => session.submitPrompt('处理第二批任务'));
+  assert.equal(children[0].writes.at(-1), '\u001b[200~处理第二批任务\u001b[201~');
+  await session.close();
+});
+
+test('OpenCode 启动 banner 不算就绪，必须等到真实输入框再注入提示词', async () => {
+  const children = [];
+  const scheduledSubmits = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'opencode',
+    initialPrompt:() => 'OpenCode 初始化说明',
+    scheduleSubmit:(callback, delayMs) => {
+      const entry = { callback, delayMs, handle:scheduledSubmits.length + 1 };
+      scheduledSubmits.push(entry);
+      return entry.handle;
+    },
+    cancelScheduledSubmit:() => {},
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start();
+  children[0].events.emit('data', '\u001b]0;OpenCode\u0007OpenCode 1.17 starting');
+  assert.equal(session.snapshot().promptReady, false);
+  assert.equal(session.snapshot().startupPromptState, 'pending');
+  assert.deepEqual(children[0].writes, []);
+  children[0].events.emit('data', OPENCODE_READY_OUTPUT);
+  assert.equal(session.snapshot().promptReady, true);
+  assert.equal(session.snapshot().startupPromptState, 'submitting');
+  assert.deepEqual(children[0].writes, [
+    '\u001b[200~OpenCode 初始化说明\u001b[201~',
+  ]);
+  drainUntilEnter(scheduledSubmits, children[0]);
+  assert.equal(session.snapshot().startupPromptState, 'awaiting-confirmation');
+  children[0].events.emit('data', '\u001b[2KOpenCode accepted');
+  assert.equal(session.snapshot().startupPromptState, 'submitted');
+  await session.close();
+});
+
+test('自动回车没有终端回执时只重试一次并显式失败', async () => {
+  const children = [];
+  const scheduledSubmits = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    initialPrompt:() => '不能静默留在输入框里的初始化说明',
+    scheduleSubmit:(callback, delayMs) => {
+      const entry = { callback, delayMs, handle:scheduledSubmits.length + 1 };
+      scheduledSubmits.push(entry);
+      return entry.handle;
+    },
+    cancelScheduledSubmit:() => {},
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start();
+  children[0].events.emit('data', 'Codex ready');
+  const submitted = session.waitUntilStartupPromptSubmitted({ timeoutMs:1_000 });
+  drainUntilEnter(scheduledSubmits, children[0]);
+  scheduledSubmits.shift().callback();
+  scheduledSubmits.shift().callback();
+
+  assert.equal(children[0].writes.filter(value => value === '\r').length, 2);
+  assert.equal(session.snapshot().startupPromptState, 'failed');
+  await assert.rejects(submitted, error => (
+    error.code === 'AGENT_PROMPT_NOT_SUBMITTED'
+      && /手动提交/.test(error.message)
+  ));
+  await session.close();
+});
+
 test('恢复会话的 PTY 已运行但输入框未出现时仍不算就绪', async () => {
   const children = [];
   const session = new AgentTerminalSession({
@@ -277,6 +456,83 @@ test('恢复会话的 PTY 已运行但输入框未出现时仍不算就绪', asy
   children[0].events.emit('data', 'Codex ready');
   await ready;
   assert.equal(session.snapshot().promptReady, true);
+  await session.close();
+});
+
+test('恢复历史中的旧目录信任提示不能覆盖最终空输入框', async () => {
+  const children = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    resolveConversation:async () => ({
+      conversationId:'codex-resumed-history-trust-session',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start({ provider:'codex' });
+  children[0].events.emit(
+    'data',
+    'Do you trust the contents of this directory?\r\n› 1. Yes\r\n  2. No\r\n'
+      + '历史会话内容已经恢复\r\n'
+      + CODEX_READY_OUTPUT,
+  );
+  assert.equal(session.snapshot().interactionRequired, null);
+  assert.equal(session.snapshot().promptReady, true);
+  await session.close();
+});
+
+test('恢复超长 Codex 历史时模型标题被裁掉仍可识别最终输入框', async () => {
+  const children = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    resolveConversation:async () => ({
+      conversationId:'codex-resumed-long-history-session',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start({ provider:'codex' });
+  children[0].events.emit(
+    'data',
+    `${'历史内容 '.repeat(220_000)}\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck`
+      + CODEX_DRAFT_OUTPUT,
+  );
+  assert.equal(session.snapshot().interactionRequired, null);
+  assert.equal(session.snapshot().promptReady, true);
+  await session.close();
+});
+
+test('恢复 Codex 会话时显式 model loading 仍不能提前接收任务', async () => {
+  const children = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    resolveConversation:async () => ({
+      conversationId:'codex-resumed-loading-session',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start({ provider:'codex' });
+  children[0].events.emit('data', CODEX_LOADING_WITH_STATUS_OUTPUT);
+  assert.equal(session.snapshot().promptReady, false);
   await session.close();
 });
 
@@ -324,11 +580,13 @@ test('Windows PTY 使用 npm 的 .cmd shim 启动 Agent', async () => {
   session.submitPrompt('第一行\n第二行');
   assert.deepEqual(children[0].writes, ['\u001b[200~']);
   assert.equal(scheduledSubmits[0].delayMs, 30);
-  drainScheduledCallbacks(scheduledSubmits);
+  drainUntilEnter(scheduledSubmits, children[0]);
   assert.deepEqual(children[0].writes, [
     '\u001b[200~', '第一行\n第二行', '\u001b[201~', '\r',
   ]);
-  assert.deepEqual(scheduledDelays, [30, 30, 3_500]);
+  assert.deepEqual(scheduledDelays, [30, 30, 3_500, 1_500]);
+  children[0].events.emit('data', '\u001b[?25lClaude accepted prompt');
+  assert.equal(session.snapshot().promptSubmission.state, 'submitted');
   await session.close();
 });
 
@@ -360,7 +618,7 @@ test('Windows Claude Code 长任务分块穿过 ConPTY 后再自动回车', asyn
   ].join('\n');
 
   session.submitPrompt(prompt);
-  drainScheduledCallbacks(scheduledSubmits);
+  drainUntilEnter(scheduledSubmits, children[0]);
 
   assert.equal(
     children[0].accepted.join(''),
@@ -373,6 +631,8 @@ test('Windows Claude Code 长任务分块穿过 ConPTY 后再自动回车', asyn
     '每次正文写入不得超过保守的 512 B ConPTY 边界',
   );
   assert.equal(children[0].writes.at(-1), '\r');
+  children[0].events.emit('data', '\u001b[?25lClaude accepted prompt');
+  assert.equal(session.snapshot().promptSubmission.state, 'submitted');
   await session.close();
 });
 
@@ -408,13 +668,15 @@ test('Windows Claude Code 在单次写入只保留末尾 1 KiB 时不得丢失�
   });
 
   session.submitPrompt(prompt);
-  drainScheduledCallbacks(scheduledSubmits);
+  drainUntilEnter(scheduledSubmits, children[0]);
 
   assert.equal(
     children[0].accepted.join(''),
     `\u001b[200~${prompt}\u001b[201~\r`,
     '接收端保留大块写入的末尾时，任务第一行和第 1 点仍必须完整',
   );
+  children[0].events.emit('data', '\u001b[?25lClaude accepted prompt');
+  assert.equal(session.snapshot().promptSubmission.state, 'submitted');
   await session.close();
 });
 
@@ -536,7 +798,11 @@ test('Windows Codex 通过 WSL runtime 启动并用 WSL 路径提交与发现会
     HUAWEI_DECK_CODEX_RUNTIME:'wsl',
   });
   children[0].events.emit('data', 'Codex ready');
-  assert.match(children[0].writes[0], /\/mnt\/c\/Users\/tester\/workspace\/project/);
+  drainUntilEnter(scheduled, children[0]);
+  assert.match(children[0].writes.join(''), /\/mnt\/c\/Users\/tester\/workspace\/project/);
+  assert.match(children[0].writes.join(''), /\u001b\[201~\r$/);
+  children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
+  assert.equal(session.snapshot().startupPromptState, 'submitted');
   assert.equal(discoveries[0][1].cwd, '/mnt/c/Users/tester/workspace/project');
   assert.equal(discoveries[0][1].environment.HUAWEI_DECK_CODEX_RUNTIME, 'wsl');
   await session.close();
@@ -625,11 +891,7 @@ test('Codex 初始化指令等待真实输入框就绪，添加任务和新会�
     'data',
     '\u001b[?2004h\u001b[?2026h\u001b[2;1HOpenAI Codex\u001b[5;1Hmodel: loading',
   );
-  const emitInputReady = child => child.events.emit(
-    'data',
-    '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mExplain this codebase'
-      + '\u001b[?25h\u001b[11;3H\u001b[?2026l',
-  );
+  const emitInputReady = child => child.events.emit('data', CODEX_READY_OUTPUT);
 
   await session.start({ provider:'codex' });
   emitBanner(children[0]);
@@ -640,7 +902,10 @@ test('Codex 初始化指令等待真实输入框就绪，添加任务和新会�
   assert.deepEqual(children[0].writes, [
     '\u001b[200~这是新建 Deck 的初始化说明\u001b[201~',
   ]);
-  scheduledSubmits[0].callback();
+  drainUntilEnter(scheduledSubmits, children[0]);
+  assert.equal(session.snapshot().startupPromptState, 'awaiting-confirmation');
+  children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
+  assert.equal(session.snapshot().startupPromptState, 'submitted');
 
   await session.restart({ provider:'codex', newConversation:true });
   emitBanner(children[1]);
@@ -650,7 +915,10 @@ test('Codex 初始化指令等待真实输入框就绪，添加任务和新会�
   assert.deepEqual(children[1].writes, [
     '\u001b[200~这是新建 Deck 的初始化说明\u001b[201~',
   ]);
-  scheduledSubmits[1].callback();
+  drainUntilEnter(scheduledSubmits, children[1]);
+  assert.equal(session.snapshot().startupPromptState, 'awaiting-confirmation');
+  children[1].events.emit('data', '\u001b[?25l\u001b[2K• Working');
+  assert.equal(session.snapshot().startupPromptState, 'submitted');
   assert.deepEqual(resolutions, [false, true]);
   await session.close();
 });
@@ -701,8 +969,12 @@ test('PTY 会话在项目目录启动、回放输出并支持输入、缩放和�
   assert.deepEqual(first.writes, ['\u001b[200~初始化 codex\u001b[201~']);
   assert.equal(scheduledSubmits.length, 1);
   assert.equal(scheduledSubmits[0].delayMs, 120);
-  scheduledSubmits[0].callback();
+  drainUntilEnter(scheduledSubmits, first);
+  assert.equal(session.snapshot().startupPromptState, 'awaiting-confirmation');
+  first.events.emit('data', '\u001b[?25l\u001b[2K• Working');
   assert.equal(session.snapshot().startupPromptState, 'submitted');
+  first.events.emit('data', 'Codex ready');
+  assert.equal(session.snapshot().promptReady, true);
   session.input('hello');
   session.submitPrompt('处理任务');
   session.resize(120, 40);
@@ -710,13 +982,13 @@ test('PTY 会话在项目目录启动、回放输出并支持输入、缩放和�
     '\u001b[200~初始化 codex\u001b[201~', '\r',
     'hello', '\u001b[200~处理任务\u001b[201~',
   ]);
-  assert.equal(scheduledSubmits.length, 2);
-  assert.equal(scheduledSubmits[1].delayMs, 120);
-  scheduledSubmits[1].callback();
+  assert.equal(scheduledSubmits.at(-1).delayMs, 120);
+  drainUntilEnter(scheduledSubmits, first);
   assert.deepEqual(first.writes, [
     '\u001b[200~初始化 codex\u001b[201~', '\r',
     'hello', '\u001b[200~处理任务\u001b[201~', '\r',
   ]);
+  first.events.emit('data', '\u001b[?25l\u001b[2K• Working');
   assert.deepEqual(first.resizes, [[120, 40]]);
 
   const replay = [];

@@ -15,7 +15,9 @@ test('CreationManagedDeck 复用 Editor Server，并在发布前 flush + solidif
       body:JSON.parse(Buffer.concat(chunks).toString('utf8')),
     });
     response.writeHead(200, { 'content-type':'application/json' });
-    response.end(JSON.stringify({ revision:4, clearedGroupCount:1 }));
+    response.end(JSON.stringify(request.url === '/api/solidify-preflight'
+      ? { preflightToken:'preflight-1', bindingRevision:7 }
+      : { revision:4, clearedGroupCount:1 }));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -50,9 +52,18 @@ test('CreationManagedDeck 复用 Editor Server，并在发布前 flush + solidif
   const result = await runtime.preparePublish();
   assert.equal(result.solidified, true);
   assert.deepEqual(calls, ['flush', 'ready']);
-  assert.deepEqual(requests, [{
-    url:'/api/solidify-deck', authorization:'Bearer editor-token', body:{ expectedRevision:3 },
-  }]);
+  assert.deepEqual(requests, [
+    {
+      url:'/api/solidify-preflight', authorization:'Bearer editor-token',
+      body:{ expectedRevision:3 },
+    },
+    {
+      url:'/api/solidify-deck', authorization:'Bearer editor-token',
+      body:{
+        expectedRevision:3, expectedBindingRevision:7, preflightToken:'preflight-1',
+      },
+    },
+  ]);
   const transferred = runtime.transfer();
   assert.equal(transferred.url, `http://127.0.0.1:${port}`);
   await runtime.close();

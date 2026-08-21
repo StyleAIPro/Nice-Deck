@@ -8,6 +8,7 @@ import { connectEvents } from './ws-client.mjs';
 import { createLauncherLeaseClient } from './launcher-lease-client.mjs';
 import { compileActionGroups, sourceRebaseActionIds } from './action-compiler.mjs';
 import { historyCandidates, historyLabel } from '/editor/history-state.mjs';
+import { isRegionShortcutKey } from '/editor/editor-shortcuts.mjs';
 
 const params = new URLSearchParams(location.search);
 installPillNav(document);
@@ -394,6 +395,7 @@ function renderAgentStatus() {
     : (busy ? 'busy' : (ready ? 'online' : 'standby'));
   let label = `${workspaceProviderName} 未启动`;
   if (interactionRequired) label = `${workspaceProviderName} 等待确认`;
+  else if (agentRun.status === 'queued') label = `${workspaceProviderName} 正在提交`;
   else if (initializing) label = `${workspaceProviderName} 准备中`;
   else if (busy) label = `${workspaceProviderName} 处理中`;
   else if (ready) label = `${workspaceProviderName} 空闲`;
@@ -541,10 +543,10 @@ function renderInspectorLayout() {
   inspectorPanel.hidden = !expanded;
   inspectorReopenButton.hidden = state !== 'collapsed';
 
-  const collapseDirection = dock === 'top' ? '↑' : '→';
-  const reopenDirection = dock === 'top' ? '↓' : '←';
-  inspectorCollapseButton.querySelector('[aria-hidden="true"]').textContent = collapseDirection;
-  inspectorReopenButton.querySelector('[aria-hidden="true"]').textContent = reopenDirection;
+  const collapseDirection = dock === 'top' ? 'up' : 'right';
+  const reopenDirection = dock === 'top' ? 'down' : 'left';
+  inspectorCollapseButton.dataset.pillArrowDirection = collapseDirection;
+  inspectorReopenButton.dataset.pillArrowDirection = reopenDirection;
   inspectorCollapseButton.setAttribute('aria-label', `向${dock === 'top' ? '上' : '右'}收起属性面板`);
   inspectorCollapseButton.title = inspectorCollapseButton.getAttribute('aria-label');
   inspectorReopenButton.setAttribute('aria-label', `展开${dock === 'top' ? '顶部' : '右侧'}属性面板`);
@@ -654,7 +656,7 @@ async function processAllTasks(selectedTasks) {
 
 function locateTask(task) {
   if (task?.targetMissing === true) {
-    showTaskNotice('这个任务的目标页面已经删除；请撤销删页或删除任务后重新标记。');
+    showTaskNotice('这个任务的原目标当前不可定位；请撤销相关结构修改或删除任务后重新标记。');
     return;
   }
   pendingPageKey = task.pageKey;
@@ -690,7 +692,7 @@ function showHistoryNotice(message, state = 'warning') {
 
 function renderHistory() {
   const { undoGroup, redoGroup } = historyCandidates(sessionGroups, sessionRedo);
-  const unsolidifiedCount = sessionGroups.length + sessionRedo.length;
+  const unsolidifiedCount = sessionGroups.length;
   const refreshPending = loadedSessionRevision < historyRefreshTargetRevision
     || historySnapshotFulfilled < historySnapshotRequirement;
   const controlsBusy = historyBusy || solidifyBusy || refreshPending;
@@ -864,6 +866,7 @@ const ACTION_LABELS = {
 };
 
 function unsolidifiedGroupSummary(group) {
+  if (group?.compensation) return '任务撤销补偿';
   if (group?.mutationType === 'source') {
     const detail = typeof group.source?.summary === 'string'
       ? group.source.summary.trim() : '';
@@ -1085,12 +1088,30 @@ async function solidifyChanges() {
   });
   renderHistory();
   try {
+    setSolidifyProgress({
+      state:'indeterminate',
+      label:'正在检查历史、页面与文件状态…',
+    });
+    const preflight = await requestJson('/api/solidify-preflight', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({
+        expectedRevision:revision,
+        expectedBindingRevision:deckBinding.revision,
+      }),
+    });
+    setSolidifyProgress({
+      state:'determinate',
+      label:'检查通过，正在原子写入 Deck…',
+      value:32,
+    });
     const result = await requestJson('/api/solidify-deck', {
       method:'POST',
       headers:{ 'content-type':'application/json' },
       body:JSON.stringify({
         expectedRevision:revision,
         expectedBindingRevision:deckBinding.revision,
+        preflightToken:preflight.preflightToken,
       }),
     });
     setSolidifyProgress({
@@ -1257,6 +1278,19 @@ function onHistoryKeydown(event) {
   if (!method || acceptsNativeHistoryShortcut(event.target)) return;
   event.preventDefault();
   triggerHistoryShortcut(method);
+}
+
+function onSelectionDeleteKeydown(event) {
+  if (editorMode !== 'edit' || inspectorSelection?.scope !== 'element'
+    || !['Delete', 'Backspace'].includes(event.key)
+    || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey
+    || acceptsNativeHistoryShortcut(event.target)) return;
+  event.preventDefault();
+  if (event.repeat) return;
+  deckFrame.contentWindow?.postMessage({
+    type:'delete-transform-selection',
+    selectionId:inspectorSelection.selectionId,
+  }, location.origin);
 }
 
 async function undoTask(task) {
@@ -1556,7 +1590,7 @@ async function submitManualActions(message) {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            expectedRevision:revision, taskId:null, actions,
+            expectedRevision:revision, taskId:null, actions, commandId:requestId,
             ...(typeof coalesceKey === 'string' && coalesceKey ? { coalesceKey } : {}),
           }),
         });
@@ -1892,7 +1926,7 @@ function isAgentTerminalInput(target) {
 function onTemporaryRegionKeydown(event) {
   const captureAgentInput = deckSurfacePointerActive && agentTerminalOpen
     && isAgentTerminalInput(event.target);
-  if (!['edit', 'region'].includes(editorMode) || event.key.toLowerCase() !== 'r'
+  if (!['edit', 'region'].includes(editorMode) || !isRegionShortcutKey(event)
     || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey
     || (acceptsNativeHistoryShortcut(event.target) && !captureAgentInput)) return;
   event.preventDefault();
@@ -1901,7 +1935,7 @@ function onTemporaryRegionKeydown(event) {
 }
 
 function onTemporaryRegionKeyup(event) {
-  if (!temporaryRegionShortcut || event.key.toLowerCase() !== 'r') return;
+  if (!temporaryRegionShortcut || !isRegionShortcutKey(event)) return;
   event.preventDefault();
   if (deckSurfacePointerActive && agentTerminalOpen && isAgentTerminalInput(event.target)) {
     event.stopImmediatePropagation();
@@ -1921,7 +1955,7 @@ function setPagePanelCollapsed(collapsed) {
   pagePanelToggle.setAttribute('aria-expanded', String(collapsed !== true));
   pagePanelToggle.setAttribute('aria-label', collapsed ? '展开页面列表' : '收起页面列表');
   pagePanelToggle.title = collapsed ? '展开页面列表' : '收起页面列表';
-  pagePanelToggle.querySelector('[aria-hidden="true"]').textContent = collapsed ? '›' : '‹';
+  pagePanelToggle.dataset.pillArrowDirection = collapsed ? 'right' : 'left';
 }
 const onPagePanelToggle = () => setPagePanelCollapsed(
   editorShell.dataset.pagePanelCollapsed !== 'true',
@@ -1997,6 +2031,7 @@ document.addEventListener('pointerdown', onTaskDrawerOutsidePointerDown, true);
 document.addEventListener('pointermove', onEditorPointerMove, true);
 document.addEventListener('keydown', onAgentTerminalKeydown);
 document.addEventListener('keydown', onHistoryKeydown);
+document.addEventListener('keydown', onSelectionDeleteKeydown);
 document.addEventListener('keydown', onTemporaryRegionKeydown, true);
 document.addEventListener('keyup', onTemporaryRegionKeyup, true);
 
@@ -2117,6 +2152,7 @@ function teardown() {
   document.removeEventListener('pointermove', onEditorPointerMove, true);
   document.removeEventListener('keydown', onAgentTerminalKeydown);
   document.removeEventListener('keydown', onHistoryKeydown);
+  document.removeEventListener('keydown', onSelectionDeleteKeydown);
   document.removeEventListener('keydown', onTemporaryRegionKeydown, true);
   document.removeEventListener('keyup', onTemporaryRegionKeyup, true);
   window.removeEventListener('message', onFrameMessage);

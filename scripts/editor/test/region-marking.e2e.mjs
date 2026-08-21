@@ -79,6 +79,67 @@ test('鼠标位于 Deck 时 R 快捷键优先于仍持有焦点的 Agent 终端'
   assert.deepEqual(resourceProblems, []);
 });
 
+test('中文输入法组合态下物理 R 键仍可从 Agent 终端临时切换模式', async t => {
+  const terminalWrites = [];
+  const app = await startFixtureServer({
+    spawnAgentTerminal:() => ({
+      pid:4323,
+      onData(listener) {
+        queueMicrotask(() => listener('\r\ncodex READY\r\n'));
+        return { dispose() {} };
+      },
+      onExit() { return { dispose() {} }; },
+      write(data) { terminalWrites.push(data); },
+      resize() {}, kill() {},
+    }),
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.frameLocator('#deck-frame');
+
+  await page.locator('[data-mode="edit"]').click();
+  await page.locator('[data-agent-status]').click();
+  await page.locator('[data-agent-terminal-panel]').waitFor({ state:'visible' });
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-terminal-panel]')?.dataset.terminalState === 'running'
+  ));
+  const terminalHost = page.locator('[data-agent-terminal-host]');
+  const terminalInput = page.locator('[data-agent-terminal-host] .xterm-helper-textarea');
+  await page.waitForTimeout(260);
+  await terminalHost.hover();
+  await terminalInput.focus();
+  await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'));
+  await frame.locator('h2').first().hover();
+
+  const writesBeforeShortcut = terminalWrites.join('');
+  await page.evaluate(() => {
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {
+      key:'Process', code:'KeyR', isComposing:true, bubbles:true, cancelable:true,
+    }));
+  });
+  await page.waitForFunction(() => (
+    document.querySelector('.mode-tools')?.dataset.temporaryMode === 'region'
+      && document.querySelector('#deck-frame')?.contentDocument?.documentElement
+        ?.dataset.deckEditorMode === 'region'
+  ));
+  assert.equal(terminalWrites.join(''), writesBeforeShortcut);
+
+  await page.evaluate(() => {
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', {
+      key:'Process', code:'KeyR', isComposing:true, bubbles:true, cancelable:true,
+    }));
+  });
+  await page.waitForFunction(() => (
+    !document.querySelector('.mode-tools')?.dataset.temporaryMode
+      && document.querySelector('#deck-frame')?.contentDocument?.documentElement
+        ?.dataset.deckEditorMode === 'edit'
+  ));
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('编辑模式按住 R 临时拉框，松开后返回编辑并保留标注输入框', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());

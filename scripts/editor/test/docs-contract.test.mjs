@@ -170,7 +170,7 @@ test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 side
     '外部 Agent 读任务和提交动作': /GET \/api\/tasks[\s\S]{0,260}POST \/api\/actions/,
     'sidecar 内容': /\.huawei-deck-editor\/[\s\S]{0,500}(?:会话|session)[\s\S]{0,220}(?:任务|tasks?)[\s\S]{0,220}(?:ActionMutation|动作)[\s\S]{0,220}(?:SourceMutation|工作版本)[\s\S]{0,220}备份/i,
     'sidecar 不进交付与版本控制': /\.huawei-deck-editor\/[\s\S]{0,300}(?:不进入|不会进入)[^\n]{0,60}(?:交付 deck|最终交付)[\s\S]{0,180}(?:忽略提交|Git 忽略|gitignore)/i,
-    '固化发布闸门': /editor online[\s\S]{0,500}(?:文件指纹|双指纹|真实 Deck 指纹)[\s\S]{0,500}(?:无新增溢出|页面诊断|诊断)[\s\S]{0,500}(?:bundle verify|eb\.verify|bundle)[\s\S]{0,500}(?:patch replay|browser replay|补丁重放)/i,
+    '固化发布闸门': /solidify-preflight[\s\S]{0,500}(?:revision|版本)[\s\S]{0,500}(?:文件绑定|binding)[\s\S]{0,500}(?:双指纹|fingerprint)[\s\S]{0,500}(?:诊断|diagnostics)[\s\S]{0,500}(?:动作投影|projection)/i,
     '预览和自动保存不碰 source deck': /(?:真实 source deck|source deck|真实 Deck)[^。\n]{0,120}(?:只读|字节保持不变)[\s\S]{0,220}预览[\s\S]{0,220}(?:自动(?:会话)?保存|session)/i,
     'Agent 动作安全字段': /token[\s\S]{0,100}revision[\s\S]{0,100}locator[\s\S]{0,100}事务/i,
     '冲突不静默覆盖': /(?:冲突|验证失败)[\s\S]{0,120}(?:不静默覆盖|拒绝覆盖)/,
@@ -206,7 +206,7 @@ test('四份入口文档共享全选删除与固化修改契约', async () => {
       '全选删除提交空内容': /全选[^。\n]{0,30}删除[^。\n]{0,100}(?:空字符串|空内容)[^。\n]{0,80}(?:不会|不再)[^。\n]{0,40}(?:恢复|取消)/,
       '固化修改按钮': /固化修改/,
       '固化 API': /POST \/api\/solidify-deck/,
-      '固化清空历史': /固化[^。\n]{0,420}(?:清空|清除)[^。\n]{0,80}(?:撤销[^。\n]{0,30}(?:重做|redo)|groups \/ redo)/i,
+      '固化建立检查点并归档历史': /(?:(?:建立|创建)固化检查点[^。\n]{0,100}归档[^。\n]{0,40}(?:编辑|旧)?时间线|固化成功[^。\n]{0,80}建立检查点[^。\n]{0,100}归档[^。\n]{0,40}(?:编辑|当前)?时间线)/i,
       '连续固化保留前一轮': /连续固化[^。\n]{0,100}(?:不会|不)[^。\n]{0,30}(?:丢|覆盖丢失)[^。\n]{0,30}(?:上一轮|前一轮)/,
       '站内退出按任务显示未固化清单': /退出交互以“退出编辑器”[\s\S]{0,760}按 `taskId` 分组/,
       '退出会结束全部运行时': /退出(?:会|通过)[^。\n]{0,140}(?:显式|shutdown)[^。\n]{0,140}(?:全部编辑运行时|启动器)/,
@@ -249,13 +249,24 @@ test('四份入口文档共享区域临时预览与任务交互画面绑定契�
   }
 });
 
+test('四份入口文档共享中文输入法 R 键与终端复制边界', async () => {
+  const documents = await loadDocuments();
+  for (const [file, contents] of Object.entries(documents)) {
+    requireClaims(file, contents, {
+      '中文输入法按物理 R 键': /物理 `KeyR`[^。\n]{0,80}中文输入法/,
+      '终端选区 Ctrl+C 只复制': /有文字选区时[^。\n]{0,40}`Ctrl\+C`[^。\n]{0,80}(?:不向 PTY 发送 `0x03`|浏览器复制)/,
+      '终端无选区 Ctrl+C 仍中断': /没有选区时[^。\n]{0,40}(?:仍发送终端中断|`Ctrl\+C` 中断)/,
+    });
+  }
+});
+
 test('四份入口文档共享未完成 badge、完成任务折叠和实时终端边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
       '页码 badge 不显示完成任务': /(?:页码|页序)[^。\n]{0,80}badge[^。\n]{0,140}(?:完成项(?:不再|默认)|completed|已完成任务不再)/i,
       '完成任务默认折叠': /(?:完成项|已完成任务|completed 任务)[^。\n]{0,40}默认[^。\n]{0,40}闭合[^。\n]{0,30}(?:分组|已完成)/i,
-      '完成任务仍可撤销': /(?:完成项|已完成任务|completed 任务)[^。\n]{0,100}(?:展开后)[^。\n]{0,40}撤销/i,
+      '完成任务仍可撤回': /(?:完成项|已完成任务|completed 任务)[^。\n]{0,140}(?:展开后[^。\n]{0,40})?撤回/i,
       '已固化任务可删除且不影响 Deck': /(?:固化后|已固化)[^。\n]{0,120}删除[^。\n]{0,120}(?:不会|不改变)[^。\n]{0,40}Deck/i,
       'Editor 终端是实时视图': /终端[^。\n]{0,80}Editor[^。\n]{0,80}实时交互视图/i,
       '任务状态仍以 sidecar 为权威': /任务完成[^。\n]{0,100}sidecar[^。\n]{0,40}权威/i,
@@ -279,7 +290,7 @@ test('Skill、README 与架构文档各自承担入口、仓库和开发者职�
   });
   requireClaims('docs/architecture.md', documents['docs/architecture.md'], {
     '浏览器双层': /browser parent[\s\S]{0,100}frame/i,
-    '桥和持久化组件': /BridgeService[\s\S]{0,180}SessionStore[\s\S]{0,100}PatchJournal/,
+    '桥、时间线和持久化组件': /BridgeService[\s\S]{0,220}EditTimeline[\s\S]{0,220}SessionStore/,
     '可信 sidecar I/O': /persistent dirfd helper/,
     '写回组件': /bundle adapter[\s\S]{0,180}diagnostics[\s\S]{0,100}watch[\s\S]{0,100}write gate/i,
     '状态与动作模型': /session registry[\s\S]{0,220}revision[\s\S]{0,160}mutation queue[\s\S]{0,260}(?:ActionMutation|canonical action)[\s\S]{0,260}(?:SourceMutation|transaction record)[\s\S]{0,260}authoritative reload|session registry[\s\S]{0,600}authoritative reload[\s\S]{0,300}transaction record/i,
@@ -299,7 +310,7 @@ test('四份文档统一声明 Windows Python 子进程的 UTF-8 编码边界', 
   }
 });
 
-test('四份文档统一声明 Windows Claude Code 长任务提交边界', async () => {
+test('四份文档统一声明三种 Agent 的可靠 Prompt 提交边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -307,7 +318,10 @@ test('四份文档统一声明 Windows Claude Code 长任务提交边界', async
       '单块不超过 512 B': /不超过 512 B/,
       '使用 bracketed paste': /bracketed[- ]paste/i,
       '只有真正输入提示符才就绪': /Claude(?: Code)?[^。\n]{0,220}(?:空 `?❯`?|Ink)[^。\n]{0,160}(?:就绪|ready|提示符|光标)/i,
-      '关闭 paste 后才发送 Enter': /关闭 paste[^。\n]{0,80}(?:后才|后再)[^。\n]{0,60}(?:发送|独立发送) Enter/i,
+      '关闭 paste 后才发送 Enter': /(?:关闭 paste[^。\n]{0,80}(?:后才|后再)[^。\n]{0,60}(?:发送|开始)|正文结束符[^。\n]{0,40}后才开始) Enter/i,
+      'Codex 0.148 草稿框不是就绪': /Codex 0\.148[^。\n]{0,180}(?:草稿框|草稿输入框)[^。\n]{0,180}(?:完整状态栏|不算就绪|不能触发)/i,
+      'OpenCode 等真实 placeholder': /OpenCode[^。\n]{0,180}Ask anything[^。\n]{0,100}(?:光标|placeholder)/i,
+      'Enter 后等回执且只重试一次': /Enter[^。\n]{0,220}(?:回执|重绘|处理中)[^。\n]{0,180}重试一次/i,
     });
   }
 });
@@ -345,11 +359,11 @@ test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与�
       'Agent 提交 actions': /\/api\/actions/,
       'Agent undo/redo': /\/api\/groups\/<GROUP_ID>\/(?:undo|redo)[\s\S]{0,160}(?:undo|redo)/i,
       'Agent 检查点 API': /\/api\/write-deck[\s\S]{0,160}(?:检查点|不发布)/,
-      '用户固化 API': /\/api\/solidify-deck[\s\S]{0,220}(?:用户|确认|固化)[\s\S]{0,160}(?:发布|真实 Deck)/i,
+      '用户固化 API': /\/api\/solidify-preflight[\s\S]{0,260}\/api\/solidify-deck[\s\S]{0,700}(?:用户|确认|固化)[\s\S]{0,500}(?:发布|真实 Deck)/i,
       'observer WS 只订阅 events': /observer WebSocket[\s\S]{0,100}\/events[\s\S]{0,100}(?:只|仅)[^。\n]{0,40}(?:订阅|接收)/i,
       '唯一 editor capability 只传 frame 事务 ACK': /唯一 editor capability WebSocket[\s\S]{0,160}frame[\s\S]{0,100}(?:事务|命令)[\s\S]{0,80}ACK[\s\S]{0,100}(?:不对外|不能用于|不用于)[^。\n]{0,40}(?:提交|动作)/i,
       'edit-bundle 只操作托管工作副本': /scripts\/edit-bundle\.py[\s\S]{0,220}(?:托管工作副本|HUAWEI_DECK_WORKING_PATH)/,
-      'sidecar 负责原子发布': /(?:sidecar helper|可信 sidecar|WorkingDeckStore|helper 为真实 Deck)[\s\S]{0,420}(?:备份|transaction|事务)[\s\S]{0,360}(?:os\.replace|原子替换|原子发布)/i,
+      'sidecar 负责原子发布': /(?:sidecar helper|可信 sidecar|WorkingDeckStore|helper 为真实 Deck)[\s\S]{0,780}(?:os\.replace|原子替换|原子发布)/i,
     });
     assert.doesNotMatch(
       contents,
@@ -364,12 +378,12 @@ test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与�
   }
 });
 
-test('editing guide 准确说明 drawer 撤销且不承诺缩略图', async () => {
+test('editing guide 准确说明 drawer 撤回且不承诺缩略图', async () => {
   const documents = await loadDocuments();
   const guide = documents['references/editing-guide.md'];
   requireClaims('references/editing-guide.md', guide, {
     '左栏是文字页序列表和 badge': /左侧文字页序列表[\s\S]{0,100}badge/,
-    'drawer 可撤销已完成任务': /drawer[\s\S]{0,180}已完成[\s\S]{0,100}撤销/,
+    'drawer 可撤回已完成任务': /drawer[\s\S]{0,180}已完成[\s\S]{0,120}撤回/,
     'undo 由 CLI 或 HTTP 完成': /undo[\s\S]{0,100}(?:CLI|HTTP)/i,
     'redo 由 HTTP 完成': /redo[\s\S]{0,100}HTTP/i,
   });
@@ -395,8 +409,8 @@ test('四份入口文档完整说明全局历史与任务附件边界', async ()
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
       '顶栏全局撤销重做': /顶栏[\s\S]{0,120}撤销[\s\S]{0,40}重做/,
-      '人工与 Agent 共用权威历史': /ActionMutation[\s\S]{0,220}(?:人工|手工)[\s\S]{0,160}Agent|(?:人工|手工)[\s\S]{0,220}Agent[\s\S]{0,220}ActionMutation|人工文字[\s\S]{0,100}移动[\s\S]{0,100}缩放[\s\S]{0,160}Agent[^。\n]{0,100}(?:动作组|group)/i,
-      '任务行定点撤销': /任务行[\s\S]{0,80}定点撤销/,
+      '人工与 Agent 共用权威历史': /ActionMutation[\s\S]{0,220}(?:人工|手工)[\s\S]{0,160}Agent|(?:人工|手工)[\s\S]{0,220}Agent[\s\S]{0,220}ActionMutation|人工文字[\s\S]{0,100}移动[\s\S]{0,100}缩放[\s\S]{0,160}Agent[^。\n]{0,100}(?:动作|修改)/i,
+      '任务行用补偿修改撤回非末尾任务': /任务行[\s\S]{0,120}非末尾[^。\n]{0,80}(?:补偿修改|补偿)/,
       '文件与粘贴入口': /选择文件[\s\S]{0,100}粘贴图片/,
       '附件数量与大小限制': /最多 8 个[\s\S]{0,100}25 MiB/,
       '粘贴图片转 PNG': /粘贴图片[\s\S]{0,80}(?:转为|转换为|转成) PNG/,

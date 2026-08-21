@@ -2,6 +2,7 @@ import { createHash, randomUUID as systemRandomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join, parse } from 'node:path';
 import { validateTask } from './protocol.mjs';
+import { EditTimeline } from './edit-timeline.mjs';
 import { localDurableIO } from './sidecar-io.mjs';
 
 export class RevisionConflict extends Error {}
@@ -228,6 +229,7 @@ export class SessionStore {
         agentConnection:persisted.agentConnection ?? null,
         sourceEdit:normalizePersistedSourceEdit(persisted.sourceEdit),
       };
+      EditTimeline.open(store.state);
     };
     await sidecarGuard();
     if (persisted === null) await store.#persist();
@@ -252,7 +254,7 @@ export class SessionStore {
     this.sidecarIO = sidecarIO;
     this.taskIdFactory = taskIdFactory;
     this.state = {
-      version: 1,
+      version: 2,
       sessionId,
       deckPath,
       deckFingerprint,
@@ -260,6 +262,10 @@ export class SessionStore {
       tasks: [],
       groups: [],
       redo: [],
+      timeline:{ cursor:0, entries:[] },
+      checkpoints:[],
+      historyArchives:[],
+      completedCommands:{},
       solidifiedActions: [],
       diagnosticsBaseline: {},
       diagnosticsCurrent: {},
@@ -308,6 +314,7 @@ export class SessionStore {
   async persistState(state = this.state) {
     const candidate = structuredClone(state);
     candidate.tasks = normalizePersistedTasks(candidate.tasks);
+    EditTimeline.open(candidate);
     const sourceEdit = normalizePersistedSourceEdit(candidate.sourceEdit);
     if (sourceEdit) candidate.sourceEdit = sourceEdit;
     else delete candidate.sourceEdit;
@@ -476,7 +483,7 @@ export class SessionStore {
     if (task.targetMissing === true) {
       throw snapshotError(
         'TASK_TARGET_MISSING', 409,
-        '任务目标页面已删除；请撤销删页或删除该任务后重新标记',
+        '任务原目标当前不可定位；请撤销相关结构修改或删除该任务后重新标记',
       );
     }
     if (!MUTABLE_TASK_STATUSES.has(task.status) || task.groupId) {

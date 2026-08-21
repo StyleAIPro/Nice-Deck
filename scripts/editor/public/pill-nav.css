@@ -41,6 +41,44 @@
 .pill-nav-control[data-pill-kind="icon"][data-pill-size="md"] { width: 36px; min-width: 36px; height: 36px; }
 .pill-nav-control[data-pill-kind="icon"][data-pill-size="lg"] { width: 44px; min-width: 44px; height: 44px; }
 
+.pill-nav-control[data-pill-arrow] {
+  --pill-nav-base: rgb(255 255 255 / 88%);
+  --pill-nav-text: #191919;
+  --pill-nav-fill-color: var(--pill-nav-track);
+  --pill-nav-hover-text: #191919;
+  --pill-nav-border: rgb(20 22 28 / 10%);
+  --pill-nav-shadow: 0 3px 10px rgb(20 22 28 / 8%), inset 0 .5px .5px rgb(255 255 255 / 70%);
+}
+
+.pill-nav-arrow-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  overflow: visible;
+  transform: rotate(0deg);
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  transition: transform 220ms var(--pill-nav-ease);
+  will-change: transform;
+}
+
+.pill-nav-control[data-pill-arrow-direction="left"] .pill-nav-arrow-icon {
+  transform: rotate(180deg);
+}
+
+.pill-nav-control[data-pill-arrow-direction="right"] .pill-nav-arrow-icon {
+  transform: rotate(0deg);
+}
+
+.pill-nav-control[data-pill-arrow-direction="up"] .pill-nav-arrow-icon {
+  transform: rotate(-90deg);
+}
+
+.pill-nav-control[data-pill-arrow-direction="down"] .pill-nav-arrow-icon {
+  transform: rotate(90deg);
+}
+
 .pill-nav-control[data-pill-variant="secondary"] {
   --pill-nav-base: rgb(255 255 255 / 88%);
   --pill-nav-text: #5f6268;
@@ -147,17 +185,35 @@
   transition-duration: 300ms;
 }
 
-.pill-nav-control[data-pill-nav-hovered="true"]:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]) .pill-nav-label-default,
-.pill-nav-control:focus-visible:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]) .pill-nav-label-default {
+.pill-nav-control[data-pill-nav-hovered="true"]:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]):not([data-pill-arrow]) .pill-nav-label-default,
+.pill-nav-control:focus-visible:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]):not([data-pill-arrow]) .pill-nav-label-default {
   opacity: 0;
   transform: translateY(calc(-1 * var(--pill-nav-label-shift, 48px)));
   transition-duration: 300ms;
 }
 
-.pill-nav-control[data-pill-nav-hovered="true"]:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]) .pill-nav-label-hover,
-.pill-nav-control:focus-visible:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]) .pill-nav-label-hover {
+.pill-nav-control[data-pill-nav-hovered="true"]:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]):not([data-pill-arrow]) .pill-nav-label-hover,
+.pill-nav-control:focus-visible:not(:disabled):not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-expanded="true"]):not([data-pill-arrow]) .pill-nav-label-hover {
   opacity: 1;
   transform: translateY(0);
+  transition-duration: 300ms;
+}
+
+/* 方向按钮只保留一枚箭头：PillNav 的液态填充继续运动，标签翻页不再克隆箭头。 */
+.pill-nav-control[data-pill-arrow] .pill-nav-label-hover {
+  display: none;
+}
+
+.pill-nav-control[data-pill-arrow] .pill-nav-label-default,
+.pill-nav-control[data-pill-arrow][data-pill-nav-hovered="true"]:not(:disabled) .pill-nav-label-default,
+.pill-nav-control[data-pill-arrow]:focus-visible:not(:disabled) .pill-nav-label-default {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.pill-nav-control[data-pill-arrow][data-pill-nav-hovered="true"]:not(:disabled) .pill-nav-fill,
+.pill-nav-control[data-pill-arrow]:focus-visible:not(:disabled) .pill-nav-fill {
+  transform: translateX(-50%) scale(1.2);
   transition-duration: 300ms;
 }
 
@@ -194,7 +250,8 @@
 @media (prefers-reduced-motion: reduce) {
   .pill-nav-control,
   .pill-nav-fill,
-  .pill-nav-label { transition: none; }
+  .pill-nav-label,
+  .pill-nav-arrow-icon { transition: none; }
   .pill-nav-control[data-pill-nav-hovered="true"]:not(:disabled) .pill-nav-label-default,
   .pill-nav-control:focus-visible:not(:disabled) .pill-nav-label-default { opacity: 0; transform: none; }
   .pill-nav-control[data-pill-nav-hovered="true"]:not(:disabled) .pill-nav-label-hover,

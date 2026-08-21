@@ -42,7 +42,9 @@ import { pickDeckWithSystemPicker } from './system-picker.mjs';
 import { validateAction, validateTask } from './protocol.mjs';
 import { RevisionConflict, SessionStore } from './session-store.mjs';
 import { createPersistentSidecarIO } from './sidecar-io.mjs';
-import { WorkingDeckStore, verifyWorkingPatchReplay } from './working-deck-store.mjs';
+import {
+  WorkingDeckStore, verifyWorkingPatchReplay, writeVerifiedPatches,
+} from './working-deck-store.mjs';
 import { startHeadlessEditorRuntime } from './headless-editor-runtime.mjs';
 import {
   removeWorkspaceCapability,
@@ -59,6 +61,7 @@ const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
 const PUBLIC_DIR = join(EDITOR_DIR, 'public');
 const MAX_BODY_BYTES = 1024 * 1024;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 const PPTX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 const EDITOR_ASSETS = new Map([
   ['/editor/editor.css', { path: join(PUBLIC_DIR, 'editor.css'), type: 'text/css; charset=utf-8' }],
@@ -81,6 +84,12 @@ const EDITOR_ASSETS = new Map([
   }],
   ['/editor/agent-terminal-panel.mjs', {
     path: join(PUBLIC_DIR, 'agent-terminal-panel.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/terminal-keyboard.mjs', {
+    path: join(PUBLIC_DIR, 'terminal-keyboard.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/editor-shortcuts.mjs', {
+    path: join(PUBLIC_DIR, 'editor-shortcuts.mjs'), type: 'text/javascript; charset=utf-8',
   }],
   ['/editor/agent-provider-registry.mjs', {
     path:join(EDITOR_DIR, 'agent-provider-registry.mjs'),
@@ -159,6 +168,20 @@ function migrateSessionToPersistentPageIds(state, workingDeck, fingerprintMap = 
     if (group?.mutationType !== 'source' || !group.source) continue;
     group.source.beforeFingerprint = mapFingerprint(group.source.beforeFingerprint);
     group.source.afterFingerprint = mapFingerprint(group.source.afterFingerprint);
+  }
+  for (const entry of candidate.timeline?.entries ?? []) {
+    if (entry?.mutation?.kind === 'source' && entry.mutation.source) {
+      entry.mutation.source.beforeFingerprint = mapFingerprint(
+        entry.mutation.source.beforeFingerprint,
+      );
+      entry.mutation.source.afterFingerprint = mapFingerprint(
+        entry.mutation.source.afterFingerprint,
+      );
+    }
+    for (const action of entry?.mutation?.kind === 'actions'
+      ? entry.mutation.actions ?? [] : []) {
+      action.target = mapTarget(action.target, mapRecoverableKey);
+    }
   }
   if (candidate.sourceEdit) {
     candidate.sourceEdit.beforeFingerprint = mapFingerprint(
@@ -1281,6 +1304,24 @@ async function prepareClosedEditorRename(
   }
 }
 
+function recoverablePublishedCheckpoint(state, { deckId, currentFingerprint }) {
+  if (!state || state.deckId !== deckId || state.conflict !== null) return null;
+  if (typeof state.deckFingerprint !== 'string'
+    || !SHA256_HEX.test(state.deckFingerprint)
+    || state.deckFingerprint !== currentFingerprint) return null;
+  const checkpoint = Array.isArray(state.checkpoints) ? state.checkpoints.at(-1) : null;
+  if (!checkpoint
+    || typeof checkpoint.checkpointId !== 'string' || !checkpoint.checkpointId
+    || checkpoint.fingerprint !== state.deckFingerprint
+    || !Number.isSafeInteger(checkpoint.revision) || checkpoint.revision < 0
+    || checkpoint.revision > state.revision
+    || !Number.isSafeInteger(checkpoint.entryCount) || checkpoint.entryCount < 0) return null;
+  return {
+    checkpointId:checkpoint.checkpointId,
+    fingerprint:`sha256:${state.deckFingerprint}`,
+  };
+}
+
 export async function startServer({
   deckPath,
   deckId = null,
@@ -1613,6 +1654,22 @@ export async function startServer({
         }
       },
     });
+    const openedBinding = bindingCoordinator.snapshot();
+    const publishedCheckpoint = openedBinding.state === 'conflict'
+      && openedBinding.reason === 'replaced'
+      ? recoverablePublishedCheckpoint(sessionStore.state, {
+          deckId:effectiveDeckId,
+          currentFingerprint:initialization.currentFingerprint,
+        })
+      : null;
+    if (publishedCheckpoint) {
+      await bindingCoordinator.recoverPublishedCheckpoint({
+        expectedPath:absoluteDeckPath,
+        expectedFingerprint:publishedCheckpoint.fingerprint,
+        expectedBindingRevision:openedBinding.revision,
+      });
+      await bindingPersistenceQueue;
+    }
     if (sessionStore.state.deckId !== effectiveDeckId) {
       await sessionStore.persistState({ ...sessionStore.state, deckId:effectiveDeckId });
     }
@@ -1637,6 +1694,7 @@ export async function startServer({
   try {
     const terminalAdapter = {
         id:'agent-terminal',
+        submissionAware:true,
         get mode() { return 'terminal'; },
         async run(context) {
           if (!agentTerminal) {
@@ -1662,21 +1720,45 @@ export async function startServer({
             environmentCredentials:true,
           });
           context.onProgress?.({
+            status:'queued',
             mode:'terminal',
             message:firstTurn
-              ? `正在启动 ${agentProviderDefinition(provider).label} 终端并处理反馈`
-              : '任务已发送到当前 Agent 终端，请在右侧查看实时过程',
+              ? `正在启动 ${agentProviderDefinition(provider).label} 终端并提交反馈`
+              : '正在等待当前 Agent 终端空闲并提交本批反馈',
           });
-          const deadline = Date.now() + agentRunTimeoutMs;
-          if (firstTurn) await agentTerminal.start({ provider, initialPrompt:prompt });
-          await agentTerminal.waitUntilReady?.({
-            timeoutMs:Math.max(1, deadline - Date.now()),
-          });
-          if (!firstTurn) {
-            agentTerminal.submitPrompt(prompt);
+          // 这个期限只约束终端启动、输入框就绪和提示词提交。提示词已被 Agent
+          // 确认接收后，长任务可能合理地运行超过该时长；此时应依靠任务状态、
+          // 终端退出/回到输入框或用户取消来结算，不能用提交期限误报失败。
+          const submissionDeadline = Date.now() + agentRunTimeoutMs;
+          if (firstTurn) {
+            await agentTerminal.start({ provider, initialPrompt:prompt });
+            if (typeof agentTerminal.waitUntilStartupPromptSubmitted === 'function') {
+              await agentTerminal.waitUntilStartupPromptSubmitted({
+                timeoutMs:Math.max(1, submissionDeadline - Date.now()),
+              });
+            } else {
+              await agentTerminal.waitUntilReady?.({
+                timeoutMs:Math.max(1, submissionDeadline - Date.now()),
+              });
+            }
+          } else {
+            await agentTerminal.waitUntilReady?.({
+              timeoutMs:Math.max(1, submissionDeadline - Date.now()),
+            });
+            const submissionId = agentTerminal.submitPrompt(prompt);
+            if (typeof agentTerminal.waitUntilPromptSubmission === 'function') {
+              await agentTerminal.waitUntilPromptSubmission(submissionId, {
+                timeoutMs:Math.max(1, submissionDeadline - Date.now()),
+              });
+            }
           }
+          context.onProgress?.({
+            status:'running',
+            mode:'terminal',
+            message:'任务已确认提交到当前 Agent 终端，请在右侧查看实时过程',
+          });
           let heartbeatAt = Date.now();
-          while (Date.now() < deadline) {
+          for (;;) {
             if (context.signal?.aborted) {
               throw httpError('AGENT_RUN_CANCELLED', 409, 'Agent 任务已取消');
             }
@@ -1696,6 +1778,16 @@ export async function startServer({
                 `${terminalState.providerLabel} 终端已退出，仍有 ${remaining.size} 个任务未完成`,
               );
             }
+            if (terminalState.promptReady === true) {
+              const partial = remaining.size < context.taskIds.length;
+              throw httpError(
+                partial ? 'AGENT_TASKS_INCOMPLETE' : 'AGENT_TASKS_UNCHANGED',
+                502,
+                partial
+                  ? `Agent 已返回输入框，但仍有 ${remaining.size} 个任务未处理，可直接重试`
+                  : `Agent 已返回输入框，但 ${remaining.size} 个任务均未处理，可直接重试`,
+              );
+            }
             if (Date.now() - heartbeatAt >= 15_000) {
               heartbeatAt = Date.now();
               context.onProgress?.({
@@ -1705,7 +1797,6 @@ export async function startServer({
             }
             await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
           }
-          throw httpError('AGENT_RUN_TIMEOUT', 504, 'Agent 终端处理任务超时');
         },
     };
     const runAdapter = agentRunAdapter ?? terminalAdapter;
@@ -2162,7 +2253,9 @@ export async function startServer({
         return;
       }
       if (request.method === 'POST' && pathname === '/api/actions') {
-        const { expectedRevision, taskId, actions, coalesceKey } = await readJson(request);
+        const {
+          expectedRevision, taskId, actions, coalesceKey, commandId=null,
+        } = await readJson(request);
         requireRevision(expectedRevision);
         requireTaskId(taskId);
         if (!Array.isArray(actions) || actions.length === 0) {
@@ -2176,11 +2269,21 @@ export async function startServer({
           || coalesceKey.length === 0 || coalesceKey.length > 256)) {
           throw httpError('INVALID_INPUT', 400, 'coalesceKey 只允许人工动作使用非空短字符串');
         }
+        const duplicate = bridge.replayCompletedAction({
+          taskId, actions,
+          coalesceKey:coalesceKey ?? null,
+          commandId,
+        });
+        if (duplicate) {
+          json(response, 200, await serializeTaskResult(duplicate, { committed:true }));
+          return;
+        }
         await guardWorkingRevision(expectedRevision);
         let result;
         try {
           result = await bridge.applyActions({
             taskId, actions, expectedRevision,
+            commandId,
             ...(coalesceKey === undefined ? {} : { coalesceKey }),
           });
         } catch (error) {
@@ -2229,9 +2332,32 @@ export async function startServer({
         json(response, 200, serializedResult);
         return;
       }
+      if (request.method === 'POST' && pathname === '/api/solidify-preflight') {
+        const { expectedRevision, expectedBindingRevision } = await readJson(request);
+        requireRevision(expectedRevision);
+        await guardWorkingRevision(expectedRevision);
+        const binding = await bindingCoordinator.reconcile({ cause:'before-publish' });
+        if (expectedBindingRevision !== undefined
+          && expectedBindingRevision !== binding.revision) {
+          throw detailedHttpError('DECK_BINDING_REVISION_CONFLICT', 409,
+            'Deck 文件绑定已更新，请刷新后重试', { binding });
+        }
+        if (binding.state !== 'bound') {
+          throw detailedHttpError('DECK_REBIND_REQUIRED', 409,
+            'Editor 不能确认当前源文件，重新绑定前无法固化', { binding });
+        }
+        const result = await bridge.preflightSolidify(expectedRevision, {
+          fingerprint:() => sidecarBoundary.io.hashDeck().then(value => value.fingerprint),
+          bindingRevision:binding.revision,
+        });
+        json(response, 200, { ...result, binding });
+        return;
+      }
       if (request.method === 'POST'
         && ['/api/write-deck', '/api/solidify-deck'].includes(pathname)) {
-        const { expectedRevision, expectedBindingRevision } = await readJson(request);
+        const {
+          expectedRevision, expectedBindingRevision, preflightToken=null,
+        } = await readJson(request);
         requireRevision(expectedRevision);
         await guardWorkingRevision(expectedRevision);
         const solidify = pathname === '/api/solidify-deck';
@@ -2268,23 +2394,12 @@ export async function startServer({
                       previousFingerprint:workingDeckStore.fingerprint,
                     };
                   }
-                  const workingResult = await workingDeckStore.writePatches(patches);
-                  try {
-                    await workingPatchVerifier(workingDeckStore.path);
-                  } catch (error) {
-                    try {
-                      await workingDeckStore.restore(
-                        workingResult.previousFingerprint, workingResult.fingerprint,
-                      );
-                    } catch (restoreError) {
-                      throw detailedHttpError(
-                        'RECOVERY_REQUIRED', 503,
-                        '补丁验证失败且工作副本无法恢复，请重启 Editor 完成对账',
-                        { cause:restoreError, originalError:error },
-                      );
-                    }
-                    throw error;
-                  }
+                  const workingResult = await writeVerifiedPatches(
+                    workingDeckStore, patches, {
+                      verify:workingPatchVerifier,
+                      droppableActionIds:bridge.sourceRebaseActionIds(patches),
+                    },
+                  );
                   try {
                     const published = await runWriteTransaction({
                       deckPath:currentDeckPath,
@@ -2303,6 +2418,8 @@ export async function startServer({
                       ...published,
                       previousWorkingFingerprint:workingResult.previousFingerprint,
                       workingFingerprint:workingResult.fingerprint,
+                      effectivePatches:workingResult.effectivePatches,
+                      droppedActionIds:workingResult.droppedActionIds,
                     };
                   } catch (error) {
                     if (error?.committed !== true) {
@@ -2377,6 +2494,8 @@ export async function startServer({
                 ),
               solidify,
               scope:workingDeckStore.managed && !solidify ? 'working' : 'deck',
+              preflightToken,
+              bindingRevision:solidify ? expectedBindingRevision ?? null : null,
             },
           );
         } catch (error) {
@@ -2725,8 +2844,13 @@ export async function startServer({
           },
         });
         if (prompt) {
-          const submitHandoffPrompt = () => {
-            try { agentTerminal.submitPrompt?.(prompt); }
+          const submitHandoffPrompt = async () => {
+            try {
+              const submissionId = agentTerminal.submitPrompt?.(prompt);
+              if (submissionId && typeof agentTerminal.waitUntilPromptSubmission === 'function') {
+                await agentTerminal.waitUntilPromptSubmission(submissionId, { timeoutMs:30_000 });
+              }
+            }
             catch { /* 终端已关闭或正在切换时，交接说明不能阻断 Editor 启动 */ }
           };
           if (typeof agentTerminal.waitUntilReady === 'function') {

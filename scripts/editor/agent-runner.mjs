@@ -143,7 +143,7 @@ export class AgentRunCoordinator {
     if (taskIds.some(id => tasks.get(id).targetMissing === true)) {
       throw runnerError(
         'TASK_TARGET_MISSING', 409,
-        '本批任务中包含目标页面已删除的任务；请撤销删页或删除任务后重新标记',
+        '本批任务中包含原目标当前不可定位的任务；请撤销相关结构修改或删除任务后重新标记',
       );
     }
     if (taskIds.some(id => !RETRYABLE_TASK_STATUSES.has(tasks.get(id).status))) {
@@ -167,14 +167,20 @@ export class AgentRunCoordinator {
       if (this.closed || this.abortController.signal.aborted) {
         throw runnerError('AGENT_RUN_CANCELLED', 409, 'Agent 任务已取消');
       }
-      this.#publish({ status:'running', startedAt:new Date().toISOString() });
+      this.#publish({
+        ...(this.adapter.submissionAware === true ? {} : { status:'running' }),
+        startedAt:new Date().toISOString(),
+      });
       const result = await this.adapter.run({
         ...this.getContext(),
         taskIds:[...taskIds],
         signal:this.abortController.signal,
         onProgress:progress => {
           if (this.current?.id !== runId || this.closed) return;
+          const progressStatus = ['queued', 'running'].includes(progress?.status)
+            ? progress.status : null;
           this.#publish({
+            ...(progressStatus ? { status:progressStatus } : {}),
             ...(progress?.mode ? { mode:progress.mode } : {}),
             ...(progress?.message ? { message:String(progress.message).slice(0, 500) } : {}),
           });

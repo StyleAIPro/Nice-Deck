@@ -393,6 +393,36 @@ export class WorkCatalog {
     return this.#enqueue(() => this.#listUnlocked());
   }
 
+  reopenEditing({ deckPath }) {
+    return this.#enqueue(async () => {
+      if (!isDeckPath(deckPath)) {
+        throw catalogError('INVALID_DECK_PATH', 400, 'Deck 文件路径必须指向 HTML');
+      }
+      const canonicalPath = await canonicalDeckPath(deckPath);
+      const state = await this.#read();
+      const index = state.workItems.findIndex(item => (
+        item?.kind === 'editing'
+        && [item.binding?.currentPath, item.binding?.previousPath]
+          .filter(Boolean)
+          .some(path => editingKey(path) === editingKey(canonicalPath))
+      ));
+      if (index < 0) return null;
+      const current = state.workItems[index];
+      if (current.hiddenAt === null) return publicEditing(current);
+      const next = {
+        ...current,
+        revision:current.revision + 1,
+        hiddenAt:null,
+      };
+      await this.#write({
+        ...state,
+        revision:state.revision + 1,
+        workItems:state.workItems.map((item, candidate) => candidate === index ? next : item),
+      });
+      return publicEditing(next);
+    });
+  }
+
   rename({ workId, displayName, expectedRevision }) {
     return this.#enqueue(async () => {
       requireUuid(workId, 'workId');

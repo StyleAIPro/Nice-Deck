@@ -31,3 +31,19 @@ test('结构修改显示来源摘要而不是零项动作', () => {
     source:{ summary:'模板升级并保留页面 ID' },
   }, [], 'undo'), '撤销结构修改：模板升级并保留页面 ID');
 });
+
+test('补偿条目的全局撤销明确表示恢复任务效果', () => {
+  const compensation = {
+    id:'compensation', taskId:null, active:true, actions:[],
+    compensation:{ entryId:'g-agent', taskId:'t-1' },
+  };
+  const tasks = [{ id:'t-1', instruction:'把标题改为红色' }];
+  assert.equal(
+    historyLabel(compensation, tasks, 'undo'),
+    '恢复已撤销的 Agent 任务：把标题改为红色',
+  );
+  assert.equal(
+    historyLabel(compensation, tasks, 'redo'),
+    '再次撤销 Agent 任务：把标题改为红色',
+  );
+});

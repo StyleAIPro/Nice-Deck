@@ -5,12 +5,14 @@ import json
 import os
 import plistlib
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
+MAC_APP = ROOT / "Huawei Deck 编辑器.app"
 
 
 def load_module(name, path):
@@ -26,6 +28,15 @@ DECK = ROOT / "assets/training-deck.html"
 
 
 class LauncherTest(unittest.TestCase):
+    def test_macos_app_declares_the_bundled_icon(self):
+        plist_path = MAC_APP / "Contents/Info.plist"
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+
+        self.assertEqual(info["CFBundleIconFile"], "HuaweiDeckEditor")
+        icon = MAC_APP / "Contents/Resources/HuaweiDeckEditor.icns"
+        self.assertEqual(icon.read_bytes()[:4], b"icns")
+
     def test_desktop_instance_url_only_accepts_authenticated_loopback_workspace(self):
         for path in ("app", "editor"):
             url = f"http://127.0.0.1:45678/{path}/?token=secret"
@@ -174,6 +185,33 @@ class LauncherTest(unittest.TestCase):
 
         with mock.patch.object(launcher, "choose_project_directory", return_value=None):
             self.assertEqual(launcher.main(["--pick-directory-only"]), 3)
+
+    def test_windows_directory_picker_has_topmost_parent_and_always_destroys_root(self):
+        root = mock.Mock()
+        filedialog = types.ModuleType("tkinter.filedialog")
+        filedialog.askdirectory = mock.Mock(return_value=r"C:\\workspace")
+        tkinter = types.ModuleType("tkinter")
+        tkinter.Tk = mock.Mock(return_value=root)
+        tkinter.filedialog = filedialog
+
+        with (
+            mock.patch.dict(
+                "sys.modules",
+                {"tkinter": tkinter, "tkinter.filedialog": filedialog},
+            ),
+            mock.patch.object(launcher.sys, "platform", "win32"),
+        ):
+            selected = launcher.choose_project_directory()
+
+        self.assertEqual(str(selected), r"C:\\workspace")
+        root.withdraw.assert_called_once_with()
+        root.attributes.assert_called_once_with("-topmost", True)
+        root.update_idletasks.assert_called_once_with()
+        root.update.assert_called_once_with()
+        filedialog.askdirectory.assert_called_once_with(
+            parent=root, title="选择 Agent 项目目录", mustexist=True
+        )
+        root.destroy.assert_called_once_with()
 
     def test_finder_argument_and_ctrl_c_are_quiet(self):
         self.assertEqual(launcher.normalize_argv(["-psn_0_123", "deck.html"]), ["deck.html"])

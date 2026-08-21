@@ -355,6 +355,51 @@ class DeckBindingCoordinator {
     return operation;
   }
 
+  recoverPublishedCheckpoint({
+    expectedPath, expectedFingerprint, expectedBindingRevision,
+  }) {
+    const operation = this.queue.then(async () => {
+      if (this.closed) throw bindingError('DECK_BINDING_CLOSED', 410, 'Deck 文件绑定已关闭');
+      if (expectedBindingRevision !== this.binding.revision) {
+        throw bindingError(
+          'DECK_BINDING_REVISION_CONFLICT', 409, '文件绑定已更新，请刷新后重试',
+          { binding:this.snapshot() },
+        );
+      }
+      if (this.binding.state !== 'conflict' || this.binding.reason !== 'replaced') {
+        throw bindingError(
+          'DECK_BINDING_RECOVERY_STATE_INVALID', 409,
+          '只有被同路径文件替换的绑定才能按固化检查点恢复',
+          { binding:this.snapshot() },
+        );
+      }
+      const normalized = this.fileAdapter.normalize(expectedPath);
+      if (normalized !== this.binding.currentPath) {
+        throw bindingError(
+          'DECK_BINDING_PATH_CHANGED', 409,
+          '固化检查点对应的 Deck 路径已变化，拒绝恢复文件见证',
+          { binding:this.snapshot() },
+        );
+      }
+      const current = await this.fileAdapter.inspect(normalized);
+      if (!current.exists || !current.valid || current.fingerprint !== expectedFingerprint) {
+        throw bindingError(
+          'DECK_BINDING_CHECKPOINT_MISMATCH', 409,
+          '当前 Deck 与最近成功固化检查点不一致，文件绑定保持冻结',
+          { binding:this.snapshot() },
+        );
+      }
+      return this.#commit({
+        state:'bound', reason:'recovered-published-checkpoint', pendingCandidates:[],
+        witness:current.witness,
+        sourceFingerprint:current.fingerprint,
+        observedSourceFingerprint:current.fingerprint,
+      });
+    });
+    this.queue = operation.catch(() => {});
+    return operation;
+  }
+
   #scheduleReconcile() {
     clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => void this.reconcile().catch(() => {}), 200);

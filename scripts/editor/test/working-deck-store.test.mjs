@@ -10,6 +10,7 @@ import { PassThrough } from 'node:stream';
 
 import {
   WorkingDeckStore, pageIdsFromBundle, verifyWorkingPatchReplay,
+  writeVerifiedPatches,
 } from '../working-deck-store.mjs';
 
 function bundle(template) {
@@ -43,6 +44,7 @@ test('补丁重放失败保留具体动作 ID 与可恢复提示', async () => {
     verifyWorkingPatchReplay('/tmp/not-read-by-fake.html', { spawnProcess }),
     error => {
       assert.equal(error.code, 'PATCH_REPLAY_FAILED');
+      assert.equal(error.replayCode, 'TARGET_AMBIGUOUS');
       assert.equal(error.failedActionId, 'action-stale-range');
       assert.equal(error.stage, 'patch-replay');
       assert.match(error.message, /历史修改无法安全重放/);
@@ -50,6 +52,49 @@ test('补丁重放失败保留具体动作 ID 与可恢复提示', async () => {
       return true;
     },
   );
+});
+
+test('固化时丢弃已被后续源码重构删除的旧动作并重试完整验证', async () => {
+  const writes = [];
+  const restores = [];
+  const store = {
+    path:'/tmp/legacy-working-deck.html',
+    async writePatches(patches) {
+      writes.push(patches.map(patch => patch.id));
+      return {
+        fingerprint:`written-${writes.length}`,
+        previousFingerprint:`previous-${writes.length}`,
+      };
+    },
+    async restore(previousFingerprint, writtenFingerprint) {
+      restores.push([previousFingerprint, writtenFingerprint]);
+    },
+  };
+  const patches = [
+    { id:'valid-current-action' },
+    { id:'old-deleted-target' },
+  ];
+  const result = await writeVerifiedPatches(store, patches, {
+    droppableActionIds:['old-deleted-target'],
+    verify:async () => {
+      if (writes.at(-1).includes('old-deleted-target')) {
+        throw Object.assign(new Error('历史修改无法安全重放'), {
+          code:'PATCH_REPLAY_FAILED',
+          replayCode:'TARGET_NOT_FOUND',
+          failedActionId:'old-deleted-target',
+        });
+      }
+    },
+  });
+
+  assert.deepEqual(writes, [
+    ['valid-current-action', 'old-deleted-target'],
+    ['valid-current-action'],
+  ]);
+  assert.deepEqual(restores, [['previous-1', 'written-1']]);
+  assert.deepEqual(result.effectivePatches, [{ id:'valid-current-action' }]);
+  assert.deepEqual(result.droppedActionIds, ['old-deleted-target']);
+  assert.equal(result.fingerprint, 'written-2');
 });
 
 function templateOf(bytes) {

@@ -1978,37 +1978,16 @@ p {
 
 .inspector-collapse,
 .inspector-reopen {
-  border: 1px solid var(--line);
-  background: rgb(255 255 255 / 60%);
-  color: var(--ink-secondary);
-  box-shadow: var(--glass-card-shadow);
-  cursor: pointer;
-  transition: border-color var(--motion), background var(--motion), color var(--motion),
-    transform 120ms ease;
+  flex: 0 0 auto;
 }
 
 .inspector-collapse {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
-  place-items: center;
-  border-radius: 8px;
-  font-size: 15px;
+  flex-basis: 30px;
 }
 
 .inspector-reopen {
   z-index: 3;
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  border-radius: var(--radius-md);
-  color: var(--brand-red-deep);
-  font-size: 11px;
-  font-weight: 700;
+  place-self: center;
 }
 
 .editor-shell[data-inspector-state="collapsed"][data-inspector-dock="right"] .inspector-reopen {
@@ -2017,32 +1996,9 @@ p {
   flex-direction: column;
 }
 
-.editor-shell[data-inspector-state="collapsed"][data-inspector-dock="right"] .inspector-reopen-label {
-  line-height: 1;
-  writing-mode: vertical-rl;
-}
-
 .editor-shell[data-inspector-state="collapsed"][data-inspector-dock="top"] .inspector-reopen {
   grid-column: 2;
   grid-row: 1;
-}
-
-.inspector-collapse:hover,
-.inspector-reopen:hover {
-  border-color: rgb(199 0 11 / 24%);
-  background: rgb(255 248 248 / 86%);
-  color: var(--brand-red);
-}
-
-.inspector-collapse:active,
-.inspector-reopen:active {
-  transform: translateY(1px);
-}
-
-.inspector-collapse:focus-visible,
-.inspector-reopen:focus-visible {
-  outline: 2px solid rgb(199 0 11 / 45%);
-  outline-offset: 2px;
 }
 
 .editor-shell[data-agent-terminal-open="true"][data-inspector-state="expanded"] .page-panel,
@@ -2351,36 +2307,7 @@ p {
 }
 
 .page-panel-toggle {
-  display: inline-grid;
-  width: 30px;
-  height: 30px;
   flex: 0 0 auto;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-subtle);
-  color: var(--ink-secondary);
-  box-shadow: var(--glass-card-shadow);
-  cursor: pointer;
-  transition: color var(--motion), background var(--motion), border-color var(--motion);
-}
-
-.page-panel-toggle span {
-  font-size: 22px;
-  line-height: 1;
-  transform: translateY(-1px);
-}
-
-.page-panel-toggle:hover {
-  border-color: rgb(199 0 11 / 24%);
-  background: rgb(255 255 255 / 82%);
-  color: var(--brand-red);
-}
-
-.page-panel-toggle:focus-visible {
-  outline: 2px solid var(--brand-red);
-  outline-offset: 2px;
 }
 
 .editor-shell[data-page-panel-collapsed="true"] .page-panel .panel-heading {

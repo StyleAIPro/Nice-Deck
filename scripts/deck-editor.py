@@ -228,6 +228,27 @@ def _run_applescript(source, *arguments):
     )
 
 
+def _choose_with_tk(dialog_name, **options):
+    """打开一个有明确父窗口的 Tk 系统选择器。
+
+    Windows 上隐藏的 Tk 根窗口若不是 topmost，原生对话框可能被
+    浏览器压在后面，看起来就像“选择器一直没打开”。
+    """
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    try:
+        root.withdraw()
+        if sys.platform == "win32":
+            root.attributes("-topmost", True)
+        root.update_idletasks()
+        root.update()
+        return getattr(filedialog, dialog_name)(parent=root, **options)
+    finally:
+        root.destroy()
+
+
 def choose_deck():
     """用系统文件选择器选一份 HTML；用户取消时返回 None。"""
     if sys.platform == "darwin" and Path("/usr/bin/osascript").is_file():
@@ -250,17 +271,11 @@ def choose_deck():
         return Path(selected) if selected else None
 
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.update()
-        selected = filedialog.askopenfilename(
+        selected = _choose_with_tk(
+            "askopenfilename",
             title="选择要继续修改的 Huawei Deck HTML",
             filetypes=[("Huawei Deck HTML", "*.html *.htm"), ("所有文件", "*")],
         )
-        root.destroy()
         return Path(selected) if selected else None
     except Exception as error:
         raise LauncherError("无法打开系统文件选择器，请改用命令行传入 deck 路径") from error
@@ -288,17 +303,11 @@ def choose_project_directory():
         return Path(selected) if selected else None
 
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.update()
-        selected = filedialog.askdirectory(
+        selected = _choose_with_tk(
+            "askdirectory",
             title="选择 Agent 项目目录",
             mustexist=True,
         )
-        root.destroy()
         return Path(selected) if selected else None
     except Exception as error:
         raise LauncherError("无法打开系统目录选择器") from error

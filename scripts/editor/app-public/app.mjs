@@ -519,11 +519,14 @@ function renderWorkList(kind, entries) {
     actions.className = 'work-item-actions';
     if (needsRebind) {
       const rebind = document.createElement('button');
+      const sourceReplaced = entry.binding.reason === 'replaced';
       rebind.type = 'button';
       rebind.className = 'work-item-rebind';
-      rebind.textContent = '重新绑定';
+      rebind.textContent = sourceReplaced ? '查找原文件' : '重新绑定';
       rebind.setAttribute('aria-label', `重新绑定 ${displayName} 的源文件`);
-      rebind.title = '选择改名后的同一份 HTML 文件';
+      rebind.title = sourceReplaced
+        ? '当前位置已是另一份文件，请选择原来的物理文件'
+        : '选择改名或移动后的同一份 HTML 文件';
       applyPill(rebind, { variant:'primary', size:'sm', kind:'action' });
       rebind.addEventListener('click', () => void rebindWorkTask(entry, rebind));
       actions.append(rebind);
@@ -555,7 +558,14 @@ function renderWorkList(kind, entries) {
 async function rebindWorkTask(entry, button) {
   if (state !== 'idle') return;
   button.disabled = true;
-  setState('choosing-rebind', '请选择改名后的同一份 Deck HTML…', 'working');
+  const sourceReplaced = entry.binding?.reason === 'replaced';
+  setState(
+    'choosing-rebind',
+    sourceReplaced
+      ? '当前位置已是另一份文件，请选择原来的 Deck HTML…'
+      : '请选择改名或移动后的同一份 Deck HTML…',
+    'working',
+  );
   historyStatus('editing', '工作副本安全保留；正在等待选择源文件…', 'working');
   try {
     const result = await post('/api/work-items/choose-rebind-file', {
@@ -575,7 +585,9 @@ async function rebindWorkTask(entry, button) {
     await resumeDeckTask(result.workItem);
   } catch (error) {
     await loadWorkHistory();
-    const message = error.message || '重新绑定失败，请确认选择的是原来的物理文件';
+    const message = error.message || (sourceReplaced
+      ? '所选文件不是原来的物理文件；当前位置的同名文件不能直接替代原文件'
+      : '重新绑定失败，请确认选择的是原来的物理文件');
     setState('idle', message, 'error');
     historyStatus('editing', message, 'error');
   }

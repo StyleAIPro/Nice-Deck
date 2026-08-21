@@ -383,7 +383,10 @@ export class DeckCreationWorkspace {
       if (this.terminal?.snapshot?.().state === 'running') {
         try {
           await this.terminal.waitUntilReady?.({ timeoutMs:10_000 });
-          this.terminal.submitPrompt(prompt);
+          const submissionId = this.terminal.submitPrompt(prompt);
+          if (typeof this.terminal.waitUntilPromptSubmission === 'function') {
+            await this.terminal.waitUntilPromptSubmission(submissionId, { timeoutMs:10_000 });
+          }
         }
         catch { /* PTY 失败不丢失已经持久化的生成任务 */ }
       }

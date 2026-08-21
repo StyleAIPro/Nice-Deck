@@ -157,7 +157,7 @@ test('局部格式键被替换或撤销时不让后续细粒度文字动作丢�
   });
   journal.appendGroup(null, [{
     id:'granular-text', taskId:null, target:{ ...target, textPath }, kind:'setText',
-    payload:{ text:'两页' }, before:'一页', after:'两页', appliedAt:'granular-text',
+    payload:{ text:'两页', sourceRange:range }, before:'一页', after:'两页', appliedAt:'granular-text',
   }]);
   await page.evaluate(actions => window.HuaweiDeckPatchRuntime.applyAll(actions), journal.compile());
 
@@ -172,7 +172,12 @@ test('局部格式键被替换或撤销时不让后续细粒度文字动作丢�
   }, changed.compile());
 
   const undone = new PatchJournal(structuredClone(journal.state));
-  undone.undo(formatted.id);
+  // 后续文字替换已经使旧字符范围失效，严格时间线不会再为它制造空补偿；
+  // 直接按当前有效历史重放，验证文字目标没有随旧格式包装一起丢失。
+  assert.throws(
+    () => undone.compensate(formatted.id),
+    error => error.code === 'NOTHING_TO_COMPENSATE',
+  );
   const undoneResult = await page.evaluate(actions => {
     try {
       window.HuaweiDeckPatchRuntime.applyAll(actions);

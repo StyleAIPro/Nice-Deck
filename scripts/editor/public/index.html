@@ -123,8 +123,12 @@
             <span class="page-count" data-page-count>0 页</span>
             <button class="page-panel-toggle" type="button" data-page-panel-toggle
               aria-expanded="false" aria-label="展开页面列表" title="展开页面列表"
-              data-pill-nav data-pill-variant="neutral" data-pill-size="sm" data-pill-kind="icon">
-              <span aria-hidden="true">›</span>
+              data-pill-nav data-pill-variant="neutral" data-pill-size="sm" data-pill-kind="icon"
+              data-pill-arrow data-pill-arrow-direction="right">
+              <svg class="pill-nav-arrow-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <polyline points="6 4 10 8 6 12" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round"></polyline>
+              </svg>
             </button>
           </div>
         </div>
@@ -185,8 +189,12 @@
             <span class="selection-state" data-selection-state>未选中</span>
             <button class="inspector-collapse" type="button" data-inspector-collapse
               aria-label="收起属性面板" title="收起属性面板"
-              data-pill-nav data-pill-variant="neutral" data-pill-size="sm" data-pill-kind="icon">
-              <span aria-hidden="true">→</span>
+              data-pill-nav data-pill-variant="neutral" data-pill-size="sm" data-pill-kind="icon"
+              data-pill-arrow data-pill-arrow-direction="right">
+              <svg class="pill-nav-arrow-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <polyline points="6 4 10 8 6 12" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round"></polyline>
+              </svg>
             </button>
           </div>
         </div>
@@ -200,8 +208,12 @@
       </aside>
       <button class="inspector-reopen" type="button" data-inspector-reopen hidden
         aria-label="展开属性面板" title="展开属性面板"
-        data-pill-nav data-pill-variant="neutral" data-pill-size="md" data-pill-kind="action">
-        <span aria-hidden="true">←</span><span class="inspector-reopen-label">属性</span>
+        data-pill-nav data-pill-variant="neutral" data-pill-size="sm" data-pill-kind="icon"
+        data-pill-arrow data-pill-arrow-direction="left">
+        <svg class="pill-nav-arrow-icon" viewBox="0 0 16 16" aria-hidden="true">
+          <polyline points="6 4 10 8 6 12" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"></polyline>
+        </svg>
       </button>
       <aside class="agent-terminal-panel" data-agent-terminal-panel role="dialog"
         aria-label="Agent 交互终端" hidden></aside>

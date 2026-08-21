@@ -213,7 +213,11 @@ test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/sol
     });
     response.writeHead(200, { 'content-type':'application/json' });
     if (request.method === 'GET') response.end(JSON.stringify({ revision:9, groups:[] }));
-    else response.end(JSON.stringify({ revision:10, ok:true }));
+    else if (request.url === '/api/solidify-preflight') {
+      response.end(JSON.stringify({
+        revision:9, preflightToken:'preflight-cli', bindingRevision:4,
+      }));
+    } else response.end(JSON.stringify({ revision:10, ok:true }));
   });
   await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
   t.after(() => new Promise(resolvePromise => server.close(resolvePromise)));
@@ -248,9 +252,11 @@ test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/sol
     HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
   }).result);
   assert.deepEqual(received.slice(beforeSolidify).map(item => item.url), [
-    '/api/session', '/api/solidify-deck',
+    '/api/session', '/api/solidify-preflight', '/api/solidify-deck',
   ]);
-  assert.deepEqual(received.at(-1).body, { expectedRevision:9 });
+  assert.deepEqual(received.at(-1).body, {
+    expectedRevision:9, expectedBindingRevision:4, preflightToken:'preflight-cli',
+  });
 
   parseJsonOutput(await spawnCliWithEnv([
     '--url', url, '--token', 'explicit-secret', '--expected-revision', '11',

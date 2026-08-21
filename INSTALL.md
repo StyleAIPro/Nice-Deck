@@ -41,7 +41,7 @@ python3 scripts/install.py install
 py -3 scripts\install.py install
 ```
 
-安装器会使用目录 junction 注册 Skill，不要求开启 Windows Developer Mode。安装后重新打开 Codex 任务，再双击 `Huawei Deck 编辑器.cmd`。
+安装器会使用目录 junction 注册 Skill，不要求开启 Windows Developer Mode。安装后重新打开 Codex 任务，再双击 `Huawei Deck 编辑器.cmd`；它会在同目录生成带图标的 `Huawei Deck 编辑器（Windows）.lnk`，以后可直接使用该快捷方式。
 
 如果系统没有 `py`，可改用：
 
@@ -185,7 +185,7 @@ macOS：双击 `Huawei Deck 编辑器.app`，或：
 python3 scripts/deck-editor.py --app
 ```
 
-Windows：双击 `Huawei Deck 编辑器.cmd`，也可以把一份 deck HTML 拖到该文件上。
+Windows：首次双击 `Huawei Deck 编辑器.cmd` 会生成带图标的 `Huawei Deck 编辑器（Windows）.lnk`；之后可双击快捷方式，也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上。快捷方式保存当前机器的绝对路径，移动仓库后删除旧 `.lnk` 并重新运行 `.cmd` 即可重建。
 
 命令行直接打开一份 Deck：
 

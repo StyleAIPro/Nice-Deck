@@ -16,6 +16,12 @@ if not exist "%LAUNCHER%" (
   exit /b 2
 )
 
+set "SHORTCUT=%~dp0Huawei Deck 编辑器（Windows）.lnk"
+set "SHORTCUT_SCRIPT=%~dp0scripts\create_windows_launcher_shortcut.ps1"
+if not exist "%SHORTCUT%" if exist "%SHORTCUT_SCRIPT%" if exist "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" (
+  "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SHORTCUT_SCRIPT%" >nul 2>&1
+)
+
 where py.exe >nul 2>&1
 if not errorlevel 1 goto launch_py
 
