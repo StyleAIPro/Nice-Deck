@@ -104,6 +104,33 @@ class CreationTerminalFixture {
   }
 }
 
+test('启动状态恢复完成前入口不可点击，完成后选择的流程不会被迟到响应覆盖', async t => {
+  const app = await startAppServer({ token:'browser-bootstrap-race-secret' });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  let reached;
+  const restoring = new Promise(resolve => { reached = resolve; });
+  await page.route('**/api/creation-draft?*', async route => {
+    reached();
+    await pending;
+    await route.continue();
+  });
+  t.after(() => release());
+  await page.goto(app.appUrl);
+  await restoring;
+  assert.equal(await page.locator('[data-new-deck]').isDisabled(), true);
+  assert.equal(await page.locator('[data-existing-deck]').isDisabled(), true);
+  release();
+  await page.locator('[data-existing-deck]').click();
+  await page.locator('[data-add-deck]').waitFor({ state:'visible', timeout:2_000 });
+  assert.equal(await page.locator('[data-landing]').isHidden(), true);
+});
+
 test('用户在网页点击添加后才打开选择器，取消后仍可重试', async t => {
   let picks = 0;
   const app = await startAppServer({

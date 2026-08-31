@@ -8,8 +8,8 @@ import test from 'node:test';
 import { startServer } from '../server.mjs';
 import { openEditor } from './test-helpers.mjs';
 
-const SOURCE_DECK = resolve('Deck-Projects/ds-resource-deck/test-999.html');
-const EXPECTED_PAGE_COUNT = 15;
+const SOURCE_DECK = resolve('scripts/editor/test/fixtures/interactive-state-deck.html');
+const EXPECTED_PAGE_COUNT = 5;
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const materialResourceProblems = problems => problems.filter(problem => (
@@ -19,7 +19,7 @@ const materialResourceProblems = problems => problems.filter(problem => (
 async function openDsResourceEditor(t) {
   const sourceHash = sha256(await readFile(SOURCE_DECK));
   const root = await mkdtemp(join(tmpdir(), 'huawei-deck-ds-state-'));
-  const deckPath = join(root, 'test-999.html');
+  const deckPath = join(root, 'interactive-state-deck.html');
   await copyFile(SOURCE_DECK, deckPath);
   const app = await startServer({
     deckPath,
@@ -45,7 +45,7 @@ async function openDsResourceEditor(t) {
     await opened.browser.close().catch(() => {});
     await app.close().catch(() => {});
     await rm(root, { recursive:true, force:true });
-    assert.equal(sha256(await readFile(SOURCE_DECK)), sourceHash, '真实测试 Deck 不得被修改');
+    assert.equal(sha256(await readFile(SOURCE_DECK)), sourceHash, '内置测试 Deck 不得被修改');
   });
   return { app, ...opened };
 }
@@ -155,16 +155,16 @@ async function markTask(page, pageLabel, instruction, expectedCount) {
   }
 }
 
-test('真实 Deck 顶部目录导航与编辑器当前页保持同一个目标', async t => {
+test('内置交互 Deck 顶部目录导航与编辑器当前页保持同一个目标', async t => {
   const { page, browserProblems, resourceProblems } = await openDsResourceEditor(t);
   const frame = page.frameLocator('#deck-frame');
 
   await page.locator('[data-page-index="2"]').click();
   await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录');
 
-  await frame.locator('.navbar button.tab[data-idx="10"]').click();
+  await frame.locator('.navbar button.tab[data-idx="3"]').click();
   await page.waitForFunction(() => (
-    document.querySelector('[data-current-page]')?.textContent === '11 03·资源预测'
+    document.querySelector('[data-current-page]')?.textContent === '04 03·资源预测'
   ));
   await page.waitForFunction(() => {
     const frame = document.querySelector('#deck-frame');
@@ -197,8 +197,8 @@ test('同页不同交互画面的区域任务可分别恢复标记时的完整�
   const { app, page, browserProblems, resourceProblems } = await openDsResourceEditor(t);
   const frame = page.frameLocator('#deck-frame');
 
-  await page.locator('[data-page-index="12"]').click();
-  await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '12 预测主链');
+  await page.locator('[data-page-index="5"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '05 预测主链');
   assert.equal(await activeLayer(page), 'capacity');
 
   await page.locator('[data-mode="region"]').click();

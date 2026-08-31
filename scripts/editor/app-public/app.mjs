@@ -119,6 +119,7 @@ enhanceSelect(provider, { minimumMenuWidth:190 });
 enhanceSelect(document.querySelector('[data-creation-provider]'), { minimumMenuWidth:190 });
 installPillNav(document);
 let state = 'idle';
+let appReady = false;
 let candidate = null;
 let creationCandidate = null;
 let creationDraft = null;
@@ -194,12 +195,16 @@ function setState(nextState, message, kind = '') {
   changeDeckButton.disabled = nextState !== 'deck-selected';
   openButton.disabled = nextState !== 'deck-selected';
   provider.disabled = nextState !== 'deck-selected';
+  syncLandingButtons();
+  setStatus(message, kind);
+}
+
+function syncLandingButtons() {
   for (const button of landing.querySelectorAll(
     '[data-work-task], [data-dismiss-work], [data-rename-work], [data-new-deck], [data-existing-deck]',
   )) {
-    button.disabled = nextState !== 'idle';
+    button.disabled = !appReady || state !== 'idle';
   }
-  setStatus(message, kind);
 }
 
 async function requestJson(path, { method = 'GET', body } = {}) {
@@ -718,14 +723,14 @@ async function resumeCreationTask(entry) {
 }
 
 existingDeckButton.addEventListener('click', () => {
-  if (state !== 'idle') return;
+  if (!appReady || state !== 'idle') return;
   showExistingFlow();
 });
 
 backHomeButton.addEventListener('click', () => void returnToLanding('existing'));
 
 creationUi.newDeck.addEventListener('click', () => {
-  if (state !== 'idle') return;
+  if (!appReady || state !== 'idle') return;
   showCreationFlow();
 });
 
@@ -1292,5 +1297,8 @@ createSupportCenter({
     setStatus('示例副本已创建；确认项目目录和 Agent 后打开编辑器。');
   },
 });
+// 会话恢复可能切换页面；只在最后一次初始化导航完成后开放入口。
+appReady = true;
+syncLandingButtons();
 document.documentElement.dataset.appReady = 'true';
 delete document.documentElement.dataset.workspaceNavigationState;

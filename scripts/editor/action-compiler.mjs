@@ -56,7 +56,10 @@ export const actionKey = action => {
   const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
   const textRange = action.kind === 'setStyle' ? action.payload?.textRange : null;
   const rangeKey = textRange ? `${textRange.start}:${textRange.end}` : '';
-  return `${stableTargetKey(action)}|${kind}|${action.payload?.property ?? ''}|${rangeKey}`;
+  // 宽高与 CSS scale 修改不同属性，不能共享连续值校验与折叠槽位。
+  const property = action.kind === 'resize' && Object.hasOwn(action.payload ?? {}, 'scale')
+    ? 'scale' : (action.payload?.property ?? '');
+  return `${stableTargetKey(action)}|${kind}|${property}|${rangeKey}`;
 };
 
 const rangeStyleKey = action => (

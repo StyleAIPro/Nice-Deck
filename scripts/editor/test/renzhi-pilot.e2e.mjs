@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import {
   access, copyFile, mkdir, mkdtemp, readFile, rm, stat,
@@ -15,6 +16,15 @@ const KEEP_TEMP = process.argv.includes('--keep-temp');
 const FIXED_ROOT = '/tmp/huawei-deck-editor-renzhi-pilot';
 const PILOT_PAGE_INDEXES = [7, 8, 9, 12, 17];
 const EXPECTED_PAGE_COUNT = 21;
+const SOURCE_CANDIDATES = process.env.HUAWEI_DECK_RENZHI_FIXTURE
+  ? [resolve(process.env.HUAWEI_DECK_RENZHI_FIXTURE)]
+  : [resolve('Deck-Projects/renzhi/renzhi-deck.html'),
+    resolve('../..', 'Deck-Projects/renzhi/renzhi-deck.html')];
+// 业务验收材料不随仓库发布；显式指定的路径错误仍须失败，不能静默跳过。
+const pilotSkip = !process.env.HUAWEI_DECK_RENZHI_FIXTURE
+  && !SOURCE_CANDIDATES.some(candidate => existsSync(candidate))
+  ? '未提供 renzhi 业务验收 Deck；可用 HUAWEI_DECK_RENZHI_FIXTURE 指定'
+  : false;
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -23,10 +33,7 @@ async function sha256File(path) {
 }
 
 async function locateSourceDeck() {
-  const candidates = [
-    resolve('Deck-Projects/renzhi/renzhi-deck.html'),
-    resolve('../..', 'Deck-Projects/renzhi/renzhi-deck.html'),
-  ];
+  const candidates = SOURCE_CANDIDATES;
   for (const candidate of candidates) {
     try {
       await access(candidate);
@@ -201,7 +208,7 @@ function assertBundleIsClean(template) {
 }
 
 test('renzhi 工作副本完成 21 页、跨页任务、检查点、固化与重开', {
-  timeout:180_000,
+  timeout:180_000, skip:pilotSkip,
 }, async t => {
   const sourceDeck = await locateSourceDeck();
   const sourceBefore = await sha256File(sourceDeck);
@@ -353,7 +360,7 @@ test('renzhi 工作副本完成 21 页、跨页任务、检查点、固化与重
 });
 
 test('renzhi 封面文字连续格式、混合态、历史合并与重开恢复', {
-  timeout:60_000,
+  timeout:60_000, skip:pilotSkip,
 }, async t => {
   const sourceDeck = await locateSourceDeck();
   const sourceBefore = await sha256File(sourceDeck);
@@ -567,7 +574,7 @@ test('renzhi 封面文字连续格式、混合态、历史合并与重开恢复'
 });
 
 test('renzhi 封面红框文字全选删除后保持空内容并可撤销', {
-  timeout:60_000,
+  timeout:60_000, skip:pilotSkip,
 }, async t => {
   const sourceDeck = await locateSourceDeck();
   const sourceBefore = await sha256File(sourceDeck);

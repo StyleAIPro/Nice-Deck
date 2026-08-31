@@ -158,6 +158,10 @@ test('画布工具栏用品牌导出图标下载当前工作副本 PPTX', async 
     node.getBoundingClientRect().right <= resolutionNode.getBoundingClientRect().left
   ), await resolution.elementHandle()));
   assert.equal(await button.evaluate(node => getComputedStyle(node).width), '30px');
+  // PillNav 挂载会触发颜色过渡，断言最终样式而非原生按钮的起始帧。
+  await page.waitForFunction(() => getComputedStyle(document.querySelector(
+    '[data-export-pptx] .pill-nav-label-default',
+  )).color === 'rgb(168, 0, 9)');
   assert.equal(await button.locator('.pill-nav-label-default').evaluate(node => (
     getComputedStyle(node).color
   )), 'rgb(168, 0, 9)');
@@ -268,6 +272,13 @@ test('iframe 挂载后发现两个同名页并显示独立页序', async t => {
   assert.equal(await page.locator('.agent-status').evaluate(element => (
     getComputedStyle(element).height
   )), '44px');
+  await page.waitForFunction(() => (
+    ['[data-history-undo]', '[data-history-redo]', '[data-solidify]'].every(selector => {
+      const style = getComputedStyle(document.querySelector(selector));
+      return style.backgroundColor === 'rgb(247, 247, 248)'
+        && style.color === 'rgb(168, 168, 173)' && style.opacity === '1';
+    })
+  ));
   for (const selector of ['[data-history-undo]', '[data-history-redo]', '[data-solidify]']) {
     const disabledStyle = await page.locator(selector).evaluate(element => ({
       background:getComputedStyle(element).backgroundColor,
@@ -285,7 +296,11 @@ test('iframe 挂载后发现两个同名页并显示独立页序', async t => {
     getComputedStyle(element).transform
   ));
   await page.locator('.agent-status').hover();
-  await page.waitForTimeout(180);
+  await page.waitForFunction(({ fill, label }) => (
+    getComputedStyle(document.querySelector('.agent-status .pill-nav-fill')).transform !== fill
+    && getComputedStyle(document.querySelector('.agent-status .pill-nav-label-default')).transform !== label
+    && getComputedStyle(document.querySelector('.agent-status .pill-nav-label-hover')).opacity === '1'
+  ), { fill:agentHoverBefore, label:agentLabelBefore });
   assert.notEqual(await page.locator('.agent-status .pill-nav-fill').evaluate(element => (
     getComputedStyle(element).transform
   )), agentHoverBefore);
@@ -366,20 +381,27 @@ test('iframe 挂载后发现两个同名页并显示独立页序', async t => {
   const emblemTransformBefore = await page.locator('.mode-emblem-icon')
     .evaluate(element => getComputedStyle(element).transform);
   await page.locator('.mode-emblem').hover();
-  await page.waitForTimeout(120);
+  await page.waitForFunction(before => (
+    getComputedStyle(document.querySelector('.mode-emblem-icon')).transform !== before
+  ), emblemTransformBefore);
   assert.notEqual(await page.locator('.mode-emblem-icon')
     .evaluate(element => getComputedStyle(element).transform), emblemTransformBefore);
   const hoverCircleBefore = await page.locator('[data-mode="edit"] .pill-nav-fill')
     .evaluate(element => getComputedStyle(element).transform);
   await page.locator('[data-mode="edit"]').hover();
-  await page.waitForTimeout(350);
+  await page.waitForFunction(before => (
+    getComputedStyle(document.querySelector('[data-mode="edit"] .pill-nav-fill')).transform !== before
+  ), hoverCircleBefore);
   assert.notEqual(await page.locator('[data-mode="edit"] .pill-nav-fill')
     .evaluate(element => getComputedStyle(element).transform), hoverCircleBefore);
   assert.equal(await page.locator('[data-mode="edit"] .pill-nav-label-hover')
     .evaluate(element => getComputedStyle(element).color), 'rgb(168, 0, 9)');
   await page.locator('[data-mode="edit"]').click();
   assert.equal(await page.locator('.mode-tools').getAttribute('data-active-mode'), 'edit');
-  await page.waitForTimeout(220);
+  await page.waitForFunction(() => {
+    const style = getComputedStyle(document.querySelector('[data-mode="edit"]'));
+    return style.backgroundColor === 'rgb(227, 229, 233)' && style.color === 'rgb(168, 0, 9)';
+  });
   assert.equal(await page.locator('[data-mode="edit"]').evaluate(element => (
     getComputedStyle(element).backgroundColor
   )), 'rgb(227, 229, 233)');

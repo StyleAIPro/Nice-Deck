@@ -142,6 +142,8 @@ Editor 的全部 Node → Python 子进程通过 `scripts/editor/python-utf8.mjs
 
 Windows WSL Codex 会在启动器阶段预热；同一进程缓存 Codex / Node 命令、HOME 和路径映射，终端按“WSL 准备 / Codex 启动 / 历史重绘”显示真实阶段。恢复历史由服务端 headless xterm 解析，浏览器不再逐块接收和渲染历史 ANSI，只在输入态闸门成立后一次性接收最终终端画面；投影完成前 `resumePending`、键盘和 Agent 任务仍保持锁定。
 
+启动页完成会话恢复和初始导航后才开放“新建 Deck / 修改 Deck”入口，避免首次点击被迟到响应覆盖。小文字的拖动与缩放手柄保持屏幕尺寸，但热区向外避让文字中心，缩小画布后仍可直接编辑。宽高调整与 CSS scale 分别保存历史基线，连续使用两者时都保留，并支持独立撤销 / 重做。
+
 命令式入口继续保留：`python3 scripts/deck-editor.py <deck.html>`。Skill / Agent 完成第一版 deck 并通过基础验证后可直接带路径启动，Windows / Linux 也使用这一入口：
 
 ```bash
@@ -266,3 +268,10 @@ node scripts/verify/steps.mjs <deck.html> <页label> /tmp/steps    # 仅修改�
 原创代码与文档（`scripts/` / `references/` / `SKILL.md` 等）以 **MIT** 许可，见 [`LICENSE`](LICENSE)。
 
 两块第三方内容**不在** MIT 范围内，按各自条款使用：`.agents/skills/pdf/`（Anthropic 官方 skill，© Anthropic, PBC）、`assets/huawei-refs/` 与模板中的华为官方版式 / 封面 / 插画 / Logo / 品牌色（版权归华为）。复用品牌素材前须自行获得授权；发布自己的 deck 前建议按 `references/branding.md` 替换为自有或已授权资产。详见 `LICENSE` 末尾的第三方声明。
+
+
+### Editor 回归测试材料
+
+`npm run test:editor` 串行运行 Node 单测、Chrome E2E 和 Python 测试。导航、旧目录重绘和 layer 状态恢复使用仓库内的 `scripts/editor/test/fixtures/interactive-state-deck.html`，不依赖个人 `Deck-Projects` 目录。
+
+renzhi 业务 Deck 不随仓库发布，其三项专项验收在未找到材料时明确跳过；可设置 `HUAWEI_DECK_RENZHI_FIXTURE` 为该 Deck 的绝对路径后运行 `npm run test:editor:e2e`。显式指定了无效路径时测试仍失败，不会跳过。Windows 专属或真实 CLI 验收继续按各自的环境条件启用。

@@ -153,17 +153,20 @@ function connect(url, options) {
   });
 }
 
-function nextMessage(socket) {
+function nextMessage(socket, accepts = () => true) {
   return new Promise((resolve, reject) => {
     const onMessage = data => {
+      const message = JSON.parse(data);
+      if (!accepts(message)) return;
+      socket.off('message', onMessage);
       socket.off('error', onError);
-      resolve(JSON.parse(data));
+      resolve(message);
     };
     const onError = error => {
       socket.off('message', onMessage);
       reject(error);
     };
-    socket.once('message', onMessage);
+    socket.on('message', onMessage);
     socket.once('error', onError);
   });
 }
@@ -234,7 +237,9 @@ async function prepareAndCommit(socket, command, results = command.actions) {
     type: 'actions-prepared', commandId: command.commandId,
     applied: command.actions.length, results,
   }));
-  const commit = await nextMessage(socket);
+  const commit = await nextMessage(socket, message => (
+    message.type === 'commit-actions' && message.commandId === command.commandId
+  ));
   assert.equal(commit.type, 'commit-actions');
   assert.equal(commit.commandId, command.commandId);
   socket.send(JSON.stringify({
@@ -2930,7 +2935,7 @@ test('成功 action 原子完成任务且 undo/redo 同步任务生命周期', a
   t.after(() => editor.close());
   const requested = { ...action, taskId };
 
-  let commandPromise = nextMessage(editor);
+  let commandPromise = nextMessage(editor, message => message.type === 'apply-actions');
   let responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
     body:JSON.stringify({ expectedRevision:1, taskId, actions:[requested] }),
@@ -2955,13 +2960,15 @@ test('成功 action 原子完成任务且 undo/redo 同步任务生命周期', a
   assert.equal(task.groupId, groupId);
   assert.ok(task.updatedAt > created.task.updatedAt);
 
-  commandPromise = nextMessage(editor);
+  commandPromise = nextMessage(editor, message => message.type === 'apply-actions');
   responsePromise = fetch(`${app.url}/api/groups/${groupId}/undo?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
     body:JSON.stringify({ expectedRevision:2 }),
   });
   command = await commandPromise;
   await prepareAndCommit(editor, command);
+  // 暂停接收，稳定复现 HTTP 已完成但上一轮通知尚未被测试消费的顺序。
+  editor.pause();
   response = await responsePromise;
   body = await response.json();
   assert.equal(response.status, 200);
@@ -2971,11 +2978,12 @@ test('成功 action 原子完成任务且 undo/redo 同步任务生命周期', a
   assert.equal(task.groupId, undefined);
   assert.equal(app.session.groups[0].active, false);
 
-  commandPromise = nextMessage(editor);
+  commandPromise = nextMessage(editor, message => message.type === 'apply-actions');
   responsePromise = fetch(`${app.url}/api/groups/${groupId}/redo?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
     body:JSON.stringify({ expectedRevision:3 }),
   });
+  editor.resume();
   command = await commandPromise;
   await prepareAndCommit(editor, command);
   response = await responsePromise;

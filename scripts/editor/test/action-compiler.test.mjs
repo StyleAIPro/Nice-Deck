@@ -14,6 +14,21 @@ function rangeStyle(id, property, value, start, end) {
   };
 }
 
+test('宽高与 scale 分别编译，后续缩放不丢失此前尺寸且各自保留最早基线', () => {
+  const resize = (id, before, after) => ({
+    id, taskId:null, target:{ ...target }, kind:'resize', payload:after, before, after,
+  });
+  const compiled = compileActionGroups([
+    { active:true, actions:[resize('size', { width:300, height:100 }, { width:500, height:200 })] },
+    { active:true, actions:[resize('scale-1', { scale:1 }, { scale:1.5 })] },
+    { active:true, actions:[resize('scale-2', { scale:1.5 }, { scale:2 })] },
+  ]);
+  assert.deepEqual(compiled.map(({ before, payload }) => ({ before, payload })), [
+    { before:{ width:300, height:100 }, payload:{ width:500, height:200 } },
+    { before:{ scale:1 }, payload:{ scale:2 } },
+  ]);
+});
+
 test('局部格式编译为互不重叠的最终运行段，并合并相邻同值区间', () => {
   const compiled = compileActionGroups([{
     id:'group-1', active:true, actions:[

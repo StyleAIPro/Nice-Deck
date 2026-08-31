@@ -179,13 +179,14 @@ export async function openEditor(app, options = {}) {
 
 export async function dragInFrame(page, start, end) {
   const frame = page.locator('#deck-frame');
-  const box = await frame.boundingBox();
+  // 模式切换会改变属性面板和 iframe 缩放，不能在布局过渡中按旧坐标落下鼠标。
+  await (await frame.elementHandle()).waitForElementState('stable');
   const delta = { x:end.x - start.x, y:end.y - start.y };
-  const reachable = await frame.evaluate((frameElement, point) => {
+  const origin = await frame.evaluate((frameElement, point) => {
     const rect = frameElement.getBoundingClientRect();
     const owner = frameElement.ownerDocument;
     const requested = { x:rect.left + point.x, y:rect.top + point.y };
-    if (owner.elementFromPoint(requested.x, requested.y) === frameElement) return point;
+    if (owner.elementFromPoint(requested.x, requested.y) === frameElement) return requested;
     // 响应式布局可能把 iframe 的一部分裁到视口外。Playwright
     // 的 boundingBox 仍包含被裁部分；改用真正可命中的中心点。
     const candidate = {
@@ -195,9 +196,8 @@ export async function dragInFrame(page, start, end) {
     if (owner.elementFromPoint(candidate.x, candidate.y) !== frameElement) {
       throw new Error('iframe 在当前视口没有可交互区域');
     }
-    return { x:candidate.x - rect.left, y:candidate.y - rect.top };
+    return candidate;
   }, start);
-  const origin = { x:box.x + reachable.x, y:box.y + reachable.y };
   await page.mouse.move(origin.x, origin.y);
   await page.mouse.down();
   await page.mouse.move(origin.x + delta.x, origin.y + delta.y, { steps:8 });

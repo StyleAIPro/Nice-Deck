@@ -844,8 +844,9 @@ test('编辑模式用 Delete 或 Backspace 删除整个选中元素并可撤销'
   await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '3');
   await heading.waitFor({ state:'hidden' });
   state = await session(app);
-  assert.equal(state.groups[1].actions[0].kind, 'hide');
-  assert.deepEqual(state.groups[1].actions[0].payload, {});
+  assert.equal(state.groups.length, 1, '撤销后新增修改会截断旧重做分支');
+  assert.equal(state.groups[0].actions[0].kind, 'hide');
+  assert.deepEqual(state.groups[0].actions[0].payload, {});
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
@@ -1090,8 +1091,13 @@ for (const scenario of [
           && Math.abs(selected.top - element.top) < 1
           && Math.abs(selected.width - element.width) < 1
           && Math.abs(selected.height - element.height) < 1,
-        handleAligned:!scenario.handle || (Math.abs((handle.left + handle.width / 2) - element.right) < 1
-          && Math.abs((handle.top + handle.height / 2) - element.bottom) < 1),
+        // 小文字控制点允许向外避让；仍须覆盖右下角且不能挡住文字中心。
+        handleAligned:!scenario.handle || (handle.left <= element.right && handle.right >= element.right
+          && handle.top <= element.bottom && handle.bottom >= element.bottom
+          && !(handle.left < element.left + element.width / 2
+            && handle.right > element.left + element.width / 2
+            && handle.top < element.top + element.height / 2
+            && handle.bottom > element.top + element.height / 2)),
       };
     }, scenario);
     assert.deepEqual(alignment, { overlayAligned:true, handleAligned:true });
@@ -1331,7 +1337,7 @@ test('刷新恢复后同一文字仍可暂停 replay 并形成第二组', async 
   })), { active:0,suspended:0,pending:0 });
 });
 
-test('撤销 inactive 的最早文字组仍沿用历史安全 locator 并保留较新组', async t => {
+test('重开后拒绝跳过较新文字修改，并沿历史定位器顺序撤销重做', async t => {
   const app=await startFixtureServer();
   t.after(() => app.close());
   const {browser,page}=await openEditor(app);
@@ -1353,15 +1359,23 @@ test('撤销 inactive 的最早文字组仍沿用历史安全 locator 并保留�
   heading=page.frameLocator('#deck-frame').locator('h2').first();
 
   let changed=await postJson(app,`/api/groups/${state.groups[0].id}/undo`,{expectedRevision:2});
-  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.equal(changed.response.status,409,JSON.stringify(changed.body));
+  assert.equal(changed.body.code,'HISTORY_ORDER');
+  assert.equal((await session(app)).revision,2);
   assert.equal(await heading.textContent(),'历史第二次');
   await page.reload();
   await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent==='历史第二次');
   heading=page.frameLocator('#deck-frame').locator('h2').first();
-  changed=await postJson(app,`/api/groups/${state.groups[1].id}/undo`,{expectedRevision:3});
+  changed=await postJson(app,`/api/groups/${state.groups[1].id}/undo`,{expectedRevision:2});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.equal(await heading.textContent(),'历史第一次');
+  changed=await postJson(app,`/api/groups/${state.groups[0].id}/undo`,{expectedRevision:3});
   assert.equal(changed.response.status,200,JSON.stringify(changed.body));
   assert.equal(await heading.textContent(),'第一页标题');
-  changed=await postJson(app,`/api/groups/${state.groups[1].id}/redo`,{expectedRevision:4});
+  changed=await postJson(app,`/api/groups/${state.groups[0].id}/redo`,{expectedRevision:4});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.equal(await heading.textContent(),'历史第一次');
+  changed=await postJson(app,`/api/groups/${state.groups[1].id}/redo`,{expectedRevision:5});
   assert.equal(changed.response.status,200,JSON.stringify(changed.body));
   assert.equal(await heading.textContent(),'历史第二次');
 });
@@ -1421,9 +1435,13 @@ test('undo/redo 以完整 authoritative compiled 集合替换浏览器状态', a
   assert.equal(first.response.status,200,JSON.stringify(first.body));
   assert.equal(second.response.status,200,JSON.stringify(second.body));
   let changed=await postJson(app,`/api/groups/${first.body.groupId}/undo`,{expectedRevision:2});
-  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.equal(changed.response.status,409,JSON.stringify(changed.body));
+  assert.equal(changed.body.code,'HISTORY_ORDER');
   assert.equal(await heading.evaluate(element => element.style.translate),'40px 20px');
-  changed=await postJson(app,`/api/groups/${first.body.groupId}/redo`,{expectedRevision:3});
+  changed=await postJson(app,`/api/groups/${second.body.groupId}/undo`,{expectedRevision:2});
+  assert.equal(changed.response.status,200,JSON.stringify(changed.body));
+  assert.equal(await heading.evaluate(element => element.style.translate),'20px 10px');
+  changed=await postJson(app,`/api/groups/${second.body.groupId}/redo`,{expectedRevision:3});
   assert.equal(changed.response.status,200,JSON.stringify(changed.body));
   assert.equal(await heading.evaluate(element => element.style.translate),'40px 20px');
 
@@ -1440,7 +1458,7 @@ test('undo/redo 以完整 authoritative compiled 集合替换浏览器状态', a
   assert.equal(changed.response.status,200,JSON.stringify(changed.body));
   assert.deepEqual(await card.evaluate(element => ({
     width:element.style.width,height:element.style.height,scale:element.style.scale,
-  })),{width:'300px',height:'100px',scale:'1.5'});
+  })),{width:'500px',height:'200px',scale:'1.5'});
 });
 
 test('双击局部格式文字仍以单击红框圈定的整个文字盒编辑', async t => {
@@ -1599,6 +1617,11 @@ test('文字识别兼容：classless 文字块可直接修改和拖动', async t
   });
   const plain = frame.locator('[data-plain-text]');
   await page.click('[data-mode="edit"]');
+  await plain.click();
+  assert.equal(await plain.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+  }), true, '小字号文字中心不能被拖动热区遮挡');
   await plain.dblclick();
   await plain.fill('已识别的 classless 文字块');
   await plain.press('Meta+Enter');
@@ -1856,11 +1879,12 @@ test('durable manual 成功后 session refresh 瞬时失败仍回成功并由 de
     { name:'syncPending', syncPending:true },
   ]) {
     await t.test(scenario.name, async t => {
-      const app=await startFixtureServer({bridgeTimeoutMs:100});
+      // 此处注入的是 ACK 丢失；为正常 prepare 留出浏览器调度预算，避免先误报超时。
+      const app=await startFixtureServer({bridgeTimeoutMs:1_000});
       t.after(() => app.close());
       const {browser,page,browserProblems,resourceProblems,resourceRequests}=await openEditor(app);
       t.after(() => browser.close());
-      page.setDefaultTimeout(4_000);
+      page.setDefaultTimeout(8_000);
       for (let attempt=0; attempt<50 && sessionRequestCount(resourceRequests)<1; attempt+=1) {
         await page.waitForTimeout(20);
       }

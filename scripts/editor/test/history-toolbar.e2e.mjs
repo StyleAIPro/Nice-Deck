@@ -782,8 +782,12 @@ test('撤销与重做移动后选中框和缩放控制点跟随元素位置', as
         && Math.abs(overlay.top - element.top) < 1
         && Math.abs(overlay.width - element.width) < 1
         && Math.abs(overlay.height - element.height) < 1,
-      handle:Math.abs(handle.left + handle.width / 2 - element.right) < 1
-        && Math.abs(handle.top + handle.height / 2 - element.bottom) < 1,
+      handle:handle.left <= element.right && handle.right >= element.right
+        && handle.top <= element.bottom && handle.bottom >= element.bottom
+        && !(handle.left < element.left + element.width / 2
+          && handle.right > element.left + element.width / 2
+          && handle.top < element.top + element.height / 2
+          && handle.bottom > element.top + element.height / 2),
     };
   });
   assert.deepEqual(await selectionAlignment(), { overlay:true, handle:true });

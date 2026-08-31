@@ -1815,11 +1815,15 @@ function positionTransformSelection() {
   const scale = frameVisualScale();
   const hitWidth = 10 / scale.x;
   const hitHeight = 10 / scale.y;
+  // 缩小画布中的小文字可能比 10px 热区更矮。保持手柄屏幕尺寸，
+  // 但最多侵入元素四分之一，将剩余热区外移，给文字中心留下输入空间。
+  const insetX = Math.min(hitWidth / 2, rect.width / 4);
+  const insetY = Math.min(hitHeight / 2, rect.height / 4);
   const moveBoxes = {
-    top:{ left:rect.left, top:rect.top - hitHeight / 2, width:rect.width, height:hitHeight },
-    right:{ left:rect.right - hitWidth / 2, top:rect.top, width:hitWidth, height:rect.height },
-    bottom:{ left:rect.left, top:rect.bottom - hitHeight / 2, width:rect.width, height:hitHeight },
-    left:{ left:rect.left - hitWidth / 2, top:rect.top, width:hitWidth, height:rect.height },
+    top:{ left:rect.left, top:rect.top - hitHeight + insetY, width:rect.width, height:hitHeight },
+    right:{ left:rect.right - insetX, top:rect.top, width:hitWidth, height:rect.height },
+    bottom:{ left:rect.left, top:rect.bottom - insetY, width:rect.width, height:hitHeight },
+    left:{ left:rect.left - hitWidth + insetX, top:rect.top, width:hitWidth, height:rect.height },
   };
   for (const moveHandle of transformSelection.moveHandles) {
     setBox(moveHandle, moveBoxes[moveHandle.dataset.transformMoveHandle]);
@@ -1828,8 +1832,8 @@ function positionTransformSelection() {
   const width = 14 / scale.x;
   const height = 14 / scale.y;
   setBox(transformSelection.handle, {
-    left: rect.right - width / 2,
-    top: rect.bottom - height / 2,
+    left: rect.right - Math.min(width / 2, rect.width / 4),
+    top: rect.bottom - Math.min(height / 2, rect.height / 4),
     width,
     height,
   });

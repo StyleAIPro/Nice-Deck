@@ -123,7 +123,10 @@
     const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
     const textRange=action.kind==='setStyle' ? action.payload.textRange : null;
     const rangeKey=textRange ? `${textRange.start}:${textRange.end}` : '';
-    return `${stableTargetKey(action.target)}|${kind}|${action.kind === 'setStyle' ? action.payload.property : ''}|${rangeKey}`;
+    // 与服务端编译器一致：宽高和 CSS scale 分别维护基线。
+    const property=action.kind==='resize' && Object.hasOwn(action.payload,'scale')
+      ? 'scale' : (action.kind==='setStyle' ? action.payload.property : '');
+    return `${stableTargetKey(action.target)}|${kind}|${property}|${rangeKey}`;
   };
   function runtimeError(code, candidates = []) {
     return Object.assign(new Error(code), { code, candidates });
