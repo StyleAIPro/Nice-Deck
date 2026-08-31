@@ -79,8 +79,8 @@ export function buildAgentPrompt({
     `1. 用 ${cli} revision 只读取权威 revision，再对每个本批 ID 用 ${cli} task TASK_ID 读取任务详情；不要用 status 拉取整份历史，只处理本批 ID。`,
     `2. 结合任务区域、附件、Deck 源文件和 huawei-deck 规范判断修改。先区分修改本质：现有元素的文字、样式、移动、缩放、显隐走 ActionMutation；页面结构和复杂 DOM 走 SourceMutation。动作 envelope 为 {expectedRevision,taskId,actions:[{id,taskId,target,kind,payload}]}；target 优先原样使用任务候选中的 pageKey/path/tag/fingerprint/rect。仅当具体 action 字段不确定时，定点读取 ${JSON.stringify(join(skillRoot, 'scripts/editor/protocol.mjs'))} 的 validateAction 与 ${JSON.stringify(join(skillRoot, 'references/editing-guide.md'))} 的“Agent / CLI”小节，不要完整打印两个文件。`,
     '3. ActionMutation：每个任务生成受控 action JSON，并用 CLI apply 提交；发生 REVISION_CONFLICT 时重新读取 revision 后继续。',
-    `4. 页面增删排序、模板升级或复杂 DOM 重构：逐个任务先用 ${cli} begin-source-task TASK_ID 创建源码事务，保存返回的 sourceEditId 与预留 revision；只有 begin 成功后，才用 ${JSON.stringify(join(skillRoot, 'scripts/edit-bundle.py'))} 只修改 Deck 所指向的托管工作副本（deckPath），保持 slide / nav / chapters 同步并一次原子保存。写盘成功后必须用 ${cli} --expected-revision PREPARED_REVISION commit-source-edit SOURCE_EDIT_ID 显式登记 SourceMutation；写盘前或写盘后失败则用同一预留 revision 调用 cancel-source-edit SOURCE_EDIT_ID 回滚。删除区域任务所在整页时必须使用任务的 pageKey 调用 delete_page_by_id，不能按页序猜测，也不能用 hide 代替。commit 成功后再用 ${cli} task TASK_ID 确认 completed，随后才处理下一项。`,
-    '5. 不得手工编辑 bundle 或 huawei-deck-editor-patches 块；不调用 write-deck，不修改真实 Deck，不处理提交按钮之后新增加的任务。',
+    `4. 页面增删排序、模板升级或复杂 DOM 重构：逐个任务先用 ${cli} begin-source-task TASK_ID 创建源码事务，保存返回的 sourceEditId 与预留 revision；只有 begin 成功后，才用 ${JSON.stringify(join(skillRoot, 'scripts/edit-bundle.py'))} 只修改 Deck 所指向的托管工作副本（deckPath），保持 slide / nav / chapters 同步并一次原子保存。写盘成功后必须用 ${cli} --expected-revision PREPARED_REVISION commit-source-edit SOURCE_EDIT_ID 显式登记 SourceMutation；写盘前或写盘后失败则用同一预留 revision 调用 cancel-source-edit SOURCE_EDIT_ID 回滚。删除区域任务所在整页时必须使用任务的 pageKey 调用 delete_page_by_id，不能按页序猜测，也不能用 hide 代替。即使待删除页仍被旧的已固化 action 引用，也不得提前放弃事务或手工修改补丁块；Editor 会在 commit 时仅对 PAGE_NOT_FOUND / TARGET_NOT_FOUND 的已取代固化动作做受控清理并完整重放。commit 成功后再用 ${cli} task TASK_ID 确认 completed，随后才处理下一项。`,
+    '5. 不得手工编辑 bundle 或 huawei-deck-editor-patches 块；不调用 write-deck，不调用 /api/shutdown 或任何关闭 / 重启当前 Editor 的接口，不修改真实 Deck，不处理提交按钮之后新增加的任务。',
     '6. 全部处理完后简洁汇总成功、失败和需要用户确认的任务。',
   ].join('\n');
 }
@@ -101,8 +101,8 @@ export function buildSessionInitializationPrompt({
       `本 Deck 由“新建 Deck”流程交接而来，Creation 上下文清单：${creationContextPath}`,
       '先读取这份清单，继承其中已确认的 brief、大纲、页面规划、设计文稿与素材库；不要重复询问已经明确的信息。',
     ] : []),
-    '后续用户直接在终端提出修改时：现有元素的文字、样式、移动、缩放、显隐必须通过 Editor CLI action 提交；模板升级、页面增删排序和复杂 DOM 重构必须先用 begin-source-edit 取得 sourceEditId 与预留 revision，再用 edit-bundle.py 修改上述托管工作副本，成功后 commit-source-edit，失败时 cancel-source-edit 回滚。',
-    '绝不能改真实 Deck，也不能手工改 huawei-deck-editor-patches 块；源码事务显式提交后才会形成可撤销结构历史，只有用户点击“固化修改”才会发布到真实 Deck。',
+    '后续用户直接在终端提出修改时：现有元素的文字、样式、移动、缩放、显隐必须通过 Editor CLI action 提交；模板升级、页面增删排序和复杂 DOM 重构必须先用 begin-source-edit 取得 sourceEditId 与预留 revision，再用 edit-bundle.py 修改上述托管工作副本，成功后 commit-source-edit，失败时 cancel-source-edit 回滚。删页若取代了旧的已固化 action，仍应正常提交事务，由 Editor 受控清理明确缺页或缺目标的旧补丁。',
+    '绝不能改真实 Deck，也不能手工改 huawei-deck-editor-patches 块，不得调用 /api/shutdown 或关闭 / 重启当前 Editor；源码事务显式提交后才会形成可撤销结构历史，只有用户点击“固化修改”才会发布到真实 Deck。',
     '本轮只建立后续编辑上下文，不修改任何文件，不执行任务，也不启动编辑器。',
     '准备完成后只需简洁回复“Deck 编辑会话已准备好”。',
   ].join('\n');

@@ -102,7 +102,7 @@ open -n "Huawei Deck 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" 
 
 编辑器打开时默认进入区域标记，左侧页面栏默认折叠为窄页码轨道，可按顶部箭头展开完整标题。区域说明弹窗可选“继续添加任务”只保存当前标记，或选“直接提交任务”将累计的全部待完成任务作为一批交给 Agent。区域标记模式下按住 `R` 会临时进入预览，可直接操作 Deck 内按钮，松开后恢复区域标记；输入控件继续把 `R` 当普通文字。拉框时会把当前页的 layer、分步显示、展开项等交互状态写入任务，定位任务时先恢复标记画面，再显示原区域。历史 Deck 的 `data-mod` 目录仍可兼容恢复，但三套当前模板与新页面统一使用固定 DOM 的 layer 协议。Deck 内导航与主舞台滚动也会主动同步左侧当前页，同页内容重绘不会再触发页面重定位，缩略图副本不参与页面身份。
 
-任务批次执行期间，可以直接在右侧 Agent CLI 按独立的 `Esc` 停止本轮。编辑器会同步退出“Agent 正在处理”状态，把未完成成员保留到“批次 N · 未完成”，并提供“仅重试剩余”与“合并到下一批”两个显式入口；右侧长期 PTY 不会因此关闭。方向键、功能键等多字节控制序列不算独立 Esc，不会误取消批次。
+任务批次执行期间，可以直接在右侧 Agent CLI 按独立的 `Esc` 停止本轮。编辑器会同步退出“Agent 正在处理”状态，把未完成成员保留到“批次 N · 未完成”，并提供“重新提交本批未完成任务”与“合并到下一批”两个显式入口；右侧长期 PTY 不会因此关闭。方向键、功能键等多字节控制序列不算独立 Esc，不会误取消批次。
 
 ### 0.3 外部 Agent 协作与撤销 / 重做
 
@@ -145,23 +145,25 @@ Editor 启动时通过可信 sidecar 把真实 source deck 复制为 `.huawei-de
 - `ActionMutation`：已有元素的文字、文字格式、移动、缩放、隐藏和显示。它保存稳定 locator 与 before / after，通过 browser runtime 重放；区域任务、画布直接编辑和终端 `replace-text` / `apply` 最终都走这一类。
 - `SourceMutation`：模板升级、复杂 DOM 或动画重构、整页插入 / 删除 / 排序。Agent 必须先创建源码事务，再用 `scripts/edit-bundle.py` 修改 `HUAWEI_DECK_WORKING_PATH`，显式 commit 时读取可信字节、验证 pageId 与 slide / section / nav 三处同步后，以前后 SHA-256 记录整个工作副本版本并刷新 iframe。Agent 不得修改 `HUAWEI_DECK_SOURCE_PATH`，也不得手工编辑离线补丁块。
 
-Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begin-source-task`）取得 `sourceEditId` 与预留 revision，成功后才能写工作副本，写盘完成必须执行 `commit-source-edit`；失败执行 `cancel-source-edit` 回滚。事务活动期间，人工 action、撤销、重做和固化统一返回 `SOURCE_EDIT_ACTIVE`。源码事务与 revision 一并持久化；服务重开后仍保留开始前基线，只允许同一 `sourceEditId` 继续 commit 提交或 cancel 取消，不由文件监视器猜测提交顺序。文件监视器只兼容旧客户端在事务外直接写入。
+Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begin-source-task`）取得 `sourceEditId` 与预留 revision，成功后才能写工作副本，写盘完成必须执行 `commit-source-edit`；提交在登记 SourceMutation 前用真实浏览器重放已有固化补丁。若新源码确实删除了更早固化动作的页面或元素，验证器明确返回 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND` 时只剔除该旧动作并从头重放，同时把补丁转换记入结构历史；其他失败返回 `PATCH_REPLAY_FAILED`、恢复事务前工作副本并保留事务供取消或重试。失败后执行 `cancel-source-edit` 回滚。事务活动期间，人工 action、撤销、重做和固化统一返回 `SOURCE_EDIT_ACTIVE`。源码事务与 revision 一并持久化；服务重开后仍保留开始前基线，只允许同一 `sourceEditId` 继续 commit 提交或 cancel 取消，不由文件监视器猜测提交顺序。文件监视器只兼容旧客户端在事务外直接写入，并执行同一补丁重放闸门；结构历史撤销 / 重做也先验证目标版本，失败时返回重放错误、恢复当前工作副本且不移动历史游标。
 
-`data-editor-id` 是可编辑元素的持久元素身份。Agent 移动或调整层级时必须保留既有 `data-editor-id`；新增元素会在 SourceMutation 之前由工作副本归一化补齐。格式错误或重复的身份必须安全停止。`data-editor-id` 只定位元素，不放宽 `before` / `after` 与文字范围校验；Agent 改写同一属性或改变字符偏移时仍然冲突关闭。旧 action 没有该身份时继续使用保守的路径、几何与语义锚点，不猜测迁移目标。
+`data-editor-id` 是可编辑元素的持久元素身份。Agent 移动或调整层级时必须保留既有 `data-editor-id`；新增元素会在 SourceMutation 之前由工作副本归一化补齐。`sc-for` 循环模板的后代不得携带静态 `data-editor-id`，归一化会跳过新节点并清理旧工作副本中的误注入身份，避免循环实例共享同一目标。格式错误或重复的身份必须安全停止。`data-editor-id` 只定位元素，不放宽 `before` / `after` 与文字范围校验；Agent 改写同一属性或改变字符偏移时仍然冲突关闭。旧 action 没有该身份时继续使用保守的路径、几何与语义锚点，不猜测迁移目标。
 
 区域任务批次中的结构修改要逐个建立事务：先执行 `node scripts/editor/cli.mjs begin-source-task TASK_ID`，保存返回的 `sourceEditId` 与 revision，再对工作副本做一次原子保存并执行 `commit-source-edit SOURCE_EDIT_ID`；提交会把 SourceMutation 关联该任务并标记完成。失败时用 `cancel-source-edit SOURCE_EDIT_ID` 回滚。撤销这条结构历史会让任务回到待处理，重做后任务再次完成。自由终端对话产生的结构修改使用 `begin-source-edit`，不绑定任务。
 
-两类记录共享 revision、编辑时间线、历史游标和固化边界。结构历史按时间顺序恢复文件版本；插页生成新 pageId，移页保留原 pageId，删页只移除目标 ID，所以其他页 action 不依赖页码。SourceMutation 不能用非末尾补偿跨越后续结构版本。固化验证若确认某条旧 action 位于后续 SourceMutation 之前、且其页面或元素已被该源码版本删除，会把它记为“源码已取代”并从发布补丁中剔除后重新做完整重放；同一标识仍存在但语义、几何或当前值冲突时继续 fail-closed，不能借此放宽为猜测匹配。
+两类记录共享 revision、编辑时间线、历史游标和固化边界。结构历史按时间顺序恢复文件版本；插页生成新 pageId，移页保留原 pageId，删页只移除目标 ID，所以其他页 action 不依赖页码。SourceMutation 不能用非末尾补偿跨越后续结构版本。源码提交或固化验证若确认某条旧 action 属于更早固化基线、且其页面或元素已被新源码删除，会把它记为“源码已取代”并从补丁中剔除后重新做完整重放；结构撤销恢复旧固化动作，重做再次剔除。同一标识仍存在但语义、几何或当前值冲突时继续 fail-closed，不能借此放宽为猜测匹配。
 
 保存会话不同于正式发布：关闭服务后 session 与托管工作副本可以重开，预览、自动保存和 `Cmd/Ctrl+S` 期间真实 HTML 字节保持不变。顶栏提供“固化修改”，但必须二次确认；它不是普通自动保存，而是唯一会永久写盘、建立固化检查点并归档当前编辑时间线的入口。浏览器标签页的 `×` 会直接关闭，不触发 Chrome 通用离开提醒；网页无法用自定义弹窗接管标签页关闭。要离开编辑器，应点击品牌区右侧、页面左上角独立的“退出编辑”；右侧工作区导航继续保留“初始页”按钮，二者不能互相替换。有未固化历史或 Agent 正在运行时，“退出编辑”会直接打开页面内未固化任务清单，按最新修改倒序列出页码与任务说明，并提供“继续编辑”“暂不固化，退出”“固化并退出”。后者仍走同一固化预检与原子发布流程；未固化历史与工作副本会保留到下次打开。
 
-当前退出交互以“退出编辑器”为唯一文案：初始页、流程页和各编辑页面的品牌区右侧保持同一位置，文字右侧使用品牌红线性的门框与向右退出箭头，不带独立底框。退出会调用显式 shutdown，关闭启动器、全部编辑运行时与 Agent 终端，而不是返回初始页。退出弹窗覆盖游标前全部生效条目，按 `taskId` 分组；任务默认只显示任务说明与下拉箭头，首次展开时才生成页码、条目数和具体 action / source 修改类型。直接编辑 / 结构修改与游标后的重做历史独立显示。
+当前退出交互以“退出编辑器”为唯一文案：初始页、流程页和各编辑页面的品牌区右侧保持同一位置，文字右侧使用品牌红线性的门框与向右退出箭头，不带独立底框。退出会调用同时校验当前浏览器 Origin 与独立 editor capability token 的显式 shutdown，关闭启动器、全部编辑运行时与 Agent 终端；Agent 的通用 API token 无权调用。退出弹窗覆盖游标前全部生效条目，按 `taskId` 分组；任务默认只显示任务说明与下拉箭头，首次展开时才生成页码、条目数和具体 action / source 修改类型。直接编辑 / 结构修改与游标后的重做历史独立显示。
 
 正式发布只能由明确意图触发。可见 Editor 顶栏“固化修改”确认，或无窗口 Skill 在用户要求正式写入时执行 `cli.mjs solidify`，都会先调用 `POST /api/solidify-preflight`，再用返回的一次性令牌调用 `POST /api/solidify-deck`。预检令牌绑定当前 revision、binding revision、真实 / working 双 fingerprint 与最终动作投影，60 秒后过期且只能消费一次；其间任何绑定或历史变化都返回 `SOLIDIFY_PREFLIGHT_STALE`。正式写入在当前工作副本中用最终 action 快照替换唯一的 `huawei-deck-editor-patches` 块，再通过可信事务把整份工作副本原子发布为真实 Deck，并创建固化检查点、归档时间线；因此连续固化既不会覆盖丢失上一轮结果，也不会不断追加脚本块。完成任务关联新的 checkpoint；已固化任务可在 drawer 的已完成分组中直接删除记录，删除只清理任务、局部截图和附件，不会改变 Deck 中已固化的修改。`POST /api/write-deck` / `cli.mjs verify` 只建立受控检查点并保留历史，不发布真实 Deck。对同目标、属性和范围的旧 action 会在固化时折叠为最终值，重叠文字范围会压成互不重叠的最终运行段。发布闸门依次检查：
 
 1. **预检闸门**：revision、文件绑定、页面目标、controlled frame、诊断和双指纹一致；缺页、离线或文件变化分别返回稳定错误码；
 2. **令牌重验**：正式写入前再次核对 token 绑定的 revision、binding revision、双 fingerprint 和动作投影，过期、重复使用或变化都要求重新预检；
 3. **验证闸门**：修改页相对基线无新增溢出，候选 bundle 通过 `eb.verify`，全部离线补丁在真实浏览器中成功重放。
+
+会话重开与固化都使用同一受限恢复规则：只有被后续 SourceMutation 标记为可 rebase 的旧动作，且重放结果为 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND`，才可作为“源码已取代”跳过；未授权缺失、目标歧义和语义冲突仍会报错。固化验证在同一 Chrome 进程中一次收集全部可清理动作，恢复第一次候选后只重写一次并重新完整验证；写入期间进度条显示为不确定状态，不承诺无法准确测量的百分比。
 
 通过闸门后，`scripts/edit-bundle.py` 只负责 bundle 编解码和三处结构同步；sidecar helper 持有可信目录 identity，负责归档工作版本、真实 Deck 备份、transaction、双 fingerprint 复核、同目录候选与 `os.replace`。会话基线更新失败时会恢复工作副本或真实 Deck；冲突或验证失败不静默覆盖。
 

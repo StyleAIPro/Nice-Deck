@@ -367,6 +367,25 @@ export class AgentTerminalPanel {
     return commandUser[1] ?? commandUser[2] ?? commandUser[3] ?? null;
   }
 
+  #startupPhaseCopy(state = this.terminalState) {
+    const user = state.startupPhaseDetail?.user ?? this.#wslUser(state);
+    if (state.startupPhase === 'wsl-preparing') {
+      return user
+        ? `WSL 准备：正在唤醒 ${user} 环境并加载 Codex…`
+        : 'WSL 准备：正在唤醒环境并加载 Codex…';
+    }
+    if (state.startupPhase === 'codex-starting') {
+      return 'Codex 启动：正在等待 CLI 输入界面…';
+    }
+    if (state.startupPhase === 'history-redraw') {
+      return '历史重绘：正在恢复最终终端画面…';
+    }
+    if (state.startupPhase === 'agent-starting') {
+      return 'Agent 启动：正在等待 CLI 输入界面…';
+    }
+    return null;
+  }
+
   #syncLoading() {
     const state = this.terminalState;
     if (state.interactionRequired?.kind) {
@@ -380,6 +399,11 @@ export class AgentTerminalPanel {
     }
     if (startupPromptState === 'submitting') {
       this.#setLoading(true, '正在提交初始化指令…');
+      return;
+    }
+    const phaseCopy = this.#startupPhaseCopy(state);
+    if (phaseCopy && state.startupPhase !== 'ready') {
+      this.#setLoading(true, phaseCopy);
       return;
     }
     if (state.state === 'starting' || startupPromptState === 'pending') {
@@ -467,6 +491,15 @@ export class AgentTerminalPanel {
           this.#requestFit({ scrollToBottom:true });
         }
         this.#adoptState(message.terminal);
+      } else if (message.type === 'projection' && typeof message.data === 'string') {
+        if (this.restartPending) return;
+        this.terminal.reset();
+        this.hasTerminalOutput = Boolean(message.data);
+        if (message.data) {
+          this.terminal.write(message.data, () => this.#requestFit({ scrollToBottom:true }));
+        } else {
+          this.#requestFit({ scrollToBottom:true });
+        }
       } else if (message.type === 'output' && typeof message.data === 'string') {
         if (this.restartPending) return;
         if (message.data.length > 0) {
@@ -530,15 +563,17 @@ export class AgentTerminalPanel {
     const promptSubmissionError = state.promptSubmission?.state === 'failed'
       ? state.promptSubmission.error || 'Agent 没有确认收到提示词'
       : null;
+    const startupPhaseCopy = this.#startupPhaseCopy(state);
     const copies = {
-      starting:'正在启动 bypass 会话…', running:promptSubmissionError
+      starting:startupPhaseCopy ?? '正在启动 bypass 会话…', running:promptSubmissionError
         ?? (state.startupPromptState === 'awaiting-confirmation'
           ? '初始化指令已回车，正在等待 Agent 接收…'
-          : state.promptReady === false
-        ? 'CLI 已启动，正在等待输入界面…'
-        : state.conversationError
-        ? '会话已启动 · 恢复标识保存失败'
-        : `${state.projectRoot?.split('/').filter(Boolean).at(-1) || '项目'}${conversationLabel} · PID ${state.pid ?? '—'}`),
+          : startupPhaseCopy
+            ?? (state.promptReady === false
+              ? 'CLI 已启动，正在等待输入界面…'
+              : state.conversationError
+                ? '会话已启动 · 恢复标识保存失败'
+                : `${state.projectRoot?.split('/').filter(Boolean).at(-1) || '项目'}${conversationLabel} · PID ${state.pid ?? '—'}`)),
       exited:state.exit?.message || '会话已退出', failed:state.exit?.message || '启动失败',
       stopped:'尚未启动', closed:'服务已关闭',
     };

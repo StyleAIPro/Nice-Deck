@@ -160,7 +160,11 @@ function requestProcessShutdown(url) {
   setTimeout(() => window.close(), 80);
 }
 
-const closeStandaloneEditor = () => requestProcessShutdown(endpoint('/api/shutdown'));
+const closeStandaloneEditor = () => {
+  const url = endpoint('/api/shutdown');
+  url.searchParams.set('editorToken', editorToken);
+  requestProcessShutdown(url);
+};
 if (workspaceUrl && !embeddedCreation) {
   workspaceNavigation.hidden = false;
   const workspaceClientId = workspaceUrl.searchParams.get('clientId');
@@ -1142,9 +1146,8 @@ async function solidifyChanges() {
       }),
     });
     setSolidifyProgress({
-      state:'determinate',
-      label:'检查通过，正在原子写入 Deck…',
-      value:32,
+      state:'indeterminate',
+      label:'检查通过，正在清理历史并原子写入 Deck…',
     });
     const result = await requestJson('/api/solidify-deck', {
       method:'POST',

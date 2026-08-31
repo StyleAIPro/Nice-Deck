@@ -34,6 +34,10 @@ test('活动批次与下一批新标注分区显示，且只冻结在途任务',
         window.__submittedBatchTaskIds = selected.map(item => item.id);
       },
     });
+    window.__setBatchTaskStatus = (id, status) => {
+      const selected = tasks.find(item => item.id === id);
+      if (selected) selected.status = status;
+    };
     window.__renderBatchDrawer({
       id:'batch-1', status:'running', taskCount:1,
       activeBatch:{ id:'batch-1', ordinal:1, taskIds:['task-a'] },
@@ -78,6 +82,30 @@ test('活动批次与下一批新标注分区显示，且只冻结在途任务',
   assert.deepEqual(await page.evaluate(() => window.__submittedBatchTaskIds), ['task-a']);
   await residual.locator('[data-merge-agent-batch]').click();
   assert.deepEqual(await page.evaluate(() => window.__submittedBatchTaskIds), ['task-a', 'task-b']);
+
+  await page.evaluate(() => {
+    window.__setBatchTaskStatus('task-b', 'completed');
+    window.__renderBatchDrawer({
+      id:'batch-1', status:'failed', taskCount:1,
+      activeBatch:null,
+      nextBatch:{ taskIds:[], actionableTaskIds:[], count:0 },
+      residualBatches:[{
+        id:'batch-1', ordinal:1, taskIds:['task-a'],
+        unfinishedTaskIds:['task-a'], actionableTaskIds:['task-a'],
+      }],
+      batches:[{ id:'batch-1', ordinal:1, taskIds:['task-a'] }],
+    });
+  });
+  assert.match(
+    await root.locator('[data-process-all] .pill-nav-label-default').innerText(),
+    /下一批暂无新任务.*上方重新提交按钮/,
+  );
+  assert.equal(await root.locator('[data-process-all]').isDisabled(), true);
+  assert.equal(
+    await residual.locator('[data-retry-agent-batch] .pill-nav-label-default').innerText(),
+    '重新提交本批未完成任务（1 条）',
+  );
+  assert.equal(await residual.locator('[data-retry-agent-batch]').isDisabled(), false);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });

@@ -794,6 +794,30 @@
       tentativeCount-=1;
     }
   }
+  function applyAllDroppingMissing(actions,{rebaseActionIds=[]}={}) {
+    if (!Array.isArray(actions)) throw runtimeError('INVALID_ACTION');
+    const droppable=new Set(rebaseActionIds);
+    const effectiveActions=[...actions];
+    const droppedActionIds=[];
+    while (true) {
+      try {
+        return {
+          results:applyAll(effectiveActions,{rebaseActionIds}),
+          effectiveActions:[...effectiveActions],
+          droppedActionIds:[...droppedActionIds],
+        };
+      } catch (error) {
+        const failedActionId=error?.failedActionId;
+        const canDrop=['PAGE_NOT_FOUND','TARGET_NOT_FOUND'].includes(error?.code)
+          && typeof failedActionId==='string' && droppable.has(failedActionId);
+        const failedIndex=canDrop
+          ? effectiveActions.findIndex(action => action?.id===failedActionId) : -1;
+        if (failedIndex<0) throw error;
+        effectiveActions.splice(failedIndex,1);
+        droppedActionIds.push(failedActionId);
+      }
+    }
+  }
   function adoptActiveAsBaseline() {
     if (tentativeCount>0) throw runtimeError('TRANSACTION_PENDING');
     const adopted=activeActions.length;
@@ -842,7 +866,8 @@
   }).observe(document.documentElement,{childList:true,subtree:true});
   window.HuaweiDeckPatchRuntime={
     contract,
-    pageKey,makeLocator,resolve,applyAction,applyAll,applyTransaction,beginTransaction,suspendTarget,
+    pageKey,makeLocator,resolve,applyAction,applyAll,applyAllDroppingMissing,
+    applyTransaction,beginTransaction,suspendTarget,
     adoptActiveAsBaseline,
     pendingTransactionCount:() => tentativeCount,
     activeActionCount:() => activeActions.length,

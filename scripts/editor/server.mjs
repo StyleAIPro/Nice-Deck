@@ -164,19 +164,23 @@ function migrateSessionToPersistentPageIds(state, workingDeck, fingerprintMap = 
     if (mapped !== value) changed = true;
     return mapped;
   };
+  const mapSource = source => {
+    if (!source || typeof source !== 'object') return;
+    source.beforeFingerprint = mapFingerprint(source.beforeFingerprint);
+    source.afterFingerprint = mapFingerprint(source.afterFingerprint);
+    for (const item of source.solidifiedPatchTransition?.droppedActions ?? []) {
+      if (item?.action) {
+        item.action.target = mapTarget(item.action.target, mapRecoverableKey);
+      }
+    }
+  };
   for (const group of historyGroups) {
     if (group?.mutationType !== 'source' || !group.source) continue;
-    group.source.beforeFingerprint = mapFingerprint(group.source.beforeFingerprint);
-    group.source.afterFingerprint = mapFingerprint(group.source.afterFingerprint);
+    mapSource(group.source);
   }
   for (const entry of candidate.timeline?.entries ?? []) {
     if (entry?.mutation?.kind === 'source' && entry.mutation.source) {
-      entry.mutation.source.beforeFingerprint = mapFingerprint(
-        entry.mutation.source.beforeFingerprint,
-      );
-      entry.mutation.source.afterFingerprint = mapFingerprint(
-        entry.mutation.source.afterFingerprint,
-      );
+      mapSource(entry.mutation.source);
     }
     for (const action of entry?.mutation?.kind === 'actions'
       ? entry.mutation.actions ?? [] : []) {
@@ -1730,12 +1734,14 @@ export async function startServer({
           // 确认接收后，长任务可能合理地运行超过该时长；此时应依靠任务状态、
           // 终端退出/回到输入框或用户取消来结算，不能用提交期限误报失败。
           const submissionDeadline = Date.now() + agentRunTimeoutMs;
+          let submittedPromptId = null;
           if (firstTurn) {
             await agentTerminal.start({ provider, initialPrompt:prompt });
             if (typeof agentTerminal.waitUntilStartupPromptSubmitted === 'function') {
-              await agentTerminal.waitUntilStartupPromptSubmitted({
+              const submittedState = await agentTerminal.waitUntilStartupPromptSubmitted({
                 timeoutMs:Math.max(1, submissionDeadline - Date.now()),
               });
+              submittedPromptId = submittedState.promptSubmission?.id ?? null;
             } else {
               await agentTerminal.waitUntilReady?.({
                 timeoutMs:Math.max(1, submissionDeadline - Date.now()),
@@ -1746,6 +1752,7 @@ export async function startServer({
               timeoutMs:Math.max(1, submissionDeadline - Date.now()),
             });
             const submissionId = agentTerminal.submitPrompt(prompt);
+            submittedPromptId = submissionId;
             if (typeof agentTerminal.waitUntilPromptSubmission === 'function') {
               await agentTerminal.waitUntilPromptSubmission(submissionId, {
                 timeoutMs:Math.max(1, submissionDeadline - Date.now()),
@@ -1778,7 +1785,10 @@ export async function startServer({
                 `${terminalState.providerLabel} 终端已退出，仍有 ${remaining.size} 个任务未完成`,
               );
             }
-            if (terminalState.turnState === 'idle') {
+            const submittedTurnCompleted = submittedPromptId
+              ? terminalState.completedPromptSubmissionId === submittedPromptId
+              : terminalState.turnState === 'idle';
+            if (submittedTurnCompleted) {
               const partial = remaining.size < context.taskIds.length;
               throw httpError(
                 partial ? 'AGENT_TASKS_INCOMPLETE' : 'AGENT_TASKS_UNCHANGED',
@@ -1858,6 +1868,7 @@ export async function startServer({
 
   const publishSourceMutation = async (change, {
     sourceEditId=null, expectedRevision=sessionStore.state.revision,
+    solidifiedPatchRepair=null,
   } = {}) => {
     const source = {
       beforeFingerprint:change.beforeFingerprint,
@@ -1870,12 +1881,16 @@ export async function startServer({
       restore:(target, expected) => workingDeckStore.restore(target, expected),
     };
     const result = sourceEditId === null
-      ? await bridge.recordSourceMutation(source, transaction)
+      ? await bridge.recordSourceMutation(source, {
+        ...transaction,
+        solidifiedPatchRepair,
+      })
       : await bridge.commitSourceEdit({
         sourceEditId,
         expectedRevision,
         source,
         ...transaction,
+        solidifiedPatchRepair,
         finalize:afterFingerprint => workingDeckStore.confirmExternalChange(afterFingerprint),
       });
     if (sourceEditId === null) workingDeckStore.confirmExternalChange(change.afterFingerprint);
@@ -1901,7 +1916,72 @@ export async function startServer({
     const change = await workingDeckStore.checkpointExternalChange();
     if (!change) return;
     if (watcherClosed || generation !== watcherGeneration) return;
-    return publishSourceMutation(change, { sourceEditId, expectedRevision });
+    const effectivePatches = structuredClone(workingDeckStore.embeddedPatches ?? []);
+    const droppableActionIds = new Set(
+      (sessionStore.state.solidifiedActions ?? []).map(action => action?.id),
+    );
+    const droppedActionIds = [];
+    try {
+      while (true) {
+        try {
+          await workingPatchVerifier(workingDeckStore.path);
+          break;
+        } catch (error) {
+          const failedActionId = error?.failedActionId;
+          const canDrop = error?.code === 'PATCH_REPLAY_FAILED'
+            && ['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND'].includes(error?.replayCode)
+            && droppableActionIds.has(failedActionId);
+          const failedIndex = canDrop
+            ? effectivePatches.findIndex(patch => patch?.id === failedActionId)
+            : -1;
+          if (failedIndex < 0) throw error;
+          effectivePatches.splice(failedIndex, 1);
+          droppedActionIds.push(failedActionId);
+          const rewritten = await workingDeckStore.rewritePendingExternalPatches(
+            effectivePatches,
+          );
+          change.afterFingerprint = rewritten.change.afterFingerprint;
+        }
+      }
+    } catch (error) {
+      try {
+        await workingDeckStore.discardExternalChange(change.beforeFingerprint);
+      } catch (restoreError) {
+        throw detailedHttpError(
+          'RECOVERY_REQUIRED', 503,
+          '工作副本补丁重放失败且无法恢复，请重启 Editor 完成对账',
+          { cause:restoreError, originalError:error },
+        );
+      }
+      throw error;
+    }
+    return publishSourceMutation(change, {
+      sourceEditId,
+      expectedRevision,
+      solidifiedPatchRepair:droppedActionIds.length > 0 ? {
+        effectivePatches,
+        droppedActionIds,
+      } : null,
+    });
+  };
+
+  const restoreVerifiedSourceVersion = async (targetFingerprint, expectedFingerprint) => {
+    const restored = await workingDeckStore.restore(targetFingerprint, expectedFingerprint);
+    try {
+      await workingPatchVerifier(workingDeckStore.path);
+    } catch (error) {
+      try {
+        await workingDeckStore.restore(expectedFingerprint, targetFingerprint);
+      } catch (restoreError) {
+        throw detailedHttpError(
+          'RECOVERY_REQUIRED', 503,
+          '结构历史目标补丁重放失败且无法恢复，请重启 Editor 完成对账',
+          { cause:restoreError, originalError:error },
+        );
+      }
+      throw error;
+    }
+    return restored;
   };
 
   const queueWorkingDeckCheckpoint = () => {
@@ -1985,6 +2065,18 @@ export async function startServer({
         return;
       }
       if (request.method === 'POST' && pathname === '/api/shutdown') {
+        if (request.headers.origin === undefined) {
+          throw httpError(
+            'BROWSER_ORIGIN_REQUIRED', 403,
+            '退出接口只接受当前 Editor 页面发起的请求',
+          );
+        }
+        if (url.searchParams.get('editorToken') !== editorToken) {
+          throw httpError(
+            'EDITOR_CAPABILITY_REQUIRED', 403,
+            '退出接口缺少编辑器能力令牌',
+          );
+        }
         json(response, 202, { status:'shutting-down' });
         setImmediate(() => void close().catch(() => {}));
         return;
@@ -2339,7 +2431,7 @@ export async function startServer({
           .find(group => group?.id === groupId && group?.mutationType === 'source');
         const result = sourceGroup
           ? await bridge.changeSourceGroup(method, groupId, expectedRevision, {
-            restore:(target, expected) => workingDeckStore.restore(target, expected),
+            restore:restoreVerifiedSourceVersion,
           })
           : (method === 'undo'
             ? await bridge.undoGroup(groupId, expectedRevision)

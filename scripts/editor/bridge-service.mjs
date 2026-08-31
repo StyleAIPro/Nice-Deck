@@ -19,6 +19,86 @@ function commandDigest(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+function normalizeSolidifiedPatchRepair(state, repair) {
+  if (repair === null || repair === undefined) return null;
+  if (!repair || typeof repair !== 'object' || Array.isArray(repair)
+    || !Array.isArray(repair.effectivePatches)
+    || !Array.isArray(repair.droppedActionIds)) {
+    throw serviceError('INVALID_PATCH_REPAIR', 500, '源码修改的固化补丁修复结果无效');
+  }
+  const droppedIds = new Set(repair.droppedActionIds);
+  if (droppedIds.size === 0 || droppedIds.size !== repair.droppedActionIds.length
+    || [...droppedIds].some(id => typeof id !== 'string' || !id)) {
+    throw serviceError('INVALID_PATCH_REPAIR', 500, '源码修改的失效补丁标识无效');
+  }
+  const before = structuredClone(state.solidifiedActions ?? []);
+  const droppedActions = [];
+  const expectedEffective = [];
+  for (const [index, action] of before.entries()) {
+    if (droppedIds.has(action?.id)) droppedActions.push({ index, action });
+    else expectedEffective.push(action);
+  }
+  if (droppedActions.length !== droppedIds.size
+    || !isDeepStrictEqual(expectedEffective, repair.effectivePatches)) {
+    throw serviceError(
+      'INVALID_PATCH_REPAIR', 500,
+      '源码修改清理的补丁与当前固化基线不一致',
+    );
+  }
+  return {
+    effectivePatches:structuredClone(repair.effectivePatches),
+    droppedActionIds:[...repair.droppedActionIds],
+    transition:{
+      beforeDigest:commandDigest(before),
+      afterDigest:commandDigest(expectedEffective),
+      droppedActions:structuredClone(droppedActions),
+    },
+  };
+}
+
+function applySolidifiedPatchTransition(actions, transition, method) {
+  if (!transition) return structuredClone(actions ?? []);
+  if (!transition || typeof transition !== 'object' || Array.isArray(transition)
+    || typeof transition.beforeDigest !== 'string'
+    || typeof transition.afterDigest !== 'string'
+    || !Array.isArray(transition.droppedActions)) {
+    throw serviceError('INVALID_PATCH_REPAIR', 500, '结构历史的固化补丁转换无效');
+  }
+  const current = structuredClone(actions ?? []);
+  const expectedDigest = method === 'undo'
+    ? transition.afterDigest : transition.beforeDigest;
+  if (commandDigest(current) !== expectedDigest) {
+    throw serviceError(
+      'SOLIDIFIED_PATCH_HISTORY_CONFLICT', 409,
+      '结构历史对应的固化补丁基线已经改变，无法安全撤销或重做',
+    );
+  }
+  if (method === 'undo') {
+    for (const item of [...transition.droppedActions].sort((a, b) => a.index - b.index)) {
+      if (!Number.isSafeInteger(item?.index) || item.index < 0 || !item.action
+        || typeof item.action.id !== 'string'
+        || current.some(action => action?.id === item.action.id)) {
+        throw serviceError('INVALID_PATCH_REPAIR', 500, '结构历史缺少可恢复的固化动作');
+      }
+      current.splice(Math.min(item.index, current.length), 0, structuredClone(item.action));
+    }
+  } else {
+    for (const item of transition.droppedActions) {
+      const index = current.findIndex(action => action?.id === item?.action?.id);
+      if (index < 0 || !isDeepStrictEqual(current[index], item.action)) {
+        throw serviceError('INVALID_PATCH_REPAIR', 500, '结构历史缺少待剔除的固化动作');
+      }
+      current.splice(index, 1);
+    }
+  }
+  const resultDigest = method === 'undo'
+    ? transition.beforeDigest : transition.afterDigest;
+  if (commandDigest(current) !== resultDigest) {
+    throw serviceError('INVALID_PATCH_REPAIR', 500, '结构历史的固化补丁转换结果不一致');
+  }
+  return current;
+}
+
 function completedCommand(state, commandId, requestDigest) {
   if (commandId === null) return null;
   const completed = state.completedCommands?.[commandId];
@@ -945,16 +1025,21 @@ export class BridgeService {
     });
   }
 
-  recordSourceMutation(source, { restore, taskId = null } = {}) {
+  recordSourceMutation(source, {
+    restore, taskId = null, solidifiedPatchRepair = null,
+  } = {}) {
     return this.#enqueue(async () => {
       this.#assertMutable();
       this.#assertSourceEditInactive();
-      return this.#recordSourceMutation(source, { restore, taskId });
+      return this.#recordSourceMutation(source, {
+        restore, taskId, solidifiedPatchRepair,
+      });
     });
   }
 
   commitSourceEdit({
     sourceEditId, expectedRevision, source, restore, finalize = async () => {},
+    solidifiedPatchRepair = null,
   }) {
     return this.#enqueue(async () => {
       this.#assertMutable();
@@ -968,6 +1053,7 @@ export class BridgeService {
         taskId:active.taskId,
         clearSourceEditId:active.id,
         finalize,
+        solidifiedPatchRepair,
       });
     });
   }
@@ -992,6 +1078,7 @@ export class BridgeService {
 
   async #recordSourceMutation(source, {
     restore, taskId = null, clearSourceEditId = null, finalize = async () => {},
+    solidifiedPatchRepair = null,
   } = {}) {
     const state = this.sessionStore.state;
     if (state.workingDeckFingerprint !== source?.beforeFingerprint) {
@@ -1011,8 +1098,21 @@ export class BridgeService {
       }
       delete candidate.sourceEdit;
     }
+    const patchRepair = normalizeSolidifiedPatchRepair(state, solidifiedPatchRepair);
+    const recordedSource = patchRepair
+      ? { ...source, solidifiedPatchTransition:patchRepair.transition }
+      : source;
     const journal = new PatchJournal(candidate);
-    const group = journal.appendSourceGroup(source, taskId);
+    const group = journal.appendSourceGroup(recordedSource, taskId);
+    if (patchRepair) {
+      candidate.solidifiedActions = patchRepair.effectivePatches;
+      candidate.historyRepair = {
+        repairedAt:new Date().toISOString(),
+        sourceGroupId:group.id,
+        reason:'source-replaced-solidified-targets',
+        droppedActionIds:[...patchRepair.droppedActionIds],
+      };
+    }
     completeTask(candidate, taskId, group);
     candidate.revision += 1;
     candidate.workingDeckFingerprint = source.afterFingerprint;
@@ -1047,6 +1147,8 @@ export class BridgeService {
     const completedTask = taskId === null ? null : taskById(candidate, taskId);
     return {
       groupId:group.id, revision:candidate.revision, source:group.source,
+      ...(patchRepair
+        ? { droppedSolidifiedActionIds:[...patchRepair.droppedActionIds] } : {}),
       ...(completedTask ? { task:structuredClone(completedTask) } : {}),
     };
   }
@@ -1085,6 +1187,11 @@ export class BridgeService {
         diagnosticsBaseline:{}, diagnosticsCurrent:{}, diagnosticsRevision:null,
         revision:state.revision + 1,
       };
+      candidate.solidifiedActions = applySolidifiedPatchTransition(
+        state.solidifiedActions,
+        originalGroup.source?.solidifiedPatchTransition,
+        method,
+      );
       let linkedTask = method === 'undo'
         ? reopenTask(candidate, originalGroup.taskId ?? null)
         : completeTask(candidate, originalGroup.taskId ?? null, originalGroup);

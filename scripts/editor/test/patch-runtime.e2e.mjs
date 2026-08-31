@@ -74,6 +74,48 @@ test('固化后的 active action 被收养为新基线，空同步不会恢复�
   });
 });
 
+test('会话恢复批量跳过被后续源码修改取代的缺失动作', async t => {
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+
+  const result = await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    const valid = {
+      id:'valid-current-action', target:runtime.makeLocator(heading),
+      kind:'setText', payload:{ text:'保留的修改' },
+    };
+    const missing = {
+      id:'old-deleted-target',
+      target:{
+        ...valid.target,
+        editorId:'element-ffffffffffffffffffffffffffffffff',
+        path:'999',
+      },
+      kind:'setText', payload:{ text:'目标已经不存在' },
+    };
+    const repaired = runtime.applyAllDroppingMissing([valid, missing], {
+      rebaseActionIds:[missing.id],
+    });
+    return {
+      text:heading.textContent,
+      applied:repaired.results.length,
+      effectiveIds:repaired.effectiveActions.map(action => action.id),
+      droppedActionIds:repaired.droppedActionIds,
+    };
+  });
+
+  assert.deepEqual(result, {
+    text:'保留的修改',
+    applied:1,
+    effectiveIds:['valid-current-action'],
+    droppedActionIds:['old-deleted-target'],
+  });
+});
+
 test('局部文字样式按字符范围重放、替换并恢复原始结构', async t => {
   const chromium = await loadChromium();
   const browser = await chromium.launch({ channel:'chrome', headless:true });

@@ -67,6 +67,62 @@ class WorkingDeckUnicodeTest(unittest.TestCase):
         self.assertEqual(len(normalized_ids), 3)
         self.assertTrue(normalized_ids[2].startswith("element-"))
 
+    def test_prepare_working_copy_does_not_seed_sc_for_descendants(self):
+        template = '''<!doctype html><body>
+<div class="stage"><div class="slide-fit" data-idx="0"><div class="slide-canvas">
+<section data-label="循环页"><sc-for list="{{ items }}" as="item">
+<div class="card"><span>{{ item }}</span></div></sc-for></section>
+</div></div></div>
+<script>const nav = [
+      { i:0, code:'循', label:'循环页' },
+    ];</script></body>'''
+        lines = [
+            '<script type="__bundler/manifest">', '{}', '</script>',
+            '<script type="__bundler/template">',
+            working_deck.eb.dump_template(template), '</script>',
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deck.html"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            prepared = working_deck.prepare_working_copy(path)
+
+        prepared_template = working_deck.eb.get_template(
+            base64.b64decode(prepared["bytes"]).decode("utf-8").split("\n")
+        )
+        loop_body = prepared_template[
+            prepared_template.index('<sc-for') : prepared_template.index('</sc-for>')
+        ]
+        self.assertIn('data-editor-id=', loop_body.split('>', 1)[0])
+        self.assertNotIn('data-editor-id=', loop_body.split('>', 1)[1])
+
+    def test_normalize_working_copy_removes_legacy_sc_for_descendant_ids(self):
+        loop_id = "element-" + "1" * 32
+        legacy_id = "element-" + "2" * 32
+        template = f'''<!doctype html><body>
+<div class="stage"><div class="slide-fit" data-idx="0"><div class="slide-canvas">
+<section data-label="循环页"><sc-for list="{{{{ items }}}}" as="item" data-editor-id="{loop_id}">
+<div data-editor-id="{legacy_id}">{{{{ item }}}}</div></sc-for></section>
+</div></div></div>
+<script>const nav = [
+      {{ i:0, code:'循', label:'循环页' }},
+    ];</script></body>'''
+        lines = [
+            '<script type="__bundler/manifest">', '{}', '</script>',
+            '<script type="__bundler/template">',
+            working_deck.eb.dump_template(template), '</script>',
+        ]
+
+        normalized = working_deck.normalize_working_copy_bytes(
+            "\n".join(lines).encode("utf-8")
+        )
+
+        normalized_template = working_deck.eb.get_template(
+            normalized.decode("utf-8").split("\n")
+        )
+        self.assertIn(loop_id, normalized_template)
+        self.assertNotIn(legacy_id, normalized_template)
+        self.assertEqual(working_deck.eb.editor_ids(normalized_template), [loop_id])
+
 
 if __name__ == "__main__":
     unittest.main()

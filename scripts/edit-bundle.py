@@ -246,6 +246,46 @@ def _inject_editor_id(tag, value):
     return body + f' data-editor-id="{value}">'
 
 
+def _remove_tag_attribute(tag, attribute_name):
+    """从 start tag 中移除指定属性，不误伤其他属性的引号内文本。"""
+    opening = re.match(r'<\s*[A-Za-z][\w:-]*', tag)
+    if not opening:
+        return tag
+    cursor = opening.end()
+    lowered_name = attribute_name.lower()
+    while cursor < len(tag):
+        whitespace_start = cursor
+        while cursor < len(tag) and tag[cursor].isspace():
+            cursor += 1
+        if cursor >= len(tag) or tag[cursor] in ('>', '/'):
+            return tag
+        name_start = cursor
+        while cursor < len(tag) and not tag[cursor].isspace() \
+                and tag[cursor] not in ('=', '>', '/'):
+            cursor += 1
+        name = tag[name_start:cursor].lower()
+        while cursor < len(tag) and tag[cursor].isspace():
+            cursor += 1
+        if cursor < len(tag) and tag[cursor] == '=':
+            cursor += 1
+            while cursor < len(tag) and tag[cursor].isspace():
+                cursor += 1
+            if cursor < len(tag) and tag[cursor] in ('"', "'"):
+                quote = tag[cursor]
+                cursor += 1
+                while cursor < len(tag) and tag[cursor] != quote:
+                    cursor += 1
+                if cursor < len(tag):
+                    cursor += 1
+            else:
+                while cursor < len(tag) and not tag[cursor].isspace() \
+                        and tag[cursor] != '>':
+                    cursor += 1
+        if name == lowered_name:
+            return tag[:whitespace_start] + tag[cursor:]
+    return tag
+
+
 def _transform_editor_ids(source, id_factory=None, create=False):
     """只扫描页面 section 的真实 start tag，并保持其他字节原样。
 
@@ -259,6 +299,7 @@ def _transform_editor_ids(source, id_factory=None, create=False):
     seen = set()
     cursor = 0
     page_section_depth = 0
+    repeat_template_depth = 0
     raw_text_tag = None
 
     while cursor < len(source):
@@ -309,6 +350,8 @@ def _transform_editor_ids(source, id_factory=None, create=False):
         self_closing = bool(re.search(r'/\s*>$', tag))
 
         if closing:
+            if name == 'sc-for' and repeat_template_depth:
+                repeat_template_depth -= 1
             if name == 'section' and page_section_depth:
                 page_section_depth -= 1
             output.append(tag)
@@ -317,8 +360,13 @@ def _transform_editor_ids(source, id_factory=None, create=False):
 
         enters_page = name == 'section' and not page_section_depth \
             and bool(_PAGE_SECTION_ATTRIBUTE_RE.search(tag))
+        inside_repeat_template = repeat_template_depth > 0
         editable = page_section_depth > 0 and name not in _EDITOR_ID_SKIP_TAGS \
-            and name != 'section'
+            and name != 'section' and not inside_repeat_template
+        if inside_repeat_template and _EDITOR_ID_ATTRIBUTE_RE.search(tag):
+            # sc-for 的循环体是渲染模板：其中一个静态属性会被克隆到所有实例，
+            # 因而绝不能作为持久元素身份。这里也迁移清理旧工作副本已注入的 ID。
+            tag = _remove_tag_attribute(tag, 'data-editor-id')
         if editable:
             any_id = _EDITOR_ID_ATTRIBUTE_RE.search(tag)
             valid = EDITOR_ID_RE.search(tag)
@@ -346,6 +394,8 @@ def _transform_editor_ids(source, id_factory=None, create=False):
                 page_section_depth = 1
             elif page_section_depth:
                 page_section_depth += 1
+        if name == 'sc-for' and not self_closing:
+            repeat_template_depth += 1
         if name in ('script', 'style') and not self_closing:
             raw_text_tag = name
         output.append(tag)

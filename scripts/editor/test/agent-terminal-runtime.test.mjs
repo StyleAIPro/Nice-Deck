@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   loadAgentRuntimeSettings,
+  prewarmAgentTerminalRuntime,
   prepareAgentTerminalRuntime,
 } from '../agent-terminal-runtime.mjs';
 
@@ -134,4 +135,46 @@ test('WSL 配置只作用于 Windows Codex，不改变其他 provider 与 macOS'
     projectRoot:String.raw`C:\project`,
     cwd:String.raw`C:\project`,
   }), null);
+});
+
+test('WSL runtime 预热并缓存命令、HOME 与路径映射，后续会话不重复探测', async () => {
+  const projectRoot = String.raw`C:\Users\tester\workspace\AICO-PPT`;
+  const cwd = String.raw`C:\Users\tester\workspace\Deck 项目`;
+  const sourcePath = String.raw`C:\Users\tester\workspace\Deck 项目\演示.html`;
+  const calls = [];
+  const mappings = new Map([
+    [projectRoot, '/mnt/c/Users/tester/workspace/AICO-PPT'],
+    [cwd, '/mnt/c/Users/tester/workspace/Deck 项目'],
+    [sourcePath, '/mnt/c/Users/tester/workspace/Deck 项目/演示.html'],
+  ]);
+  const runWsl = async args => {
+    calls.push(args);
+    if (args.includes('bash') && args.includes('-lic')) {
+      return 'HUAWEI_DECK_CODEX=/usr/local/bin/codex\n'
+        + 'HUAWEI_DECK_NODE=/usr/bin/node\n'
+        + 'HUAWEI_DECK_HOME=/root\n';
+    }
+    if (args.includes('wslpath')) return `${mappings.get(args.at(-1))}\n`;
+    throw new Error(`未覆盖的 WSL 调用：${JSON.stringify(args)}`);
+  };
+  const options = {
+    platform:'win32',
+    settings:{
+      codexRuntime:'wsl', wslDistribution:'Ubuntu-26.04', wslUser:'root',
+    },
+    environment:{ HUAWEI_DECK_SOURCE_PATH:sourcePath },
+    projectRoot,
+    cwd,
+    pathRoots:[projectRoot],
+    runWsl,
+  };
+
+  await prewarmAgentTerminalRuntime('codex', options);
+  const afterPrewarm = calls.length;
+  const runtime = await prepareAgentTerminalRuntime('codex', options);
+
+  assert.equal(calls.length, afterPrewarm, '同一进程后续启动不应重复调用 wsl.exe');
+  assert.equal(runtime.environment.HUAWEI_DECK_WSL_NODE, '/usr/bin/node');
+  assert.equal(runtime.environment.HUAWEI_DECK_WSL_CODEX_HOME, '/root/.codex');
+  assert.equal(runtime.conversationCwd, '/mnt/c/Users/tester/workspace/Deck 项目');
 });

@@ -107,6 +107,46 @@ const chapters = [{name:'章', start:0}];
                 '<section data-label="甲"><h2 data-editor-id="element-bad">甲</h2></section>'
             )
 
+    def test_ensure_editor_ids_skips_sc_for_template_descendants(self):
+        created = ["element-" + value * 32 for value in "abc"]
+        source = (
+            '<section data-label="循环页"><div>静态容器'
+            '<sc-for list="{{ items }}" as="item"><article>'
+            '<span>{{ item }}</span></article></sc-for>'
+            '<p>静态结尾</p></div></section>'
+        )
+
+        result = eb.ensure_editor_ids(source, id_factory(*created))
+
+        self.assertRegex(
+            result,
+            r'<div data-editor-id="element-a{32}">静态容器'
+            r'<sc-for[^>]*data-editor-id="element-b{32}">'
+            r'<article><span>{{ item }}</span></article></sc-for>'
+            r'<p data-editor-id="element-c{32}">静态结尾</p>',
+        )
+        self.assertEqual(eb.editor_ids(result), created)
+        self.assertEqual(eb.ensure_editor_ids(result), result)
+
+    def test_ensure_editor_ids_removes_legacy_ids_inside_sc_for(self):
+        outer = "element-" + "1" * 32
+        loop = "element-" + "2" * 32
+        legacy = "element-" + "3" * 32
+        tail = "element-" + "4" * 32
+        source = (
+            '<section data-label="循环页">'
+            f'<div data-editor-id="{outer}">'
+            f'<sc-for list="{{{{ items }}}}" as="item" data-editor-id="{loop}">'
+            f'<span data-editor-id="{legacy}">{{{{ item }}}}</span></sc-for>'
+            f'<p data-editor-id="{tail}">静态结尾</p></div></section>'
+        )
+
+        result = eb.ensure_editor_ids(source)
+
+        self.assertNotIn(legacy, result)
+        self.assertEqual(eb.editor_ids(result), [outer, loop, tail])
+        self.assertEqual(eb.ensure_editor_ids(result), result)
+
     def test_insert_page_assigns_fresh_identity_even_when_copy_has_an_id(self):
         first = "page-" + "1" * 32
         second = "page-" + "2" * 32

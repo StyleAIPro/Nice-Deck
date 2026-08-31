@@ -126,6 +126,8 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
       command:'wsl.exe -d Ubuntu-26.04 -u root --exec bash -lic codex',
       promptReady:false,
       startupPromptState:null,
+      startupPhase:'wsl-preparing',
+      startupPhaseDetail:{ user:'root', distribution:'Ubuntu-26.04' },
     };
     socket.emit('message', { data:JSON.stringify({ type:'state', terminal:wslState }) });
     const beforeOutput = snapshot();
@@ -139,6 +141,7 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
         conversationResumed:true,
         initialInputPending:true,
         resumePending:true,
+        startupPhase:'history-redraw',
       },
     }) });
     const resuming = snapshot();
@@ -150,6 +153,7 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
         conversationResumed:true,
         initialInputPending:true,
         resumePending:true,
+        startupPhase:'history-redraw',
         interactionRequired:{
           kind:'codex-update',
           message:'请在右侧终端处理 Codex 更新提示',
@@ -162,7 +166,12 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
     };
     socket.emit('message', { data:JSON.stringify({
       type:'state',
-      terminal:{ ...wslState, state:'running', startupPromptState:'pending' },
+      terminal:{
+        ...wslState,
+        state:'running',
+        startupPromptState:'pending',
+        startupPhase:'codex-starting',
+      },
     }) });
     const pending = snapshot();
     socket.emit('message', { data:JSON.stringify({
@@ -172,6 +181,7 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
         state:'running',
         promptReady:true,
         startupPromptState:'submitting',
+        startupPhase:'ready',
       },
     }) });
     const submitting = snapshot();
@@ -183,6 +193,7 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
         promptReady:false,
         startupPromptState:'awaiting-confirmation',
         promptSubmission:{ state:'awaiting-confirmation' },
+        startupPhase:'ready',
       },
     }) });
     const awaitingConfirmation = snapshot();
@@ -193,6 +204,7 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
         state:'running',
         promptReady:true,
         startupPromptState:'submitted',
+        startupPhase:'ready',
       },
     }) });
     const submitted = snapshot();
@@ -207,13 +219,13 @@ test('WSL 初始化回车发出前始终用阶段遮罩覆盖首段终端输出'
 
   assert.equal(result.beforeOutput.visible, true);
   assert.equal(result.afterOutput.visible, true, '代理输出不能在回车前提前露出空终端');
-  assert.match(result.afterOutput.copy, /正在进入 root WSL/);
+  assert.match(result.afterOutput.copy, /WSL 准备/);
   assert.equal(result.resuming.visible, true);
-  assert.match(result.resuming.copy, /正在恢复 root WSL 会话，等待 Codex 输入界面/);
+  assert.match(result.resuming.copy, /历史重绘/);
   assert.equal(result.updateInteraction.visible, false, '升级选择页不能被恢复遮罩挡住');
   assert.match(result.updateInteraction.detail, /处理 Codex 更新提示/);
   assert.equal(result.pending.visible, true);
-  assert.match(result.pending.copy, /正在进入 root WSL/);
+  assert.match(result.pending.copy, /Codex 启动/);
   assert.equal(result.submitting.visible, true);
   assert.match(result.submitting.copy, /正在提交初始化指令/);
   assert.equal(result.awaitingConfirmation.visible, true);
@@ -304,7 +316,15 @@ test('恢复旧 Codex 会话进入输入框前保持遮罩并拒绝输入与 Age
     document.querySelector('[data-agent-terminal-panel]')?.dataset.terminalState === 'running'
   ), null, { timeout:2_000 });
   await loading.waitFor({ state:'visible', timeout:1_000 });
-  assert.match(await loading.innerText(), /正在等待输入界面/);
+  assert.match(await loading.innerText(), /历史重绘/);
+
+  children[0].events.emit('data', '\r\n仅服务端处理的恢复历史标记\r\n');
+  await page.waitForTimeout(80);
+  assert.doesNotMatch(
+    await panel.locator('[data-agent-terminal-host]').innerText(),
+    /仅服务端处理的恢复历史标记/,
+    '恢复期间不得把历史 ANSI 增量写入浏览器 xterm',
+  );
 
   await page.locator('.xterm-helper-textarea').focus();
   await page.keyboard.type('恢复期间不能进入终端');
@@ -353,6 +373,10 @@ test('恢复旧 Codex 会话进入输入框前保持遮罩并拒绝输入与 Age
 
   releaseReady();
   await loading.waitFor({ state:'hidden' });
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-terminal-host]')?.textContent
+      ?.includes('仅服务端处理的恢复历史标记')
+  ));
   await page.waitForFunction(() => (
     document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
   ));

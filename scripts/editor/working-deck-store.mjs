@@ -136,11 +136,19 @@ function runIdentityAdapter(bytes, {
 }
 
 export function verifyWorkingPatchReplay(path, {
-  spawnProcess=spawn, timeoutMs=180_000,
+  spawnProcess=spawn, timeoutMs=180_000, droppableActionIds=[],
 } = {}) {
+  if (!Array.isArray(droppableActionIds)
+    || droppableActionIds.some(id => typeof id !== 'string' || !id)
+    || new Set(droppableActionIds).size !== droppableActionIds.length) {
+    throw new TypeError('可清理动作标识必须是唯一非空字符串数组');
+  }
   return new Promise((resolvePromise, reject) => {
-    const child = spawnProcess(process.execPath, [PATCH_VERIFIER, resolve(path)], {
-      stdio:['ignore', 'pipe', 'pipe'],
+    const repairMissing = droppableActionIds.length > 0;
+    const child = spawnProcess(process.execPath, [
+      PATCH_VERIFIER, resolve(path), ...(repairMissing ? ['--repair-missing'] : []),
+    ], {
+      stdio:[repairMissing ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
@@ -158,7 +166,24 @@ export function verifyWorkingPatchReplay(path, {
     child.once('close', code => {
       clearTimeout(timer);
       if (code === 0) {
-        resolvePromise({ ok:true });
+        let report;
+        try { report = JSON.parse(stdout.trim()); }
+        catch (error) {
+          reject(Object.assign(new Error(`补丁验证器成功响应无效：${error.message}`), {
+            code:'PATCH_REPLAY_UNAVAILABLE', statusCode:500, stage:'patch-replay',
+          }));
+          return;
+        }
+        const droppedActionIds = report?.droppedActionIds ?? [];
+        if (!Array.isArray(droppedActionIds)
+          || droppedActionIds.some(id => typeof id !== 'string' || !id)
+          || new Set(droppedActionIds).size !== droppedActionIds.length) {
+          reject(Object.assign(new Error('补丁验证器返回的批量清理结果无效'), {
+            code:'PATCH_REPLAY_UNAVAILABLE', statusCode:500, stage:'patch-replay',
+          }));
+          return;
+        }
+        resolvePromise({ ok:true, droppedActionIds });
         return;
       }
       const diagnostic = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n');
@@ -170,24 +195,26 @@ export function verifyWorkingPatchReplay(path, {
         && report.error.code ? report.error.code : undefined;
       const replayFailed = code === 1;
       reject(Object.assign(new Error(replayFailed
-        ? '历史修改无法安全重放，已停止固化且原 Deck 未被改动'
+        ? '历史修改无法安全重放，已拒绝当前候选且原 Deck 未被改动'
         : diagnostic || '补丁重放验证基础设施不可用'), {
         code:replayFailed ? 'PATCH_REPLAY_FAILED' : 'PATCH_REPLAY_UNAVAILABLE',
         statusCode:replayFailed ? 409 : 500,
         stage:'patch-replay',
         recovery:replayFailed
-          ? '原 Deck 未被改动；撤销或重新执行提示中的冲突修改后再固化'
+          ? '原 Deck 未被改动；撤销或重新执行提示中的冲突修改后重试'
           : '确认本机 Chrome 与 Node.js 可用后重试',
         ...(failedActionId ? { failedActionId } : {}),
         ...(replayCode ? { replayCode } : {}),
         ...(diagnostic ? { diagnostic } : {}),
       }));
     });
+    if (repairMissing) child.stdin.end(JSON.stringify({ droppableActionIds }));
   });
 }
 
 export async function writeVerifiedPatches(store, patches, {
-  verify=path => verifyWorkingPatchReplay(path), droppableActionIds=[],
+  verify=(path, options) => verifyWorkingPatchReplay(path, options),
+  droppableActionIds=[],
 } = {}) {
   if (!store || typeof store.writePatches !== 'function'
     || typeof store.restore !== 'function' || typeof store.path !== 'string') {
@@ -202,35 +229,58 @@ export async function writeVerifiedPatches(store, patches, {
   const droppedActionIds = [];
   while (true) {
     const written = await store.writePatches(effectivePatches);
+    let repairActionIds = [];
+    let verificationError = null;
     try {
-      await verify(store.path);
-      return {
-        ...written,
-        effectivePatches:structuredClone(effectivePatches),
-        droppedActionIds:[...droppedActionIds],
-      };
-    } catch (error) {
-      try {
-        await store.restore(written.previousFingerprint, written.fingerprint);
-      } catch (restoreError) {
-        throw Object.assign(new Error(
-          '补丁验证失败且工作副本无法恢复，请重启 Editor 完成对账',
-        ), {
-          code:'RECOVERY_REQUIRED', statusCode:503,
-          committed:true, commitScope:'working-deck',
-          cause:restoreError, originalError:error,
+      const verified = await verify(store.path, {
+        droppableActionIds:[...droppable],
+      });
+      repairActionIds = verified?.droppedActionIds ?? [];
+      const repairSet = new Set(repairActionIds);
+      const validRepair = Array.isArray(repairActionIds)
+        && repairSet.size === repairActionIds.length
+        && repairActionIds.every(id => typeof id === 'string' && id
+          && droppable.has(id)
+          && effectivePatches.some(patch => patch?.id === id));
+      if (!validRepair) {
+        throw Object.assign(new Error('补丁验证器返回了未授权或不存在的清理动作'), {
+          code:'INVALID_PATCH_REPAIR', statusCode:500,
         });
       }
+    } catch (error) {
       const failedActionId = error?.failedActionId;
       const canDrop = error?.code === 'PATCH_REPLAY_FAILED'
         && ['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND'].includes(error?.replayCode)
         && droppable.has(failedActionId);
       const failedIndex = canDrop
         ? effectivePatches.findIndex(patch => patch?.id === failedActionId) : -1;
-      if (failedIndex < 0) throw error;
-      effectivePatches.splice(failedIndex, 1);
-      droppedActionIds.push(failedActionId);
+      if (failedIndex >= 0) repairActionIds = [failedActionId];
+      else verificationError = error;
     }
+    if (repairActionIds.length === 0 && verificationError === null) {
+      return {
+        ...written,
+        effectivePatches:structuredClone(effectivePatches),
+        droppedActionIds:[...droppedActionIds],
+      };
+    }
+    try {
+      await store.restore(written.previousFingerprint, written.fingerprint);
+    } catch (restoreError) {
+      throw Object.assign(new Error(
+        '补丁验证失败且工作副本无法恢复，请重启 Editor 完成对账',
+      ), {
+        code:'RECOVERY_REQUIRED', statusCode:503,
+        committed:true, commitScope:'working-deck',
+        cause:restoreError, originalError:verificationError,
+      });
+    }
+    if (verificationError) throw verificationError;
+    const repairSet = new Set(repairActionIds);
+    for (let index=effectivePatches.length - 1; index >= 0; index-=1) {
+      if (repairSet.has(effectivePatches[index]?.id)) effectivePatches.splice(index, 1);
+    }
+    droppedActionIds.push(...repairActionIds);
   }
 }
 
@@ -511,6 +561,55 @@ export class WorkingDeckStore {
     });
     const result = await this.replace(bytes, beforeFingerprint);
     return { ...result, previousFingerprint:beforeFingerprint };
+  }
+
+  async rewritePendingExternalPatches(patches) {
+    if (!Array.isArray(patches)) throw new TypeError('补丁必须是数组');
+    const pending = this.pendingExternalChange;
+    if (!pending) {
+      throw Object.assign(new Error('working Deck 当前没有待登记的外部修改'), {
+        code:'WORKING_DECK_CHANGED',
+      });
+    }
+    const current = decodeRead(await this.sidecarIO.readWorkingDeck({ missingOk:false }));
+    if (current.fingerprint !== this.fingerprint
+      || current.fingerprint !== pending.afterFingerprint) {
+      throw Object.assign(new Error('working Deck 在清理失效补丁前再次发生变化'), {
+        code:'WORKING_DECK_CHANGED',
+        expectedFingerprint:pending.afterFingerprint,
+        actualFingerprint:current.fingerprint,
+      });
+    }
+    const bytes = await runPatchAdapter(current.bytes, patches, {
+      pythonExecutable:this.pythonExecutable, spawnProcess:this.spawnProcess,
+    });
+    const inspected = inspectBundle(bytes);
+    const result = await this.sidecarIO.writeWorkingDeck({
+      sessionId:this.sessionId,
+      bytes,
+      expectedFingerprint:current.fingerprint,
+    });
+    if (result.fingerprint !== sha256(bytes)) {
+      throw new Error('清理失效补丁后的工作副本指纹不一致');
+    }
+    this.fingerprint = result.fingerprint;
+    this.managed = inspected.managed;
+    this.pageIds = inspected.pageIds;
+    this.embeddedPatches = inspected.embeddedPatches;
+    this.pendingExternalChange = {
+      ...pending,
+      afterFingerprint:result.fingerprint,
+      managed:inspected.managed,
+      pageIds:[...inspected.pageIds],
+    };
+    // SourceMutation 的 after 版本必须进入归档，否则撤销后无法再重做到
+    // 已清理补丁的最终候选。
+    await this.sidecarIO.archiveWorkingDeck({ expectedFingerprint:result.fingerprint });
+    return {
+      ...result,
+      previousFingerprint:current.fingerprint,
+      change:structuredClone(this.pendingExternalChange),
+    };
   }
 
   async materializePatches(patches) {

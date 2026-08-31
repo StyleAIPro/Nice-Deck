@@ -150,9 +150,10 @@ test('源码后的实际 before 与旧动作不连续时，撤销不会复活过
   assert.equal(compiled.length, 1);
   assert.equal(compiled[0].id, 'after-source');
   assert.equal(compiled[0].target.fingerprint, '新源码指纹');
+  assert.deepEqual(sourceRebaseActionIds(groups, compiled), []);
 });
 
-test('持久元素身份跨 DOM 路径合并同一目标的源码前后动作', () => {
+test('持久元素身份跨 DOM 路径合并连续的源码前后动作并继承重定位资格', () => {
   const editorId = 'element-11111111111111111111111111111111';
   const action = (id, path, text, before) => ({
     id, taskId:null,
@@ -169,10 +170,126 @@ test('持久元素身份跨 DOM 路径合并同一目标的源码前后动作', 
 
   const compiled = compileActionGroups(groups);
   assert.deepEqual(compiled.map(item => item.id), ['after-source']);
-  assert.equal(compiled[0].target.path, '3/2/0');
+  assert.equal(compiled[0].before, '原始标题');
+  assert.equal(compiled[0].target.path, '0/1');
+  assert.deepEqual(sourceRebaseActionIds(groups, compiled), ['after-source']);
 
   groups[2].active = false;
   const restored = compileActionGroups(groups);
   assert.deepEqual(restored.map(item => item.id), ['before-source']);
   assert.deepEqual(sourceRebaseActionIds(groups, restored), ['before-source']);
+});
+
+test('源码后同一持久元素的新文字节点继承受控重定位资格', () => {
+  const editorId = 'element-44444444444444444444444444444444';
+  const old = {
+    id:'before-source', taskId:null,
+    target:{ ...target, editorId, textPath:'2', fingerprint:'源码前指纹' },
+    kind:'setText', payload:{ text:'旧结果' }, before:'旧原文', after:'旧结果',
+  };
+  const afterSource = {
+    id:'after-source-new-node', taskId:null,
+    target:{ ...target, editorId, textPath:'0/0', fingerprint:'源码后指纹' },
+    kind:'setText', payload:{ text:'新结果' }, before:'源码新增节点', after:'新结果',
+  };
+  const groups = [
+    { id:'old-group', mutationType:'action', active:true, actions:[old] },
+    { id:'source-group', mutationType:'source', active:true, actions:[] },
+    { id:'new-group', mutationType:'action', active:true, actions:[afterSource] },
+  ];
+
+  const compiled = compileActionGroups(groups);
+  assert.deepEqual(compiled.map(item => item.id), ['before-source', 'after-source-new-node']);
+  assert.equal(compiled[1].target.fingerprint, '源码后指纹');
+  assert.deepEqual(
+    sourceRebaseActionIds(groups, compiled),
+    ['before-source', 'after-source-new-node'],
+  );
+});
+
+test('后写子元素整段文字桥接同一节点的父级细粒度分支', () => {
+  const childId = 'element-55555555555555555555555555555555';
+  const parentId = 'element-66666666666666666666666666666666';
+  const child = (id, text, before) => ({
+    id, taskId:null,
+    target:{ ...target, path:'0/1/0', editorId:childId },
+    kind:'setText', payload:{ text }, before, after:text,
+  });
+  const parentGranular = {
+    id:'parent-granular', taskId:null,
+    target:{ ...target, path:'0/1', editorId:parentId, textPath:'0/0' },
+    kind:'setText', payload:{ text:'父级中间结果' },
+    before:'子元素中间结果', after:'父级中间结果',
+  };
+  const groups = [
+    { id:'child-first', mutationType:'action', active:true,
+      actions:[child('child-first', '子元素中间结果', '子元素原文')] },
+    { id:'parent-middle', mutationType:'action', active:true, actions:[parentGranular] },
+    { id:'child-final', mutationType:'action', active:true,
+      actions:[child('child-final', '子元素最终结果', '子元素中间结果')] },
+  ];
+
+  const compiled = compileActionGroups(groups);
+  assert.deepEqual(compiled.map(item => item.id), ['parent-granular', 'child-final']);
+  assert.equal(compiled[0].before, '子元素原文');
+  assert.equal(compiled[0].after, '父级中间结果');
+  assert.equal(compiled[1].before, '父级中间结果');
+  assert.equal(compiled[1].after, '子元素最终结果');
+});
+
+test('合并子标题并隐藏旧正文的分支规范化为最终标题与空正文', () => {
+  const parentId = 'element-77777777777777777777777777777777';
+  const childId = 'element-88888888888888888888888888888888';
+  const childTarget = { ...target, path:'0/1/0', editorId:childId };
+  const bodyTarget = { ...target, path:'0/1', editorId:parentId, textPath:'2' };
+  const groups = [
+    { id:'baseline', mutationType:'action', active:true, actions:[
+      {
+        id:'child-baseline', taskId:null, target:childTarget, kind:'setText',
+        payload:{ text:'短标题' }, before:'原始标题', after:'短标题',
+      },
+      {
+        id:'body-baseline', taskId:null, target:bodyTarget, kind:'setText',
+        payload:{ text:'旧正文内容' }, before:'原始正文', after:'旧正文内容',
+      },
+    ] },
+    { id:'stale-branch', mutationType:'action', active:true, actions:[
+      {
+        id:'parent-title-branch', taskId:null,
+        target:{ ...bodyTarget, textPath:'0/0' }, kind:'setText',
+        payload:{ text:'分支标题' }, before:'短标题', after:'分支标题',
+      },
+      {
+        id:'body-branch', taskId:null, target:bodyTarget, kind:'setText',
+        payload:{ text:'分支正文' }, before:'旧正文内容', after:'分支正文',
+      },
+    ] },
+    { id:'final-merge', mutationType:'action', active:true, actions:[
+      {
+        id:'hide-old-body', taskId:'task-final',
+        target:{ ...bodyTarget, textPath:undefined }, kind:'setStyle',
+        payload:{ property:'font-size', value:'0px', textRange:{ start:3, end:8 } },
+        before:'15px', after:'0px',
+      },
+      {
+        id:'child-final', taskId:'task-final', target:childTarget, kind:'setText',
+        payload:{ text:'最终合并标题' }, before:'短标题', after:'最终合并标题',
+      },
+    ] },
+  ];
+
+  const compiled = compileActionGroups(groups);
+  assert.deepEqual(compiled.map(item => item.id), ['child-final', 'hide-old-body']);
+  assert.deepEqual(compiled.map(item => ({
+    kind:item.kind, textPath:item.target.textPath, before:item.before,
+    after:item.after, text:item.payload.text,
+  })), [
+    {
+      kind:'setText', textPath:undefined, before:'原始标题',
+      after:'最终合并标题', text:'最终合并标题',
+    },
+    {
+      kind:'setText', textPath:'2', before:'原始正文', after:'', text:'',
+    },
+  ]);
 });

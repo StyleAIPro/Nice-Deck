@@ -9,6 +9,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { buildOpenCommand, startServer } from './server.mjs';
 import { isMainModule } from './main-module.mjs';
 import { AgentTerminalSession } from './agent-terminal-session.mjs';
+import { prewarmAgentTerminalRuntime } from './agent-terminal-runtime.mjs';
 import {
   DraftAgentConversationStore,
   discoverTerminalConversation,
@@ -229,6 +230,7 @@ export async function startAppServer({
   createCreationWorkspace = options => DeckCreationWorkspace.create(options),
   openCreationWorkspace = options => DeckCreationWorkspace.open(options),
   createAgentTerminal = options => new AgentTerminalSession(options),
+  prewarmAgentRuntime = prewarmAgentTerminalRuntime,
   loadHelpCatalog = () => buildHelpCatalog({ projectRoot:PROJECT_DIR }),
   inspectEnvironment = options => inspectEnvironmentWithPython({
     pythonExecutable, ...options,
@@ -256,6 +258,21 @@ export async function startAppServer({
   host = loopbackHost(host);
   if (!isAgentProviderId(agentProvider)) {
     throw new TypeError(`Agent provider 不受支持：${agentProvider}`);
+  }
+  if (typeof prewarmAgentRuntime !== 'function') {
+    throw new TypeError('prewarmAgentRuntime 必须是函数');
+  }
+  try {
+    const prewarm = prewarmAgentRuntime(agentProvider, {
+      projectRoot:PROJECT_DIR,
+      cwd:PROJECT_DIR,
+      pathRoots:[PROJECT_DIR],
+    });
+    prewarm?.catch?.(() => {
+      // 预热只隐藏 WSL 冷启动；失败由真正打开终端时的显式状态负责报告。
+    });
+  } catch {
+    // 同上：启动页本身不能因可选预热失败而退出。
   }
   const activeWorkCatalog = workCatalog ?? createWorkCatalog({
     legacyHistory:workHistoryStore,

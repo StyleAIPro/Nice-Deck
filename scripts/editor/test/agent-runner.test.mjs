@@ -126,11 +126,15 @@ test('终端任务 Prompt 限定批次、Skill 与写回边界', () => {
   assert.match(prompt, /完整读取 "[\\/]+skill[\\/]+SKILL\.md"/);
   assert.match(prompt, /只处理本批 ID/);
   assert.match(prompt, /不调用 write-deck/);
+  assert.match(prompt, /不调用 \/api\/shutdown/);
+  assert.match(prompt, /关闭 \/ 重启当前 Editor/);
   assert.match(prompt, /pageKey[^。\n]*delete_page_by_id/);
   assert.match(prompt, /begin-source-task TASK_ID/);
   assert.match(prompt, /commit-source-edit SOURCE_EDIT_ID/);
   assert.match(prompt, /cancel-source-edit SOURCE_EDIT_ID/);
   assert.match(prompt, /只有 begin 成功后/);
+  assert.match(prompt, /已固化 action[^。]*不得提前放弃事务/);
+  assert.match(prompt, /PAGE_NOT_FOUND \/ TARGET_NOT_FOUND/);
   assert.match(prompt, /本批任务 ID：\["task-a"\]/);
 
   const resumed = buildAgentPrompt({
@@ -150,9 +154,11 @@ test('终端初始化 Prompt 继承 Creation 上下文且不直接修改真实 D
   assert.match(initialized, /Creation 上下文清单：\/tmp\/session\/creation-context\.json/);
   assert.match(initialized, /brief、大纲、页面规划、设计文稿与素材库/);
   assert.match(initialized, /绝不能改真实 Deck/);
+  assert.match(initialized, /不得调用 \/api\/shutdown/);
   assert.match(initialized, /begin-source-edit/);
   assert.match(initialized, /commit-source-edit/);
   assert.match(initialized, /cancel-source-edit/);
+  assert.match(initialized, /删页若取代了旧的已固化 action[^。]*仍应正常提交事务/);
   assert.match(initialized, /同一组、同一层级、同一语义角色的普通信息卡必须同构/);
   assert.match(initialized, /不得为了构图制造默认高亮/);
 });

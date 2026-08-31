@@ -80,6 +80,16 @@ function drainUntilEnter(queue, child) {
   );
 }
 
+async function waitForSessionState(session, predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const snapshot = session.snapshot();
+    if (predicate(snapshot)) return snapshot;
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
+  }
+  return session.snapshot();
+}
+
 const CLAUDE_READY_OUTPUT = '\u001b[5;1H────\r\n❯\u00a0\u001b[7m \u001b[27m';
 const CODEX_DRAFT_OUTPUT = '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mExplain this codebase'
   + '\u001b[?25h\u001b[11;3H\u001b[?2026l';
@@ -351,8 +361,12 @@ test('Codex 完成长输出后再次出现输入框即可接收下一批任务',
 
   // 长输出会把启动时的 `model:` 行挤出短扫描窗口；返回输入框本身仍应恢复 ready。
   children[0].events.emit('data', `\r\n${'处理过程 '.repeat(1_500)}`);
-  children[0].events.emit('data', '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
-    + CODEX_DRAFT_OUTPUT);
+  children[0].events.emit(
+    'data',
+    '\r\nWorked for 4m 12s'
+      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+      + CODEX_DRAFT_OUTPUT,
+  );
   assert.equal(session.snapshot().promptReady, true);
   assert.doesNotThrow(() => session.submitPrompt('处理第二批任务'));
   assert.equal(children[0].writes.at(-1), '\u001b[200~处理第二批任务\u001b[201~');
@@ -390,10 +404,69 @@ test('Codex 工作期间出现 steer 输入框仍保持活动回合，不能接�
   assert.equal(session.snapshot().inputVisible, true);
   assert.equal(session.snapshot().turnState, 'active');
   assert.equal(session.snapshot().promptReady, false);
+  session.input('人工 steer 补充');
+  assert.equal(children[0].writes.at(-1), '人工 steer 补充',
+    '活动回合只阻止自动注入下一批，不能锁住用户键盘输入');
   assert.throws(
     () => session.submitPrompt('不能注入的第二批任务'),
     error => error.code === 'AGENT_TERMINAL_BUSY',
   );
+  await session.close();
+});
+
+test('Codex 长步骤挤远活动标记后出现 steer 输入框仍保持活动，明确结束后才空闲', async () => {
+  const children = [];
+  const scheduledSubmits = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    initialPrompt:() => '',
+    scheduleSubmit:(callback, delayMs) => {
+      const entry = { callback, delayMs, handle:scheduledSubmits.length + 1 };
+      scheduledSubmits.push(entry);
+      return entry.handle;
+    },
+    cancelScheduledSubmit:() => {},
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+
+  await session.start();
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  const submissionId = session.submitPrompt('处理一个会产生长输出的任务');
+  drainUntilEnter(scheduledSubmits, children[0]);
+  children[0].events.emit(
+    'data',
+    '\r\nWorked for 30s（上一回合）\r\n\u001b[?25l\u001b[2K• Working',
+  );
+  assert.equal(session.snapshot().promptSubmission.id, submissionId);
+  assert.equal(session.snapshot().turnState, 'active');
+
+  children[0].events.emit('data', `\r\n${'工具执行输出 '.repeat(420)}`);
+  children[0].events.emit(
+    'data',
+    '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck' + CODEX_DRAFT_OUTPUT,
+  );
+  assert.equal(session.snapshot().inputVisible, true);
+  assert.equal(session.snapshot().turnState, 'active');
+  assert.equal(session.snapshot().promptReady, false);
+  assert.throws(
+    () => session.submitPrompt('不能重复注入的同一任务'),
+    error => error.code === 'AGENT_TERMINAL_BUSY',
+  );
+
+  children[0].events.emit(
+    'data',
+    '\r\nWorked for 2m 10s'
+      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+      + CODEX_DRAFT_OUTPUT,
+  );
+  assert.equal(session.snapshot().turnState, 'idle');
+  assert.equal(session.snapshot().promptReady, true);
+  assert.equal(session.snapshot().completedPromptSubmissionId, submissionId);
   await session.close();
 });
 
@@ -585,6 +658,7 @@ test('恢复普通长度 Codex 历史时最终输入框不因缺少启动 model 
       + '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mAsk Codex to do anything'
       + '\u001b[?25h\u001b[11;3H\u001b[?2026l',
   );
+  await waitForSessionState(session, snapshot => snapshot.resumePending === false);
   assert.equal(session.snapshot().resumePending, false);
   assert.equal(session.snapshot().promptReady, true);
   await session.close();
@@ -612,6 +686,7 @@ test('恢复 Codex 已画出输入框但状态栏仍陈旧时只触发一次尺�
   assert.deepEqual(children[0].resizes, [[90, 29], [90, 30]]);
 
   children[0].events.emit('data', CODEX_READY_OUTPUT);
+  await waitForSessionState(session, snapshot => snapshot.resumePending === false);
   assert.equal(session.snapshot().promptReady, true);
   assert.equal(session.snapshot().resumePending, false);
   await session.close();
@@ -642,6 +717,7 @@ test('Codex 恢复时升级通知不误放行，交互升级页开放键盘并�
     assert.deepEqual(children[0].writes, [], '纯通知期间仍禁止误输入');
 
     children[0].events.emit('data', CODEX_READY_OUTPUT);
+    await waitForSessionState(session, snapshot => snapshot.resumePending === false);
     assert.equal(session.snapshot().resumePending, false);
     assert.equal(session.snapshot().promptReady, true);
     await session.close();
@@ -675,6 +751,7 @@ test('Codex 恢复时升级通知不误放行，交互升级页开放键盘并�
     assert.deepEqual(children[0].writes, ['\r'], '升级交互页必须允许用户按键继续');
 
     children[0].events.emit('data', CODEX_READY_OUTPUT);
+    await waitForSessionState(session, snapshot => snapshot.resumePending === false);
     assert.equal(session.snapshot().interactionRequired, null);
     assert.equal(session.snapshot().resumePending, false);
     assert.equal(session.snapshot().promptReady, true);
@@ -976,6 +1053,101 @@ test('Windows Codex 通过 WSL runtime 启动并用 WSL 路径提交与发现会
   await session.close();
 });
 
+test('WSL Codex 启动依次投影准备、CLI 启动和历史重绘阶段', async () => {
+  const children = [];
+  let releaseRuntime;
+  const runtimeReady = new Promise(resolveReady => { releaseRuntime = resolveReady; });
+  const session = new AgentTerminalSession({
+    projectRoot:String.raw`C:\Users\tester\workspace\project`,
+    cwd:String.raw`C:\Users\tester\workspace\project`,
+    provider:'codex',
+    platform:'win32',
+    prepareRuntime:async (_provider, options) => {
+      options.onPhase('wsl-preparing');
+      await runtimeReady;
+      return {
+        kind:'wsl',
+        conversationCwd:'/mnt/c/Users/tester/workspace/project',
+        spawnCwd:String.raw`C:\Users\tester\workspace\project`,
+        environment:{},
+        wrapCommand:command => ({ ...command, executable:'wsl.exe' }),
+      };
+    },
+    resolveConversation:async () => ({
+      conversationId:'codex-history-phase', resume:true, initialPromptConsumed:true,
+    }),
+    initialPrompt:() => '',
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+
+  const starting = session.start();
+  await new Promise(resolveDelay => setImmediate(resolveDelay));
+  assert.equal(session.snapshot().startupPhase, 'wsl-preparing');
+  releaseRuntime();
+  await starting;
+  assert.equal(session.snapshot().startupPhase, 'history-redraw');
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  await waitForSessionState(session, snapshot => snapshot.startupPhase === 'ready');
+  assert.equal(session.snapshot().startupPhase, 'ready');
+  await session.close();
+});
+
+test('恢复会话只向浏览器投影最终终端画面，后续输出恢复实时传输', async () => {
+  const children = [];
+  const sockets = [];
+  const projectedChunks = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    initialPrompt:() => '',
+    resolveConversation:async () => ({
+      conversationId:'codex-projection', resume:true, initialPromptConsumed:true,
+    }),
+    createTerminalProjection:() => ({
+      write:data => projectedChunks.push(data),
+      resize:() => {},
+      snapshot:async () => '\u001b[2J\u001b[H最终终端画面',
+      dispose:() => {},
+    }),
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  const socket = {
+    readyState:1,
+    send:value => sockets.push(JSON.parse(value)),
+  };
+  session.attach(socket);
+  await session.start();
+  sockets.length = 0;
+
+  children[0].events.emit('data', '\u001b[2J第一段历史 ANSI');
+  children[0].events.emit('data', '\u001b[3;1H第二段历史 ANSI');
+  assert.equal(sockets.some(message => message.type === 'output'), false);
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  await new Promise(resolveDelay => setImmediate(resolveDelay));
+
+  const projection = sockets.find(message => message.type === 'projection');
+  assert.equal(projection?.data, '\u001b[2J\u001b[H最终终端画面');
+  assert.match(projectedChunks.join(''), /第一段历史 ANSI/);
+  assert.match(projectedChunks.join(''), /第二段历史 ANSI/);
+  assert.equal(session.snapshot().resumePending, false);
+
+  sockets.length = 0;
+  children[0].events.emit('data', '\r\n就绪后的实时输出');
+  assert.deepEqual(
+    sockets.filter(message => message.type === 'output').map(message => message.data),
+    ['\r\n就绪后的实时输出'],
+  );
+  await session.close();
+});
+
 test('独立 Escape 输入发布批次中断事件，方向键转义序列不误触发', async () => {
   const children = [];
   const interrupts = [];
@@ -1217,6 +1389,7 @@ test('PTY 启动前解析任务专属会话，启动后持久化回执', async (
     'codex-task-session',
   ]);
   children[1].events.emit('data', 'Codex ready');
+  await waitForSessionState(session, () => children[1].writes.length > 0);
   assert.deepEqual(children[1].writes, ['\u001b[200~处理新任务\u001b[201~']);
   assert.equal(session.snapshot().conversationId, 'codex-task-session');
   assert.equal(session.snapshot().conversationResumed, true);

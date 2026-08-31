@@ -73,6 +73,10 @@ Editor 会进入该发行版用户的登录 shell，继承其 `PATH`、代理等
 并把 Windows 项目路径转换为 WSL 路径。会话继续从该 WSL 用户的 `~/.codex`
 发现和恢复；配置只在
 Windows 的 Codex provider 上生效，不改变 macOS、Linux、Claude Code 或 OpenCode。
+启动器会在用户打开任务前预热 WSL；同一 Editor 进程会缓存该发行版 / 用户对应的
+Codex、Node、HOME 与 Windows→WSL 路径映射。任务终端依次显示“WSL 准备 / Codex
+启动 / 历史重绘”；恢复历史只在服务端无界面终端中解析，真实输入态成立后才把最终
+终端画面一次性投影到浏览器，避免长会话逐块重绘。
 修改配置或更新 Editor 代码后，需要彻底退出旧 Editor 后台再重新双击启动。
 
 ## 4. 只安装 Skill

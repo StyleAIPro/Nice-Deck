@@ -80,9 +80,13 @@ async function makeApp(t, options = {}) {
 
 test('显式退出接口关闭当前编辑服务', async t => {
   const app = await makeApp(t);
-  const response = await fetch(`${app.url}/api/shutdown?token=${encodeURIComponent(app.token)}`, {
+  const response = await fetch(
+    `${app.url}/api/shutdown?token=${encodeURIComponent(app.token)}`
+      + `&editorToken=${encodeURIComponent(app.editorToken)}`,
+    {
     method:'POST', headers:{ origin:app.url },
-  });
+    },
+  );
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), { status:'shutting-down' });
   const deadline = Date.now() + 1_000;
@@ -93,6 +97,27 @@ test('显式退出接口关闭当前编辑服务', async t => {
       .then(() => false, () => true);
   }
   assert.equal(closed, true);
+});
+
+test('Agent 终端凭据不能调用浏览器专用退出接口', async t => {
+  const app = await makeApp(t);
+  const response = await fetch(`${app.url}/api/shutdown`, {
+    method:'POST',
+    headers:{ authorization:`Bearer ${app.token}` },
+  });
+  const result = await response.json();
+
+  assert.equal(response.status, 403, JSON.stringify(result));
+  assert.equal(result.code, 'BROWSER_ORIGIN_REQUIRED');
+  const forgedBrowserResponse = await fetch(`${app.url}/api/shutdown`, {
+    method:'POST',
+    headers:{ authorization:`Bearer ${app.token}`, origin:app.url },
+  });
+  const forgedBrowserResult = await forgedBrowserResponse.json();
+  assert.equal(forgedBrowserResponse.status, 403, JSON.stringify(forgedBrowserResult));
+  assert.equal(forgedBrowserResult.code, 'EDITOR_CAPABILITY_REQUIRED');
+  const sessionResponse = await fetch(`${app.url}/api/session?token=secret`);
+  assert.equal(sessionResponse.status, 200, '拒绝终端退出请求后服务必须继续运行');
 });
 
 test('PPTX 导出接口返回工作副本并使用源 Deck 文件名', async t => {
@@ -1024,6 +1049,74 @@ test('Agent 提示词提交超时不误杀已经开始执行的长任务', async
     if (Date.now() > deadline) assert.fail('等待长任务完成超时');
     await new Promise(resolve => setTimeout(resolve, 10));
   }
+});
+
+test('Codex 长步骤中的 steer 输入框不提前结算批次或开放重复提交', async t => {
+  let app;
+  const events = new EventEmitter();
+  const draftOutput = '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mExplain this codebase'
+    + '\u001b[?25h\u001b[11;3H\u001b[?2026l';
+  const child = {
+    pid:7760, writes:[], killed:false,
+    onData(listener) { events.on('data', listener); return { dispose() {} }; },
+    onExit(listener) { events.on('exit', listener); return { dispose() {} }; },
+    write(data) {
+      this.writes.push(data);
+      if (data === '\r') queueMicrotask(() => {
+        events.emit('data', '\u001b[?25l\u001b[2K• Working');
+        queueMicrotask(() => {
+          events.emit('data', `\r\n${'工具执行输出 '.repeat(420)}`);
+          events.emit(
+            'data',
+            '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck' + draftOutput,
+          );
+        });
+      });
+    },
+    resize() {},
+    kill() { this.killed = true; },
+  };
+  app = await makeApp(t, {
+    spawnAgentTerminal:() => {
+      queueMicrotask(() => events.emit('data', '\r\ncodex READY\r\n'));
+      return child;
+    },
+    createAgentTerminalConversation:async () => ({
+      conversationId:'long-steer-codex-session', resume:true,
+    }),
+  });
+
+  const created = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ ...taskInput, instruction:'长步骤期间不能误报失败' }),
+  }).then(response => response.json());
+  const response = await fetch(`${app.url}/api/agent-runs?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({
+      expectedRevision:created.revision,
+      taskIds:[created.task.id],
+    }),
+  });
+  assert.equal(response.status, 202, JSON.stringify(await response.clone().json()));
+
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(app.agentTerminal.snapshot().turnState, 'active');
+  assert.equal(app.agentTerminal.snapshot().promptReady, false);
+  assert.equal(app.agentRuns.snapshot().status, 'running');
+  const duplicateResponse = await fetch(`${app.url}/api/agent-runs?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({
+      expectedRevision:app.session.revision,
+      taskIds:[created.task.id],
+    }),
+  });
+  const duplicate = await duplicateResponse.json();
+  assert.equal(duplicateResponse.status, 409, JSON.stringify(duplicate));
+  assert.equal(duplicate.code, 'AGENT_TERMINAL_BUSY');
+
+  app.session.tasks[0].status = 'completed';
+  await app.agentRuns.activePromise;
+  assert.equal(app.agentRuns.snapshot().status, 'succeeded');
 });
 
 test('批次一执行期间新增任务进入下一批，且只冻结批次一成员', async t => {
@@ -4091,9 +4184,19 @@ test('文字定位通过唯一 editor capability 返回 CLI 可复用 locator', 
 
 test('托管工作副本的外部结构修改进入统一历史且真实 Deck 保持不变', async t => {
   const source = managedBundle();
+  const replayError = Object.assign(new Error('注入结构历史补丁重放失败'), {
+    code:'PATCH_REPLAY_FAILED', statusCode:409, stage:'patch-replay',
+  });
+  let rejectReplay = false;
+  let verifierCalls = 0;
   const app = await makeApp(t, {
     deckContents:source,
     managedWorkingDeck:true,
+    workingPatchVerifier:async () => {
+      verifierCalls += 1;
+      if (rejectReplay) throw replayError;
+      return { ok:true };
+    },
   });
   const workingBefore = await readFile(app.workingDeckPath, 'utf8');
   assert.match(workingBefore, /data-page-id=\\"page-[0-9a-f]{32}\\"/);
@@ -4120,6 +4223,8 @@ test('托管工作副本的外部结构修改进入统一历史且真实 Deck �
   let result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));
   assert.match(await readFile(app.workingDeckPath, 'utf8'), /旧文案/);
+  const undoRevision = result.revision;
+  rejectReplay = true;
 
   response = await fetch(
     `${app.url}/api/groups/${session.groups[0].id}/redo?token=secret`,
@@ -4128,8 +4233,11 @@ test('托管工作副本的外部结构修改进入统一历史且真实 Deck �
     }) },
   );
   result = await response.json();
-  assert.equal(response.status, 200, JSON.stringify(result));
-  assert.match(await readFile(app.workingDeckPath, 'utf8'), /结构修改文案/);
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'PATCH_REPLAY_FAILED');
+  assert.equal(verifierCalls, 3);
+  assert.equal(app.session.revision, undoRevision);
+  assert.match(await readFile(app.workingDeckPath, 'utf8'), /旧文案/);
   assert.deepEqual(await readFile(app.deckPath, 'utf8'), source);
 });
 
@@ -4213,6 +4321,161 @@ test('源码事务预留 revision，写盘期间拒绝人工动作并在显式�
   assert.equal(app.session.sourceEdit, undefined);
   assert.deepEqual(app.session.groups.map(group => group.mutationType), ['source']);
   assert.match(await readFile(app.workingDeckPath, 'utf8'), /源码事务修改/);
+});
+
+test('源码事务候选无法回放旧补丁时恢复事务前工作副本且不登记历史', async t => {
+  const verifierError = Object.assign(new Error('注入补丁重放失败'), {
+    code:'PATCH_REPLAY_FAILED', statusCode:409, stage:'patch-replay',
+  });
+  let verifierCalls = 0;
+  const app = await makeApp(t, {
+    deckContents:managedBundle(),
+    managedWorkingDeck:true,
+    workingPatchVerifier:async workingDeckPath => {
+      verifierCalls += 1;
+      assert.equal(workingDeckPath, app.workingDeckPath);
+      assert.match(await readFile(workingDeckPath, 'utf8'), /破坏旧补丁目标的源码修改/);
+      throw verifierError;
+    },
+  });
+  const workingBefore = await readFile(app.workingDeckPath);
+  let response = await fetch(`${app.url}/api/source-edits?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0, taskId:null,
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  const { sourceEditId } = result;
+
+  await writeFile(
+    app.workingDeckPath,
+    workingBefore.toString('utf8').replace('旧文案', '破坏旧补丁目标的源码修改'),
+  );
+  response = await fetch(
+    `${app.url}/api/source-edits/${sourceEditId}/commit?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:1,
+    }) },
+  );
+  result = await response.json();
+
+  assert.equal(response.status, 409, JSON.stringify(result));
+  assert.equal(result.code, 'PATCH_REPLAY_FAILED');
+  assert.equal(verifierCalls, 1);
+  assert.deepEqual(await readFile(app.workingDeckPath), workingBefore);
+  assert.equal(app.session.revision, 1);
+  assert.equal(app.session.sourceEdit?.id, sourceEditId);
+  assert.deepEqual(app.session.groups, []);
+});
+
+test('源码事务删除已固化动作所在页面时剔除被取代补丁并完成任务', async t => {
+  const deletedPageKey = 'page-22222222222222222222222222222222';
+  const solidifiedAction = {
+    id:'solidified-action-on-deleted-page', taskId:null,
+    target:{
+      pageKey:deletedPageKey,
+      path:'0', tag:'H1', fingerprint:'1234abcd', textPath:'0',
+    },
+    kind:'setText', payload:{ text:'已修改' },
+    before:'删除页', after:'已修改', appliedAt:'2026-08-23T00:00:00.000Z',
+  };
+  let verifierCalls = 0;
+  const app = await makeApp(t, {
+    deckContents:managedTwoPageBundleWithPatches([solidifiedAction]),
+    managedWorkingDeck:true,
+    workingPatchVerifier:async workingDeckPath => {
+      verifierCalls += 1;
+      const candidate = await readFile(workingDeckPath, 'utf8');
+      const lines = candidate.split('\n');
+      const templateMarker = lines.findIndex(
+        line => line.trim() === '<script type="__bundler/template">',
+      );
+      const template = JSON.parse(lines[templateMarker + 1]);
+      const pageExists = template.includes(`data-page-id="${deletedPageKey}"`);
+      if (!pageExists && template.includes(solidifiedAction.id)) {
+        throw Object.assign(new Error('旧固化动作的页面已被源码事务删除'), {
+          code:'PATCH_REPLAY_FAILED', statusCode:409, stage:'patch-replay',
+          replayCode:'PAGE_NOT_FOUND', failedActionId:solidifiedAction.id,
+        });
+      }
+      return { ok:true };
+    },
+  });
+  assert.deepEqual(app.session.solidifiedActions, [solidifiedAction]);
+
+  let response = await fetch(`${app.url}/api/tasks?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:0,
+      pageKey:deletedPageKey, pageIndex:2, pageLabel:'删除页',
+      rect:{ x:1, y:2, w:3, h:4 }, instruction:'删除这一页',
+    }),
+  });
+  let result = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(result));
+  const taskId = result.task.id;
+
+  response = await fetch(
+    `${app.url}/api/tasks/${taskId}/source-edit/begin?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  const { sourceEditId } = result;
+  const workingBefore = await readFile(app.workingDeckPath, 'utf8');
+  await writeFile(app.workingDeckPath, updateBundledTemplate(
+    workingBefore,
+    template => removeManagedPage(template, deletedPageKey)
+      .replace("      { i:1, code:'02', label:'删除页' },\n", ''),
+  ));
+
+  response = await fetch(
+    `${app.url}/api/source-edits/${sourceEditId}/commit?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:result.revision,
+    }) },
+  );
+  result = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(verifierCalls, 2, '首次发现缺页后应剔除旧补丁并从头验证');
+  assert.equal(app.session.tasks.find(task => task.id === taskId)?.status, 'completed');
+  assert.deepEqual(app.session.solidifiedActions, []);
+  assert.deepEqual(app.session.historyRepair?.droppedActionIds, [solidifiedAction.id]);
+  assert.equal(app.session.groups.at(-1)?.mutationType, 'source');
+  const sourceGroupId = result.groupId;
+  const workingAfter = await readFile(app.workingDeckPath, 'utf8');
+  assert.doesNotMatch(workingAfter, new RegExp(deletedPageKey));
+  assert.doesNotMatch(workingAfter, new RegExp(solidifiedAction.id));
+
+  response = await fetch(
+    `${app.url}/api/groups/${sourceGroupId}/undo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:app.session.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.deepEqual(app.session.solidifiedActions, [solidifiedAction]);
+  assert.equal(app.session.tasks.find(task => task.id === taskId)?.status, 'pending');
+  assert.match(await readFile(app.workingDeckPath, 'utf8'), new RegExp(deletedPageKey));
+
+  response = await fetch(
+    `${app.url}/api/groups/${sourceGroupId}/redo?token=secret`,
+    { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({
+      expectedRevision:app.session.revision,
+    }) },
+  );
+  result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.deepEqual(app.session.solidifiedActions, []);
+  assert.equal(app.session.tasks.find(task => task.id === taskId)?.status, 'completed');
+  assert.doesNotMatch(await readFile(app.workingDeckPath, 'utf8'), new RegExp(deletedPageKey));
+  assert.equal(await readFile(app.deckPath, 'utf8'), managedTwoPageBundleWithPatches([
+    solidifiedAction,
+  ]));
 });
 
 test('源码事务写盘后重启仍保留旧基线并可显式提交', async t => {
@@ -5133,10 +5396,14 @@ test('固化补丁重放失败时真实 Deck 不变且工作副本恢复到固�
   const verifierError = Object.assign(new Error('注入补丁重放失败'), {
     code:'PATCH_REPLAY_FAILED', statusCode:409, stage:'patch-replay',
   });
+  let rejectReplay = false;
   const app = await makeApp(t, {
     deckContents:source,
     managedWorkingDeck:true,
-    workingPatchVerifier:async () => { throw verifierError; },
+    workingPatchVerifier:async () => {
+      if (rejectReplay) throw verifierError;
+      return { ok:true };
+    },
   });
   const initialWorking = await readFile(app.workingDeckPath, 'utf8');
   const pageKey = initialWorking.match(/data-page-id=\\"(page-[0-9a-f]{32})\\"/)?.[1];
@@ -5166,6 +5433,7 @@ test('固化补丁重放失败时真实 Deck 不变且工作副本恢复到固�
     await new Promise(resolve => setTimeout(resolve, 40));
   }
   assert.equal(app.session.groups[0]?.mutationType, 'source');
+  rejectReplay = true;
   sendReady(app.session.revision);
   const diagnosticsDeadline = Date.now() + 1_000;
   while (!Object.keys(app.session.diagnosticsBaseline ?? {}).length

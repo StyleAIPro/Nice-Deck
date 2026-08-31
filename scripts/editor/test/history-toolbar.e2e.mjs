@@ -235,7 +235,7 @@ test('固化修改永久写盘，退出编辑时显示自定义未固化清单�
   const progressBar = page.locator('[data-solidify-progressbar]');
   assert.equal(await progress.isVisible(), true);
   assert.equal(await progress.getAttribute('data-state'), 'indeterminate');
-  assert.match(await progress.textContent(), /正在校验并写入 Deck/);
+  assert.match(await progress.textContent(), /正在清理历史并原子写入 Deck/);
   assert.equal(await progressBar.getAttribute('aria-valuenow'), null);
   assert.equal(await page.locator('[data-solidify-cancel]').isDisabled(), true);
   if (process.env.SOLIDIFY_PROGRESS_SCREENSHOT) {
@@ -470,6 +470,66 @@ test('固化验证失败会显示具体原因并明确原 Deck 未被改动', as
   assert.match(await progress.textContent(), /原 Deck 未被改动/);
   assert.equal(await page.locator('[data-solidify-dialog]').isVisible(), true);
   assert.equal(await page.locator('[data-solidify-confirm]').isEnabled(), true);
+});
+
+test('重开恢复只跳过被后续源码修改取代的缺失动作', async t => {
+  const app = await startFixtureServer({ bundle:true });
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app, {
+    allowPilotDocumentBlobAbort:true,
+  });
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const frame = page.locator('#deck-frame');
+  await frame.evaluate(element => {
+    element.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  const actions = await frame.evaluate(element => {
+    const runtime = element.contentWindow.HuaweiDeckPatchRuntime;
+    const heading = element.contentDocument.querySelector('h2');
+    const target = runtime.makeLocator(heading);
+    return {
+      valid:{
+        id:'restore-valid', target, kind:'setText', payload:{ text:'恢复后的有效修改' },
+      },
+      missing:{
+        id:'restore-replaced',
+        target:{
+          ...target,
+          editorId:'element-ffffffffffffffffffffffffffffffff',
+          path:'999',
+        },
+        kind:'setText', payload:{ text:'已被结构修改删除' },
+      },
+    };
+  });
+
+  await frame.evaluate((element, value) => {
+    element.contentWindow.postMessage({
+      type:'sync-actions', actions:[value.valid, value.missing],
+      rebaseActionIds:[value.missing.id],
+    }, location.origin);
+  }, actions);
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent
+      === '恢复后的有效修改'
+  ));
+  assert.equal(await frame.evaluate(element => (
+    element.contentDocument.querySelector('[data-direct-status][data-state="error"]')?.textContent
+      ?? null
+  )), null);
+
+  await frame.evaluate((element, value) => {
+    element.contentWindow.postMessage({
+      type:'sync-actions', actions:[value.valid, { ...value.missing, id:'restore-real-conflict' }],
+      rebaseActionIds:[],
+    }, location.origin);
+  }, actions);
+  await page.waitForFunction(() => (
+    document.querySelector('#deck-frame')?.contentDocument
+      ?.querySelector('[data-direct-status][data-state="error"]')?.textContent
+      ?.includes('TARGET_NOT_FOUND')
+  ));
 });
 
 test('已固化 Agent 任务可删除记录且不改变 Deck 固化结果', async t => {

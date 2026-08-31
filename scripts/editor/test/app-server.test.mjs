@@ -100,6 +100,24 @@ test('目录选择器子进程不响应 AbortSignal 时仍会被显式终止并�
   assert.equal(child.killCount, 1);
 });
 
+test('启动器打开任务前即预热所选 Agent runtime', async t => {
+  const calls = [];
+  const app = await startAppServer({
+    token:'agent-runtime-prewarm-secret',
+    agentProvider:'codex',
+    prewarmAgentRuntime:(provider, options) => {
+      calls.push({ provider, options });
+      return Promise.resolve(null);
+    },
+  });
+  t.after(() => app.close());
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].provider, 'codex');
+  assert.equal(calls[0].options.cwd, calls[0].options.projectRoot);
+  assert.deepEqual(calls[0].options.pathRoots, [calls[0].options.projectRoot]);
+});
+
 test('启动器可查询页面租约，并区分从未连接与已经关闭', async t => {
   const app = await startAppServer({
     token:'launcher-status-secret',

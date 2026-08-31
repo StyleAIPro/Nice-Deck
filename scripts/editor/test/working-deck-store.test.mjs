@@ -54,6 +54,39 @@ test('补丁重放失败保留具体动作 ID 与可恢复提示', async () => {
   );
 });
 
+test('补丁验证器通过 stdin 一次返回全部可清理缺失动作', async () => {
+  let request;
+  const spawnProcess = (_executable, args, options) => {
+    assert.equal(args.at(-1), '--repair-missing');
+    assert.deepEqual(options.stdio, ['pipe', 'pipe', 'pipe']);
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => {};
+    let input = '';
+    child.stdin.setEncoding('utf8');
+    child.stdin.on('data', chunk => { input += chunk; });
+    child.stdin.on('finish', () => {
+      request = JSON.parse(input);
+      child.stdout.end(JSON.stringify({
+        state:'applied', expected:1, applied:1, adopted:1, error:null,
+        droppedActionIds:['old-a', 'old-b'],
+      }));
+      child.emit('close', 0);
+    });
+    return child;
+  };
+
+  const result = await verifyWorkingPatchReplay('/tmp/not-read-by-fake.html', {
+    spawnProcess,
+    droppableActionIds:['old-a', 'old-b'],
+  });
+
+  assert.deepEqual(request, { droppableActionIds:['old-a', 'old-b'] });
+  assert.deepEqual(result, { ok:true, droppedActionIds:['old-a', 'old-b'] });
+});
+
 test('固化时丢弃已被后续源码重构删除的旧动作并重试完整验证', async () => {
   const writes = [];
   const restores = [];
@@ -95,6 +128,44 @@ test('固化时丢弃已被后续源码重构删除的旧动作并重试完整�
   assert.deepEqual(result.effectivePatches, [{ id:'valid-current-action' }]);
   assert.deepEqual(result.droppedActionIds, ['old-deleted-target']);
   assert.equal(result.fingerprint, 'written-2');
+});
+
+test('固化批量清理多条已取代动作时只重写和复验一次', async () => {
+  const writes = [];
+  const restores = [];
+  const verifyCalls = [];
+  const staleIds = Array.from({ length:29 }, (_, index) => `old-${index + 1}`);
+  const store = {
+    path:'/tmp/batch-repair-working-deck.html',
+    async writePatches(patches) {
+      writes.push(patches.map(patch => patch.id));
+      return {
+        fingerprint:`written-${writes.length}`,
+        previousFingerprint:`previous-${writes.length}`,
+      };
+    },
+    async restore(previousFingerprint, writtenFingerprint) {
+      restores.push([previousFingerprint, writtenFingerprint]);
+    },
+  };
+  const patches = [{ id:'valid-current-action' }, ...staleIds.map(id => ({ id }))];
+  const result = await writeVerifiedPatches(store, patches, {
+    droppableActionIds:staleIds,
+    verify:async (_path, options = {}) => {
+      verifyCalls.push(options.droppableActionIds ?? []);
+      return verifyCalls.length === 1
+        ? { ok:true, droppedActionIds:staleIds }
+        : { ok:true, droppedActionIds:[] };
+    },
+  });
+
+  assert.equal(writes.length, 2, '29 条旧动作必须批量清理，不能触发 30 次全量写入');
+  assert.deepEqual(writes[0], ['valid-current-action', ...staleIds]);
+  assert.deepEqual(writes[1], ['valid-current-action']);
+  assert.deepEqual(restores, [['previous-1', 'written-1']]);
+  assert.deepEqual(verifyCalls, [staleIds, staleIds]);
+  assert.deepEqual(result.effectivePatches, [{ id:'valid-current-action' }]);
+  assert.deepEqual(result.droppedActionIds, staleIds);
 });
 
 function templateOf(bytes) {

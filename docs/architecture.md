@@ -178,7 +178,7 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 
 Editor 启动后真实 source deck 只读，预览读取 sidecar 托管工作副本。`.huawei-deck-editor/` 自动保存会话、任务、快照、ActionMutation、SourceMutation、诊断、工作版本与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。session v2 以 `timeline.entries + timeline.cursor` 为权威，`groups / redo` 仅是兼容旧界面与旧客户端的投影视图；旧版带 active 空洞的历史在启动时线性化，无法证明有效的 redo 进入迁移归档。工作台不绑定 `Cmd/Ctrl+S`。用户二次确认“固化修改”后，浏览器先调用 `POST /api/solidify-preflight` 校验 revision、文件绑定、双指纹、页面目标、诊断和动作投影，再携带 60 秒内一次性令牌调用 `POST /api/solidify-deck` 原子发布真实 Deck。成功后创建固化检查点、归档旧时间线并从空时间线继续；连续固化不丢上一轮内容，也不追加脚本块。浏览器标签页的 `×` 会直接关闭，不触发 Chrome 通用离开提醒；网页无法用自定义弹窗接管标签页关闭。要离开编辑器，应点击品牌区右侧、页面左上角独立的“退出编辑”；右侧工作区导航继续保留“初始页”按钮，二者不能互相替换。有未固化历史或 Agent 正在运行时，“退出编辑”会直接打开页面内未固化任务清单，按最新修改倒序列出游标前仍生效条目关联任务的页码与说明，并汇总未绑定任务的直接编辑 / 结构修改与游标后的重做历史；操作项为“继续编辑”“暂不固化，退出”“固化并退出”。“固化并退出”仍走同一预检与安全写入闸门；未固化历史与工作副本保留到下次打开。`POST /api/write-deck` 只检查并保存会话检查点。冲突或验证失败拒绝覆盖。
 
-当前退出交互以“退出编辑器”为唯一文案：初始页、流程页和各编辑页面的品牌区右侧保持同一位置，文字右侧使用品牌红线性的门框与向右退出箭头，不带独立底框。退出通过受令牌保护的 `/api/shutdown` 显式关闭启动器、全部编辑运行时与 Agent 终端，而不是返回初始页。退出弹窗覆盖游标前全部生效条目，按 `taskId` 分组；任务默认只显示任务说明与下拉箭头，首次展开时才生成页码、条目数和具体 action / source 修改类型。`taskId:null` 的直接编辑 / 结构修改与游标后的重做历史独立显示。
+当前退出交互以“退出编辑器”为唯一文案：初始页、流程页和各编辑页面的品牌区右侧保持同一位置，文字右侧使用品牌红线性的门框与向右退出箭头，不带独立底框。退出通过同时校验当前浏览器 Origin 与独立 editor capability token 的 `/api/shutdown` 显式关闭启动器、全部编辑运行时与 Agent 终端；Agent 的通用 API token 不能关闭承载自身 PTY 的服务。退出弹窗覆盖游标前全部生效条目，按 `taskId` 分组；任务默认只显示任务说明与下拉箭头，首次展开时才生成页码、条目数和具体 action / source 修改类型。`taskId:null` 的直接编辑 / 结构修改与游标后的重做历史独立显示。
 
 后期 iframe 动作层不直接增删页、调整页序或重构复杂动画；这些结构修改由真实 PTY 中的 Agent 经 `scripts/edit-bundle.py` 修改托管工作副本，绝不直接写真实 Deck。工作台不另造聊天协议。Agent 动作受 token、revision、locator 与事务校验。session 可重开；`RECOVERY_REQUIRED` 会让未决恢复状态阻断继续写回，外部文件变化必须重载，或另存副本。
 
@@ -365,7 +365,7 @@ Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动
 | `WorkspaceStore` | 持有已确认的项目根目录与活动终端 provider；独立持久化 `agent-workspace.json` 与 `workspaceRevision`，不增加 Deck revision |
 | `HeadlessEditorRuntime` + workspace capability | 无可见窗口时启动同一 Editor 页面与受控 frame，写出权限为 0600 的短期 capability；不复制 Mutation、诊断或固化实现 |
 | `agent-provider-registry.mjs` | 窗口化 Agent Host 的单一 provider 注册表；统一服务端、启动页和终端 UI 的 Codex / Claude Code / OpenCode 标识、标签与固定命令 |
-| `AgentTerminalSession` | 在项目根目录管理唯一真实 PTY、ANSI 输出回放、原始输入、resize、三个注册 provider 与固定 bypass 命令，并在目录信任交互解除前阻止自动 Prompt |
+| `AgentTerminalSession` | 在项目根目录管理唯一真实 PTY、WSL / CLI / 历史投影阶段、服务端终端帧投影、原始输入、resize、三个注册 provider 与固定 bypass 命令，并在目录信任交互解除前阻止自动 Prompt |
 | `AgentBatchCoordinator` | 原子捕获并持久化一次点击的任务 ID，限制单批并发，管理 queued / running / succeeded / failed，并投影活动批次、下一批候选和剩余任务；默认把任务 Prompt 写入当前 `AgentTerminalSession` |
 | persistent dirfd helper / Windows path helper | Python JSONL 长驻 sidecar 进程；macOS/Linux 绑定目录 fd，Windows 绑定真实路径与 dev/ino 身份并拒绝 symlink/junction/reparse point；两者都执行同目录原子持久化，并负责真实 Deck 的备份、transaction 与原子发布 |
 | bundle adapter | Python `bundle_adapter.py`；只在可信临时副本上调用 `scripts/edit-bundle.py`，构造离线补丁块并做 bundle verify |
@@ -379,6 +379,8 @@ Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动
 
 #### Agent 批处理与 provider seam
 
+Windows WSL Codex 由 App Server 在打开任务前预热；进程级 runtime cache 按 `wsl.exe + distribution + user` 保存登录环境中的 Codex / Node 命令、HOME 与每条 Windows 路径的 `wslpath` 结果，并合并并发探测。`startupPhase` 依次投影 `wsl-preparing`、`codex-starting` 和 `history-redraw`。恢复期间 PTY ANSI 只进入服务端 `@xterm/headless`，浏览器 WebSocket 不接收历史 `output` chunk；真实输入态成立后，`@xterm/addon-serialize` 生成无 scrollback 的最终 framebuffer，通过单条 `projection` 消息替换浏览器 xterm。最终投影完成前 `resumePending`、键盘、`waitUntilReady()` 与 Agent 任务继续锁定；目录信任或交互式更新提示是唯一提前投影当前画面的例外。
+
 窗口化 Editor 是 Skill 的可选增强，不是使用前提；Skill 核心也不绑定某个 Agent 品牌。任何能读取 `SKILL.md` 并执行本地命令的 Agent 都可复用活动 Managed Workspace；没有可见 Editor 时，由 `deck-editor.py --headless-workspace` 启动同一个 Server、BridgeService、preview frame 和 EditTimeline，只把浏览器 UI 换成后台 Chrome。它在首行返回 `url`、普通 token、`workingDeckPath` 与权限为 0600 的 `workspace-capability.json` 路径。Agent 通过环境变量或 capability 调用统一 CLI，完成后按用户意图执行 `verify` 与 `solidify`。只有用户明确拒绝后台运行时或运行依赖确实不可用，才允许经典 `edit-bundle.py` 直改真实 Deck；该 fallback 没有 Mutation、撤销历史和固化，不能静默冒充受控模式。
 
 浏览器点击“交给 Agent”时只向 `POST /api/agent-runs` 发送 `expectedRevision` 和下一批候选中仍为 pending / failed 的任务 ID。`BridgeService.captureAgentBatch()` 在现有 mutation queue 内校验 revision、任务存在性和可处理状态，先把成员不可变的 `agentBatches[]` 记录持久化并增加 revision，`AgentBatchCoordinator` 才把该批次提交到终端；因此提交回执丢失、页面刷新或进程退出都不会丢失批次边界。后续快照通过 `GET /api/agent-runs/current` 和 observer WebSocket 的 `agent-run-updated` 同时投影 `activeBatch`、`nextBatch` 与 `residualBatches`。浏览器不能指定 executable、命令参数或 Prompt，因此该入口不是任意命令执行器。点击之后新建的任务不属于已冻结批次；活动批次成员禁止改删，下一批候选仍可继续编辑和删除。
@@ -389,9 +391,11 @@ Agent 执行只有一条产品路径：`AgentTerminalSession` 统一管理 PTY �
 
 右上角投影真实 PTY 运行态，编辑服务启动后即在后台创建新的 CLI 会话；点击后从右侧推出唯一的 Agent 交互终端，不会再启动第二个进程。终端抽屉与属性面板同高，默认宽度为视口的三分之一；左边界可拖动，向左加宽时通过同一 grid 压缩中间画布。打开状态通过 shell 数据属性把任务面板向内避让。产品不再维护结构化对话视图或消息提交 API。`/agent-terminal` 是独立的受保护 WebSocket：只接受当前 editor capability，传输 ANSI 输出、原始键盘输入、终端尺寸和固定枚举的启动 / 重启命令。浏览器只能选择注册表中的 Codex、Claude Code 与 OpenCode；服务端分别固定 `codex --dangerously-bypass-approvals-and-sandbox`、`claude --dangerously-skip-permissions` 与 `opencode`，拒绝浏览器提供 executable、参数或环境变量，也不会在 provider 不存在或未登录时静默切到 Codex。同一编辑服务内刷新只重连现存 PTY；“新会话”才终止并重启 CLI。进程状态 `running` 只表示 PTY 存活，不等于 CLI 可接收任务：ANSI 归一化后的目录信任提示会投影为 `interactionRequired: {kind: "directory-trust"}`，会话保留初始 Prompt、开放用户键盘输入，并让编辑页和新建页自动展开或重新展开右侧终端；前端关闭加载遮罩，显示“等待确认”与脉冲提醒。用户完成选择且正常输入屏出现后才清除交互状态；Codex 0.148 还必须越过初始化期间提前出现的草稿框并看到模型与工作目录完整状态栏，Claude Code 必须看到 Ink 的空 `❯` 输入行与光标，OpenCode 必须看到 `Ask anything` placeholder 与可见光标。恢复旧会话时，首个真实输入框出现前必须持续显示恢复遮罩，同时阻断人工键盘输入与 Agent 任务提交；任务按钮保持禁用，服务端 `POST /api/agent-runs` 也以 `AGENT_TERMINAL_RESUMING` 拒绝绕过界面的请求。若 Codex 恢复时已经画出最终输入占位符和光标、却仍残留陈旧的 `model: loading`，`AgentTerminalSession` 只自动执行一次一行尺寸重绘并恢复原尺寸；重绘本身不设置 `promptReady`，仍须等待后续真实模型状态通过同一输入态闸门。Codex 的普通更新通知继续保持遮罩直到真实输入框出现；只有同时要求按键继续的更新面板才投影为 `interactionRequired: {kind: "codex-update"}`，暂时收起遮罩并仅开放终端输入，Agent 任务仍保持阻断。`waitUntilReady()` 与 Agent 批次共用这些 provider 闸门。普通人工交互与 Agent 任务提示都写入同一 PTY；程序化任务提示使用 bracketed paste。Windows 下三者的正文统一按 UTF-8 字节拆成不超过 512 B 的 PTY 写入并逐块节流，正文结束符独立写入后才开始 Enter 等待；Claude Code 使用 3–6 秒，Windows Codex / OpenCode 使用 1–4 秒，其他平台使用 120ms。发送 Enter 时 `promptSubmission` 进入 `awaiting-confirmation`；只有 CLI 输出活动区重绘或处理中信号才转为 `submitted`，1.5 秒无回执自动重试一次，仍无回执则转为 `failed` 并提示手动提交。提交成功后 `turnState` 进入 `active`；Codex 工作期间出现的 steer 输入框只设置 `inputVisible`，不能把回合改成 `idle`，也不能开放下一批按钮。只有最终空闲提示符出现后，`waitUntilReady()` 和下一执行批次才继续。`AgentBatchCoordinator`、新建工作区和创建交接都等待这份提交回执，而不是把 PTY `write()` 当成成功；重启会取消尚未完成的整条提交链。终端是 Editor 的实时交互视图，但任务完成、Deck action、撤销与固化仍以 sidecar 为权威。
 
+`AgentTerminalSession` 对程序化 Prompt 锁存 `activePromptSubmissionId`：Codex 长步骤中的 steer 输入框只更新 `inputVisible`，不会因 `Working` 标记被长输出挤出短缓冲而切换到 idle。只有当前 Prompt 之后的明确结束信号晚于本回合最新活动信号、并且最终空闲提示符重新出现，状态机才登记同一 `completedPromptSubmissionId`；服务端只允许这个匹配的 Prompt ID 结算对应执行批次，旧回合重绘和瞬时输入框不能提前生成 `AGENT_TASKS_UNCHANGED`。
+
 只有目录信任解除并且 provider 的正常输入框真正出现后，初始化 Prompt 或 Agent 任务才会粘贴和提交；前面的 banner、loading 状态与草稿框始终保持 pending。
 
-Editor 不提供高级设置或“连接已有会话”，也不暴露历史 catalog、connection、session scan 或结构化 runtime API。旧 `session.json.agentConnection` 只在 `agent-workspace.json` 尚未建立时静默迁移一次，随后由专用会话模型接管；它不能改变 Deck revision。Agent 回到空闲输入态后，调度器仍逐个复核冻结批次；任何成员未完成或进入 `needs-confirmation`，批次都不能以正常返回冒充成功。失败、取消、崩溃或 Editor 重启后的未完成成员根据持久化批次记录投影为 residual，只有用户点击“仅重试剩余”或“合并到下一批”才会创建新批次。
+Editor 不提供高级设置或“连接已有会话”，也不暴露历史 catalog、connection、session scan 或结构化 runtime API。旧 `session.json.agentConnection` 只在 `agent-workspace.json` 尚未建立时静默迁移一次，随后由专用会话模型接管；它不能改变 Deck revision。Agent 回到空闲输入态后，调度器仍逐个复核冻结批次；任何成员未完成或进入 `needs-confirmation`，批次都不能以正常返回冒充成功。失败、取消、崩溃或 Editor 重启后的未完成成员根据持久化批次记录投影为 residual，只有用户点击“重新提交本批未完成任务”或“合并到下一批”才会创建新批次。
 
 Windows / Linux 的无修饰 `Ctrl+V` 由 xterm 自定义键盘边界放回浏览器原生 paste 事件，只向 PTY 交付一次剪贴板文字，不发送会被 Codex 解释为图片粘贴的 `0x16`；有文字选区时，`Ctrl+C` 也放回浏览器复制且不向 PTY 发送 `0x03`，没有选区时仍发送终端中断。macOS 继续使用原生 `Cmd+C` / `Cmd+V` 路径。
 
@@ -404,11 +408,11 @@ Windows / Linux 的无修饰 `Ctrl+V` 由 xterm 自定义键盘边界放回浏�
 
 终端自由对话修改已有文字时，CLI `locate-text` 通过唯一 editor capability 在当前真实 DOM 中返回文字节点 locator；`replace-text` 只在候选和出现次数均唯一时构造 `setText` 并回到上述 action 事务。多处同名不猜测。
 
-模板升级、复杂 DOM / 动画重构和整页增删排序不进入 action runtime。Agent 只能修改 sidecar 的 `working/deck.html`，监视器通过可信 helper 读取文件，校验 bundle、唯一 `data-page-id` 和 slide / section / nav 同步，再归档前后版本并写入 `SourceMutation`。插页生成新 ID、移页保留 ID、删页移除目标 ID。结构撤销 / 重做恢复内容寻址版本并重载 iframe；顺序不合法返回 `SOURCE_HISTORY_ORDER`。SourceMutation 后重放旧 action 只对编译器明确标记的旧动作开放 rebase，并同时核对几何位置、忽略 inline style 的语义指纹，以及当前值是否仍等于该动作的 `before` 或 `after`；Agent 已改同一属性、替换了语义元素或改变文字范围时一律 fail-closed，不能让旧人工动作静默覆盖新源码。唯一例外是固化重放明确返回 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND`，且失败动作确实位于后续 SourceMutation 之前：发布器先恢复工作副本，只剔除该条已被源码删除的旧动作，再从头验证全部补丁；最终 session 基线必须采用实际通过验证的补丁列表。可见工作台、重连恢复与固化后的离线补丁使用同一重放契约；其他重放失败必须发布可观察冲突并在全局历史提示中显示，不能用空 `catch` 隐藏分叉。
+模板升级、复杂 DOM / 动画重构和整页增删排序不进入 action runtime。Agent 只能修改 sidecar 的 `working/deck.html`，监视器通过可信 helper 读取文件，校验 bundle、唯一 `data-page-id` 和 slide / section / nav 同步，再归档前后版本并写入 `SourceMutation`。插页生成新 ID、移页保留 ID、删页移除目标 ID。结构撤销 / 重做恢复内容寻址版本并重载 iframe；顺序不合法返回 `SOURCE_HISTORY_ORDER`。SourceMutation 后重放旧 action 只对编译器明确标记的旧动作开放 rebase，并同时核对几何位置、忽略 inline style 的语义指纹，以及当前值是否仍等于该动作的 `before` 或 `after`；Agent 已改同一属性、替换了语义元素或改变文字范围时一律 fail-closed，不能让旧人工动作静默覆盖新源码。唯一例外是源码事务提交或固化重放明确返回 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND`，且失败动作确实属于更早的固化基线：提交器只剔除该条已被新源码删除的旧动作，再从头验证全部补丁；SourceMutation 同时记录这次固化补丁转换，使结构撤销恢复旧动作、重做再次剔除。最终 session 基线必须采用实际通过验证的补丁列表。可见工作台、重连恢复与固化后的离线补丁使用同一重放契约；其他重放失败必须发布可观察冲突并在全局历史提示中显示，不能用空 `catch` 隐藏分叉。
 
-Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begin-source-task`）取得 `sourceEditId` 与预留 revision，成功后才能写工作副本，写盘完成必须执行 `commit-source-edit`；失败执行 `cancel-source-edit` 回滚。`BridgeService` 把 begin / action / undo / redo / solidify 放进同一 mutation queue，活动事务对其他修改返回 `SOURCE_EDIT_ACTIVE`。源码事务与 revision 一并持久化；服务重开后 `WorkingDeckStore` 保留开始前基线，只允许同一 `sourceEditId` 继续 commit 提交或 cancel 取消，不把磁盘候选误认成已提交基线。监视器只兼容旧客户端在事务外直接写入，不再决定提交顺序。
+Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begin-source-task`）取得 `sourceEditId` 与预留 revision，成功后才能写工作副本，写盘完成必须执行 `commit-source-edit`；检查点建立后、SourceMutation 发布前，Server 用 `workingPatchVerifier` 在真实浏览器重放已有固化补丁，失败时恢复事务前工作副本且不登记历史，恢复失败才进入 `RECOVERY_REQUIRED`。结构历史撤销 / 重做恢复目标版本后也执行同一验证，失败时回滚当前工作版本且不提交游标，只有回滚本身失败才进入 `RECOVERY_REQUIRED`。`BridgeService` 把 begin / action / undo / redo / solidify 放进同一 mutation queue，活动事务对其他修改返回 `SOURCE_EDIT_ACTIVE`。源码事务与 revision 一并持久化；服务重开后 `WorkingDeckStore` 保留开始前基线，只允许同一 `sourceEditId` 继续 commit 提交或 cancel 取消，不把磁盘候选误认成已提交基线。监视器只兼容旧客户端在事务外直接写入，不再决定提交顺序，但同样经过补丁重放闸门。
 
-`data-editor-id` 是可编辑元素的持久元素身份。Agent 移动或调整层级时必须保留既有 `data-editor-id`；新增元素会在 SourceMutation 之前由工作副本归一化补齐。格式错误或重复的身份必须安全停止。`data-editor-id` 只定位元素，不放宽 `before` / `after` 与文字范围校验；Agent 改写同一属性或改变字符偏移时仍然冲突关闭。旧 action 没有该身份时继续使用保守的路径、几何与语义锚点，不猜测迁移目标。
+`data-editor-id` 是可编辑元素的持久元素身份。Agent 移动或调整层级时必须保留既有 `data-editor-id`；新增元素会在 SourceMutation 之前由工作副本归一化补齐。`sc-for` 循环模板的后代不得携带静态 `data-editor-id`，归一化会跳过新节点并清理旧工作副本中的误注入身份，避免循环实例共享同一目标。格式错误或重复的身份必须安全停止。`data-editor-id` 只定位元素，不放宽 `before` / `after` 与文字范围校验；Agent 改写同一属性或改变字符偏移时仍然冲突关闭。旧 action 没有该身份时继续使用保守的路径、几何与语义锚点，不猜测迁移目标。
 
 #### sidecar、恢复与持久化
 
@@ -425,15 +429,17 @@ Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begi
 1. mutation queue 先强制登记已经写盘的工作副本变化，再检查 revision、editor online、页面目标和诊断 ready；旧 revision 在任何固化副作用前返回 `REVISION_CONFLICT`；
 2. 预检读取真实 Deck 与 working Deck fingerprint，与 session 双基线比较，并让 frame 针对修改页返回 diagnostics；新增 section overflow 或 nested clip 以 `NEW_OVERFLOW` 阻断；
 3. 预检签发 60 秒内、仅可消费一次的令牌，绑定 revision、binding revision、双 fingerprint 与最终动作投影摘要；任何一项变化都以 `SOLIDIFY_PREFLIGHT_STALE` 要求重新预检；
-4. 在 working Deck 中用最终 action 快照替换唯一补丁块，执行 `eb.verify` 与 browser patch replay；
+4. 在 working Deck 中用最终 action 快照替换唯一补丁块，执行 `eb.verify` 与 browser patch replay；若同一候选包含多条经 SourceMutation 授权、且返回 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND` 的旧动作，验证器在同一浏览器进程中一次返回全部动作 ID，发布器恢复候选、批量剔除后只重写一次并做最终完整复验；其他冲突不进入修复分支；
 5. helper 为当前绑定的真实 Deck 建立内容寻址备份，把 working 候选写成同目录独占临时文件，再次核对文件见证与双指纹并 durable 写入 transaction record；
 6. POSIX 用 `renameatx_np(RENAME_SWAP)` / `renameat2(RENAME_EXCHANGE)`，Windows 用 `ReplaceFileW` 对“当前仍存在的同一文件条目”原子发布；外部改名抢先发生时发布明确失败，绝不按旧路径新建文件。成功后刷新 FileWitness，持久化新的 binding revision、双 fingerprint / diagnostics，最后删除 transaction；同时建立固化检查点、把旧时间线移入归档、清除完成任务的可撤回关联，增加 revision，并让离线补丁执行后调用 `adoptActiveAsBaseline()`。
+
+初次 session 同步没有事务 `commandId`，frame 会用同一授权集合批量跳过已被源码取代的缺失动作，避免一条陈旧 locator 让整个可恢复动作集失败；带 `commandId` 的 action / undo / redo 仍严格原子重放。原子写入耗时取决于 Deck 大小和浏览器验证，前端因此使用不确定进度，不把固定百分比误当作可观测阶段进度。
 
 若替换前失败，正式 deck 字节不变；替换后 session 持久化失败会尝试从可信备份恢复。恢复或 transaction 清理无法安全完成时进入 `RECOVERY_REQUIRED`，保留诊断和备份，绝不静默声称成功。
 
 #### 信任边界
 
-网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin，editor WebSocket 和 Agent PTY WebSocket 还需独立 capability token；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由真实 / working 双 fingerprint、revision、pageId、locator 与 transaction 校验。服务没有任意路径读写 API。外部 Agent 常用受控接口包括 session / status、tasks、文字定位（`GET /api/text-locations`）、actions、undo / redo、检查点（`POST /api/write-deck`）和 observer events；永久固化统一使用 `POST /api/solidify-deck`，并要求来自可见 Editor 的用户确认或无窗口 Skill 中用户明确的正式写入意图。Agent 任务调度使用固定 schema 的 `POST /api/agent-runs` 与 `GET /api/agent-runs/current`，实时终端使用 `/agent-terminal`。唯一 editor capability WebSocket 只为 frame 事务、文字定位与 ACK 服务。
+网络边界从 loopback 开始：服务拒绝非回环监听，HTTP 用 token（query / Bearer / SameSite cookie）授权并校验浏览器 Origin；文件边界由路径规范化和 dirfd / `O_NOFOLLOW` 绑定，版本边界由真实 / working 双 fingerprint、revision、pageId、locator 与 transaction 校验。editor WebSocket 和 Agent PTY WebSocket 还需独立 capability token；浏览器专用 `/api/shutdown` 同时要求 Origin 与 editor capability，通用 Agent token 不具备关闭服务的权限。服务没有任意路径读写 API。外部 Agent 常用受控接口包括 session / status、tasks、文字定位（`GET /api/text-locations`）、actions、undo / redo、检查点（`POST /api/write-deck`）和 observer events；永久固化统一使用 `POST /api/solidify-deck`，并要求来自可见 Editor 的用户确认或无窗口 Skill 中用户明确的正式写入意图。Agent 任务调度使用固定 schema 的 `POST /api/agent-runs` 与 `GET /api/agent-runs/current`，实时终端使用 `/agent-terminal`。唯一 editor capability WebSocket 只为 frame 事务、文字定位和 ACK 服务。
 
 目标 locator 找不到返回 `TARGET_NOT_FOUND`，不能唯一匹配返回 `TARGET_AMBIGUOUS`；frame 未就绪返回 `EDITOR_OFFLINE`。所有错误都保留稳定 code 与恢复提示，浏览器 tentative 状态和 durable session 不会分叉。
 

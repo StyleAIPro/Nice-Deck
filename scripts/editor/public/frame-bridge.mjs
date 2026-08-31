@@ -2747,7 +2747,16 @@ function onParentMessage(event) {
   if (event.data?.type === 'sync-actions' && Array.isArray(event.data.actions)) {
     try {
       rollbackAllTentative();
-      runtime.applyAll(event.data.actions, { rebaseActionIds:event.data.rebaseActionIds });
+      // 父页面的无 commandId 会话恢复不是一次新事务。后续 SourceMutation 已经
+      // 删除的旧目标允许按 rebaseActionIds 批量跳过，避免整批恢复被第一条
+      // TARGET_NOT_FOUND 中断；带 commandId 的事务性强制同步仍保持严格失败。
+      if (typeof event.data.commandId === 'string') {
+        runtime.applyAll(event.data.actions, { rebaseActionIds:event.data.rebaseActionIds });
+      } else {
+        runtime.applyAllDroppingMissing(event.data.actions, {
+          rebaseActionIds:event.data.rebaseActionIds,
+        });
+      }
       if (transformSelection) {
         positionTransformSelection();
         publishInspectorSelection();

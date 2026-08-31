@@ -7,6 +7,7 @@ import {
   buildRegisteredTerminalCommand,
   publicAgentProviders,
 } from './agent-provider-registry.mjs';
+import { createAgentTerminalProjection } from './agent-terminal-projection.mjs';
 import { prepareAgentTerminalRuntime } from './agent-terminal-runtime.mjs';
 
 const MAX_BUFFER_CHARS = 1024 * 1024;
@@ -163,10 +164,10 @@ function terminalAcknowledgesPrompt(provider, output) {
   return true;
 }
 
-function terminalKeepsTurnActive(provider, output) {
+function terminalReportsTurnFinished(provider, output) {
   if (provider !== 'codex') return false;
   const visibleOutput = visibleTerminalText(output);
-  if (/codex ready/i.test(visibleOutput)) return false;
+  if (/codex ready/i.test(visibleOutput)) return true;
   const activeMatches = [...visibleOutput.matchAll(
     /(?:^|\n)[^\n]{0,160}\b(?:working|thinking)\b[^\n]{0,160}|esc to interrupt/gim,
   )];
@@ -175,10 +176,7 @@ function terminalKeepsTurnActive(provider, output) {
   )];
   const lastActive = activeMatches.at(-1)?.index ?? -1;
   const lastFinished = finishedMatches.at(-1)?.index ?? -1;
-  const lastPrompt = visibleOutput.lastIndexOf('›');
-  return lastActive > lastFinished
-    && lastPrompt > lastActive
-    && lastPrompt - lastActive < 2_048;
+  return lastFinished > lastActive;
 }
 
 function terminalError(code, message) {
@@ -251,6 +249,7 @@ export class AgentTerminalSession {
     cancelScheduledSubmit = clearTimeout,
     resolveExecutable = resolveAgentTerminalExecutable,
     prepareRuntime = prepareAgentTerminalRuntime,
+    createTerminalProjection = createAgentTerminalProjection,
     runtimePathRoots = [],
   }) {
     const absolutePath = platform === 'win32' ? win32.isAbsolute : isAbsolute;
@@ -273,6 +272,9 @@ export class AgentTerminalSession {
     if (typeof cancelScheduledSubmit !== 'function') throw new TypeError('cancelScheduledSubmit 必须是函数');
     if (typeof resolveExecutable !== 'function') throw new TypeError('resolveExecutable 必须是函数');
     if (typeof prepareRuntime !== 'function') throw new TypeError('prepareRuntime 必须是函数');
+    if (typeof createTerminalProjection !== 'function') {
+      throw new TypeError('createTerminalProjection 必须是函数');
+    }
     if (!Array.isArray(runtimePathRoots)
       || runtimePathRoots.some(value => typeof value !== 'string')) {
       throw new TypeError('runtimePathRoots 必须是路径数组');
@@ -293,6 +295,7 @@ export class AgentTerminalSession {
     this.cancelScheduledSubmit = cancelScheduledSubmit;
     this.resolveExecutable = resolveExecutable;
     this.prepareRuntime = prepareRuntime;
+    this.createTerminalProjection = createTerminalProjection;
     this.runtimePathRoots = [...runtimePathRoots];
     this.providerChangeListeners = new Set();
     this.stateListeners = new Set();
@@ -301,6 +304,7 @@ export class AgentTerminalSession {
     this.process = null;
     this.state = 'stopped';
     this.output = '';
+    this.clientOutput = '';
     this.startedAt = null;
     this.conversationId = null;
     this.conversationResumed = false;
@@ -309,6 +313,8 @@ export class AgentTerminalSession {
     this.promptReady = false;
     this.inputVisible = false;
     this.turnState = 'stopped';
+    this.startupPhase = null;
+    this.startupPhaseDetail = null;
     this.interactionRequired = null;
     this.interactionResponsePending = false;
     this.interactionScanOutput = '';
@@ -319,6 +325,9 @@ export class AgentTerminalSession {
     this.pendingSubmitTimer = null;
     this.promptSubmissionSequence = 0;
     this.promptSubmission = null;
+    this.activePromptSubmissionId = null;
+    this.completedPromptSubmissionId = null;
+    this.turnCompletionSeen = false;
     this.promptCapabilityConfirmed = false;
     this.terminalCols = 80;
     this.terminalRows = 24;
@@ -326,6 +335,11 @@ export class AgentTerminalSession {
     this.closed = false;
     this.activeCommand = null;
     this.activeRuntime = null;
+    this.historyProjection = null;
+    this.historyProjectionPending = false;
+    this.historyProjectionFlushing = false;
+    this.historyProjectionTail = '';
+    this.historyProjectionCallbacks = [];
   }
 
   snapshot() {
@@ -344,10 +358,16 @@ export class AgentTerminalSession {
       conversationId:this.conversationId,
       conversationResumed:this.conversationResumed,
       initialInputPending,
-      resumePending:this.conversationResumed && initialInputPending,
+      resumePending:this.conversationResumed
+        && (initialInputPending || this.historyProjectionPending),
+      startupPhase:this.startupPhase,
+      startupPhaseDetail:this.startupPhaseDetail ? { ...this.startupPhaseDetail } : null,
+      historyProjectionPending:this.historyProjectionPending,
       conversationError:this.conversationError,
       startupPromptState:this.startupPromptState,
       promptSubmission:this.promptSubmission ? { ...this.promptSubmission } : null,
+      activePromptSubmissionId:this.activePromptSubmissionId,
+      completedPromptSubmissionId:this.completedPromptSubmissionId,
       promptReady:this.promptReady,
       inputVisible:this.inputVisible,
       turnState:this.turnState,
@@ -432,7 +452,7 @@ export class AgentTerminalSession {
   attach(socket) {
     if (!socket || typeof socket.send !== 'function') throw new TypeError('终端 socket 无效');
     this.sockets.add(socket);
-    this.#send(socket, { type:'snapshot', terminal:this.snapshot(), output:this.output });
+    this.#send(socket, { type:'snapshot', terminal:this.snapshot(), output:this.clientOutput });
     return () => this.sockets.delete(socket);
   }
 
@@ -458,15 +478,21 @@ export class AgentTerminalSession {
     if (this.closed) throw terminalError('SERVICE_CLOSED', '编辑服务已关闭');
     this.provider = provider;
     this.output = '';
+    this.clientOutput = '';
     this.exit = null;
     this.conversationId = null;
     this.conversationResumed = false;
     this.conversationError = null;
     this.startupPromptState = null;
     this.promptSubmission = null;
+    this.activePromptSubmissionId = null;
+    this.completedPromptSubmissionId = null;
+    this.turnCompletionSeen = false;
     this.promptReady = false;
     this.inputVisible = false;
     this.turnState = 'starting';
+    this.startupPhase = 'runtime-preparing';
+    this.startupPhaseDetail = null;
     this.promptCapabilityConfirmed = false;
     this.interactionRequired = null;
     this.interactionResponsePending = false;
@@ -481,6 +507,14 @@ export class AgentTerminalSession {
         projectRoot:this.projectRoot,
         cwd:this.cwd,
         pathRoots:this.runtimePathRoots,
+        onPhase:(phase, detail = null) => {
+          if (this.closed || this.state !== 'starting') return;
+          this.startupPhase = phase;
+          this.startupPhaseDetail = detail && typeof detail === 'object'
+            ? { ...detail }
+            : null;
+          this.#publishState();
+        },
       });
     } catch (error) {
       this.state = 'failed';
@@ -491,6 +525,9 @@ export class AgentTerminalSession {
         error?.message ?? 'Agent 运行环境准备失败',
       );
     }
+    this.startupPhase = provider === 'codex' ? 'codex-starting' : 'agent-starting';
+    this.startupPhaseDetail = null;
+    this.#publishState();
     const runtimeEnvironment = runtime?.environment ?? this.environment;
     const hasExplicitPrompt = initialPrompt !== undefined;
     const prompt = initialPrompt ?? await this.initialPrompt(provider);
@@ -551,6 +588,21 @@ export class AgentTerminalSession {
     const generation = ++this.generation;
     this.terminalCols = Number.isInteger(cols) && cols > 0 ? Math.min(cols, 500) : 80;
     this.terminalRows = Number.isInteger(rows) && rows > 0 ? Math.min(rows, 300) : 24;
+    if (conversation?.resume === true) {
+      try {
+        this.historyProjection = this.createTerminalProjection({
+          cols:this.terminalCols,
+          rows:this.terminalRows,
+        });
+        this.historyProjectionPending = true;
+        this.historyProjectionFlushing = false;
+        this.historyProjectionTail = '';
+      } catch {
+        // 投影器不可用时回退到既有实时输出，不能阻断 Agent 会话本身。
+        this.historyProjection = null;
+        this.historyProjectionPending = false;
+      }
+    }
     let child;
     try {
       child = this.spawnPty(command.executable, command.args, {
@@ -568,6 +620,7 @@ export class AgentTerminalSession {
       this.state = 'failed';
       this.exit = { code:null, signal:null, message:error?.message || 'Agent 终端启动失败' };
       this.activeRuntime = null;
+      this.#discardHistoryProjection();
       this.#publishState();
       throw terminalError(
         error?.code === 'ENOENT' ? 'AGENT_NOT_FOUND' : 'AGENT_START_FAILED',
@@ -581,6 +634,9 @@ export class AgentTerminalSession {
     this.conversationResumed = conversation?.resume === true;
     this.startupPromptState = startupPrompt ? 'pending' : null;
     this.state = 'running';
+    this.startupPhase = this.historyProjectionPending
+      ? 'history-redraw'
+      : (provider === 'codex' ? 'codex-starting' : 'agent-starting');
     this.startedAt = new Date().toISOString();
     let resumeRedrawRequested = false;
     child.onData(data => {
@@ -589,7 +645,15 @@ export class AgentTerminalSession {
       this.output = `${this.output}${chunk}`.slice(-MAX_BUFFER_CHARS);
       this.interactionScanOutput = `${this.interactionScanOutput}${chunk}`
         .slice(-INTERACTION_SCAN_CHARS);
-      this.#broadcast({ type:'output', data:chunk });
+      if (this.historyProjectionPending && this.historyProjection) {
+        this.historyProjection.write(chunk);
+        if (this.historyProjectionFlushing) {
+          this.historyProjectionTail = `${this.historyProjectionTail}${chunk}`
+            .slice(-MAX_BUFFER_CHARS);
+        }
+      } else {
+        this.#deliverOutput(chunk);
+      }
       let acknowledgedPrompt = false;
       if (this.promptSubmission?.state === 'awaiting-confirmation'
         && terminalAcknowledgesPrompt(provider, chunk)) {
@@ -607,8 +671,15 @@ export class AgentTerminalSession {
         this.promptReady = false;
         this.inputVisible = false;
         this.turnState = 'active';
+        this.activePromptSubmissionId = this.promptSubmission.id;
+        this.turnCompletionSeen = false;
         acknowledgedPrompt = true;
         this.#publishState();
+      }
+      if (this.turnState === 'active'
+        && this.activePromptSubmissionId
+        && terminalReportsTurnFinished(provider, this.interactionScanOutput || this.output)) {
+        this.turnCompletionSeen = true;
       }
       const acceptsPrompt = terminalAcceptsPrompt(
         provider,
@@ -651,6 +722,7 @@ export class AgentTerminalSession {
         this.interactionRequired = interactionRequested;
         this.interactionResponsePending = false;
         this.#publishState();
+        this.#flushHistoryProjection();
       }
       if (this.interactionRequired) {
         if (interactionRequested || !acceptsPrompt) return;
@@ -658,23 +730,41 @@ export class AgentTerminalSession {
         this.interactionResponsePending = false;
         this.#publishState();
       }
-      const idlePrompt = acceptsPrompt
-        && (this.turnState !== 'active'
-          || !terminalKeepsTurnActive(provider, this.interactionScanOutput || this.output));
+      // Codex 工作期间也会绘制可输入的 steer 框。活动回合必须保持锁存，
+      // 直到当前 Prompt 之后出现明确结束信号；不能再用 Working 与输入框之间
+      // 的字符距离推断，否则长工具输出会把仍在执行的批次误判为空闲。
+      const activeTurnLocked = this.turnState === 'active'
+        && provider === 'codex'
+        && !this.turnCompletionSeen;
+      const idlePrompt = acceptsPrompt && !activeTurnLocked;
       if (!acknowledgedPrompt && !this.promptReady && idlePrompt) {
+        if (this.turnState === 'active' && this.activePromptSubmissionId) {
+          this.completedPromptSubmissionId = this.activePromptSubmissionId;
+          this.activePromptSubmissionId = null;
+          this.turnCompletionSeen = false;
+        }
         this.promptReady = true;
         this.turnState = 'idle';
         this.promptCapabilityConfirmed = true;
-        if (this.startupPromptState === 'pending') {
-          this.#queuePrompt(startupPrompt, { startup:true });
+        const finishStartup = () => {
+          if (this.startupPromptState === 'pending') {
+            this.#queuePrompt(startupPrompt, { startup:true });
+          } else {
+            this.#publishState();
+          }
+        };
+        if (this.historyProjectionPending) {
+          this.#flushHistoryProjection(finishStartup);
         } else {
-          this.#publishState();
+          this.startupPhase = 'ready';
+          finishStartup();
         }
       }
     });
     child.onExit(({ exitCode = null, signal = null } = {}) => {
       if (generation !== this.generation || this.process !== child) return;
       this.process = null;
+      this.#discardHistoryProjection();
       if (conversation?.resume === true && missingAgentSession(provider, this.output)) {
         this.state = 'starting';
         this.exit = null;
@@ -689,6 +779,8 @@ export class AgentTerminalSession {
       this.promptReady = false;
       this.inputVisible = false;
       this.turnState = 'exited';
+      this.activePromptSubmissionId = null;
+      this.turnCompletionSeen = false;
       this.promptCapabilityConfirmed = false;
       this.interactionRequired = null;
       this.interactionResponsePending = false;
@@ -736,6 +828,64 @@ export class AgentTerminalSession {
     return this.snapshot();
   }
 
+  #deliverOutput(chunk) {
+    if (typeof chunk !== 'string' || !chunk) return;
+    this.clientOutput = `${this.clientOutput}${chunk}`.slice(-MAX_BUFFER_CHARS);
+    this.#broadcast({ type:'output', data:chunk });
+  }
+
+  #discardHistoryProjection() {
+    this.historyProjection?.dispose?.();
+    this.historyProjection = null;
+    this.historyProjectionPending = false;
+    this.historyProjectionFlushing = false;
+    this.historyProjectionTail = '';
+    this.historyProjectionCallbacks.length = 0;
+  }
+
+  #flushHistoryProjection(onComplete = null) {
+    if (typeof onComplete === 'function') this.historyProjectionCallbacks.push(onComplete);
+    if (!this.historyProjectionPending || !this.historyProjection
+      || this.historyProjectionFlushing) return;
+    this.historyProjectionFlushing = true;
+    this.historyProjectionTail = '';
+    const projection = this.historyProjection;
+    const generation = this.generation;
+    Promise.resolve(projection.snapshot()).then(serialized => {
+      if (generation !== this.generation || projection !== this.historyProjection) return;
+      const projected = String(serialized ?? '').slice(-MAX_BUFFER_CHARS);
+      const tail = this.historyProjectionTail;
+      this.clientOutput = projected;
+      this.#broadcast({ type:'projection', data:projected });
+      this.historyProjectionPending = false;
+      this.historyProjectionFlushing = false;
+      this.historyProjectionTail = '';
+      this.historyProjection = null;
+      projection.dispose?.();
+      if (tail) this.#deliverOutput(tail);
+      this.startupPhase = this.promptCapabilityConfirmed ? 'ready' : this.startupPhase;
+      this.#publishState();
+      const callbacks = this.historyProjectionCallbacks.splice(0);
+      for (const callback of callbacks) callback();
+    }).catch(() => {
+      if (generation !== this.generation || projection !== this.historyProjection) return;
+      // 极少数序列化失败时一次性回放环形缓冲，仍避免历史按 PTY chunk
+      // 逐块触发浏览器渲染；Agent 会话与交互状态保持可用。
+      const fallback = this.output.slice(-MAX_BUFFER_CHARS);
+      this.clientOutput = fallback;
+      this.#broadcast({ type:'projection', data:fallback });
+      this.historyProjectionPending = false;
+      this.historyProjectionFlushing = false;
+      this.historyProjectionTail = '';
+      this.historyProjection = null;
+      projection.dispose?.();
+      this.startupPhase = this.promptCapabilityConfirmed ? 'ready' : this.startupPhase;
+      this.#publishState();
+      const callbacks = this.historyProjectionCallbacks.splice(0);
+      for (const callback of callbacks) callback();
+    });
+  }
+
   input(data) {
     if (!this.process || this.state !== 'running') {
       throw terminalError('AGENT_TERMINAL_STOPPED', 'Agent 终端尚未启动');
@@ -748,6 +898,7 @@ export class AgentTerminalSession {
     // Esc/Ctrl+C 等交互仍可正常传给 CLI。目录信任与 Codex 更新面板是输入框
     // 之前的显式交互，必须例外允许用户作答。
     if ((!this.promptCapabilityConfirmed
+      || this.historyProjectionPending
       || ['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState))
       && !this.interactionRequired) return;
     this.process.write(data);
@@ -778,6 +929,7 @@ export class AgentTerminalSession {
     }
     const ready = () => this.state === 'running'
       && this.promptReady
+      && !this.historyProjectionPending
       && this.turnState === 'idle'
       && !this.interactionRequired
       && !['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState)
@@ -798,6 +950,7 @@ export class AgentTerminalSession {
       const onState = state => {
         if (state.state === 'running'
           && state.promptReady
+          && state.resumePending !== true
           && state.turnState === 'idle'
           && !state.interactionRequired
           && !['pending', 'submitting', 'awaiting-confirmation'].includes(state.startupPromptState)
@@ -922,6 +1075,12 @@ export class AgentTerminalSession {
         this.turnState === 'active' ? 'Agent 当前回合仍在处理，不能提交下一批任务' : 'Agent 终端输入框尚未就绪',
       );
     }
+    if (!startup && this.historyProjectionPending) {
+      throw terminalError(
+        'AGENT_TERMINAL_INITIALIZING',
+        'Agent 终端正在投影恢复后的最终画面',
+      );
+    }
     if (!startup && this.turnState !== 'idle') {
       throw terminalError('AGENT_TERMINAL_BUSY', 'Agent 当前回合仍在处理，不能提交下一批任务');
     }
@@ -953,6 +1112,8 @@ export class AgentTerminalSession {
       acceptedAt:null,
       error:null,
     };
+    this.activePromptSubmissionId = null;
+    this.turnCompletionSeen = false;
     this.turnState = 'submitting';
     if (startup) {
       this.startupPromptState = 'submitting';
@@ -1043,6 +1204,7 @@ export class AgentTerminalSession {
       || cols < 2 || cols > 500 || rows < 2 || rows > 300) return;
     this.terminalCols = cols;
     this.terminalRows = rows;
+    this.historyProjection?.resize?.(cols, rows);
     this.process.resize(cols, rows);
   }
 
@@ -1074,12 +1236,21 @@ export class AgentTerminalSession {
       try { child.kill(); } catch { /* 进程可能已经退出 */ }
       await exited;
     }
-    if (clear) this.output = '';
+    this.#discardHistoryProjection();
+    if (clear) {
+      this.output = '';
+      this.clientOutput = '';
+    }
     this.startupPromptState = null;
     this.promptSubmission = null;
+    this.activePromptSubmissionId = null;
+    this.completedPromptSubmissionId = null;
+    this.turnCompletionSeen = false;
     this.promptReady = false;
     this.inputVisible = false;
     this.turnState = this.closed ? 'exited' : 'stopped';
+    this.startupPhase = null;
+    this.startupPhaseDetail = null;
     this.interactionRequired = null;
     this.interactionResponsePending = false;
     this.interactionScanOutput = '';

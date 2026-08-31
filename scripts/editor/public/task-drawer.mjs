@@ -506,7 +506,10 @@ export function renderTaskDrawer(root, {
         && ['pending', 'failed'].includes(task.status));
     const actions = [];
     if (retryTasks.length) {
-      const retry = element('button', 'task-batch-retry', `仅重试剩余 ${retryTasks.length} 条`);
+      const retry = element(
+        'button', 'task-batch-retry',
+        `重新提交本批未完成任务（${retryTasks.length} 条）`,
+      );
       retry.type = 'button';
       retry.dataset.retryAgentBatch = batch.id;
       retry.disabled = activeRun || submissionBlocked === true;
@@ -573,6 +576,9 @@ export function renderTaskDrawer(root, {
     .filter(task => task && task.targetMissing !== true
       && ['pending', 'failed'].includes(task.status));
   const idleSubmissionBlocked = submissionBlocked === true && !activeRun;
+  const hasRetryableResidual = residualBatches.some(
+    batch => (batch.actionableTaskIds?.length ?? 0) > 0,
+  );
   const buttonText = agentRun.status === 'queued'
     ? `批次 ${activeBatch?.ordinal ?? ''} 正在提交 · 下一批已积累 ${nextCount} 条`
     : agentRun.status === 'running'
@@ -581,6 +587,8 @@ export function renderTaskDrawer(root, {
       ? `有 ${unresolvedTargetMissingCount} 条任务的目标不可定位`
     : actionableTasks.length === 0 && needsConfirmationCount > 0
       ? `有 ${needsConfirmationCount} 条任务需要补充说明`
+    : actionableTasks.length === 0 && hasRetryableResidual
+      ? '下一批暂无新任务；请使用上方重新提交按钮'
     : actionableTasks.length === 0
       ? '没有待处理任务'
     : idleSubmissionBlocked

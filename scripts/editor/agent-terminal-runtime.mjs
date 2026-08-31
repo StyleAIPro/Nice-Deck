@@ -22,6 +22,15 @@ const VALUE_ENVIRONMENT_KEYS = Object.freeze([
   'HUAWEI_DECK_EDITOR_TOKEN',
   'HUAWEI_DECK_CREATION_URL',
 ]);
+const WSL_PROBE_SCRIPT = [
+  'huawei_deck_codex="$(command -v codex)" || exit 127',
+  'huawei_deck_node="$(command -v node)" || exit 127',
+  'printf "HUAWEI_DECK_CODEX=%s\\nHUAWEI_DECK_NODE=%s\\nHUAWEI_DECK_HOME=%s\\n"'
+    + ' "$huawei_deck_codex" "$huawei_deck_node" "$HOME"',
+].join('; ');
+const WSL_RUNTIME_CACHE = new Map();
+const WSL_RUNNER_IDS = new WeakMap();
+let nextWslRunnerId = 1;
 
 function runtimeError(code, message, cause = null) {
   return Object.assign(new Error(message), { code, ...(cause ? { cause } : {}) });
@@ -149,6 +158,116 @@ function wslArguments(settings, ...tail) {
   ];
 }
 
+function wslRunnerId(runWsl) {
+  if (!WSL_RUNNER_IDS.has(runWsl)) WSL_RUNNER_IDS.set(runWsl, nextWslRunnerId++);
+  return WSL_RUNNER_IDS.get(runWsl);
+}
+
+function wslRuntimeCache(settings, { runWsl, wslExecutable }) {
+  const key = [
+    wslExecutable,
+    settings.wslDistribution,
+    settings.wslUser,
+    wslRunnerId(runWsl),
+  ].join('\0');
+  let entry = WSL_RUNTIME_CACHE.get(key);
+  if (!entry) {
+    entry = { probe:null, paths:new Map() };
+    WSL_RUNTIME_CACHE.set(key, entry);
+  }
+  return entry;
+}
+
+async function probeWslRuntime(settings, callWsl, cacheEntry = null) {
+  const execute = async () => {
+    if (!cacheEntry) {
+      const codexOutput = await callWsl(wslArguments(
+        settings,
+        '--exec', 'bash', '-lic', 'command -v codex',
+      ));
+      const nodeOutput = await callWsl(wslArguments(
+        settings,
+        '--exec', 'bash', '-lic', 'command -v node',
+      ));
+      const homeOutput = await callWsl(wslArguments(
+        settings,
+        '--exec', 'printenv', 'HOME',
+      ));
+      return {
+        codexExecutable:outputLine(
+          codexOutput,
+          line => line.startsWith('/') && !/[\0\r\n]/.test(line),
+          `WSL ${settings.wslDistribution}/${settings.wslUser} 的登录环境中找不到 codex`,
+        ),
+        nodeExecutable:outputLine(
+          nodeOutput,
+          line => line.startsWith('/') && !/[\0\r\n]/.test(line),
+          `WSL ${settings.wslDistribution}/${settings.wslUser} 的登录环境中找不到 node`,
+        ),
+        wslHome:outputLine(
+          homeOutput,
+          line => line.startsWith('/') && !/[\0\r\n]/.test(line),
+          '无法确定 WSL 用户 HOME',
+        ),
+      };
+    }
+    const output = await callWsl(wslArguments(
+      settings,
+      '--exec', 'bash', '-lic', WSL_PROBE_SCRIPT,
+    ));
+    const readTaggedPath = (tag, message) => outputLine(
+      output,
+      line => line.startsWith(tag)
+        && line.slice(tag.length).startsWith('/')
+        && !/[\0\r\n]/.test(line),
+      message,
+    ).slice(tag.length);
+    return {
+      codexExecutable:readTaggedPath(
+        'HUAWEI_DECK_CODEX=',
+        `WSL ${settings.wslDistribution}/${settings.wslUser} 的登录环境中找不到 codex`,
+      ),
+      nodeExecutable:readTaggedPath(
+        'HUAWEI_DECK_NODE=',
+        `WSL ${settings.wslDistribution}/${settings.wslUser} 的登录环境中找不到 node`,
+      ),
+      wslHome:readTaggedPath('HUAWEI_DECK_HOME=', '无法确定 WSL 用户 HOME'),
+    };
+  };
+  if (!cacheEntry) return execute();
+  if (!cacheEntry.probe) {
+    cacheEntry.probe = execute().catch(error => {
+      cacheEntry.probe = null;
+      throw error;
+    });
+  }
+  return cacheEntry.probe;
+}
+
+async function mapWindowsPath(settings, windowsPath, callWsl, cacheEntry = null) {
+  const execute = async () => {
+    const stdout = await callWsl(wslArguments(
+      settings,
+      '--exec', 'wslpath', '-a', '-u', windowsPath,
+    ));
+    return outputLine(
+      stdout,
+      line => line.startsWith('/') && !/[\0\r\n]/.test(line),
+      `无法把 Windows 路径转换为 WSL 路径：${windowsPath}`,
+    );
+  };
+  if (!cacheEntry) return execute();
+  let mapped = cacheEntry.paths.get(windowsPath);
+  if (!mapped) {
+    mapped = execute().catch(error => {
+      cacheEntry.paths.delete(windowsPath);
+      throw error;
+    });
+    cacheEntry.paths.set(windowsPath, mapped);
+  }
+  return mapped;
+}
+
 export async function prepareAgentTerminalRuntime(provider, {
   platform = process.platform,
   settings = loadAgentRuntimeSettings(),
@@ -158,38 +277,27 @@ export async function prepareAgentTerminalRuntime(provider, {
   pathRoots = [PROJECT_DIR],
   runWsl = defaultRunWsl,
   wslExecutable = 'wsl.exe',
+  cache = true,
+  onPhase = () => {},
 } = {}) {
   const normalized = normalizeSettings(settings);
   if (provider !== 'codex' || platform !== 'win32' || normalized.codexRuntime !== 'wsl') {
     return null;
   }
+  if (typeof cache !== 'boolean') throw new TypeError('WSL runtime cache 必须是布尔值');
+  if (typeof onPhase !== 'function') throw new TypeError('WSL runtime phase listener 必须是函数');
+  onPhase('wsl-preparing', {
+    distribution:normalized.wslDistribution,
+    user:normalized.wslUser,
+  });
   const callWsl = args => runWsl(args, { wslExecutable, environment });
-  const codexOutput = await callWsl(wslArguments(
+  const cacheEntry = cache
+    ? wslRuntimeCache(normalized, { runWsl, wslExecutable })
+    : null;
+  const { codexExecutable, nodeExecutable, wslHome } = await probeWslRuntime(
     normalized,
-    '--exec', 'bash', '-lic', 'command -v codex',
-  ));
-  const codexExecutable = outputLine(
-    codexOutput,
-    line => line.startsWith('/') && !/[\0\r\n]/.test(line),
-    `WSL ${normalized.wslDistribution}/${normalized.wslUser} 的登录环境中找不到 codex`,
-  );
-  const nodeOutput = await callWsl(wslArguments(
-    normalized,
-    '--exec', 'bash', '-lic', 'command -v node',
-  ));
-  const nodeExecutable = outputLine(
-    nodeOutput,
-    line => line.startsWith('/') && !/[\0\r\n]/.test(line),
-    `WSL ${normalized.wslDistribution}/${normalized.wslUser} 的登录环境中找不到 node`,
-  );
-  const homeOutput = await callWsl(wslArguments(
-    normalized,
-    '--exec', 'printenv', 'HOME',
-  ));
-  const wslHome = outputLine(
-    homeOutput,
-    line => line.startsWith('/') && !/[\0\r\n]/.test(line),
-    '无法确定 WSL 用户 HOME',
+    callWsl,
+    cacheEntry,
   );
 
   const candidates = new Set([projectRoot, cwd, ...pathRoots]);
@@ -197,19 +305,11 @@ export async function prepareAgentTerminalRuntime(provider, {
     if (typeof environment[key] === 'string' && environment[key]) candidates.add(environment[key]);
   }
   const mappings = new Map();
-  for (const windowsPath of candidates) {
-    if (typeof windowsPath !== 'string' || !win32.isAbsolute(windowsPath)) continue;
-    const stdout = await callWsl(wslArguments(
-      normalized,
-      '--exec', 'wslpath', '-a', '-u', windowsPath,
-    ));
-    const mapped = outputLine(
-      stdout,
-      line => line.startsWith('/') && !/[\0\r\n]/.test(line),
-      `无法把 Windows 路径转换为 WSL 路径：${windowsPath}`,
-    );
+  await Promise.all([...candidates].map(async windowsPath => {
+    if (typeof windowsPath !== 'string' || !win32.isAbsolute(windowsPath)) return;
+    const mapped = await mapWindowsPath(normalized, windowsPath, callWsl, cacheEntry);
     mappings.set(windowsPath, mapped);
-  }
+  }));
   const wslCwd = mappings.get(cwd);
   const wslProjectRoot = mappings.get(projectRoot);
   const wslEditorRoot = [...pathRoots].map(value => mappings.get(value)).find(Boolean);
@@ -253,4 +353,8 @@ export async function prepareAgentTerminalRuntime(provider, {
       ],
     }),
   };
+}
+
+export function prewarmAgentTerminalRuntime(provider, options = {}) {
+  return prepareAgentTerminalRuntime(provider, options);
 }
