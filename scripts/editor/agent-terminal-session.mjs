@@ -23,6 +23,8 @@ const MISSING_AGENT_SESSION = Object.freeze({
 const INTERACTION_SCAN_CHARS = 8 * 1024;
 const DIRECTORY_TRUST_MESSAGE = '请在右侧终端确认是否信任当前项目目录';
 const CODEX_UPDATE_MESSAGE = '请在右侧终端处理 Codex 更新提示';
+const WORKING_DIRECTORY_SELECTION_MESSAGE = '请在右侧终端选择恢复会话使用的工作目录';
+const TERMINAL_SELECTION_MESSAGE = '请在右侧终端完成 CLI 选项确认';
 
 function visibleTerminalText(output) {
   return String(output ?? '')
@@ -30,6 +32,9 @@ function visibleTerminalText(output) {
     // Codex TUI 用 CSI n C/a 表示单词之间的水平空白；若直接删掉，
     // `Do you trust` 会塌成 `Doyoutrust`，目录信任闸门无法识别。
     .replace(/\u001b\[\d{0,4}[Ca]/g, ' ')
+    // Codex 0.149 的恢复目录菜单用绝对 row/column 定位逐词绘制，并隐藏
+    // 真实光标；保留一个边界空格，避免 `Choose`、`working` 等词粘连。
+    .replace(/\u001b\[(?:\d{0,4};)?\d{0,4}[Hf]/g, ' ')
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\r/g, '\n');
 }
@@ -54,6 +59,47 @@ function codexUpdateInteractionRequested(output) {
   // “跳过到下一版本”和“按键继续”时才开放终端交互，避免遮罩拦住回车。
   return /skip until next version/i.test(text)
     && /press(?:\s+\S+)?\s+to continue/i.test(text);
+}
+
+function workingDirectorySelectionRequested(output) {
+  const text = visibleTerminalText(output).replace(/[ \t]+/g, ' ');
+  if (!text.trim()) return false;
+  return /choose\s+(?:the\s+)?working\s+directory\s+to\s+resume\s+(?:this|the)\s+session/i
+    .test(text)
+    || (/use\s+session\s+directory/i.test(text)
+      && /use\s+current\s+directory/i.test(text)
+      && /press(?:\s+\S+)?\s+to continue/i.test(text));
+}
+
+function terminalSelectionRequested(output) {
+  const text = visibleTerminalText(output).replace(/[ \t]+/g, ' ');
+  if (!text.trim()) return false;
+  // TUI 菜单通常隐藏真实光标，以 `›` 标记当前项。要求高亮编号项、至少两个
+  // 编号选项和明确操作提示三者同时存在；普通编号日志以及 Codex 的
+  // `› Ask ...` 空输入框都不能命中这个兜底规则。
+  const numberedChoices = text.match(/(?:^|\s)(?:›\s*)?\d+[.)]\s+\S/g) ?? [];
+  if (numberedChoices.length < 2 || !/(?:^|\s)›\s*\d+[.)]\s+\S/.test(text)) return false;
+  return /(?:press\s+(?:enter|return)|use\s+(?:the\s+)?(?:arrow|up|down)|\bchoose\b|\bselect\b)/i
+    .test(text);
+}
+
+function terminalInteractionRequested(provider, output) {
+  if (directoryTrustRequested(output)) {
+    return { kind:'directory-trust', message:DIRECTORY_TRUST_MESSAGE };
+  }
+  if (provider === 'codex' && workingDirectorySelectionRequested(output)) {
+    return {
+      kind:'working-directory-selection',
+      message:WORKING_DIRECTORY_SELECTION_MESSAGE,
+    };
+  }
+  if (provider === 'codex' && codexUpdateInteractionRequested(output)) {
+    return { kind:'codex-update', message:CODEX_UPDATE_MESSAGE };
+  }
+  if (terminalSelectionRequested(output)) {
+    return { kind:'terminal-selection', message:TERMINAL_SELECTION_MESSAGE };
+  }
+  return null;
 }
 
 function missingAgentSession(provider, output) {
@@ -712,11 +758,7 @@ export class AgentTerminalSession {
       }
       const interactionRequested = (!this.promptReady || this.interactionRequired)
         && !acceptsPrompt
-        && (directoryTrustRequested(this.interactionScanOutput)
-          ? { kind:'directory-trust', message:DIRECTORY_TRUST_MESSAGE }
-          : provider === 'codex' && codexUpdateInteractionRequested(this.interactionScanOutput)
-            ? { kind:'codex-update', message:CODEX_UPDATE_MESSAGE }
-            : null);
+        && terminalInteractionRequested(provider, this.interactionScanOutput);
       if (interactionRequested
         && interactionRequested.kind !== this.interactionRequired?.kind) {
         this.interactionRequired = interactionRequested;
@@ -895,8 +937,8 @@ export class AgentTerminalSession {
     }
     // 当前进程第一次确认真实输入框之前一律锁住键盘，覆盖新建和恢复会话；
     // 后续 Agent turn 工作时 promptReady 虽会暂时为 false，但能力闸门已经确认，
-    // Esc/Ctrl+C 等交互仍可正常传给 CLI。目录信任与 Codex 更新面板是输入框
-    // 之前的显式交互，必须例外允许用户作答。
+    // Esc/Ctrl+C 等交互仍可正常传给 CLI。目录信任、Codex 更新和启动选择页是
+    // 输入框之前的显式交互，必须例外允许用户作答。
     if ((!this.promptCapabilityConfirmed
       || this.historyProjectionPending
       || ['pending', 'submitting', 'awaiting-confirmation'].includes(this.startupPromptState))

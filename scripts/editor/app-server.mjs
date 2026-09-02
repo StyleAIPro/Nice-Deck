@@ -91,6 +91,9 @@ const APP_ASSETS = new Map([
   ['/app/pill-nav.css', {
     path:join(EDITOR_DIR, 'public/pill-nav.css'), type:'text/css; charset=utf-8',
   }],
+  ['/app/guided-tour.css', {
+    path:join(EDITOR_DIR, 'public/guided-tour.css'), type:'text/css; charset=utf-8',
+  }],
   ['/app/create-deck-icon.png', {
     path:join(APP_PUBLIC_DIR, 'create-deck-icon.png'), type:'image/png',
   }],
@@ -637,6 +640,7 @@ export async function startAppServer({
     await workHistoryStore.recordDeck({
       deckPath:selectedCandidate.deckPath,
       provider,
+      projectRoot:selectedCandidate.project.path,
     }).catch(() => {});
     await activeWorkCatalog.reopenEditing({
       deckPath:selectedCandidate.deckPath,
@@ -672,6 +676,7 @@ export async function startAppServer({
       agentProvider:provider,
       agentThreadId:null,
       agentProjectRoot:selectedCandidate.project.path,
+      agentProjectRootSource:selectedCandidate.project.source,
       agentTerminalCwd:selectedCandidate.project.identity.originalPath,
       autoStartAgentTerminal:true,
       pythonExecutable,
@@ -1572,6 +1577,7 @@ export async function startAppServer({
         await workHistoryStore.recordDeck({
           deckPath:draft.generation.publishedDeck,
           provider:draft.provider,
+          projectRoot:draft.projectRoot,
         }).catch(() => {});
         await workHistoryStore.completeCreation({
           projectRoot:draft.projectRoot,

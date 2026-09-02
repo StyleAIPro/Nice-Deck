@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/editor/ui-font.css">
   <link rel="stylesheet" href="/editor/xterm.css">
   <link rel="stylesheet" href="/editor/editor.css">
+  <link rel="stylesheet" href="/editor/guided-tour.css">
   <link rel="stylesheet" href="/editor/agent-terminal-panel.css">
   <link rel="stylesheet" href="/editor/pill-nav.css">
 </head>
@@ -49,6 +50,8 @@
         </button>
       </div>
       <div class="topbar-actions">
+        <button class="guided-tour-trigger" type="button" data-guided-tour="editing"
+          aria-label="新手引导" title="新手引导"><span aria-hidden="true">?</span></button>
         <nav class="workspace-navigation" data-workspace-navigation hidden aria-label="工作台导航">
           <button class="workspace-navigation-button" type="button" data-workspace-switch
             aria-label="切换项目" title="切换项目"

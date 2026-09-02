@@ -288,6 +288,57 @@ test('bypass Agent 遇到目录信任提示时自动展开右侧终端并等待�
   assert.deepEqual(resourceProblems, []);
 });
 
+test('Codex 恢复目录选择页自动展开终端、撤掉遮罩并接收键盘选择', async t => {
+  const children = [];
+  const app = await startFixtureServer({
+    autoStartAgentTerminal:true,
+    resolveAgentConversation:async () => ({
+      conversationId:'codex-resume-directory-e2e',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnAgentTerminal:(executable, args, options) => {
+      const child = new FakePty(executable, args, options, 4950 + children.length);
+      children.push(child);
+      queueMicrotask(() => child.events.emit(
+        'data',
+        '\u001b[1;1H\u001b[J'
+          + '\u001b[2;1HChoose\u001b[2;8Hworking\u001b[2;16Hdirectory\u001b[2;26Hto'
+          + '\u001b[2;29Hresume\u001b[2;36Hthis\u001b[2;41Hsession'
+          + '\u001b[4;3HSession = latest cwd recorded in the resumed session'
+          + '\u001b[5;3HCurrent = your current working directory'
+          + '\u001b[7;1H› 1. Use session directory\u001b[8;6H(/tmp/old-huawei-deck)'
+          + '\u001b[9;3H2.\u001b[9;6HUse current directory (/tmp/huawei-deck)'
+          + '\u001b[10;3H3.\u001b[10;6HAlways use session directory'
+          + '\u001b[11;3H4.\u001b[11;6HAlways use current directory'
+          + '\u001b[13;3HPress enter to continue\u001b[?25l',
+      ));
+      return child;
+    },
+  });
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  const panel = page.locator('[data-agent-terminal-panel]');
+  await page.waitForFunction(() => (
+    document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'attention'
+      && document.querySelector('[data-agent-terminal-panel]')?.dataset.interactionRequired
+        === 'working-directory-selection'
+  ));
+  assert.equal(await panel.isVisible(), true, '恢复目录选择必须自动展开终端');
+  assert.equal(await panel.getAttribute('data-terminal-loading'), 'false', '目录选择不能被恢复遮罩挡住');
+  assert.match(await panel.locator('.agent-terminal-detail').innerText(), /选择恢复会话使用的工作目录/);
+
+  await panel.locator('[data-agent-terminal-host]').click();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(40);
+  assert.deepEqual(children[0].writes, ['\u001b[B', '\r']);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('恢复旧 Codex 会话进入输入框前保持遮罩并拒绝输入与 Agent 任务', async t => {
   const children = [];
   let releaseReady;

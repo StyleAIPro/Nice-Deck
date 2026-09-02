@@ -48,6 +48,7 @@ export class CreationManagedDeck {
       agentProvider:provider,
       agentThreadId:terminal.snapshot?.().conversationId ?? null,
       agentProjectRoot:projectRoot,
+      agentProjectRootSource:'explicit',
       agentTerminalCwd:terminalCwd,
       agentTerminalSession:terminal,
       autoStartAgentTerminal:false,

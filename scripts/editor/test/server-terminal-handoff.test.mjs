@@ -169,6 +169,71 @@ test('应用重启后 Creation 恢复以当前 Draft 项目根覆盖最终 Deck 
   }
 });
 
+test('重开任务修复可信项目根，用户显式换根时不跨目录恢复旧会话', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-editor-conversation-root-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const projectRoot = join(root, 'project');
+  await mkdir(projectRoot);
+  const deckPath = join(projectRoot, 'deck.html');
+  await writeFile(deckPath, '<!doctype html><title>conversation root</title>');
+  const oldId = '019ff3bd-3f52-7f91-8ee6-61da2977a390';
+  const newId = '019ff3bd-3f52-7f91-8ee6-61da2977a391';
+
+  const original = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    agentProjectRoot:root, agentThreadId:oldId, autoStartAgentTerminal:false,
+  });
+  await original.close();
+
+  let repairedResumeId = null;
+  const repaired = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    agentProjectRoot:projectRoot,
+    agentProjectRootSource:'persisted',
+    autoStartAgentTerminal:false,
+    resumeAgentTerminalConversation:async (_provider, { conversationId }) => {
+      repairedResumeId = conversationId;
+      return { conversationId, resume:true };
+    },
+    createAgentTerminalConversation:async () => assert.fail('可信根修复后应继续原会话'),
+    spawnAgentTerminal:(executable, args, options) => new FakePty(
+      executable, args, options, 8400,
+    ),
+  });
+  await repaired.agentTerminal.start();
+  assert.equal(repairedResumeId, oldId);
+  assert.equal(
+    repaired.agentWorkspace.snapshot().providers.codex.conversations[0].projectRoot,
+    await realpath(projectRoot),
+  );
+  await repaired.close();
+
+  let staleResumeAttempted = false;
+  const switched = await startServer({
+    deckPath, host:'127.0.0.1', port:0, openBrowser:false,
+    agentProjectRoot:root,
+    agentProjectRootSource:'explicit',
+    autoStartAgentTerminal:false,
+    resumeAgentTerminalConversation:async () => {
+      staleResumeAttempted = true;
+      return { conversationId:oldId, resume:true };
+    },
+    createAgentTerminalConversation:async () => ({
+      conversationId:newId, resume:true, initialPromptConsumed:true,
+    }),
+    spawnAgentTerminal:(executable, args, options) => new FakePty(
+      executable, args, options, 8401,
+    ),
+  });
+  try {
+    await switched.agentTerminal.start();
+    assert.equal(staleResumeAttempted, false);
+    assert.equal(switched.agentTerminal.snapshot().conversationId, newId);
+  } finally {
+    await switched.close();
+  }
+});
+
 test('应用重启恢复已发布 Draft 时先启动终端，再按顺序发送 Creation 交接说明', async t => {
   const root = await mkdtemp(join(tmpdir(), 'deck-editor-stopped-handoff-'));
   t.after(() => rm(root, { recursive:true, force:true }));

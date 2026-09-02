@@ -9,12 +9,14 @@ import { createLauncherLeaseClient } from './launcher-lease-client.mjs';
 import { compileActionGroups, sourceRebaseActionIds } from './action-compiler.mjs';
 import { historyCandidates, historyLabel } from '/editor/history-state.mjs';
 import { isRegionShortcutKey } from '/editor/editor-shortcuts.mjs';
+import { createGuidedTour } from '/editor/guided-tour.mjs';
 
 const params = new URLSearchParams(location.search);
 installPillNav(document);
 const token = params.get('token') ?? '';
 const editorToken = params.get('editorToken') ?? '';
 const embeddedCreation = params.get('embedded') === 'creation';
+const guidedTourButton = document.querySelector('[data-guided-tour="editing"]');
 const workspaceNavigation = document.querySelector('[data-workspace-navigation]');
 const switchWorkspaceButton = document.querySelector('[data-workspace-switch]');
 const workspaceHomeButton = document.querySelector('[data-workspace-home]');
@@ -78,6 +80,46 @@ const inspectorContent = document.querySelector('[data-inspector-content]');
 const selectionState = document.querySelector('[data-selection-state]');
 const inspectorCollapseButton = document.querySelector('[data-inspector-collapse]');
 const inspectorReopenButton = document.querySelector('[data-inspector-reopen]');
+const guidedTour = createGuidedTour({
+  storageKeyPrefix:'huawei-deck-editor-guided-tour',
+  canStart:() => !embeddedCreation,
+  sequences:{
+    editing:[
+      {
+        target:'.page-panel', placement:'right',
+        title:'从页面列表掌握整份 Deck',
+        copy:'左侧显示全部页面和任务状态。展开后可快速切页；页面身份不会因为改名或调整顺序而丢失。',
+      },
+      {
+        target:'.mode-tools', placement:'bottom',
+        title:'三种模式各司其职',
+        copy:'预览用于检查效果；编辑可直接改字、移动和缩放；区域标记适合把复杂修改交给 Agent。',
+      },
+      {
+        target:'[data-frame-viewport]', placement:'top',
+        title:'所有修改都先在画布预览',
+        copy:'画布展示托管工作副本和动作投影。修改会自动保存到会话，但不会直接覆盖正式 Deck。',
+      },
+      {
+        target:['.inspector-panel:not([hidden])', '[data-inspector-reopen]:not([hidden])', '.canvas-toolbar'],
+        placement:'left',
+        title:'选中元素后调整属性',
+        copy:'双击文字可直接输入；选中对象后，属性面板提供字体、段落、颜色与外观设置。',
+      },
+      {
+        target:'.agent-status-anchor', placement:'bottom',
+        title:'复杂任务交给右侧 Agent',
+        copy:'区域标记会进入任务列表；点击 Agent 状态可打开真实终端，查看处理过程或补充说明。',
+      },
+      {
+        target:'[data-solidify]', placement:'bottom',
+        title:'最后一步才固化到正式文件',
+        copy:'确认画布和任务结果后再点击“固化修改”。系统会完成冲突、诊断和补丁重放检查后原子发布。',
+      },
+    ],
+  },
+});
+guidedTourButton?.addEventListener('click', () => guidedTour.start('editing'));
 let pendingPageKey;
 let tornDown = false;
 let fitFrameRequest;

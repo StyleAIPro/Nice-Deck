@@ -35,6 +35,53 @@ test('最近 Deck 按文件修改时间排序，并自动剔除已删除文件',
   assert.deepEqual(persisted.entries.map(entry => entry.deckPath), [await realpath(first)]);
 });
 
+test('记录 Deck 时持久化已选项目根，重开不回退到启动器工作目录', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-recents-project-root-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const projectRoot = join(root, 'project');
+  const deck = join(projectRoot, 'deck.html');
+  await mkdir(projectRoot);
+  await writeFile(deck, '<!doctype html><title>project root</title>');
+  const statePath = join(root, 'state', 'recent-decks.json');
+  const store = new RecentDeckStore({ filePath:statePath });
+
+  await store.record({ deckPath:deck, provider:'codex', projectRoot });
+
+  assert.equal((await store.list())[0].projectRoot, await realpath(projectRoot));
+  const persisted = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(persisted.entries[0].projectRoot, await realpath(projectRoot));
+});
+
+test('Creation 交接的旧 Deck 从上下文恢复原项目根，不采信漂移的 Agent 工作区', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-recents-creation-root-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const projectRoot = join(root, 'project');
+  const deck = join(projectRoot, 'created.html');
+  const sessionDir = join(projectRoot, '.huawei-deck-editor', 'created-session');
+  await mkdir(sessionDir, { recursive:true });
+  await writeFile(deck, '<!doctype html><title>created</title>');
+  await writeFile(join(sessionDir, 'session.json'), JSON.stringify({ deckPath:deck }));
+  await writeFile(join(sessionDir, 'agent-workspace.json'), JSON.stringify({
+    activeProvider:'codex', projectRoot:root,
+  }));
+  await writeFile(join(sessionDir, 'creation-context.json'), JSON.stringify({
+    version:1,
+    kind:'creation-to-editing',
+    projectRoot,
+    draft:{
+      projectRoot,
+      generation:{ status:'published', publishedDeck:deck },
+    },
+  }));
+
+  const store = new RecentDeckStore({
+    filePath:join(root, 'state', 'recent-decks.json'),
+    discoveryRoots:[root],
+  });
+
+  assert.equal((await store.list())[0].projectRoot, await realpath(projectRoot));
+});
+
 test('首次使用时从旧编辑会话迁移最近 Deck', async t => {
   const root = await mkdtemp(join(tmpdir(), 'deck-recents-migrate-'));
   t.after(() => rm(root, { recursive:true, force:true }));

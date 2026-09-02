@@ -79,6 +79,12 @@ const EDITOR_ASSETS = new Map([
   ['/editor/pill-nav.css', {
     path: join(PUBLIC_DIR, 'pill-nav.css'), type: 'text/css; charset=utf-8',
   }],
+  ['/editor/guided-tour.mjs', {
+    path: join(PUBLIC_DIR, 'guided-tour.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/guided-tour.css', {
+    path: join(PUBLIC_DIR, 'guided-tour.css'), type: 'text/css; charset=utf-8',
+  }],
   ['/editor/workspace-switcher.mjs', {
     path: join(PUBLIC_DIR, 'workspace-switcher.mjs'), type: 'text/javascript; charset=utf-8',
   }],
@@ -1351,6 +1357,7 @@ export async function startServer({
   agentProvider = 'codex',
   agentThreadId = null,
   agentProjectRoot = null,
+  agentProjectRootSource = null,
   agentTerminalCwd = null,
   agentLaunchCwd = process.cwd(),
   agentRunAdapter = null,
@@ -1493,9 +1500,14 @@ export async function startServer({
       launchCwd:agentLaunchCwd,
     });
     defaultAgentProject = projectResolution.path;
+    const requestedProjectRootSource = agentProjectRootSource ?? projectResolution.source;
     const projectRootSource = persistedAgentWorkspace?.projectRoot === defaultAgentProject
       ? persistedAgentWorkspace.projectRootSource
-      : projectResolution.source;
+      : requestedProjectRootSource;
+    const projectRootChanged = Boolean(
+      persistedAgentWorkspace
+      && persistedAgentWorkspace.projectRoot !== defaultAgentProject
+    );
     const legacyConnection = resolveLegacyConnection({
       provider:agentProvider,
       launchThreadId:agentThreadId,
@@ -1521,6 +1533,25 @@ export async function startServer({
         draft.projectRoot = defaultAgentProject;
         draft.projectRootSource = projectRootSource;
         draft.activeProvider = agentProvider;
+        if (projectRootChanged) {
+          const timestamp = new Date().toISOString();
+          for (const providerState of Object.values(draft.providers)) {
+            const active = providerState.conversations.find(
+              item => item.id === providerState.activeConversationId,
+            );
+            if (!active || active.projectRoot === defaultAgentProject) continue;
+            if (requestedProjectRootSource === 'persisted') {
+              // 历史任务的持久化根来自可验证的 Creation 交接/最近记录；
+              // 用它修复旧版曾被启动器 cwd 污染的会话绑定。
+              active.projectRoot = defaultAgentProject;
+              active.updatedAt = timestamp;
+            } else {
+              // 用户显式换了项目根，旧会话仍保留在历史中，
+              // 但不能在新 cwd 下 resume，否则 CLI 会再次弹出目录选择。
+              providerState.activeConversationId = null;
+            }
+          }
+        }
       }, openedWorkspace.workspaceRevision);
     }
   } catch (error) {

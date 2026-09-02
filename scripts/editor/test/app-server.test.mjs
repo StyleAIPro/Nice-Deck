@@ -502,7 +502,9 @@ test('活动 Editor 已接受固化文件但目录写回遗漏时首页自动补
   await writeFile(replacement, published);
   await rename(replacement, deckPath);
   await runtimeBinding.acceptPublishedFile({
-    expectedPath:deckPath,
+    // WorkCatalog 会把 macOS 的 /var 别名规范为 /private/var；活动 Editor
+    // 接受固化文件时使用自身绑定快照中的权威路径。
+    expectedPath:runtimeBinding.snapshot().currentPath,
     expectedFingerprint:'sha256:' + createHash('sha256').update(published).digest('hex'),
   });
 
@@ -875,7 +877,9 @@ test('启动页返回最近修改 Deck，快捷加载仍经过项目目录确认
     provider:'claude-code',
   });
   assert.equal(opened.status, 200);
-  assert.deepEqual(recorded, { deckPath, provider:'claude-code' });
+  assert.deepEqual(recorded, {
+    deckPath, provider:'claude-code', projectRoot:'/tmp/recent-project',
+  });
 });
 
 test('可继续任务接口同时返回 Creation Draft 与修改 Deck', async t => {
@@ -1494,8 +1498,16 @@ test('生成成功后 Editor 接收同一个 PTY runtime，交接请求保持幂
   };
   let terminal;
   let startCount = 0;
+  const recordedDecks = [];
+  const workHistoryStore = {
+    async list() { return { version:1, creation:[], editing:[] }; },
+    async recordCreation() {},
+    async recordDeck(entry) { recordedDecks.push(entry); },
+    async completeCreation() {},
+  };
   const app = await startAppServer({
     token:'app-secret',
+    workHistoryStore,
     pickAgentProjectDirectory:async () => projectRoot,
     resolveCreationProject:async () => ({
       path:projectRoot, source:'explicit', needsConfirmation:false, warning:null,
@@ -1528,6 +1540,8 @@ test('生成成功后 Editor 接收同一个 PTY runtime，交接请求保持幂
   assert.equal(terminal.closed, false);
   assert.equal(workspaceClosed, true);
   assert.equal(startCount, 0);
+  assert.equal(recordedDecks.length, 1);
+  assert.equal(recordedDecks[0].projectRoot, projectRoot);
   const reopened = await postJson(app, '/api/creation-draft/open-editor', {});
   assert.equal(reopened.status, 200, await reopened.clone().text());
   assert.equal((await reopened.json()).editorUrl, result.editorUrl);

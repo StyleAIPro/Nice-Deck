@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { isAgentProviderId } from './agent-provider-registry.mjs';
 import { resolveEditorStateRoot } from './editor-state-root.mjs';
 
@@ -13,6 +13,11 @@ function isDeckPath(value) {
 
 function emptyState() {
   return { version:SCHEMA_VERSION, entries:[], dismissed:[] };
+}
+
+function contains(root, target) {
+  const suffix = relative(root, target);
+  return suffix === '' || (!suffix.startsWith('..') && !isAbsolute(suffix));
 }
 
 export class RecentDeckStore {
@@ -68,6 +73,13 @@ export class RecentDeckStore {
       const detail = await stat(deckPath);
       if (!detail.isFile()) return null;
       const session = await this.#sessionSummary(deckPath);
+      let persistedProjectRoot = null;
+      if (typeof entry.projectRoot === 'string') {
+        try {
+          const candidate = await realpath(entry.projectRoot);
+          if ((await stat(candidate)).isDirectory()) persistedProjectRoot = candidate;
+        } catch { /* 旧记录的项目根失效时仍保留 Deck 入口 */ }
+      }
       const activityAtMs = Math.max(detail.mtimeMs, session?.activityAtMs ?? 0);
       return {
         deckPath,
@@ -81,7 +93,9 @@ export class RecentDeckStore {
           : isAgentProviderId(entry.provider) ? entry.provider : 'codex',
         progress:session?.progress ?? '继续编辑',
         sessionId:session?.sessionId ?? null,
-        projectRoot:session?.projectRoot ?? null,
+        // 显式记录的项目根代表用户最后一次打开时的选择；
+        // sidecar / Creation 上下文只负责为没有新记录的旧任务补齐。
+        projectRoot:persistedProjectRoot ?? session?.projectRoot ?? null,
       };
     } catch (error) {
       if (['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) return null;
@@ -109,9 +123,22 @@ export class RecentDeckStore {
         let provider = null;
         let projectRoot = null;
         try {
+          const context = JSON.parse(await readFile(join(sessionDir, 'creation-context.json'), 'utf8'));
+          const contextRoot = await realpath(context?.projectRoot);
+          const draftRoot = await realpath(context?.draft?.projectRoot);
+          const publishedDeck = await realpath(context?.draft?.generation?.publishedDeck);
+          if (context?.version === 1 && context.kind === 'creation-to-editing'
+            && contextRoot === draftRoot && publishedDeck === deckPath
+            && contains(contextRoot, deckPath)) {
+            projectRoot = contextRoot;
+          }
+        } catch { /* 非 Creation 交接任务没有该上下文 */ }
+        try {
           const workspace = JSON.parse(await readFile(join(sessionDir, 'agent-workspace.json'), 'utf8'));
           provider = workspace?.activeProvider ?? null;
-          projectRoot = typeof workspace?.projectRoot === 'string' ? workspace.projectRoot : null;
+          if (projectRoot === null && typeof workspace?.projectRoot === 'string') {
+            projectRoot = workspace.projectRoot;
+          }
         } catch { /* 旧会话没有 Agent 工作区时继续使用最近列表中的 provider */ }
         const summary = {
           sessionId:typeof state.sessionId === 'string' ? state.sessionId : null,
@@ -185,7 +212,7 @@ export class RecentDeckStore {
     const normalized = inspected.map(({ modifiedAtMs:unused, ...entry }) => entry);
     const persisted = normalized.map(({ deckName:unusedName, directory:unusedDirectory,
       modifiedAt:unusedModifiedAt, progress:unusedProgress, sessionId:unusedSessionId,
-      projectRoot:unusedProjectRoot, ...entry }) => entry);
+      ...entry }) => entry);
     const source = state.entries.slice(0, this.limit);
     if (JSON.stringify(persisted) !== JSON.stringify(source)) {
       await this.#write(persisted, state.dismissed);
@@ -193,16 +220,24 @@ export class RecentDeckStore {
     return normalized;
   }
 
-  async record({ deckPath, provider = 'codex' }) {
+  async record({ deckPath, provider = 'codex', projectRoot = null }) {
     const canonicalPath = await realpath(deckPath);
     if (!isDeckPath(canonicalPath) || !(await stat(canonicalPath)).isFile()) {
       throw new Error(`最近 Deck 不是可用的 HTML 文件：${deckPath}`);
+    }
+    let canonicalProjectRoot = null;
+    if (projectRoot !== null) {
+      canonicalProjectRoot = await realpath(projectRoot);
+      if (!(await stat(canonicalProjectRoot)).isDirectory()) {
+        throw new Error(`Agent 项目根不是可用目录：${projectRoot}`);
+      }
     }
     const state = await this.#read();
     const entry = {
       deckPath:canonicalPath,
       lastOpenedAt:this.now().toISOString(),
       provider:isAgentProviderId(provider) ? provider : 'codex',
+      ...(canonicalProjectRoot ? { projectRoot:canonicalProjectRoot } : {}),
     };
     const entries = [entry, ...state.entries.filter(item => item?.deckPath !== canonicalPath)]
       .slice(0, this.limit);

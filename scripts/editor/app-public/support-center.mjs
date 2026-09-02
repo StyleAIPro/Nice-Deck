@@ -4,6 +4,58 @@ const SUPPORT_TITLES = {
   diagnostics:'安装与诊断',
 };
 const ONBOARDING_STORAGE_KEY = 'huawei-deck-onboarding-v1';
+const GUIDED_TOUR_STORAGE_KEY = 'huawei-deck-guided-tour-v1';
+const GUIDED_TOUR_SEQUENCES = {
+  home:[
+    {
+      target:'[data-tour-target="create-deck"]', placement:'right',
+      title:'从零创建一份 Deck',
+      copy:'选择这条路径后，先和 Agent 对齐需求、大纲和页面规划，再进入实时画布继续制作。',
+    },
+    {
+      target:'[data-tour-target="edit-deck"]', placement:'left',
+      title:'继续修改已有 Deck',
+      copy:'已经有单文件 HTML 时，从这里添加。编辑器会使用托管工作副本，明确固化前不会覆盖源文件。',
+    },
+    {
+      target:'[data-tour-target="continue-work"]', placement:'right',
+      title:'从上次停下的位置继续',
+      copy:'创建记录、编辑会话和 Agent 上下文都会显示在这里。点击记录即可恢复，不必重新选择文件。',
+    },
+    {
+      target:'[data-support-navigation]', placement:'bottom',
+      title:'需要时再查看帮助',
+      copy:'“帮助”用于查具体操作；“安装与诊断”会按任务检查本机能力，不让可选工具阻塞基础编辑。',
+    },
+    {
+      target:'.local-badge', placement:'bottom',
+      title:'内容始终留在本机',
+      copy:'Deck、Draft、附件和修改记录都保存在本机。现在可以选择一条路径，开始第一项工作。',
+    },
+  ],
+  creation:[
+    {
+      target:'.milestone-rail', placement:'right',
+      title:'四个里程碑自动点亮',
+      copy:'需求、大纲、页面规划和 Deck 生成都由真实文件状态驱动。这里只看进度，不需要手动勾选。',
+    },
+    {
+      target:'[data-agent-terminal]', placement:'left',
+      title:'在这里和 Agent 一起制作',
+      copy:'右侧是真实 Agent 终端。继续描述需求、确认大纲或提出修改，过程会保留在当前工作项中。',
+    },
+    {
+      target:'[data-milestone="deck"]', placement:'right',
+      title:'Deck 出现后画布自动展开',
+      copy:'第四个里程碑完成时，中间会打开实时画布；结构制作和后续微调使用同一份托管工作副本。',
+    },
+    {
+      target:['[data-open-generated]:not([hidden])', '[data-milestone="deck"]'], placement:'right',
+      title:'完成后进入微调编辑器',
+      copy:'Deck 发布后可进入标准编辑页，继续改字、移动、缩放、标注任务，并在确认后固化到正式文件。',
+    },
+  ],
+};
 
 
 function createElement(tag, className = '', text) {
@@ -128,6 +180,7 @@ export function createSupportCenter({
     tabs:[...document.querySelectorAll('[data-support-tab]')],
     views:[...document.querySelectorAll('[data-support-view]')],
     openers:[...document.querySelectorAll('[data-support-open]')],
+    guidedTourOpeners:[...document.querySelectorAll('[data-guided-tour]')],
     closers:[...document.querySelectorAll('[data-support-close]')],
     helpTopics:document.querySelector('[data-help-topic-list]'),
     helpArticle:document.querySelector('[data-help-article]'),
@@ -138,10 +191,27 @@ export function createSupportCenter({
     onboardingChecks:[...document.querySelectorAll('[data-onboarding-step]')],
     createSample:document.querySelector('[data-create-sample]'),
     openDiagnostics:document.querySelector('[data-open-diagnostics]'),
+    tour:document.querySelector('[data-onboarding-tour]'),
+    tourSpotlight:document.querySelector('[data-tour-spotlight]'),
+    tourArrowShape:document.querySelector('[data-tour-arrow-shape]'),
+    tourCard:document.querySelector('[data-tour-card]'),
+    tourProgress:document.querySelector('[data-tour-progress]'),
+    tourTitle:document.querySelector('[data-tour-title]'),
+    tourCopy:document.querySelector('[data-tour-copy]'),
+    tourDots:document.querySelector('[data-tour-dots]'),
+    tourPrevious:document.querySelector('[data-tour-previous]'),
+    tourSample:document.querySelector('[data-tour-sample]'),
+    tourNext:document.querySelector('[data-tour-next]'),
+    tourSkip:document.querySelector('[data-tour-skip]'),
   };
   let helpCatalog = null;
   let activeHelpTopic = 'quick-start';
   let diagnosticsLoading = false;
+  let tourSequence = 'home';
+  let tourSteps = GUIDED_TOUR_SEQUENCES.home;
+  let tourIndex = 0;
+  let tourTarget = null;
+  let tourFrame = null;
 
   const status = (node, message = '', kind = '') => {
     node.textContent = message;
@@ -350,6 +420,124 @@ export function createSupportCenter({
     return null;
   }
 
+  const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
+  const positionTour = () => {
+    if (ui.tour.hidden || !tourTarget?.isConnected) return;
+    const target = tourTarget.getBoundingClientRect();
+    if (target.width <= 0 || target.height <= 0) return;
+    const inset = 10;
+    ui.tourSpotlight.style.left = `${target.left - inset}px`;
+    ui.tourSpotlight.style.top = `${target.top - inset}px`;
+    ui.tourSpotlight.style.width = `${target.width + inset * 2}px`;
+    ui.tourSpotlight.style.height = `${target.height + inset * 2}px`;
+
+    const card = ui.tourCard.getBoundingClientRect();
+    const gap = 126;
+    const edge = 24;
+    const step = tourSteps[tourIndex];
+    const positions = {
+      right:{ left:target.right + gap, top:target.top + (target.height - card.height) / 2 },
+      left:{ left:target.left - card.width - gap, top:target.top + (target.height - card.height) / 2 },
+      bottom:{ left:target.left + (target.width - card.width) / 2, top:target.bottom + gap },
+      top:{ left:target.left + (target.width - card.width) / 2, top:target.top - card.height - gap },
+    };
+    const preferred = positions[step.placement] ?? positions.bottom;
+    const left = clamp(preferred.left, edge, window.innerWidth - card.width - edge);
+    const top = clamp(preferred.top, edge, window.innerHeight - card.height - edge);
+    ui.tourCard.style.left = `${left}px`;
+    ui.tourCard.style.top = `${top}px`;
+
+    const placedCard = { left, top, right:left + card.width, bottom:top + card.height };
+    const cardCenter = { x:(placedCard.left + placedCard.right) / 2, y:(placedCard.top + placedCard.bottom) / 2 };
+    const targetCenter = { x:target.left + target.width / 2, y:target.top + target.height / 2 };
+    const delta = { x:targetCenter.x - cardCenter.x, y:targetCenter.y - cardCenter.y };
+    let start;
+    let end;
+    if (Math.abs(delta.x) > Math.abs(delta.y)) {
+      start = { x:delta.x > 0 ? placedCard.right : placedCard.left, y:cardCenter.y };
+      end = { x:delta.x > 0 ? target.left - 6 : target.right + 6, y:targetCenter.y };
+    } else {
+      start = { x:cardCenter.x, y:delta.y > 0 ? placedCard.bottom : placedCard.top };
+      end = { x:targetCenter.x, y:delta.y > 0 ? target.top - 6 : target.bottom + 6 };
+    }
+    const length = Math.max(70, Math.hypot(end.x - start.x, end.y - start.y));
+    const angle = Math.atan2(end.y - start.y, end.x - start.x) * 180 / Math.PI;
+    const thickness = clamp(length / 180, .72, 1.05);
+    ui.tourArrowShape.setAttribute(
+      'transform',
+      `translate(${start.x} ${start.y}) rotate(${angle}) scale(${length / 196} ${thickness}) translate(0 -44)`,
+    );
+  };
+  const queueTourPosition = () => {
+    if (tourFrame !== null) cancelAnimationFrame(tourFrame);
+    tourFrame = requestAnimationFrame(() => {
+      tourFrame = null;
+      positionTour();
+    });
+  };
+  const renderTourStep = () => {
+    const step = tourSteps[tourIndex];
+    const selectors = Array.isArray(step.target) ? step.target : [step.target];
+    tourTarget = selectors
+      .map(selector => document.querySelector(selector))
+      .find(node => {
+        if (!node || node.hidden) return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+    if (!tourTarget) return;
+    ui.tourProgress.textContent = `${String(tourIndex + 1).padStart(2, '0')} / ${String(tourSteps.length).padStart(2, '0')}`;
+    ui.tourTitle.textContent = step.title;
+    ui.tourCopy.textContent = step.copy;
+    ui.tourPrevious.disabled = tourIndex === 0;
+    const finalStep = tourIndex === tourSteps.length - 1;
+    ui.tourSample.hidden = !(finalStep && tourSequence === 'home');
+    ui.tourNext.textContent = finalStep ? '完成' : '下一步';
+    for (const [index, dot] of [...ui.tourDots.children].entries()) {
+      dot.dataset.active = String(index === tourIndex);
+    }
+    queueTourPosition();
+    ui.tourNext.focus();
+  };
+  const closeTour = ({ completed=false } = {}) => {
+    if (tourFrame !== null) cancelAnimationFrame(tourFrame);
+    tourFrame = null;
+    ui.tour.hidden = true;
+    tourTarget = null;
+    delete document.body.dataset.tourOpen;
+    if (completed) {
+      try { localStorage.setItem(GUIDED_TOUR_STORAGE_KEY, 'completed'); }
+      catch { /* 禁用本机存储时不影响引导。 */ }
+    }
+  };
+  const startTour = (sequence='home') => {
+    const expectedState = sequence === 'creation' ? 'building' : 'idle';
+    if (getAppState() !== expectedState || !GUIDED_TOUR_SEQUENCES[sequence]) return;
+    ui.layer.hidden = true;
+    delete document.body.dataset.supportOpen;
+    tourSequence = sequence;
+    tourSteps = GUIDED_TOUR_SEQUENCES[sequence];
+    tourIndex = 0;
+    ui.tourDots.replaceChildren(...tourSteps.map(() => {
+      const dot = createElement('i');
+      dot.setAttribute('aria-hidden', 'true');
+      return dot;
+    }));
+    ui.tour.hidden = false;
+    document.body.dataset.tourOpen = 'true';
+    renderTourStep();
+  };
+  const changeTourStep = direction => {
+    const next = tourIndex + direction;
+    if (next < 0) return;
+    if (next >= tourSteps.length) {
+      closeTour({ completed:true });
+      return;
+    }
+    tourIndex = next;
+    renderTourStep();
+  };
+
   const setView = name => {
     const view = SUPPORT_TITLES[name] ? name : 'onboarding';
     ui.title.textContent = SUPPORT_TITLES[view];
@@ -359,6 +547,10 @@ export function createSupportCenter({
     if (view === 'diagnostics') void loadDiagnostics();
   };
   const open = name => {
+    if (name === 'onboarding') {
+      startTour();
+      return;
+    }
     restoreProgress();
     setView(name);
     ui.layer.hidden = false;
@@ -371,38 +563,88 @@ export function createSupportCenter({
   };
 
   for (const opener of ui.openers) opener.addEventListener('click', () => open(opener.dataset.supportOpen));
+  for (const opener of ui.guidedTourOpeners) {
+    opener.addEventListener('click', () => startTour(opener.dataset.guidedTour));
+  }
   for (const closer of ui.closers) closer.addEventListener('click', close);
-  for (const tab of ui.tabs) tab.addEventListener('click', () => setView(tab.dataset.supportTab));
+  for (const tab of ui.tabs) tab.addEventListener('click', () => {
+    if (tab.dataset.supportTab === 'onboarding') {
+      startTour();
+      return;
+    }
+    setView(tab.dataset.supportTab);
+  });
   for (const input of ui.onboardingChecks) input.addEventListener('change', saveProgress);
   ui.openDiagnostics.addEventListener('click', () => setView('diagnostics'));
   ui.refreshDiagnostics.addEventListener('click', () => void loadDiagnostics(true));
-  ui.createSample.addEventListener('click', async () => {
+  const createSampleProject = async ({ fromTour=false } = {}) => {
     if (getAppState() !== 'idle') {
-      status(ui.onboardingStatus, '请先返回“初始页”，再创建示例副本。', 'error');
+      if (fromTour) ui.tourCopy.textContent = '请先返回“初始页”，再创建示例副本。';
+      else status(ui.onboardingStatus, '请先返回“初始页”，再创建示例副本。', 'error');
       return;
     }
     ui.createSample.disabled = true;
-    status(ui.onboardingStatus, '请选择存放示例项目的目录…', 'working');
+    ui.tourSample.disabled = true;
+    if (fromTour) ui.tourSample.textContent = '请选择目录…';
+    else status(ui.onboardingStatus, '请选择存放示例项目的目录…', 'working');
     try {
       const result = await post('/api/onboarding/sample', {});
       if (result.status === 'cancelled') {
-        status(ui.onboardingStatus, '已取消，可以稍后再试。');
+        if (fromTour) ui.tourCopy.textContent = '已取消，可以稍后再试；也可以先完成引导。';
+        else status(ui.onboardingStatus, '已取消，可以稍后再试。');
         return;
       }
       const sample = ui.onboardingChecks.find(input => input.dataset.onboardingStep === 'sample');
       if (sample) sample.checked = true;
       saveProgress();
       close();
+      closeTour({ completed:true });
       onSampleCreated(result);
     } catch (error) {
-      status(ui.onboardingStatus, error.message || '示例项目创建失败', 'error');
+      if (fromTour) ui.tourCopy.textContent = error.message || '示例项目创建失败';
+      else status(ui.onboardingStatus, error.message || '示例项目创建失败', 'error');
     } finally {
       ui.createSample.disabled = false;
+      ui.tourSample.disabled = false;
+      ui.tourSample.textContent = '创建示例副本';
     }
-  });
+  };
+  ui.createSample.addEventListener('click', () => void createSampleProject());
+  ui.tourPrevious.addEventListener('click', () => changeTourStep(-1));
+  ui.tourSample.addEventListener('click', () => void createSampleProject({ fromTour:true }));
+  ui.tourNext.addEventListener('click', () => changeTourStep(1));
+  ui.tourSkip.addEventListener('click', () => closeTour());
+  window.addEventListener('resize', queueTourPosition);
   document.addEventListener('keydown', event => {
+    if (!ui.tour.hidden) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeTour();
+        return;
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        changeTourStep(1);
+        return;
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        changeTourStep(-1);
+        return;
+      }
+      if (event.key === 'Tab') {
+        const controls = [ui.tourSkip, ui.tourPrevious, ui.tourSample, ui.tourNext]
+          .filter(button => !button.disabled && !button.hidden);
+        const current = controls.indexOf(document.activeElement);
+        const offset = event.shiftKey ? -1 : 1;
+        const next = (current + offset + controls.length) % controls.length;
+        event.preventDefault();
+        controls[next].focus();
+        return;
+      }
+    }
     if (event.key === 'Escape' && !ui.layer.hidden) close();
   });
   restoreProgress();
-  return { open, close, setView, loadDiagnostics };
+  return { open, close, setView, loadDiagnostics, startTour, closeTour };
 }

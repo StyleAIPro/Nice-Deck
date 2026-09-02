@@ -64,6 +64,36 @@ test('同一服务进程固定编辑器资源快照，避免新前端连接旧�
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), pinned);
 });
 
+test('修改页使用统一问号入口打开手绘箭头新手引导', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+
+  const trigger = page.locator('[data-guided-tour="editing"]');
+  assert.equal(await trigger.getAttribute('aria-label'), '新手引导');
+  assert.equal(await trigger.getAttribute('title'), '新手引导');
+  assert.equal(await trigger.innerText(), '?');
+  assert.deepEqual(await trigger.evaluate(node => {
+    const style = getComputedStyle(node);
+    return { width:style.width, height:style.height, borderRadius:style.borderRadius };
+  }), { width:'34px', height:'34px', borderRadius:'50%' });
+
+  await trigger.click();
+  await page.getByRole('heading', { name:'从页面列表掌握整份 Deck' }).waitFor();
+  assert.equal(await page.locator('[data-tour-dots] i').count(), 6);
+  assert.match(
+    await page.locator('[data-tour-arrow-shape]').getAttribute('transform'),
+    /^translate\(/,
+  );
+  const arrowBody = page.locator('.tour-arrow-body');
+  assert.equal(await arrowBody.evaluate(node => getComputedStyle(node).fill), 'rgb(199, 0, 11)');
+  await page.getByRole('button', { name:'跳过引导' }).click();
+  assert.equal(await page.locator('.onboarding-tour').isHidden(), true);
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('页面抽屉箭头使用统一圆形样式并随状态反向', async t => {
   const app = await startFixtureServer();
   t.after(() => app.close());

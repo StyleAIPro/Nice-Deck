@@ -326,6 +326,10 @@ test('四份文档统一声明三种 Agent 的可靠 Prompt 提交边界', async
       '服务端拒绝恢复期任务': /AGENT_TERMINAL_RESUMING/,
       '恢复陈旧状态只重绘不直接放行': /陈旧的 `model: loading`[^。\n]{0,160}尺寸重绘[^。\n]{0,160}重绘本身不(?:算就绪|设置 `promptReady`)/,
       'Codex 交互更新页开放终端但阻断任务': /Codex 的普通更新通知[^。\n]{0,180}`interactionRequired: \{kind: "codex-update"\}`[^。\n]{0,180}仅开放终端输入[^。\n]{0,80}Agent 任务仍保持阻断/,
+      'Codex 恢复目录选择投影为显式交互': /恢复(?:会话)?目录[^。\n]{0,180}working-directory-selection/,
+      '未知编号选择页走通用交互兜底': /高亮编号项[^。\n]{0,100}(?:至少两个|多个)[^。\n]{0,40}编号选项[^。\n]{0,180}terminal-selection/,
+      '选择页撤掉加载遮罩': /working-directory-selection[\s\S]{0,900}(?:撤掉|关闭|解除)(?:加载)?遮罩/,
+      '选择页继续阻断任务': /working-directory-selection[\s\S]{0,900}(?:阻断|锁定|保留)[^。\n]{0,100}(?:Prompt|任务)/,
     });
   }
 });

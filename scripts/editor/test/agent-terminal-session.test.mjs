@@ -105,6 +105,20 @@ const CODEX_UPDATE_NOTICE_OUTPUT = '✨ Update available! 0.148.0 -> 0.149.0\r\n
 const CODEX_UPDATE_INTERACTION_OUTPUT = 'Update available! Release notes: '
   + 'https://github.com/openai/codex/releases/latest\r\n'
   + 'Skip until next version\r\nPress \u001b[1mEnter\u001b[0m to continue\u001b[?25h';
+const CODEX_RESUME_DIRECTORY_INTERACTION_OUTPUT = '\u001b[1;1H\u001b[J'
+  + '\u001b[2;1HChoose\u001b[2;8Hworking\u001b[2;16Hdirectory\u001b[2;26Hto'
+  + '\u001b[2;29H\u001b[1mresume\u001b[2;36H\u001b[22mthis\u001b[2;41Hsession'
+  + '\u001b[4;3HSession = latest cwd recorded in the resumed session'
+  + '\u001b[5;3HCurrent = your current working directory'
+  + '\u001b[7;1H› 1. Use session directory'
+  + '\u001b[8;6H(/tmp/old-huawei-deck)'
+  + '\u001b[9;3H2.\u001b[9;6HUse\u001b[9;10Hcurrent\u001b[9;18Hdirectory'
+  + '\u001b[9;28H(/tmp/huawei-deck)'
+  + '\u001b[10;3H3.\u001b[10;6HAlways\u001b[10;13Huse\u001b[10;17Hsession'
+  + '\u001b[10;25Hdirectory'
+  + '\u001b[11;3H4.\u001b[11;6HAlways\u001b[11;13Huse\u001b[11;17Hcurrent'
+  + '\u001b[11;25Hdirectory'
+  + '\u001b[13;3HPress enter to continue\u001b[?25l';
 const CODEX_READY_OUTPUT = '\u001b[3;1Hmodel: gpt-5.6-sol xhigh   /model to change'
   + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
   + CODEX_DRAFT_OUTPUT;
@@ -757,6 +771,82 @@ test('Codex 恢复时升级通知不误放行，交互升级页开放键盘并�
     assert.equal(session.snapshot().promptReady, true);
     await session.close();
   });
+});
+
+test('Codex 恢复目录不一致时开放目录选择页且继续阻断任务', async () => {
+  const children = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    resolveConversation:async () => ({
+      conversationId:'codex-resume-directory-session',
+      resume:true,
+      initialPromptConsumed:true,
+    }),
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start({ provider:'codex' });
+  children[0].events.emit('data', CODEX_RESUME_DIRECTORY_INTERACTION_OUTPUT);
+  assert.deepEqual(session.snapshot().interactionRequired, {
+    kind:'working-directory-selection',
+    message:'请在右侧终端选择恢复会话使用的工作目录',
+  });
+  assert.equal(session.snapshot().promptReady, false);
+  assert.equal(session.snapshot().resumePending, true);
+  session.input('\r');
+  assert.deepEqual(children[0].writes, ['\r'], '目录选择页必须允许用户按键继续');
+
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  await waitForSessionState(session, snapshot => snapshot.resumePending === false);
+  assert.equal(session.snapshot().interactionRequired, null);
+  assert.equal(session.snapshot().resumePending, false);
+  assert.equal(session.snapshot().promptReady, true);
+  await session.close();
+});
+
+test('未知 CLI 编号选择页走通用交互闸门，普通编号日志不误开放键盘', async () => {
+  const children = [];
+  const session = new AgentTerminalSession({
+    projectRoot:'/tmp/huawei-deck',
+    provider:'codex',
+    initialPrompt:() => '选择完成前不能提交',
+    spawnPty:(executable, args, options) => {
+      const child = new FakePty(executable, args, options);
+      children.push(child);
+      return child;
+    },
+  });
+  await session.start();
+  children[0].events.emit('data', '启动日志\r\n1. 扫描项目\r\n2. 加载配置\r\nPress Enter 只是历史说明');
+  assert.equal(session.snapshot().interactionRequired, null);
+  session.input('\r');
+  assert.deepEqual(children[0].writes, [], '没有高亮选项的编号日志必须继续锁住键盘');
+
+  children[0].events.emit(
+    'data',
+    '\u001b[2;1HChoose\u001b[2;8Hstartup\u001b[2;16Hprofile'
+      + '\u001b[4;1H› 1. Safe profile\u001b[5;1H2. Custom profile'
+      + '\u001b[7;1HUse arrow keys, then press Enter\u001b[?25l',
+  );
+  assert.deepEqual(session.snapshot().interactionRequired, {
+    kind:'terminal-selection',
+    message:'请在右侧终端完成 CLI 选项确认',
+  });
+  assert.equal(session.snapshot().promptReady, false);
+  session.input('\u001b[B');
+  session.input('\r');
+  assert.deepEqual(children[0].writes, ['\u001b[B', '\r'], '通用选择页必须允许方向键和回车');
+  assert.equal(session.snapshot().startupPromptState, 'pending');
+
+  children[0].events.emit('data', CODEX_READY_OUTPUT);
+  assert.equal(session.snapshot().interactionRequired, null);
+  assert.equal(session.snapshot().promptReady, true);
+  assert.ok(children[0].writes.some(value => value.includes('选择完成前不能提交')));
+  await session.close();
 });
 
 test('恢复 Codex 会话时显式 model loading 仍不能提前接收任务', async () => {

@@ -930,6 +930,21 @@ test('新建 Deck 终端复用修改页密度，输入行始终位于窗口内',
   await page.getByRole('button', { name:/创建 Draft 并开始对话/ }).click();
   await page.locator('[data-builder]').waitFor({ state:'visible' });
   assert.equal(await supportNavigation.isHidden(), true, '新建 Deck 对话页不应重复显示使用与支持');
+  const guidedTourTrigger = page.getByRole('button', { name:'新手引导', exact:true });
+  assert.equal(await guidedTourTrigger.getAttribute('title'), '新手引导');
+  assert.equal(await guidedTourTrigger.innerText(), '?');
+  await guidedTourTrigger.click();
+  await page.getByRole('heading', { name:'四个里程碑自动点亮' }).waitFor();
+  assert.equal(await page.locator('[data-tour-dots] i').count(), 4);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-tour-arrow-shape]')
+      ?.getAttribute('transform')?.startsWith('translate(')
+  ));
+  assert.match(
+    await page.locator('[data-tour-arrow-shape]').getAttribute('transform'),
+    /^translate\(/,
+  );
+  await page.getByRole('button', { name:'跳过引导' }).click();
   await page.getByRole('button', { name:/重命名工作项 未命名 Deck/ }).click();
   const workItemName = page.getByRole('textbox', { name:'新建 Deck 工作项名称' });
   await workItemName.fill('客户评审工作项');

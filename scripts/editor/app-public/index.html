@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/app/xterm.css?token=__APP_TOKEN__">
   <link rel="stylesheet" href="/app/agent-terminal-panel.css?token=__APP_TOKEN__">
   <link rel="stylesheet" href="/app/app.css?token=__APP_TOKEN__">
+  <link rel="stylesheet" href="/app/guided-tour.css?token=__APP_TOKEN__">
   <link rel="stylesheet" href="/app/pill-nav.css?token=__APP_TOKEN__">
 </head>
 <body>
@@ -35,11 +36,14 @@
     </div>
     <div class="topbar-actions">
       <nav class="support-navigation" data-support-navigation hidden aria-label="使用与支持">
-        <button type="button" class="support-navigation-button" data-support-open="onboarding">开始使用</button>
+        <button type="button" class="guided-tour-trigger" data-support-open="onboarding"
+          aria-label="新手引导" title="新手引导"><span aria-hidden="true">?</span></button>
         <button type="button" class="support-navigation-button" data-support-open="help">帮助</button>
         <button type="button" class="support-navigation-button" data-support-open="diagnostics">安装与诊断</button>
       </nav>
       <nav class="workspace-navigation" data-workspace-navigation hidden aria-label="工作台导航">
+        <button type="button" class="guided-tour-trigger" data-guided-tour="creation"
+          aria-label="新手引导" title="新手引导"><span aria-hidden="true">?</span></button>
         <button type="button" class="workspace-navigation-button" data-workspace-switch
           data-pill-nav data-pill-variant="neutral" data-pill-size="md" data-pill-kind="action">
           <span aria-hidden="true">⇄</span>
@@ -128,7 +132,7 @@
         <p>和 Agent 一起从零搭建，也可以打开已有的单文件 Deck 继续微调。</p>
       </div>
       <div class="work-card-grid">
-        <section class="work-card" aria-labelledby="creation-work-title">
+        <section class="work-card" aria-labelledby="creation-work-title" data-tour-target="create-deck">
           <header class="work-card-header">
             <span class="work-card-icon work-card-icon-create" aria-hidden="true">
               <span class="work-card-icon-glyph"></span>
@@ -142,7 +146,7 @@
           <div class="work-card-subhead">
             <strong>继续任务</strong>
           </div>
-          <div class="work-list" data-creation-work-list aria-live="polite">
+          <div class="work-list" data-creation-work-list data-tour-target="continue-work" aria-live="polite">
             <p class="work-empty">正在读取 Creation Draft…</p>
           </div>
           <footer class="work-card-footer">
@@ -154,7 +158,7 @@
           </footer>
         </section>
 
-        <section class="work-card" aria-labelledby="editing-work-title">
+        <section class="work-card" aria-labelledby="editing-work-title" data-tour-target="edit-deck">
           <header class="work-card-header">
             <span class="work-card-icon work-card-icon-file" aria-hidden="true">
               <span class="work-card-icon-glyph"></span>
@@ -356,6 +360,47 @@
 
     <aside class="agent-terminal-panel creation-agent-terminal-panel" data-agent-terminal aria-label="Agent 对话终端"></aside>
   </main>
+
+  <div class="onboarding-tour" data-onboarding-tour hidden>
+    <div class="tour-spotlight" data-tour-spotlight aria-hidden="true"></div>
+    <svg class="tour-arrow" data-tour-arrow aria-hidden="true">
+      <defs>
+        <clipPath id="app-tour-arrow-clip">
+          <path d="M4 32 C42 29 78 28 119 31 L101 12 L119 4 L196 44 L121 87 L101 79 L119 58 C78 58 42 60 7 68 L20 52 Z"></path>
+        </clipPath>
+      </defs>
+      <g data-tour-arrow-shape>
+        <path class="tour-arrow-body" d="M4 32 C42 29 78 28 119 31 L101 12 L119 4 L196 44 L121 87 L101 79 L119 58 C78 58 42 60 7 68 L20 52 Z"></path>
+        <g class="tour-arrow-hatching" clip-path="url(#app-tour-arrow-clip)">
+          <path d="M-28 92 L26 -6"></path><path d="M-14 92 L40 -6"></path>
+          <path d="M0 92 L54 -6"></path><path d="M14 92 L68 -6"></path>
+          <path d="M28 92 L82 -6"></path><path d="M42 92 L96 -6"></path>
+          <path d="M56 92 L110 -6"></path><path d="M70 92 L124 -6"></path>
+          <path d="M84 92 L138 -6"></path><path d="M98 92 L152 -6"></path>
+          <path d="M112 92 L166 -6"></path><path d="M126 92 L180 -6"></path>
+          <path d="M140 92 L194 -6"></path><path d="M154 92 L208 -6"></path>
+          <path d="M168 92 L222 -6"></path><path d="M182 92 L236 -6"></path>
+        </g>
+      </g>
+    </svg>
+    <section class="tour-card" data-tour-card role="dialog" aria-modal="true"
+      aria-labelledby="tour-title" aria-describedby="tour-copy">
+      <header class="tour-card-header">
+        <span data-tour-progress>01 / 05</span>
+        <button type="button" class="tour-skip" data-tour-skip>跳过引导</button>
+      </header>
+      <h2 id="tour-title" data-tour-title></h2>
+      <p id="tour-copy" data-tour-copy></p>
+      <footer class="tour-card-footer">
+        <div class="tour-dots" data-tour-dots aria-label="引导进度"></div>
+        <div class="tour-actions">
+          <button type="button" class="tour-previous" data-tour-previous>上一步</button>
+          <button type="button" class="tour-step-action" data-tour-sample hidden>创建示例副本</button>
+          <button type="button" class="tour-next" data-tour-next>下一步</button>
+        </div>
+      </footer>
+    </section>
+  </div>
 
   <script src="/app/xterm.js?token=__APP_TOKEN__"></script>
   <script type="module" src="/app/app.mjs?token=__APP_TOKEN__"></script>

@@ -56,11 +56,27 @@ test('开始使用、帮助、诊断与示例副本形成完整首页路径', as
 
   await page.goto(app.appUrl);
   await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
-  await page.getByRole('button', { name:'开始使用', exact:true }).click();
-  await page.getByRole('heading', { name:'用示例副本走通一次完整修改' }).waitFor();
-  assert.equal(await page.locator('[data-onboarding-step]').count(), 6);
+  const guidedTourTrigger = page.getByRole('button', { name:'新手引导', exact:true });
+  assert.equal(await guidedTourTrigger.getAttribute('title'), '新手引导');
+  assert.equal(await guidedTourTrigger.innerText(), '?');
+  assert.deepEqual(await guidedTourTrigger.evaluate(node => {
+    const style = getComputedStyle(node);
+    return { width:style.width, height:style.height, borderRadius:style.borderRadius };
+  }), { width:'34px', height:'34px', borderRadius:'50%' });
+  await guidedTourTrigger.click();
+  await page.getByRole('heading', { name:'从零创建一份 Deck' }).waitFor();
+  assert.equal(await page.locator('[data-tour-dots] i').count(), 5);
+  assert.match(
+    await page.locator('[data-tour-arrow-shape]').getAttribute('transform'),
+    /^translate\(/,
+  );
+  const spotlight = await page.locator('[data-tour-spotlight]').boundingBox();
+  assert.ok(spotlight.width > 100 && spotlight.height > 100);
+  await page.getByRole('button', { name:'下一步' }).click();
+  await page.getByRole('heading', { name:'继续修改已有 Deck' }).waitFor();
+  await page.getByRole('button', { name:'跳过引导' }).click();
 
-  await page.locator('[data-support-tab="help"]').click();
+  await page.getByRole('button', { name:'帮助', exact:true }).click();
   await page.getByRole('button', { name:/3 分钟开始使用/ }).waitFor();
   await page.getByRole('button', { name:/3 分钟开始使用/ }).click();
   await page.locator('[data-help-article] h1').filter({ hasText:'3 分钟开始使用' }).waitFor();
@@ -72,7 +88,12 @@ test('开始使用、帮助、诊断与示例副本形成完整首页路径', as
     'ready',
   );
 
-  await page.locator('[data-support-tab="onboarding"]').click();
+  await page.locator('.support-close').click();
+  await guidedTourTrigger.click();
+  for (let index = 0; index < 4; index += 1) {
+    await page.getByRole('button', { name:'下一步' }).click();
+  }
+  await page.getByRole('heading', { name:'内容始终留在本机' }).waitFor();
   await page.getByRole('button', { name:'创建示例副本' }).click();
   await page.getByRole('heading', { name:'添加 Deck HTML' }).waitFor();
   assert.equal(await page.locator('.support-navigation').isHidden(), true,
