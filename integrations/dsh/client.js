@@ -6,6 +6,9 @@ window.__ModuleLoader__.load({
     const React = require("react");
     const h = React.createElement;
     const brand = globalThis.__AICO_PPT_BRAND__;
+    const brandLogo = typeof brand?.logo === "string"
+      && /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u.test(brand.logo)
+      ? brand.logo : null;
     const optimisticSessionTitles = new Map();
     const sessionTitleWrites = new Map();
 
@@ -20,7 +23,8 @@ window.__ModuleLoader__.load({
 .hwd-sidebar-action:focus-visible{outline:2px solid color-mix(in srgb,#c7000b 42%,transparent);outline-offset:1px}
 .hwd-sidebar-action[data-wide=false]{width:36px;justify-content:center;padding:0}
 .hwd-sidebar-icon{display:grid;width:18px;height:18px;flex:0 0 18px;place-items:center;color:#c7000b}
-.hwd-sidebar-icon svg{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.hwd-sidebar-icon img{display:block;width:18px;height:18px;object-fit:contain}
+.hwd-sidebar-logo-error{display:grid;width:18px;height:18px;place-items:center;border:1px solid currentColor;border-radius:4px;font:700 12px/1 sans-serif}
 .hwd-sidebar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(prefers-reduced-motion:reduce){.hwd-sidebar-action{transition:none}}
 `;
@@ -541,16 +545,6 @@ window.__ModuleLoader__.load({
             }
             return;
           }
-          if (event.data.type === "aico-ppt:create-request") {
-            if (typeof event.data.prompt !== "string" || typeof props.sendTask !== "function") return;
-            try {
-              await props.sendTask(event.data.prompt, event.data.sessionId);
-              setError("");
-            } catch (cause) {
-              setError(`无法发送到 DSH 会话：${cause instanceof Error ? cause.message : String(cause)}`);
-            }
-            return;
-          }
           if (event.data.type !== "aico-ppt:agent-request"
             || typeof event.data.requestId !== "string"
             || typeof event.data.prompt !== "string") return;
@@ -606,10 +600,12 @@ window.__ModuleLoader__.load({
         onClick:props.toggleWorkbench,
       },
       h("span", { className:"hwd-sidebar-icon", "aria-hidden":"true" },
-        h("svg", { viewBox:"0 0 24 24" },
-          h("rect", { x:"3.5", y:"4.5", width:"17", height:"15", rx:"2.5" }),
-          h("path", { d:"M7 15l3.2-3.2 2.4 2.4 2.4-2.4 2 2" }),
-          h("path", { d:"M8 8.5h8" }))),
+        brandLogo
+          ? h("img", { src:brandLogo, alt:"", draggable:false })
+          : h("span", {
+            className:"hwd-sidebar-logo-error",
+            title:"AICO-PPT Logo 输入无效",
+          }, "!")),
       props.wide ? h("span", { className:"hwd-sidebar-label" }, "AICO-PPT") : null);
     }
 
@@ -704,9 +700,7 @@ window.__ModuleLoader__.load({
           const executeDshCommand = createDshWorkBridge(ctx);
           const currentSession = () => sessionSummary(ctx, ctx.sessions.list.getSnapshot().current);
           const sendTask = async (prompt, requestedSessionId) => {
-            const sessionId = typeof requestedSessionId === "string"
-              ? requestedSessionId : ctx.sessions.list.getSnapshot().current;
-            if (sessionId === undefined) throw new Error("当前没有可用的 DSH 会话");
+            const sessionId = requireBridgeString(requestedSessionId, "sessionId");
             await sendToSession(ctx, sessionId, prompt);
           };
           return {

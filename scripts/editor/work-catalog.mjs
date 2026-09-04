@@ -687,6 +687,24 @@ export class WorkCatalog {
       void canPublish;
       void ignoredDeckId;
       storedBinding.currentPath = canonicalPath;
+      const currentProjectRoot = await realpath(current.projectRoot)
+        .catch(() => resolve(current.projectRoot));
+      const nextProjectRoot = projectRoot === null
+        ? current.projectRoot
+        : await realpath(projectRoot).catch(() => resolve(projectRoot));
+      const projectRootChanged = projectRoot !== null
+        && nextProjectRoot !== currentProjectRoot;
+      const dshBinding = projectRootChanged
+        ? {
+          revision:current.dshBinding.revision + 1,
+          workspaceId:null,
+          activeSessionId:null,
+          sessions:current.dshBinding.sessions.map(link => (
+            link.state === 'available' ? { ...link, state:'historical' } : link
+          )),
+          pendingOperation:null,
+        }
+        : structuredClone(current.dshBinding);
       const next = {
         workId:current.workId,
         deckId,
@@ -699,10 +717,10 @@ export class WorkCatalog {
         modifiedAt:this.now().toISOString(),
         lastOpenedAt:current.lastOpenedAt,
         progress:'继续编辑',
-        projectRoot:projectRoot ?? current.projectRoot,
+        projectRoot:nextProjectRoot,
         hiddenAt:null,
         binding:storedBinding,
-        dshBinding:structuredClone(current.dshBinding),
+        dshBinding,
       };
       await this.#write({
         ...state,
@@ -860,7 +878,6 @@ export class WorkCatalog {
         dshBinding:{
           ...current.dshBinding,
           revision:current.dshBinding.revision + 1,
-          activeSessionId:link.sessionId,
           sessions:[...current.dshBinding.sessions, link],
           pendingOperation:null,
         },

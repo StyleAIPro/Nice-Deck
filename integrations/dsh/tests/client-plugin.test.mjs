@@ -5,7 +5,7 @@ import test from 'node:test'
 
 const CLIENT_URL = new URL('../client.js', import.meta.url)
 
-async function loadClientBundle({ fetchImpl } = {}) {
+async function loadClientBundle({ fetchImpl, brand } = {}) {
   const source = await readFile(CLIENT_URL, 'utf8')
   let handoff
   const styles = new Map()
@@ -55,7 +55,10 @@ async function loadClientBundle({ fetchImpl } = {}) {
       return id
     },
     clearInterval(id) { intervalCallbacks.delete(id) },
-    __AICO_PPT_BRAND__:{ appUrl:'http://127.0.0.1:4100/app/?token=test' },
+    __AICO_PPT_BRAND__:brand ?? {
+      appUrl:'http://127.0.0.1:4100/app/?token=test',
+      logo:'data:image/png;base64,dGVzdC1sb2dv',
+    },
   }, { filename: fileURL(CLIENT_URL) })
   assert.ok(handoff)
   const React = {
@@ -192,6 +195,12 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
   assert.equal(launcher.options.id, 'aico-ppt')
   assert.equal(workbench.options.id, 'aico-ppt')
   assert.equal(typeof workbench.component, 'function')
+  const launcherTree = launcher.component({ ...launcher.options.inject(), wide:true })
+  assert.equal(launcherTree.children[0].children[0].type, 'img')
+  assert.equal(
+    launcherTree.children[0].children[0].props.src,
+    'data:image/png;base64,dGVzdC1sb2dv',
+  )
   assert.equal(sessionStartContribution.id, 'aico-ppt')
   assert.equal(sessionStartContribution.label, 'AICO-PPT')
   assert.deepEqual(JSON.parse(JSON.stringify(sessionStartContribution.source.getSnapshot())), [])
@@ -199,13 +208,38 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
   launcher.options.inject().toggleWorkbench()
   assert.deepEqual(toggled, [['aico-ppt', 1100]])
   const face = workbench.options.inject()
-  await face.sendTask('/aico-ppt\n测试任务')
+  await assert.rejects(
+    () => face.sendTask('/aico-ppt\n缺少会话的任务'),
+    /sessionId 无效/u,
+  )
+  await face.sendTask('/aico-ppt\n测试任务', 'session-1')
   currentSessionId = 'session-2'
-  await face.sendTask('/aico-ppt\n第二个任务')
+  await face.sendTask('/aico-ppt\n第二个任务', 'session-2')
   assert.deepEqual(sent, [
     ['session-1', '/aico-ppt\n测试任务'],
     ['session-2', '/aico-ppt\n第二个任务'],
   ])
+
+  const tree = workbench.component(face)
+  const iframe = tree.children[0]
+  const contentWindow = { postMessage() {} }
+  iframe.props.ref.current = { contentWindow }
+  const cleanups = loaded.effects.map(effect => effect()).filter(Boolean)
+  for (const listener of loaded.windowListeners.get('message') ?? []) {
+    await listener({
+      source:contentWindow,
+      origin:'http://127.0.0.1:4100',
+      data:{
+        type:'aico-ppt:create-request',
+        prompt:'/aico-ppt\n旧协议不得发送',
+        sessionId:'session-1',
+      },
+    })
+  }
+  assert.deepEqual(sent, [
+    ['session-1', '/aico-ppt\n测试任务'],
+    ['session-2', '/aico-ppt\n第二个任务'],
+  ], '没有 requestId 的旧消息不得绕过 DSH Bridge')
 
   assert.deepEqual(JSON.parse(JSON.stringify(
     await face.executeDshCommand('ensure-workspace', { path:'/project' }),
@@ -268,6 +302,7 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
   assert.notEqual(immediateCreate, 'blocked', '新会话不能因补写标题而卡住')
   assert.equal(immediateCreate.title, '创建 Deck：后台补名')
   await assert.rejects(() => face.executeDshCommand('unknown-command'), /不支持的 DSH Bridge 命令/u)
+  for (const cleanup of cleanups.reverse()) cleanup()
 })
 
 test('Editor 关闭时仍按项目目录显示 AICO-PPT 入口，并在选择后打开和导航', async () => {

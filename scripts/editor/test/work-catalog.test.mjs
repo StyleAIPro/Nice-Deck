@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
@@ -330,6 +330,11 @@ test('Creation 发布后原位转换为 Editing，并保留 workId、名称和 D
     expectedBindingRevision:creation.dshBinding.revision,
   });
   creation = await catalog.completeDshSessionProvision({ workId:creation.workId, operationId });
+  creation = await catalog.activateDshSession({
+    workId:creation.workId,
+    sessionId:'session-project',
+    expectedBindingRevision:creation.dshBinding.revision,
+  });
 
   const deckId = '49333333-3333-4333-8333-333333333333';
   const coordinator = await openDeckBinding({
@@ -370,6 +375,80 @@ test('Creation 发布后原位转换为 Editing，并保留 workId、名称和 D
     workId:creation.workId, deckPath, deckId, binding,
   });
   assert.equal(retried.revision, promoted.revision);
+});
+
+test('Creation 发布到新项目根时历史化旧会话并清空 Workspace', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-work-catalog-promote-root-change-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const oldRoot = join(root, 'project-a');
+  const newRoot = join(root, 'project-b');
+  await mkdir(oldRoot);
+  await mkdir(newRoot);
+  const deckPath = join(newRoot, 'published.html');
+  await writeFile(deckPath, '<!doctype html><title>published</title>');
+  const catalog = new WorkCatalog({
+    filePath:join(root, 'catalog.json'),
+    legacyHistory:{
+      async list() {
+        return {
+          version:1,
+          creation:[{
+            draftId:'draft-root-change', projectRoot:oldRoot,
+            title:'跨项目发布', provider:'codex',
+          }],
+          editing:[],
+        };
+      },
+    },
+    randomUUID:sequence(['49444444-4444-4444-8444-444444444444']),
+  });
+  let creation = (await catalog.list()).creation[0];
+  const operationId = '49555555-5555-4555-8555-555555555555';
+  creation = await catalog.beginDshSessionProvision({
+    workId:creation.workId,
+    operationId,
+    workspaceId:'workspace-project-a',
+    sessionId:'session-project-a',
+    origin:'fresh',
+    expectedBindingRevision:creation.dshBinding.revision,
+  });
+  creation = await catalog.completeDshSessionProvision({
+    workId:creation.workId,
+    operationId,
+  });
+  creation = await catalog.activateDshSession({
+    workId:creation.workId,
+    sessionId:'session-project-a',
+    expectedBindingRevision:creation.dshBinding.revision,
+  });
+
+  const deckId = '49666666-6666-4666-8666-666666666666';
+  const coordinator = await openDeckBinding({
+    deckId,
+    initialBinding:{
+      revision:0, state:'bound', reason:'none', currentPath:deckPath,
+      previousPath:null, trustedRoot:newRoot,
+    },
+    storageRoot:root,
+    watch:false,
+  });
+  const binding = coordinator.snapshot();
+  await coordinator.close();
+
+  const promoted = await catalog.promoteCreationToEditing({
+    workId:creation.workId,
+    deckPath,
+    deckId,
+    binding,
+    projectRoot:newRoot,
+  });
+
+  assert.equal(promoted.projectRoot, await realpath(newRoot));
+  assert.equal(promoted.dshBinding.workspaceId, null);
+  assert.equal(promoted.dshBinding.activeSessionId, null);
+  assert.equal(promoted.dshBinding.pendingOperation, null);
+  assert.equal(promoted.dshBinding.sessions[0].state, 'historical');
+  assert.equal(await catalog.resolveByDshSession('session-project-a'), null);
 });
 
 test('schema v2 原样迁移工作项身份并初始化空 DSH 关联，不猜测旧会话', async t => {
@@ -440,7 +519,8 @@ test('DSH 会话创建以 pending operation 固化，完成重试幂等并建立
     operationId,
   });
   assert.equal(completed.dshBinding.revision, 2);
-  assert.equal(completed.dshBinding.activeSessionId, 'session-a');
+  assert.equal(completed.dshBinding.activeSessionId, null,
+    '完成 Link 只证明会话已关联，必须等 DSH 打开成功后再激活');
   assert.equal(completed.dshBinding.pendingOperation, null);
   assert.deepEqual(completed.dshBinding.sessions[0], {
     operationId,
@@ -525,6 +605,11 @@ test('DSH 归档会话持久化为不可用关联，活动指针与反向导航�
     current = await catalog.completeDshSessionProvision({
       workId:current.workId,
       operationId,
+    });
+    current = await catalog.activateDshSession({
+      workId:current.workId,
+      sessionId,
+      expectedBindingRevision:current.dshBinding.revision,
     });
   }
   assert.equal(current.dshBinding.activeSessionId, 'session-b');
@@ -613,9 +698,14 @@ test('明确失败只清除对应 pending，不改变原活动会话', async t =
     origin:'fresh',
     expectedBindingRevision:0,
   });
-  const first = await catalog.completeDshSessionProvision({
+  let first = await catalog.completeDshSessionProvision({
     workId:initial.workId,
     operationId:'47777777-7777-4777-8777-777777777777',
+  });
+  first = await catalog.activateDshSession({
+    workId:initial.workId,
+    sessionId:'session-a',
+    expectedBindingRevision:first.dshBinding.revision,
   });
   const pending = await catalog.beginDshSessionProvision({
     workId:initial.workId,

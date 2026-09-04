@@ -1443,7 +1443,13 @@ test('DSH 新建 Deck 先选择目录并创建可关联的 Creation Work Item，
     workId:created.workItem.workId,
     operationId,
   }).then(result => result.json());
-  assert.equal(completed.workItem.dshBinding.activeSessionId, 'session-project');
+  assert.equal(completed.workItem.dshBinding.activeSessionId, null);
+  const activated = await postJson(app, '/api/dsh-work-items/activate-session', {
+    workId:created.workItem.workId,
+    sessionId:'session-project',
+    expectedBindingRevision:completed.workItem.dshBinding.revision,
+  }).then(result => result.json());
+  assert.equal(activated.workItem.dshBinding.activeSessionId, 'session-project');
   assert.equal(app.creationTerminal.snapshot().conversationId, 'session-project');
 
   const dshOrigin = 'http://127.0.0.1:3080';
@@ -1582,9 +1588,14 @@ test('DSH Creation 发布后原任务原位进入 Editing，并继续使用已�
     origin:'fresh',
     expectedBindingRevision:0,
   });
-  await postJson(app, '/api/dsh-work-items/complete-session', {
+  const completed = await postJson(app, '/api/dsh-work-items/complete-session', {
     workId:creationWorkId,
     operationId,
+  }).then(result => result.json());
+  await postJson(app, '/api/dsh-work-items/activate-session', {
+    workId:creationWorkId,
+    sessionId:'session-project',
+    expectedBindingRevision:completed.workItem.dshBinding.revision,
   });
 
   const opened = await postJson(app, '/api/creation-draft/open-editor', {})

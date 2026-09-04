@@ -17,7 +17,7 @@
 7. 点击普通 DSH 会话不改变 Editor 工作项，但会收起 AICO-PPT Workbench；重新点击关联会话时恢复相应任务。
 8. AICO-PPT Workbench 在关联 DSH Session 之间必须复用同一挂载实例；重复选中事件不得再次打开或重建 Editor iframe。
 
-创建工作项发布出 Deck 后直接转为编辑工作项，保留同一个 `workId`、DSH 会话关联和项目根，不再创建一条重复的编辑记录。
+创建工作项发布出 Deck 后直接转为编辑工作项，保留同一个 `workId`，不再创建一条重复的编辑记录。发布项目根不变时保留 DSH 会话关联；若发布时显式更换项目根，则历史化旧 Link，并清空旧 Workspace 与活动指针。
 
 ## 1. 当前实现与问题
 
@@ -210,7 +210,7 @@ flowchart LR
 
 两种任务页的会话控件位置、尺寸、状态点和标题加载必须一致；它只负责展示和切换关联会话，不再创建会话。会话列表展示 DSH 持久标题；新建和旧标题补写尚未完成时先展示由 Work Item 生成的中文标题，不能把内部 `sessionId` 当成稳定用户文案。
 
-会话创建完成且 Link 已持久化后，才把它设为 Active Work Session。创建失败时保留原活动会话。
+会话创建完成且 Link 已持久化后，先在 DSH 打开目标 Session；只有打开成功才把它设为 Active Work Session。创建或打开失败时都保留原活动会话。
 
 ### 6.2 当前 DSH 会话与 Editor 工作项不一致
 

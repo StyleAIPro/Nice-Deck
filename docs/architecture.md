@@ -382,7 +382,7 @@ Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动
 
 项目根也是任务身份的持久化部分。`RecentDeckStore.record()` 在 Creation→Editing 交接和普通打开时保存已确认根；旧任务缺失该字段时，`RecentDeckStore` 只从发布 Deck、Draft 根和上下文根三者校验一致的 `creation-context.json` 恢复。`server.mjs` 收到该 `persisted` 根时修复旧版 cwd 污染的活动会话；收到用户 `explicit` 换根时保留会话历史但清空活动指针，阻止 CLI 跨目录 resume 后再次弹出目录选择。
 
-DSH 模式在此项目根之上增加两层明确关系：规范 `projectRoot` 经 `workspaces.create({path})` 幂等解析为一个 DSH Workspace；工作项再通过 `dshBinding` 关联该 Workspace 内一个或多个 Session。`activeSessionId` 只决定下一批请求目标，已经捕获的执行批次仍保存提交时的 `assignedSessionId`。Session 创建采用 `begin-session → sessions.create(preallocated id) → complete-session`，进程或响应在中间中断时保留 pending operation，并用相同身份恢复，避免产生无法反查的重复会话。Creation 发布后由 `WorkCatalog.promoteCreationToEditing()` 原位补上 `deckId` 与文件绑定，保留 `workId`、显示名称、项目根和全部 DSH Link。
+DSH 模式在此项目根之上增加两层明确关系：规范 `projectRoot` 经 `workspaces.create({path})` 幂等解析为一个 DSH Workspace；工作项再通过 `dshBinding` 关联该 Workspace 内一个或多个 Session。`activeSessionId` 只决定下一批请求目标，已经捕获的执行批次仍保存提交时的 `assignedSessionId`。Session 创建采用 `begin-session → sessions.create(preallocated id) → complete-session → open-session → activate-session`；`complete-session` 只固化 Link，只有 DSH 打开成功才切换活动指针。进程或响应在中间中断时保留 pending operation，并用相同身份恢复，避免产生无法反查的重复会话。Creation 发布后由 `WorkCatalog.promoteCreationToEditing()` 原位补上 `deckId` 与文件绑定；项目根不变时保留 `workId`、显示名称和全部 DSH Link，显式换根时则历史化旧 Link 并清空旧 Workspace 与活动指针。
 
 #### Agent 批处理与 provider seam
 

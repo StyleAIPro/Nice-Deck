@@ -202,7 +202,7 @@ test('会话目标以当前任务优先，修改任务显示 Deck HTML 文件名
   );
 });
 
-test('新会话先持久化 pending，再创建 DSH Session，完成关联后才打开', async () => {
+test('新会话先持久化 Link，DSH 打开成功后才激活', async () => {
   const calls = [];
   let current = workItem();
   const bridge = {
@@ -239,7 +239,6 @@ test('新会话先持久化 pending，再创建 DSH Session，完成关联后才
       current = workItem(emptyBinding({
         revision:3,
         workspaceId:pending.workspaceId,
-        activeSessionId:pending.sessionId,
         sessions:[{
           operationId:pending.operationId,
           sessionId:pending.sessionId,
@@ -248,6 +247,13 @@ test('新会话先持久化 pending，再创建 DSH Session，完成关联后才
           state:'available',
           createdAt:pending.startedAt,
         }],
+      }));
+    } else if (command === 'activate-session') {
+      current = workItem(emptyBinding({
+        revision:4,
+        workspaceId:current.dshBinding.workspaceId,
+        activeSessionId:payload.sessionId,
+        sessions:current.dshBinding.sessions,
       }));
     }
     return { workItem:structuredClone(current) };
@@ -264,6 +270,7 @@ test('新会话先持久化 pending，再创建 DSH Session，完成关联后才
     'bridge:create-session',
     'catalog:complete-session',
     'bridge:open-session',
+    'catalog:activate-session',
   ]);
   const begun = calls.find(([, command]) => command === 'begin-session')[2];
   const created = calls.find(([, command]) => command === 'create-session')[2];
@@ -289,7 +296,6 @@ test('检测到 fresh pending 时只幂等补建原 Session，不再分配第二
   const completed = workItem(emptyBinding({
     revision:2,
     workspaceId:'workspace-project',
-    activeSessionId:'session-preallocated',
     sessions:[{
       operationId:pending.operationId,
       sessionId:pending.sessionId,
@@ -298,6 +304,11 @@ test('检测到 fresh pending 时只幂等补建原 Session，不再分配第二
       state:'available',
       createdAt:pending.startedAt,
     }],
+  }));
+  const activated = workItem(emptyBinding({
+    ...completed.dshBinding,
+    revision:3,
+    activeSessionId:'session-preallocated',
   }));
   const coordinator = new DeckTaskCoordinator({
     bridge:{
@@ -308,9 +319,13 @@ test('检测到 fresh pending 时只幂等补建原 Session，不再分配第二
     },
     catalogCommand:async (command, payload) => {
       calls.push(['catalog', command, structuredClone(payload)]);
-      assert.equal(command, 'complete-session');
-      assert.equal(payload.operationId, pending.operationId);
-      return { workItem:structuredClone(completed) };
+      if (command === 'complete-session') {
+        assert.equal(payload.operationId, pending.operationId);
+        return { workItem:structuredClone(completed) };
+      }
+      assert.equal(command, 'activate-session');
+      assert.equal(payload.sessionId, pending.sessionId);
+      return { workItem:structuredClone(activated) };
     },
   });
 
@@ -321,6 +336,7 @@ test('检测到 fresh pending 时只幂等补建原 Session，不再分配第二
     'bridge:create-session',
     'catalog:complete-session',
     'bridge:open-session',
+    'catalog:activate-session',
   ]);
   assert.equal(calls[0][2].title, '修改 Deck：技术解析.html');
 });
@@ -373,7 +389,7 @@ test('已有 Workspace 关联时新建会话不再等待重复 ensure-workspace'
         current = workItem(emptyBinding({
           revision:3,
           workspaceId:'workspace-project',
-          activeSessionId:pending.sessionId,
+          activeSessionId:'session-existing',
           sessions:[...current.dshBinding.sessions, {
             operationId:pending.operationId,
             sessionId:pending.sessionId,
@@ -382,6 +398,12 @@ test('已有 Workspace 关联时新建会话不再等待重复 ensure-workspace'
             state:'available',
             createdAt:pending.startedAt,
           }],
+        }), { displayName:longDisplayName });
+      } else if (command === 'activate-session') {
+        current = workItem(emptyBinding({
+          ...current.dshBinding,
+          revision:4,
+          activeSessionId:payload.sessionId,
         }), { displayName:longDisplayName });
       }
       return { workItem:structuredClone(current) };
@@ -396,6 +418,7 @@ test('已有 Workspace 关联时新建会话不再等待重复 ensure-workspace'
     'bridge:create-session',
     'catalog:complete-session',
     'bridge:open-session',
+    'catalog:activate-session',
   ]);
   const created = calls.find(([, command]) => command === 'create-session')[2];
   assert.match(created.title, /^修改 Deck：客户技术评审/u);
@@ -434,6 +457,54 @@ test('激活旧关联会话时携带中文任务标题，但由 DSH 只补尚未
     'open-session',
     { sessionId:'session-existing', title:'修改 Deck：技术解析.html' },
   ]]);
+});
+
+test('目标会话打开失败时保留原活动会话', async () => {
+  const calls = [];
+  let current = workItem(emptyBinding({
+    revision:2,
+    workspaceId:'workspace-project',
+    activeSessionId:'session-a',
+    sessions:[
+      {
+        operationId:'66111111-1111-4111-8111-111111111111',
+        sessionId:'session-a', workspaceId:'workspace-project', origin:'fresh',
+        state:'available', createdAt:'2026-09-03T00:00:00.000Z',
+      },
+      {
+        operationId:'66222222-2222-4222-8222-222222222222',
+        sessionId:'session-b', workspaceId:'workspace-project', origin:'fresh',
+        state:'available', createdAt:'2026-09-03T00:01:00.000Z',
+      },
+    ],
+  }));
+  const coordinator = new DeckTaskCoordinator({
+    bridge:{
+      async request(command, payload) {
+        calls.push(['bridge', command, structuredClone(payload)]);
+        throw new Error('DSH 会话打开失败');
+      },
+    },
+    catalogCommand:async (command, payload) => {
+      calls.push(['catalog', command, structuredClone(payload)]);
+      current = workItem(emptyBinding({
+        ...current.dshBinding,
+        revision:current.dshBinding.revision + 1,
+        activeSessionId:payload.sessionId,
+      }));
+      return { workItem:structuredClone(current) };
+    },
+  });
+
+  await assert.rejects(
+    () => coordinator.activate({ workItem:current, sessionId:'session-b' }),
+    /DSH 会话打开失败/u,
+  );
+
+  assert.equal(current.dshBinding.activeSessionId, 'session-a');
+  assert.deepEqual(calls.map(([side, command]) => `${side}:${command}`), [
+    'bridge:open-session',
+  ]);
 });
 
 test('旧关联会话缺少 DSH 列表行时仍可立即生成中文展示标题', () => {

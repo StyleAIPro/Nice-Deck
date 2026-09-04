@@ -22,7 +22,7 @@
 6. 打开已有 Deck 后进入原 Editor Runtime。预览、编辑、区域标记三种一级模式，以及页序、富文本、拖移、缩放、删除、属性、任务、撤销 / 重做、固化和 PPTX 导出均走原来的 Managed Workspace 与 frame bridge。
 7. 区域任务点击“交给 Agent”时，Editor Server 在捕获执行批次时固定 `assignedSessionId`，生成带任务 ID、revision 和 CLI capability 的 `/aico-ppt` 提示词，并精确提交到该工作项的活动 DSH Session。后续切换页面或会话不会迁移在途批次。
 8. 点击已关联 Session 会反向找到 `workId` 并切换对应 Editor 工作项；Editor 已关闭时会先重新打开 workbench，Editor 已经显示 AICO-PPT 时重复事件不会再次调用打开或重载 iframe。点击普通 Session 会自动收起 AICO-PPT Workbench，但不改变任何工作项，也不会把后续请求误投到普通 Session。
-9. Creation 发布出 Deck 后，同一 Work Item 原位转为 Editing，保留 `workId`、项目根、Workspace 和全部 Session Link，不产生重复任务卡。
+9. Creation 发布出 Deck 后，同一 Work Item 原位转为 Editing，不产生重复任务卡；项目根不变时保留 `workId`、Workspace 和全部 Session Link，显式换根时历史化旧 Link 并清空旧 Workspace 与活动指针。
 
 项目子菜单根据当前 DSH Session 的持久 `workId` 关联为唯一的对应项显示“当前”徽标；普通会话不会标记任何项目。
 
@@ -33,7 +33,7 @@
 - Editor 顶部任务会话控件只展示和切换关联会话，不再放第二个创建按钮；修改页在同一区域显示当前 Deck HTML 文件名，完整路径放在悬停说明中。新任务会话统一从 DSH 左侧入口创建。
 - DSH 嵌入态不导入或实例化 Agent Terminal，不下发 xterm 资源，不自动启动 `node-pty`，也不连接 `/agent-terminal`；顶栏不再保留重复的机器人 / Agent 入口，执行状态由左侧 DSH 会话与右下任务 drawer 表达。
 - WorkCatalog 是 Work Item ↔ Session Link 的唯一权威；DSH 仍是 Workspace、Session 和对话内容的唯一权威。一个 Session 最多关联一个 Work Item，一个 Work Item 可关联多个 Session，但同时只有一个活动 Session。
-- WorkCatalog 先写入带预分配 Session 身份的 pending operation，再调用 DSH 创建 Session；响应丢失时重试采用同一身份，完成关联后才打开会话。
+- WorkCatalog 先写入带预分配 Session 身份的 pending operation，再调用 DSH 创建 Session；响应丢失时重试采用同一身份。`complete-session` 只固化 Link，目标 Session 在 DSH 打开成功后才通过 `activate-session` 切换活动指针；打开失败保留原活动会话。
 - Session 创建与打开命令同时携带不超过 DSH 80 字节上限的稳定中文标题；pending 恢复或旧 Link 激活只为尚未命名的 Session 补名，不覆盖用户或 DSH 已经持久化的标题。打开命令非阻塞预加载 Session history window，并立即切换 DSH 当前选择；标题补写和历史连接都不能阻塞 Editor 导航。
 - 属性栏在 DSH 嵌入态固定停靠于画布上方，避免占用画布横向空间；任务 drawer 保持原来的右下角悬浮位置。
 - Client 只嵌入原 App/Editor 页面，不复制 Editor DOM、业务状态或事务代码。

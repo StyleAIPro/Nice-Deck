@@ -114,7 +114,12 @@ export class DeckTaskCoordinator {
       operationId:pending.operationId,
     });
     await this.bridge.request('open-session', { sessionId:pending.sessionId });
-    return { workItem:completed.workItem, session:completed.workItem.dshBinding.sessions.find(
+    const activated = await this.catalogCommand('activate-session', {
+      workId:workItem.workId,
+      sessionId:pending.sessionId,
+      expectedBindingRevision:completed.workItem.dshBinding.revision,
+    });
+    return { workItem:activated.workItem, session:activated.workItem.dshBinding.sessions.find(
       link => link.sessionId === pending.sessionId,
     ) };
   }
@@ -149,9 +154,14 @@ export class DeckTaskCoordinator {
       operationId,
     });
     await this.bridge.request('open-session', { sessionId });
+    const activated = await this.catalogCommand('activate-session', {
+      workId:workItem.workId,
+      sessionId,
+      expectedBindingRevision:completed.workItem.dshBinding.revision,
+    });
     return {
-      workItem:completed.workItem,
-      session:completed.workItem.dshBinding.sessions.find(link => link.sessionId === sessionId),
+      workItem:activated.workItem,
+      session:activated.workItem.dshBinding.sessions.find(link => link.sessionId === sessionId),
       sessionId,
     };
   }
@@ -159,6 +169,10 @@ export class DeckTaskCoordinator {
   async activate({ workItem, sessionId = workItem?.dshBinding?.activeSessionId } = {}) {
     workItem = requireWorkItem(workItem);
     if (!sessionId) return { workItem, session:null };
+    const session = await this.bridge.request('open-session', {
+      sessionId,
+      title:sessionTitleFor(workItem, sessionId),
+    });
     let next = workItem;
     if (workItem.dshBinding.activeSessionId !== sessionId) {
       const result = await this.catalogCommand('activate-session', {
@@ -168,10 +182,6 @@ export class DeckTaskCoordinator {
       });
       next = result.workItem;
     }
-    const session = await this.bridge.request('open-session', {
-      sessionId,
-      title:sessionTitleFor(next, sessionId),
-    });
     return { workItem:next, session };
   }
 
