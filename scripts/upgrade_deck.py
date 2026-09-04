@@ -22,7 +22,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CURRENT_VERSION = "2026.08.3"
-VERSION_RE = re.compile(r'<meta name="huawei-deck-version" content="([^"]+)">')
+VERSION_RE = re.compile(r'<meta name="aico-ppt-version" content="([^"]+)">')
 
 
 def load_edit_bundle():
@@ -39,7 +39,7 @@ eb = load_edit_bundle()
 
 def load_patch_bundle():
     path = REPO / "scripts" / "editor" / "patch_bundle.py"
-    spec = importlib.util.spec_from_file_location("huawei_deck_patch_bundle", path)
+    spec = importlib.util.spec_from_file_location("aico_ppt_patch_bundle", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -53,12 +53,12 @@ class MigrationError(RuntimeError):
     pass
 
 
-USER_STYLE_START = "<!-- HUAWEI_DECK_USER_STYLE_START -->"
-USER_STYLE_END = "<!-- HUAWEI_DECK_USER_STYLE_END -->"
-USER_SCRIPT_START = "<!-- HUAWEI_DECK_USER_SCRIPT_START -->"
-USER_SCRIPT_END = "<!-- HUAWEI_DECK_USER_SCRIPT_END -->"
-HASH_RE = re.compile(r'<meta name="huawei-deck-runtime-hash" content="([^"]+)">')
-KIND_RE = re.compile(r'<meta name="huawei-deck-template-kind" content="([^"]+)">')
+USER_STYLE_START = "<!-- AICO_PPT_USER_STYLE_START -->"
+USER_STYLE_END = "<!-- AICO_PPT_USER_STYLE_END -->"
+USER_SCRIPT_START = "<!-- AICO_PPT_USER_SCRIPT_START -->"
+USER_SCRIPT_END = "<!-- AICO_PPT_USER_SCRIPT_END -->"
+HASH_RE = re.compile(r'<meta name="aico-ppt-runtime-hash" content="([^"]+)">')
+KIND_RE = re.compile(r'<meta name="aico-ppt-template-kind" content="([^"]+)">')
 LATEST_TEMPLATES = {
     "teaching": REPO / "assets" / "training-deck.html",
     "tech-share": REPO / "assets" / "tech-share-deck.html",
@@ -80,7 +80,7 @@ def get_version(s):
 
 
 def set_version(s, version):
-    marker = f'<meta name="huawei-deck-version" content="{version}">'
+    marker = f'<meta name="aico-ppt-version" content="{version}">'
     if VERSION_RE.search(s):
         return VERSION_RE.sub(marker, s, count=1)
     anchor = '<meta charset="utf-8">'
@@ -241,11 +241,11 @@ def _normalize_runtime(s):
     s = patch_bundle.strip_block(s)
     content = extract_user_content(s)
     slide_start, slide_end = _slide_bounds(s)
-    result = s[:slide_start] + "__HUAWEI_DECK_SLIDES__" + s[slide_end:]
+    result = s[:slide_start] + "__AICO_PPT_SLIDES__" + s[slide_end:]
     for name in ("nav", "chapters"):
         start, end = _array_bounds(result, name)
-        result = result[:start] + f"__HUAWEI_DECK_{name.upper()}__" + result[end:]
-    result = re.sub(r'<title>.*?</title>', "__HUAWEI_DECK_TITLE__", result, count=1, flags=re.S)
+        result = result[:start] + f"__AICO_PPT_{name.upper()}__" + result[end:]
+    result = re.sub(r'<title>.*?</title>', "__AICO_PPT_TITLE__", result, count=1, flags=re.S)
     if USER_STYLE_START in result and USER_STYLE_END in result:
         result = _replace_slot(result, USER_STYLE_START, USER_STYLE_END, "__USER_STYLE__")
     else:
@@ -254,9 +254,9 @@ def _normalize_runtime(s):
         result = _replace_slot(result, USER_SCRIPT_START, USER_SCRIPT_END, "__USER_SCRIPT__")
     else:
         result += "__NO_USER_SCRIPT_SLOT__"
-    result = VERSION_RE.sub('<meta name="huawei-deck-version" content="__VERSION__">', result)
-    result = HASH_RE.sub('<meta name="huawei-deck-runtime-hash" content="__HASH__">', result)
-    result = KIND_RE.sub('<meta name="huawei-deck-template-kind" content="__KIND__">', result)
+    result = VERSION_RE.sub('<meta name="aico-ppt-version" content="__VERSION__">', result)
+    result = HASH_RE.sub('<meta name="aico-ppt-runtime-hash" content="__HASH__">', result)
+    result = KIND_RE.sub('<meta name="aico-ppt-template-kind" content="__KIND__">', result)
     profile = _profile_style(result)
     if profile:
         result = result.replace(profile, "__PAGE_PROFILE_STYLE__", 1)
@@ -276,7 +276,7 @@ def runtime_hash(s):
 
 
 def set_runtime_hash(s, value):
-    marker = f'<meta name="huawei-deck-runtime-hash" content="{value}">'
+    marker = f'<meta name="aico-ppt-runtime-hash" content="{value}">'
     if HASH_RE.search(s):
         return HASH_RE.sub(marker, s, count=1)
     version = VERSION_RE.search(s)
@@ -291,7 +291,7 @@ def get_template_kind(s):
 
 
 def set_template_kind(s, kind):
-    marker = f'<meta name="huawei-deck-template-kind" content="{kind}">'
+    marker = f'<meta name="aico-ppt-template-kind" content="{kind}">'
     if KIND_RE.search(s):
         return KIND_RE.sub(marker, s, count=1)
     version = VERSION_RE.search(s)
@@ -339,12 +339,12 @@ def select_latest_template(s):
 def _merge_normalize(s):
     """三方合并用：只把用户页面数据换成稳定占位，保留壳内用户定制。"""
     start, end = _slide_bounds(s)
-    result = s[:start] + "__HUAWEI_DECK_SLIDES__" + s[end:]
+    result = s[:start] + "__AICO_PPT_SLIDES__" + s[end:]
     for name in ("nav", "chapters"):
         start, end = _array_bounds(result, name)
-        result = result[:start] + f"__HUAWEI_DECK_{name.upper()}__" + result[end:]
+        result = result[:start] + f"__AICO_PPT_{name.upper()}__" + result[end:]
     result = re.sub(
-        r'<title>.*?</title>', "__HUAWEI_DECK_TITLE__", result, count=1, flags=re.S
+        r'<title>.*?</title>', "__AICO_PPT_TITLE__", result, count=1, flags=re.S
     )
     result = VERSION_RE.sub("", result)
     result = HASH_RE.sub("", result)
@@ -454,13 +454,13 @@ def merge_legacy_shell(original, latest, template_kind, content):
             f"历史模板三方合并冲突（基线 {commit[:8]}，相似度 {score:.3f}），已停止写入。"
         )
     replacements = {
-        "__HUAWEI_DECK_SLIDES__": content["slides"],
-        "__HUAWEI_DECK_NAV__": content["nav"],
-        "__HUAWEI_DECK_CHAPTERS__": content["chapters"],
-        "__HUAWEI_DECK_TITLE__": content["title"],
+        "__AICO_PPT_SLIDES__": content["slides"],
+        "__AICO_PPT_NAV__": content["nav"],
+        "__AICO_PPT_CHAPTERS__": content["chapters"],
+        "__AICO_PPT_TITLE__": content["title"],
     }
     for marker, value in replacements.items():
-        if marker == "__HUAWEI_DECK_TITLE__" and not value and marker not in merged:
+        if marker == "__AICO_PPT_TITLE__" and not value and marker not in merged:
             continue
         if merged.count(marker) != 1:
             raise MigrationError(f"三方合并结果缺少唯一占位：{marker}")
@@ -566,7 +566,7 @@ def verify_patch_replay(path):
 
 def migrate_patch_targets(path, patches):
     """基于候选 Deck 的严格 path/tag/fingerprint 唯一匹配迁移 pageKey。"""
-    with tempfile.TemporaryDirectory(prefix="huawei-deck-patch-migrate-") as directory:
+    with tempfile.TemporaryDirectory(prefix="aico-ppt-patch-migrate-") as directory:
         input_path = Path(directory) / "patches.json"
         output_path = Path(directory) / "migrated.json"
         input_path.write_text(
@@ -656,7 +656,7 @@ def format_audit(path, version, findings):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="按当前模板重组 Huawei Deck 公共外壳并审计视觉规范")
+    parser = argparse.ArgumentParser(description="按当前模板重组 AICO-PPT 公共外壳并审计视觉规范")
     parser.add_argument("deck", type=Path, help="待升级的单文件 HTML deck")
     parser.add_argument("--check", action="store_true", help="只检查版本和待迁移项；不修改")
     parser.add_argument("--yes", action="store_true", help="确认落盘；修改前自动生成备份")

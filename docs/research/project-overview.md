@@ -1,4 +1,4 @@
-# Huawei Deck 项目调研概览
+# AICO-PPT 项目调研概览
 
 > 调研日期：2026-08-21  
 > 调研范围：`AGENTS.md`、`SKILL.md`、`README.md`、`references/`、`scripts/`、`package.json`、三套模板 HTML 与现有架构文档。  
@@ -6,7 +6,7 @@
 
 ## 1. 核心结论
 
-Huawei Deck 的首要身份是一个 **Agent Skill**，而不是以服务部署为中心的普通应用。它把演示制作知识、三套场景模板和一套编辑/验证/导出工具交付给 Codex、Claude Code 等 Agent；桌面 Editor 是可选的第二层产品能力，没有窗口时 Skill 仍能独立工作。最终交付物不是项目源码或云端链接，而是可直接拷走、离线打开的 1920×1080 单文件 HTML Deck，必要时再导出为 PPTX。项目定位见 [AGENTS.md:5-9](../../AGENTS.md#L5-L9) 与 [README.md:1-5](../../README.md#L1-L5)。
+AICO-PPT 的首要身份是一个 **Agent Skill**，而不是以服务部署为中心的普通应用。它把演示制作知识、三套场景模板和一套编辑/验证/导出工具交付给 Codex、Claude Code 等 Agent；桌面 Editor 是可选的第二层产品能力，没有窗口时 Skill 仍能独立工作。最终交付物不是项目源码或云端链接，而是可直接拷走、离线打开的 1920×1080 单文件 HTML Deck，必要时再导出为 PPTX。项目定位见 [AGENTS.md:5-9](../../AGENTS.md#L5-L9) 与 [README.md:1-5](../../README.md#L1-L5)。
 
 项目可以理解为三层：
 
@@ -187,7 +187,7 @@ Profile 的实际成员定义见 [scripts/check_deps.py:427-445](../../scripts/c
 ## 9. 2026-08-21 当前状态实测
 
 - 分支已在 `main`；执行 `git fetch --prune origin` 后，本地 `main` 与 `origin/main` 同指向 `bd367d9`，远端没有尚未合入 `main` 的分支，因此当前 origin 上 `main` 是最领先主线。
-- `python3 scripts/install.py inspect` 显示 Editor Core 已就绪，但用户级 Codex Skill 注册链接 `/root/.agents/skills/huawei-deck` 尚未建立，整体状态为 `repairable`；这不影响从仓库内调研和运行脚本。
+- `python3 scripts/install.py inspect` 显示 Editor Core 已就绪，但用户级 Codex Skill 注册链接 `/root/.agents/skills/aico-ppt` 尚未建立，整体状态为 `repairable`；这不影响从仓库内调研和运行脚本。
 - `editor-core` 与 `full` 两个依赖 Profile 均通过；Node、Chrome、Playwright、PTY、PPTX、PDF/PPTX 材料处理和 LibreOffice 能力均可用。
 - 三套模板分别通过 `scripts/edit-bundle.py` 结构验证：34 / 37 / 46 页的 slide、section、nav、连续页序和唯一 pageId 均一致。
 - Python Editor 回归测试 144/144 通过。Node 单元测试整套运行 646 项，结果为 643 通过、2 跳过、1 失败；失败用例“成功 action 原子完成任务且 undo/redo 同步任务生命周期”单独重跑通过，表现为仅在整套运行中出现的时序/隔离稳定性信号。因此本轮不能宣称 Node 单测全绿，建议后续在相同环境重复全套测试并排查共享状态或消息竞态。

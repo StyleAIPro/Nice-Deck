@@ -1,4 +1,4 @@
-# Huawei Deck 安装、分发与首次使用体验设计
+# AICO-PPT 安装、分发与首次使用体验设计
 
 > 状态：设计提案
 >
@@ -10,7 +10,7 @@
 
 ## 0. 结论
 
-Huawei Deck 不应继续把“克隆仓库 + Bash 软链接 + 首次启动时 npm install”当作面向普通用户的完整安装体验。
+AICO-PPT 不应继续把“克隆仓库 + Bash 软链接 + 首次启动时 npm install”当作面向普通用户的完整安装体验。
 
 目标形态是一个产品、两种交付渠道、三层独立就绪状态：
 
@@ -23,7 +23,7 @@ Huawei Deck 不应继续把“克隆仓库 + Bash 软链接 + 首次启动时 np
 
 用户最终只需要理解两个主动作：
 
-- “安装 Huawei Deck”：进入可用状态；
+- “安装 AICO-PPT”：进入可用状态；
 - “诊断并修复”：在安装不完整或升级后恢复状态。
 
 Python、Node、Chrome、Playwright、LibreOffice、PyMuPDF 等细节只出现在展开的诊断信息和故障文档中，不作为首页上的认知负担。
@@ -68,7 +68,7 @@ OpenAI 当前文档明确区分本地 Skill 与 Plugin 分发：
 - [OpenAI 官方 Skill 文档](https://learn.chatgpt.com/docs/build-skills)
 - [OpenAI Plugin 打包文档](https://developers.openai.com/plugins/build/plugins)
 
-因此，`~/.agents/skills/huawei-deck` 应成为 Codex 的标准用户级注册位置；`~/.codex/skills` 与 `~/.claude/skills` 只作为兼容 Adapter，不再被描述为同等标准路径。
+因此，`~/.agents/skills/aico-ppt` 应成为 Codex 的标准用户级注册位置；`~/.codex/skills` 与 `~/.claude/skills` 只作为兼容 Adapter，不再被描述为同等标准路径。
 
 ## 2. 目标与非目标
 
@@ -81,7 +81,7 @@ OpenAI 当前文档明确区分本地 Skill 与 Plugin 分发：
 5. Editor 首启时能在 3 分钟内完成环境检查并打开示例项目。
 6. 帮助内容在 Editor 内离线可读，并与网站/README 共用来源。
 7. 录屏有固定脚本、示例数据、字幕、版本和更新责任人，而不是临时录制。
-8. 无 Editor 环境仍可按照 `SKILL.md` 使用 Huawei Deck 的基础工作流。
+8. 无 Editor 环境仍可按照 `SKILL.md` 使用 AICO-PPT 的基础工作流。
 
 ### 2.2 非目标
 
@@ -108,7 +108,7 @@ OpenAI 当前文档明确区分本地 Skill 与 Plugin 分发：
 
 ### 4.1 Product Installation
 
-一次 Huawei Deck 安装由以下对象组成：
+一次 AICO-PPT 安装由以下对象组成：
 
 ```text
 ProductInstallation
@@ -146,7 +146,7 @@ ProductInstallation
 
 - 注册目录存在；
 - 目标能解析到有效 `SKILL.md`；
-- Skill 名称为 `huawei-deck`；
+- Skill 名称为 `aico-ppt`；
 - 目标不是断链；
 - 如果由安装器管理，注册目标和 `InstallRecord` 一致。
 
@@ -238,7 +238,7 @@ py -3 scripts\install.py --channel developer --hosts codex
 行为：
 
 - 以当前仓库为 `installRoot`；
-- Codex 优先注册到 `~/.agents/skills/huawei-deck`；
+- Codex 优先注册到 `~/.agents/skills/aico-ppt`；
 - POSIX 使用 symlink，Windows 优先使用不要求复制的目录链接方式；
 - 可通过 `--hosts codex,claude-code` 显式增加兼容注册；
 - 不复制 `node_modules`，Editor Core 按当前平台准备；
@@ -254,9 +254,9 @@ py -3 scripts\install.py --channel developer --hosts codex
 发布物按平台生成：
 
 ```text
-huawei-deck-<version>-macos-arm64.zip
-huawei-deck-<version>-macos-x64.zip
-huawei-deck-<version>-windows-x64.zip
+aico-ppt-<version>-macos-arm64.zip
+aico-ppt-<version>-macos-x64.zip
+aico-ppt-<version>-windows-x64.zip
 SHA256SUMS
 release-manifest.json
 ```
@@ -265,8 +265,8 @@ release-manifest.json
 
 | 平台 | 默认安装根目录 |
 |---|---|
-| macOS | `~/Library/Application Support/Huawei Deck/versions/<version>/` |
-| Windows | `%LOCALAPPDATA%\Huawei Deck\versions\<version>\` |
+| macOS | `~/Library/Application Support/AICO-PPT/versions/<version>/` |
+| Windows | `%LOCALAPPDATA%\AICO-PPT\versions\<version>\` |
 
 另有一个受安装器管理的 `current` 指针。升级先写入新版本目录、校验完整性，再原子切换 `current`；旧版本至少保留一个，用于失败回滚。
 
@@ -277,15 +277,15 @@ release-manifest.json
 Plugin 适合解决“Skill 如何被 Codex 发现和更新”，但与“本机 Editor 如何安装”分开：
 
 ```text
-huawei-deck plugin
+aico-ppt plugin
 ├── .codex-plugin/plugin.json
-├── skills/huawei-deck/
+├── skills/aico-ppt/
 │   ├── SKILL.md
 │   ├── references/
 │   └── skill-required assets/scripts
 └── optional plugin metadata
 
-Huawei Deck Editor Companion
+AICO-PPT Editor Companion
 ├── launcher
 ├── editor runtime
 ├── verify/export tools
@@ -307,7 +307,7 @@ Portable 模式允许用户解压后直接运行 launcher，不注册用户级 S
 
 它适合试用和受限设备，但 UI 必须明确显示：
 
-> Editor 可以使用，但 Agent 不会自动发现 Huawei Deck Skill。可在“安装与诊断”中完成注册。
+> Editor 可以使用，但 Agent 不会自动发现 AICO-PPT Skill。可在“安装与诊断”中完成注册。
 
 ## 6. Release Manifest 与安装记录
 
@@ -318,7 +318,7 @@ Portable 模式允许用户解压后直接运行 launcher，不注册用户级 S
 ```json
 {
   "schemaVersion": 1,
-  "product": "huawei-deck",
+  "product": "aico-ppt",
   "productVersion": "0.1.0",
   "channel": "release",
   "platform": "macos-arm64",
@@ -328,7 +328,7 @@ Portable 模式允许用户解压后直接运行 launcher，不注册用户级 S
   },
   "skill": {
     "entry": "SKILL.md",
-    "name": "huawei-deck"
+    "name": "aico-ppt"
   },
   "editor": {
     "launcher": "scripts/deck-editor.py",
@@ -348,8 +348,8 @@ Manifest 是安装器、launcher、帮助中心和发布检查共同读取的版
 
 | 平台 | 位置 |
 |---|---|
-| macOS | `~/Library/Application Support/Huawei Deck/install-state.json` |
-| Windows | `%LOCALAPPDATA%\Huawei Deck\install-state.json` |
+| macOS | `~/Library/Application Support/AICO-PPT/install-state.json` |
+| Windows | `%LOCALAPPDATA%\AICO-PPT\install-state.json` |
 
 记录示例：
 
@@ -364,7 +364,7 @@ Manifest 是安装器、launcher、帮助中心和发布检查共同读取的版
   "registrations": [
     {
       "host": "codex",
-      "targetPath": "~/.agents/skills/huawei-deck",
+      "targetPath": "~/.agents/skills/aico-ppt",
       "method": "symlink"
     }
   ],
@@ -498,7 +498,7 @@ flowchart LR
 7. 修复仍指向旧目录的受控注册；
 8. 保留上一版本用于回滚。
 
-升级不触碰用户项目，不自动升级 deck，也不删除 `.huawei-deck-editor` 会话。
+升级不触碰用户项目，不自动升级 deck，也不删除 `.aico-ppt-editor` 会话。
 
 Developer Link 渠道不自动执行 `git pull`。只提示仓库版本变化，把源代码更新留给用户或 Git 工作流。
 
@@ -514,7 +514,7 @@ Developer Link 渠道不自动执行 `git pull`。只提示仓库版本变化，
 默认保留：
 
 - 用户创建或导入的 deck；
-- 工作区与 `.huawei-deck-editor` 会话；
+- 工作区与 `.aico-ppt-editor` 会话；
 - 用户手工安装的 Python、Node、Chrome、Agent CLI；
 - 不属于本安装的 Skill 目录。
 
@@ -572,7 +572,7 @@ Editor 启动页增加三个稳定入口：
 
 首启不用强制全屏轮播。主页面右侧显示可关闭、可恢复的任务清单：
 
-1. 确认 Huawei Deck Skill 已注册；
+1. 确认 AICO-PPT Skill 已注册；
 2. 选择并检查 Agent；
 3. 打开示例项目；
 4. 让 Agent 修改一处标题；
@@ -599,7 +599,7 @@ Editor 启动页增加三个稳定入口：
 
 ```text
 基础使用
-  ✓ Huawei Deck Skill
+  ✓ AICO-PPT Skill
   ✓ Editor Core
   ! Agent CLI：已安装，尚未登录
 
@@ -646,7 +646,7 @@ Editor 启动页增加三个稳定入口：
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Huawei Deck                                      帮助  安装与诊断  ? │
+│ AICO-PPT                                      帮助  安装与诊断  ? │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 想先完成什么？                                      基础使用 2/3     │
 │                                                                      │
@@ -746,7 +746,7 @@ node scripts/help/verify-help-catalog.mjs
 
 README 应重写为：
 
-1. 一句话定位：Huawei Deck 是“Agent Skill + 可选桌面 Editor”；
+1. 一句话定位：AICO-PPT 是“Agent Skill + 可选桌面 Editor”；
 2. 30 秒效果图/短视频；
 3. “我该选哪种安装方式”两张卡：普通用户 / 维护者；
 4. macOS 与 Windows 各一条最短命令；
@@ -761,8 +761,8 @@ README 不再以“这是一个 Claude Code skill”开头，也不在首屏同�
 
 | ID | 标题 | 目标时长 | 用户任务 | 平台 |
 |---|---|---:|---|---|
-| `install-macos` | 在 macOS 安装 Huawei Deck | 60—90 秒 | 安装、注册、首启、诊断通过 | macOS |
-| `install-windows` | 在 Windows 安装 Huawei Deck | 60—90 秒 | 安装、注册、首启、诊断通过 | Windows |
+| `install-macos` | 在 macOS 安装 AICO-PPT | 60—90 秒 | 安装、注册、首启、诊断通过 | macOS |
+| `install-windows` | 在 Windows 安装 AICO-PPT | 60—90 秒 | 安装、注册、首启、诊断通过 | Windows |
 | `quick-start` | 3 分钟创建第一个 Deck | 3—5 分钟 | 从启动页到可预览 deck | 通用 |
 | `edit-existing-deck` | 修改一个现有 Deck | 3—5 分钟 | 选择文件、下任务、查看结果 | 通用 |
 | `region-task` | 用区域任务精准修改页面 | 2—4 分钟 | 选择区域、生成描述、提交 Agent | 通用 |
@@ -1061,7 +1061,7 @@ docs/media/recordings/<id>/
 ## 17. 已确定的设计决策
 
 1. Skill 和 Editor 是两个可独立工作的层，不把 Editor 设为 Skill 的硬依赖。
-2. Codex 用户级标准注册位置使用 `~/.agents/skills/huawei-deck`；其他位置通过兼容 Adapter 支持。
+2. Codex 用户级标准注册位置使用 `~/.agents/skills/aico-ppt`；其他位置通过兼容 Adapter 支持。
 3. 安装状态按 Skill、Editor Core、Feature Packs 三层呈现。
 4. `check_deps.py` 从全量单表演进为按 Profile 检测和修复。
 5. 普通用户优先使用版本化 Release；Developer Link 保留给仓库维护者。

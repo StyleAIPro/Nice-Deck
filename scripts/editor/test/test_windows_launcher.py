@@ -3,8 +3,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-WINDOWS_LAUNCHER = ROOT / "Huawei Deck 编辑器.cmd"
-WINDOWS_ICON = ROOT / "assets/launcher/huawei-deck-editor.ico"
+WINDOWS_LAUNCHER = ROOT / "AICO-PPT 编辑器.cmd"
+WINDOWS_ICON = ROOT / "assets/launcher/aico-ppt-editor.ico"
 WINDOWS_SHORTCUT_SCRIPT = ROOT / "scripts/create_windows_launcher_shortcut.ps1"
 
 
@@ -27,7 +27,7 @@ class WindowsLauncherTest(unittest.TestCase):
         self.assertIn("--detach-windows", contents)
         self.assertIn("%*", contents)
         self.assertNotIn("/min", contents)
-        self.assertNotIn('start "Huawei Deck 编辑器"', contents)
+        self.assertNotIn('start "AICO-PPT 编辑器"', contents)
         for executable in ("py.exe", "python.exe"):
             self.assertIn(executable, contents)
         self.assertIn('pushd "%~dp0"', contents)
@@ -43,8 +43,8 @@ class WindowsLauncherTest(unittest.TestCase):
             "Windows PowerShell 5.1 需要 UTF-8 BOM 才能稳定解析中文路径",
         )
         self.assertIn("CreateShortcut", shortcut_script)
-        self.assertIn("Huawei Deck 编辑器.cmd", shortcut_script)
-        self.assertIn("assets/launcher/huawei-deck-editor.ico", shortcut_script)
+        self.assertIn("AICO-PPT 编辑器.cmd", shortcut_script)
+        self.assertIn("assets/launcher/aico-ppt-editor.ico", shortcut_script)
         self.assertIn("IconLocation", shortcut_script)
         self.assertEqual(WINDOWS_ICON.read_bytes()[:4], b"\x00\x00\x01\x00")
 
@@ -57,7 +57,7 @@ class WindowsLauncherTest(unittest.TestCase):
         ):
             with self.subTest(file=relative_path):
                 contents = (ROOT / relative_path).read_text(encoding="utf-8")
-                self.assertIn("Huawei Deck 编辑器.cmd", contents)
+                self.assertIn("AICO-PPT 编辑器.cmd", contents)
                 self.assertIn("Windows", contents)
 
 

@@ -17,7 +17,7 @@ TEMPLATE_PATH = PROJECT_DIR / "assets" / "training-deck.html"
 
 
 def load_factory():
-    spec = importlib.util.spec_from_file_location("huawei_deck_factory", FACTORY_PATH)
+    spec = importlib.util.spec_from_file_location("aico_ppt_factory", FACTORY_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError("无法加载 deck_factory.py")
     module = importlib.util.module_from_spec(spec)

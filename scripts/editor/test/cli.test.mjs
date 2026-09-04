@@ -180,8 +180,8 @@ test('creation CLI 从受控 capability 文件读取凭据并提交统一 Creati
   t.after(() => new Promise(resolvePromise => server.close(resolvePromise)));
   const address = server.address();
   const environment = {
-    HUAWEI_DECK_CREATION_URL:`http://127.0.0.1:${address.port}`,
-    HUAWEI_DECK_CREATION_CAPABILITY_FILE:capability,
+    AICO_PPT_CREATION_URL:`http://127.0.0.1:${address.port}`,
+    AICO_PPT_CREATION_CAPABILITY_FILE:capability,
   };
   const status = parseJsonOutput(await spawnCliWithEnv(['creation', 'status'], environment).result);
   assert.equal(status.revision, 4);
@@ -224,9 +224,9 @@ test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/sol
   const url = `http://127.0.0.1:${server.address().port}`;
 
   const fromEnvironment = parseJsonOutput(await spawnCliWithEnv(['status'], {
-    HUAWEI_DECK_EDITOR_URL:url,
-    HUAWEI_DECK_EDITOR_TOKEN:'environment-secret',
-    HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
+    AICO_PPT_EDITOR_URL:url,
+    AICO_PPT_EDITOR_TOKEN:'environment-secret',
+    AICO_PPT_WORKSPACE_CAPABILITY_FILE:'',
   }).result);
   assert.equal(fromEnvironment.revision, 9);
   assert.equal(received.at(-1).authorization, 'Bearer environment-secret');
@@ -238,8 +238,8 @@ test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/sol
   parseJsonOutput(await spawnCliWithEnv([
     '--capability-file', capability, '--expected-revision', '7', 'verify',
   ], {
-    HUAWEI_DECK_EDITOR_URL:'', HUAWEI_DECK_EDITOR_TOKEN:'',
-    HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
+    AICO_PPT_EDITOR_URL:'', AICO_PPT_EDITOR_TOKEN:'',
+    AICO_PPT_WORKSPACE_CAPABILITY_FILE:'',
   }).result);
   assert.equal(received.at(-1).url, '/api/write-deck');
   assert.deepEqual(received.at(-1).body, { expectedRevision:7 });
@@ -247,9 +247,9 @@ test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/sol
 
   const beforeSolidify = received.length;
   parseJsonOutput(await spawnCliWithEnv(['solidify'], {
-    HUAWEI_DECK_EDITOR_URL:url,
-    HUAWEI_DECK_EDITOR_TOKEN:'environment-secret',
-    HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
+    AICO_PPT_EDITOR_URL:url,
+    AICO_PPT_EDITOR_TOKEN:'environment-secret',
+    AICO_PPT_WORKSPACE_CAPABILITY_FILE:'',
   }).result);
   assert.deepEqual(received.slice(beforeSolidify).map(item => item.url), [
     '/api/session', '/api/solidify-preflight', '/api/solidify-deck',

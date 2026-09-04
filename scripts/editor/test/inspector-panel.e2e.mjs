@@ -561,18 +561,18 @@ test('编辑器按钮使用随应用加载的跨平台统一字体', async t => 
   t.after(() => browser.close());
 
   const typography = await page.locator('[data-mode="preview"]').evaluate(async () => {
-    await document.fonts.load('13px "Huawei Deck UI"', '预览编辑区域标记');
+    await document.fonts.load('13px "AICO-PPT UI"', '预览编辑区域标记');
     const installed = [...document.fonts].some(face => (
-      face.family.replaceAll('"', '').replaceAll("'", '') === 'Huawei Deck UI'
+      face.family.replaceAll('"', '').replaceAll("'", '') === 'AICO-PPT UI'
     ));
     return {
-      loaded:installed && document.fonts.check('13px "Huawei Deck UI"', '预览编辑区域标记'),
+      loaded:installed && document.fonts.check('13px "AICO-PPT UI"', '预览编辑区域标记'),
       families:[...new Set([...document.querySelectorAll('.topbar button,.mode-button')]
         .map(element => getComputedStyle(element).fontFamily
           .split(',')[0].replaceAll('"', '').trim()))],
     };
   });
-  assert.deepEqual(typography, { loaded:true, families:['Huawei Deck UI'] });
+  assert.deepEqual(typography, { loaded:true, families:['AICO-PPT UI'] });
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });

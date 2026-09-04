@@ -176,17 +176,35 @@ function impactSummary(group) {
   };
 }
 
+function primaryTaskGroup(state, groupOrId) {
+  let group = typeof groupOrId === 'string'
+    ? state.groups?.find(candidate => candidate?.id === groupOrId) ?? null
+    : groupOrId;
+  const visited = new Set();
+  while (group?.compensation?.entryId && !visited.has(group.id)) {
+    visited.add(group.id);
+    group = state.groups?.find(
+      candidate => candidate?.id === group.compensation.entryId,
+    ) ?? group;
+    if (visited.has(group.id)) break;
+  }
+  return group;
+}
+
 function completeTask(state, taskId, groupOrId) {
   if (taskId === null) return undefined;
   const task = taskById(state, taskId);
   if (!task) return undefined;
-  const group = typeof groupOrId === 'string'
+  const changedGroup = typeof groupOrId === 'string'
     ? state.groups?.find(candidate => candidate?.id === groupOrId) ?? null
     : groupOrId;
-  const groupId = typeof groupOrId === 'string' ? groupOrId : group?.id;
+  const group = primaryTaskGroup(state, changedGroup);
+  const groupId = group?.id ?? task.groupId;
   task.status = 'completed';
-  task.groupId = groupId;
-  task.entryIds = [...new Set([...(task.entryIds ?? []), groupId].filter(Boolean))];
+  if (groupId) task.groupId = groupId;
+  task.entryIds = [...new Set([
+    ...(task.entryIds ?? []), groupId, changedGroup?.id,
+  ].filter(Boolean))];
   task.effectState = 'active';
   const summary = impactSummary(group);
   if (summary) task.impactSummary = summary;
@@ -195,14 +213,22 @@ function completeTask(state, taskId, groupOrId) {
   return task;
 }
 
-function reopenTask(state, taskId) {
+function markTaskEffectUndone(state, taskId, groupOrId) {
   if (taskId === null) return undefined;
   const task = taskById(state, taskId);
   if (!task) return undefined;
-  task.status = 'pending';
-  delete task.groupId;
-  delete task.targetMissing;
-  task.effectState = 'compensated';
+  const changedGroup = typeof groupOrId === 'string'
+    ? state.groups?.find(candidate => candidate?.id === groupOrId) ?? null
+    : groupOrId;
+  const originalGroup = primaryTaskGroup(state, changedGroup);
+  const originalGroupId = originalGroup?.id ?? task.groupId;
+  task.status = 'completed';
+  if (originalGroupId) task.groupId = originalGroupId;
+  task.entryIds = [...new Set([
+    ...(task.entryIds ?? []), originalGroupId, changedGroup?.id,
+  ].filter(Boolean))];
+  task.effectState = 'undone';
+  task.candidates = [];
   task.updatedAt = new Date().toISOString();
   return task;
 }
@@ -453,7 +479,7 @@ export class BridgeService {
         throw serviceError('TASK_NOT_FOUND', 404, '找不到结构任务');
       }
       if (linkedTask?.groupId || linkedTask?.status === 'completed') {
-        throw serviceError('TASK_ALREADY_COMPLETED', 409, '结构任务已经完成，请先撤销后再处理');
+        throw serviceError('TASK_ALREADY_COMPLETED', 409, '结构任务已经完成，不能重复交给 Agent 处理');
       }
       const sourceEdit = {
         id:randomUUID(), taskId, beforeFingerprint,
@@ -846,7 +872,7 @@ export class BridgeService {
         throw serviceError('TASK_NOT_FOUND', 404, '找不到任务');
       }
       if (linkedTask?.groupId || linkedTask?.status === 'completed') {
-        throw serviceError('TASK_ALREADY_COMPLETED', 409, '任务已关联动作组，请先撤销后再处理');
+        throw serviceError('TASK_ALREADY_COMPLETED', 409, '任务已经完成，不能重复交给 Agent 处理');
       }
       let prepared;
       try {
@@ -1089,7 +1115,7 @@ export class BridgeService {
       throw serviceError('TASK_NOT_FOUND', 404, '找不到结构任务');
     }
     if (linkedTask?.groupId || linkedTask?.status === 'completed') {
-      throw serviceError('TASK_ALREADY_COMPLETED', 409, '结构任务已关联修改组，请先撤销后再处理');
+      throw serviceError('TASK_ALREADY_COMPLETED', 409, '结构任务已经完成，不能重复交给 Agent 处理');
     }
     let candidate = structuredClone(state);
     if (clearSourceEditId !== null) {
@@ -1193,7 +1219,7 @@ export class BridgeService {
         method,
       );
       let linkedTask = method === 'undo'
-        ? reopenTask(candidate, originalGroup.taskId ?? null)
+        ? markTaskEffectUndone(candidate, originalGroup.taskId ?? null, originalGroup)
         : completeTask(candidate, originalGroup.taskId ?? null, originalGroup);
       candidate = this.reconcileSession(candidate);
       linkedTask = taskById(candidate, originalGroup.taskId ?? null);
@@ -1568,9 +1594,10 @@ export class BridgeService {
       let compensationGroup = null;
       try { draft[method](groupId); }
       catch (error) {
+        const linkedTaskId = originalGroup.taskId ?? originalGroup.compensation?.taskId;
         if (method === 'undo' && error?.code === 'HISTORY_ORDER'
           && originalGroup.mutationType !== 'source'
-          && typeof originalGroup.taskId === 'string') {
+          && typeof linkedTaskId === 'string') {
           compensationGroup = draft.compensate(groupId);
         } else if (error?.code === 'HISTORY_ORDER') {
           throw serviceError('HISTORY_ORDER', 409, error.message, {
@@ -1596,20 +1623,22 @@ export class BridgeService {
           journal.replaceHistory(draft);
           const changedGroup = journal.group(compensationGroup?.id ?? groupId);
           if (compensationGroup) {
-            linkedTask = reopenTask(journal.state, originalGroup.taskId);
-            if (linkedTask) {
-              linkedTask.entryIds = [...new Set([
-                ...(linkedTask.entryIds ?? []), compensationGroup.id,
-              ])];
-            }
+            const linkedTaskId = originalGroup.taskId ?? originalGroup.compensation?.taskId;
+            linkedTask = originalGroup.compensation
+              ? completeTask(journal.state, linkedTaskId, compensationGroup)
+              : markTaskEffectUndone(journal.state, linkedTaskId, compensationGroup);
           } else if (changedGroup?.compensation) {
             linkedTask = method === 'undo'
               ? completeTask(journal.state, changedGroup.compensation.taskId ?? null,
                 journal.group(changedGroup.compensation.entryId))
-              : reopenTask(journal.state, changedGroup.compensation.taskId ?? null);
+              : markTaskEffectUndone(
+                journal.state, changedGroup.compensation.taskId ?? null, changedGroup,
+              );
           } else {
             linkedTask = method === 'undo'
-              ? reopenTask(journal.state, changedGroup?.taskId ?? null)
+              ? markTaskEffectUndone(
+                journal.state, changedGroup?.taskId ?? null, changedGroup,
+              )
               : completeTask(journal.state, changedGroup?.taskId ?? null, changedGroup);
           }
           return { id:compensationGroup?.id ?? groupId };

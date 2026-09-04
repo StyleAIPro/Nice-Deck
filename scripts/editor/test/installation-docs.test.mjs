@@ -11,18 +11,18 @@ test('安装入口文档统一使用跨平台安装器和 Codex 标准 Skill 路
   for (const file of files) {
     const contents = await readFile(new URL(file, ROOT), 'utf8');
     assert.match(contents, /scripts[\\/]install\.py/, `${file} 缺少统一安装器入口`);
-    assert.match(contents, /\.agents\/skills\/huawei-deck/, `${file} 缺少标准 Skill 注册位置`);
+    assert.match(contents, /\.agents\/skills\/aico-ppt/, `${file} 缺少标准 Skill 注册位置`);
   }
 });
 
-test('依赖文档按 editor-core、verify、pptx-export、materials 分层', async () => {
+test('依赖文档按 editor-core、dev-shell、verify、pptx-export、materials 分层', async () => {
   const files = [
     'README.md', 'INSTALL.md', 'SKILL.md',
     'references/editing-guide.md', 'docs/architecture.md',
   ];
   for (const file of files) {
     const contents = await readFile(new URL(file, ROOT), 'utf8');
-    for (const profile of ['editor-core', 'verify', 'pptx-export', 'materials']) {
+    for (const profile of ['editor-core', 'dev-shell', 'verify', 'pptx-export', 'materials']) {
       assert.match(contents, new RegExp(profile), `${file} 缺少 ${profile} Profile`);
     }
   }

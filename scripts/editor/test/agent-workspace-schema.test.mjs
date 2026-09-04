@@ -16,7 +16,7 @@ const CREATED_AT = '2026-08-09T12:00:00.000Z';
 function emptyWorkspace(overrides = {}) {
   return createEmptyWorkspace({
     deckSessionId:DECK_SESSION_ID,
-    projectRoot:'/tmp/huawei-deck-project',
+    projectRoot:'/tmp/aico-ppt-project',
     projectRootSource:'deck-directory',
     activeProvider:'codex',
     now:() => CREATED_AT,

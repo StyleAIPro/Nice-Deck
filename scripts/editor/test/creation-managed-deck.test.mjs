@@ -36,7 +36,7 @@ test('CreationManagedDeck 复用 Editor Server，并在发布前 flush + solidif
       startOptions = options;
       return {
         url:`http://127.0.0.1:${port}`, token:'editor-token', editorToken:'browser-token',
-        workingDeckPath:'/tmp/staging/.huawei-deck-editor/session/working/deck.html',
+        workingDeckPath:'/tmp/staging/.aico-ppt-editor/session/working/deck.html',
         session,
         flushWorkingDeckChanges:async () => calls.push('flush'),
         waitUntilReady:async () => calls.push('ready'),
@@ -85,5 +85,36 @@ test('没有活动历史时发布沿用 staging 基线，不发送空固化请�
   const result = await runtime.preparePublish();
   assert.equal(result.solidified, false);
   assert.equal(requested, false);
+  await runtime.close();
+});
+
+test('DSH Creation Managed Deck 复用 Work Item 协调器而不注入独立终端', async () => {
+  const dshWorkItemProvider = async () => ({ workId:'work-dsh' });
+  const dshWorkItemCommand = async () => ({ status:'ok' });
+  let startOptions;
+  const runtime = await CreationManagedDeck.open({
+    sourceDeckPath:'/tmp/staging/deck.html',
+    projectRoot:'/tmp/project',
+    terminal:{ snapshot:() => ({ conversationId:'session-dsh' }) },
+    dshAgentBridge:true,
+    workId:'work-dsh',
+    dshWorkItemProvider,
+    dshWorkItemCommand,
+    startEditor:async options => {
+      startOptions = options;
+      return {
+        url:'http://127.0.0.1:1', token:'token', editorToken:'browser-token',
+        workingDeckPath:'/tmp/working/deck.html', session:{ revision:0, groups:[], redo:[] },
+        close:async () => {},
+      };
+    },
+  });
+
+  assert.equal(startOptions.dshAgentBridge, true);
+  assert.equal(startOptions.workId, 'work-dsh');
+  assert.equal(startOptions.dshWorkItemProvider, dshWorkItemProvider);
+  assert.equal(startOptions.dshWorkItemCommand, dshWorkItemCommand);
+  assert.equal('agentTerminalSession' in startOptions, false);
+  assert.equal('closeAgentTerminalOnShutdown' in startOptions, false);
   await runtime.close();
 });

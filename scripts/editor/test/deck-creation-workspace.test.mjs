@@ -7,6 +7,7 @@ import test from 'node:test';
 import { CreationDraftStore, createMemoryCreationDraftAdapter } from '../creation-draft-store.mjs';
 import {
   buildCreationInitializationPrompt,
+  buildCreationResumePrompt,
   buildGenerationPrompt,
   DeckCreationWorkspace,
 } from '../deck-creation-workspace.mjs';
@@ -85,12 +86,18 @@ test('新建与生成 Prompt 共享 Skill、模板固定页和质量契约', () 
   const initialization = buildCreationInitializationPrompt({
     projectRoot:'/tmp/project', capabilityPath:'/tmp/capability.json',
   });
+  assert.match(initialization, /^\/aico-ppt\n\n/u);
   assert.match(initialization, /SKILL\.md/);
   assert.match(initialization, /creation templates/);
   assert.match(initialization, /封面 cover 排第一、目录 toc 排第二、感谢页 thanks 排最后/);
   assert.match(initialization, /正文默认不得小于 21px/);
   assert.match(initialization, /同一组、同一层级、同一语义角色的普通信息卡必须同构/);
   assert.match(initialization, /不得为了构图制造默认高亮/);
+  const resume = buildCreationResumePrompt({
+    snapshot:{ draftId:'draft-1', revision:3, phase:'outline', brief:{ title:'新 Deck' } },
+    capabilityPath:'/tmp/capability.json',
+  });
+  assert.match(resume, /^\/aico-ppt\n\n/u);
   const generation = buildGenerationPrompt({
     outline:{ sections:[{ chapterId:'one', title:'第一章', objective:'讲清楚' }] },
     pagePlan:{ pages:[{ pageTypeId:'cover', label:'封面' }] },
@@ -140,7 +147,7 @@ test('Workspace 在生成前执行模板页面规划闸门', async () => {
 
 test('合法 staging Deck 出现后切入 Managed Workspace，发布前固化同一工作副本', async () => {
   const store = await preparedStore();
-  store.adapter.draftDir = '/tmp/project/.huawei-deck-editor/drafts/draft-1';
+  store.adapter.draftDir = '/tmp/project/.aico-ppt-editor/drafts/draft-1';
   const calls = [];
   const factory = {
     prepare:async () => ({
@@ -174,8 +181,8 @@ test('合法 staging Deck 出现后切入 Managed Workspace，发布前固化同
         snapshot:() => ({
           sourceDeckPath:options.sourceDeckPath,
           workingDeckPath:published
-            ? '/tmp/project/.huawei-deck-editor/final/working/deck.html'
-            : '/tmp/project/.huawei-deck-editor/drafts/draft-1/staging/run/.huawei-deck-editor/session/working/deck.html',
+            ? '/tmp/project/.aico-ppt-editor/final/working/deck.html'
+            : '/tmp/project/.aico-ppt-editor/drafts/draft-1/staging/run/.aico-ppt-editor/session/working/deck.html',
           serviceUrl:editor.url, token:editor.token,
           editorUrl:`${editor.url}/editor/?embedded=creation`, revision:published ? 0 : 2,
         }),
@@ -199,7 +206,7 @@ test('合法 staging Deck 出现后切入 Managed Workspace，发布前固化同
   const publishedView = workspace.snapshot();
   assert.equal(
     publishedView.previewDeck.path,
-    '/tmp/project/.huawei-deck-editor/final/working/deck.html',
+    '/tmp/project/.aico-ppt-editor/final/working/deck.html',
   );
   assert.equal(publishedView.previewDeck.managed, true);
   assert.match(publishedView.previewDeck.editorUrl, /60124/);
@@ -207,7 +214,7 @@ test('合法 staging Deck 出现后切入 Managed Workspace，发布前固化同
   assert.equal(finalOpenOptions.creationHandoff.draft.generation.status, 'published');
   assert.equal(
     finalOpenOptions.creationHandoff.draftDir,
-    '/tmp/project/.huawei-deck-editor/drafts/draft-1',
+    '/tmp/project/.aico-ppt-editor/drafts/draft-1',
   );
   assert.deepEqual(calls.map(value => Array.isArray(value) ? value[0] : value), [
     'open', 'ready', 'solidify', 'verify', 'publish', 'close-managed', 'open',

@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import { watch as watchFileSystem } from 'node:fs';
 import { lstat, readFile, readdir } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
+import { PROJECT_STATE_DIRECTORIES } from './state-paths.mjs';
 
 const HTML_EXTENSIONS = new Set(['.html', '.htm']);
 const IGNORED_DIRECTORIES = new Set([
-  '.git', '.huawei-deck-editor', 'node_modules',
+  '.git', ...PROJECT_STATE_DIRECTORIES, 'node_modules',
 ]);
 
 function bindingError(code, statusCode, message, details = {}) {

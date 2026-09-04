@@ -12,25 +12,25 @@
 
 ## 文件结构
 
-- 修改：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html` — 最终 Deck。
-- 归档：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor.archive-before-agent-feedback-20260802/` — 旧 session、任务截图和修改前 Deck。
-- 创建（临时、忽略提交）：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/check_result.py` — 两页内容契约测试。
-- 创建（临时、忽略提交）：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/apply_feedback.py` — 安全 bundle 转换脚本。
-- 创建（临时、忽略提交）：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/page7-body.html` — 页面 7 新主体片段。
+- 修改：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html` — 最终 Deck。
+- 归档：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor.archive-before-agent-feedback-20260802/` — 旧 session、任务截图和修改前 Deck。
+- 创建（临时、忽略提交）：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/check_result.py` — 两页内容契约测试。
+- 创建（临时、忽略提交）：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/apply_feedback.py` — 安全 bundle 转换脚本。
+- 创建（临时、忽略提交）：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/page7-body.html` — 页面 7 新主体片段。
 - 生成（临时）：`/tmp/renzhi-agent-feedback/page-6.jpg`、`page-7.jpg`、`steps/` — 视觉验证产物。
 
 ### 任务 1：冻结旧会话并建立失败契约
 
 **文件：**
-- 归档：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor.archive-before-agent-feedback-20260802/`
-- 创建：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/check_result.py`
+- 归档：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor.archive-before-agent-feedback-20260802/`
+- 创建：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/check_result.py`
 
 - [ ] **步骤 1：记录当前 Deck 和任务状态**
 
 运行：
 
 ```bash
-shasum -a 256 /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html
+shasum -a 256 /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html
 node scripts/editor/cli.mjs --url http://127.0.0.1:49892 --token d05c5539-7c59-4fa9-9a46-1ac4a9ad63aa status
 ```
 
@@ -53,23 +53,23 @@ lsof -nP -iTCP:49892 -sTCP:LISTEN
 先验证归档目标不存在，再将旧 sidecar 整体改名，并复制源 Deck：
 
 ```bash
-test ! -e /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor.archive-before-agent-feedback-20260802
-mv /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor.archive-before-agent-feedback-20260802
-cp -p /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor.archive-before-agent-feedback-20260802/renzhi-deck.before-agent-feedback.html
-shasum -a 256 /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor.archive-before-agent-feedback-20260802/renzhi-deck.before-agent-feedback.html
+test ! -e /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor.archive-before-agent-feedback-20260802
+mv /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor.archive-before-agent-feedback-20260802
+cp -p /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor.archive-before-agent-feedback-20260802/renzhi-deck.before-agent-feedback.html
+shasum -a 256 /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor.archive-before-agent-feedback-20260802/renzhi-deck.before-agent-feedback.html
 ```
 
 预期：归档 Deck hash 仍为 `184a842...66a1`；旧 `session.json` 与四张任务截图仍在归档内。
 
 - [ ] **步骤 4：创建内容契约测试**
 
-先运行 `mkdir -p /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback`，再使用 `apply_patch` 创建 `check_result.py`：
+先运行 `mkdir -p /Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback`，再使用 `apply_patch` 创建 `check_result.py`：
 
 ```python
 from pathlib import Path
 import importlib.util
 
-ROOT = Path('/Users/zhaoyinqi/zyq_workspace/huawei-deck')
+ROOT = Path('/Users/zhaoyinqi/zyq_workspace/aico-ppt')
 DECK = ROOT / 'Deck-Projects/renzhi/renzhi-deck.html'
 SPEC = importlib.util.spec_from_file_location('eb', ROOT / 'scripts/edit-bundle.py')
 eb = importlib.util.module_from_spec(SPEC)
@@ -111,7 +111,7 @@ print(f'PASS: {len(checks)}/{len(checks)} contracts')
 运行：
 
 ```bash
-python3 /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/check_result.py
+python3 /Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/check_result.py
 ```
 
 预期：退出码 1，至少报告 `page6-theme-24`、`page6-body-28`、`page7-new-diagram` 失败；失败原因必须是尚未实施需求。
@@ -119,9 +119,9 @@ python3 /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-fee
 ### 任务 2：安全修改页面 6 和页面 7
 
 **文件：**
-- 创建：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/page7-body.html`
-- 创建：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/apply_feedback.py`
-- 修改：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html`
+- 创建：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/page7-body.html`
+- 创建：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/apply_feedback.py`
+- 修改：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html`
 
 - [ ] **步骤 1：创建页面 7 主体片段**
 
@@ -175,7 +175,7 @@ python3 /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-fee
 from pathlib import Path
 import importlib.util
 
-ROOT = Path('/Users/zhaoyinqi/zyq_workspace/huawei-deck')
+ROOT = Path('/Users/zhaoyinqi/zyq_workspace/aico-ppt')
 DECK = ROOT / 'Deck-Projects/renzhi/renzhi-deck.html'
 BODY = ROOT / '.superpowers/renzhi-agent-feedback/page7-body.html'
 SPEC = importlib.util.spec_from_file_location('eb', ROOT / 'scripts/edit-bundle.py')
@@ -225,7 +225,7 @@ print('PASS: Deck 已修改并通过 eb.verify')
 运行：
 
 ```bash
-python3 /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/apply_feedback.py
+python3 /Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/apply_feedback.py
 ```
 
 预期：输出 `PASS: Deck 已修改并通过 eb.verify`，退出码 0。
@@ -235,7 +235,7 @@ python3 /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-fee
 运行：
 
 ```bash
-python3 /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-feedback/check_result.py
+python3 /Users/zhaoyinqi/zyq_workspace/aico-ppt/.superpowers/renzhi-agent-feedback/check_result.py
 ```
 
 预期：输出 `PASS: 10/10 contracts`，退出码 0。
@@ -245,8 +245,8 @@ python3 /Users/zhaoyinqi/zyq_workspace/huawei-deck/.superpowers/renzhi-agent-fee
 本 Deck 目录在主工作区中未被 Git 跟踪，因此不创建伪 commit。改用 hash 与归档作为检查点：
 
 ```bash
-shasum -a 256 /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html
-test -f /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor.archive-before-agent-feedback-20260802/renzhi-deck.before-agent-feedback.html
+shasum -a 256 /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html
+test -f /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor.archive-before-agent-feedback-20260802/renzhi-deck.before-agent-feedback.html
 ```
 
 预期：新 Deck hash 与旧 hash 不同，归档文件存在。
@@ -254,7 +254,7 @@ test -f /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-
 ### 任务 3：运行完整验证并目检
 
 **文件：**
-- 验证：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html`
+- 验证：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html`
 - 生成：`/tmp/renzhi-agent-feedback/`
 
 - [ ] **步骤 1：运行 bundle 和全页溢出验证**
@@ -262,8 +262,8 @@ test -f /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-
 运行：
 
 ```bash
-python3 -c "import importlib.util; p='scripts/edit-bundle.py'; s=importlib.util.spec_from_file_location('eb',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.verify('/Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html')"
-node scripts/verify/measure_overflow.mjs /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html --all
+python3 -c "import importlib.util; p='scripts/edit-bundle.py'; s=importlib.util.spec_from_file_location('eb',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.verify('/Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html')"
+node scripts/verify/measure_overflow.mjs /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html --all
 ```
 
 预期：两条命令退出码 0，页面 6、7 无 section overflow；已有页面 10 nested clip 基线不作为本次新增问题。
@@ -274,9 +274,9 @@ node scripts/verify/measure_overflow.mjs /Users/zhaoyinqi/zyq_workspace/huawei-d
 
 ```bash
 mkdir -p /tmp/renzhi-agent-feedback/steps
-node scripts/verify/shot.mjs /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html 专业知识 /tmp/renzhi-agent-feedback/page-6.jpg
-node scripts/verify/shot.mjs /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html kc-resp-proj /tmp/renzhi-agent-feedback/page-7.jpg
-node scripts/verify/steps.mjs /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html kc-resp-proj /tmp/renzhi-agent-feedback/steps
+node scripts/verify/shot.mjs /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html 专业知识 /tmp/renzhi-agent-feedback/page-6.jpg
+node scripts/verify/shot.mjs /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html kc-resp-proj /tmp/renzhi-agent-feedback/page-7.jpg
+node scripts/verify/steps.mjs /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html kc-resp-proj /tmp/renzhi-agent-feedback/steps
 ```
 
 预期：页面 6、7 截图均为 1920×1080；页面 7 逐拍目录包含初始、平台建设和协作图状态。
@@ -294,7 +294,7 @@ node scripts/verify/steps.mjs /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Pr
 ### 任务 4：启动新编辑会话并交付
 
 **文件：**
-- 创建：`/Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/.huawei-deck-editor/` — 最终 Deck 的新基线会话。
+- 创建：`/Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/.aico-ppt-editor/` — 最终 Deck 的新基线会话。
 
 - [ ] **步骤 1：启动编辑器并保存启动信息**
 
@@ -302,8 +302,8 @@ node scripts/verify/steps.mjs /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Pr
 
 ```javascript
 const started = await tools.exec_command({
-  cmd: 'python3 scripts/deck-editor.py --no-open /Users/zhaoyinqi/zyq_workspace/huawei-deck/Deck-Projects/renzhi/renzhi-deck.html',
-  workdir: '/Users/zhaoyinqi/zyq_workspace/huawei-deck/.worktrees/deck-visual-editor',
+  cmd: 'python3 scripts/deck-editor.py --no-open /Users/zhaoyinqi/zyq_workspace/aico-ppt/Deck-Projects/renzhi/renzhi-deck.html',
+  workdir: '/Users/zhaoyinqi/zyq_workspace/aico-ppt/.worktrees/deck-visual-editor',
   yield_time_ms: 1000,
   max_output_tokens: 4000,
   tty: true,
@@ -327,11 +327,11 @@ if (!ready?.url || !ready?.token) throw new Error('缺少编辑器启动信息')
 const base = `node scripts/editor/cli.mjs --url ${ready.url} --token ${ready.token}`;
 const status = await tools.exec_command({
   cmd: `${base} status`,
-  workdir: '/Users/zhaoyinqi/zyq_workspace/huawei-deck/.worktrees/deck-visual-editor',
+  workdir: '/Users/zhaoyinqi/zyq_workspace/aico-ppt/.worktrees/deck-visual-editor',
 });
 const tasks = await tools.exec_command({
   cmd: `${base} tasks`,
-  workdir: '/Users/zhaoyinqi/zyq_workspace/huawei-deck/.worktrees/deck-visual-editor',
+  workdir: '/Users/zhaoyinqi/zyq_workspace/aico-ppt/.worktrees/deck-visual-editor',
 });
 text({ status: JSON.parse(status.output), tasks: JSON.parse(tasks.output) });
 ```

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { lstat, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { resolveProjectStateRoot } from './state-paths.mjs';
 
 export const CREATION_HANDOFF_FILENAME = 'creation-context.json';
 const LEGACY_FILENAME = 'creation.json';
@@ -170,7 +171,9 @@ function legacyDraftDirectory(draft) {
     .find(path => typeof path === 'string' && isAbsolute(path));
   if (milestonePath) return dirname(milestonePath);
   if (typeof draft?.projectRoot === 'string' && typeof draft?.draftId === 'string') {
-    return join(draft.projectRoot, '.huawei-deck-editor', 'drafts', draft.draftId);
+    return join(resolveProjectStateRoot(draft.projectRoot, {
+      existingChild:['drafts', draft.draftId],
+    }), 'drafts', draft.draftId);
   }
   return null;
 }
@@ -220,7 +223,7 @@ export function buildCreationHandoffPrompt({ path, context, editor = null } = {}
   if (!path || !context) return '';
   return [
     '当前 Deck 已从“新建 Deck”进入“修改 Deck”微调阶段；这是同一个任务，不是新的制作项目。',
-    '沿用当前 Agent 对话与已经加载的 huawei-deck Skill，不要再次完整读取 SKILL.md，也不要重复询问已确认的信息。',
+    '沿用当前 Agent 对话与已经加载的 aico-ppt Skill，不要再次完整读取 SKILL.md，也不要重复询问已确认的信息。',
     `Creation 上下文清单：${path}`,
     `原 Draft：${context.draftId}`,
     `设计文稿：${context.artifacts.planPath ?? '未单独生成'}`,

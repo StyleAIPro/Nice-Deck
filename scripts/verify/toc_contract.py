@@ -19,7 +19,7 @@ IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
 
 def load_edit_bundle():
-    spec = importlib.util.spec_from_file_location("huawei_deck_edit_bundle", EDIT_BUNDLE_PATH)
+    spec = importlib.util.spec_from_file_location("aico_ppt_edit_bundle", EDIT_BUNDLE_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError("无法加载 scripts/edit-bundle.py")
     module = importlib.util.module_from_spec(spec)

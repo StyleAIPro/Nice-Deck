@@ -94,7 +94,7 @@ const CLAUDE_READY_OUTPUT = '\u001b[5;1H────\r\n❯\u00a0\u001b[7m \u001
 const CODEX_DRAFT_OUTPUT = '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mExplain this codebase'
   + '\u001b[?25h\u001b[11;3H\u001b[?2026l';
 const CODEX_LOADING_WITH_STATUS_OUTPUT = '\u001b[3;1Hmodel: loading   /model to change'
-  + '\u001b[23;1Hgpt-5.6-sol default · /tmp/huawei-deck'
+  + '\u001b[23;1Hgpt-5.6-sol default · /tmp/aico-ppt'
   + CODEX_DRAFT_OUTPUT;
 const CODEX_RESUMED_STALE_LOADING_OUTPUT = '\u001b[3;1Hmodel: loading   /model to change'
   + '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mAsk Codex to do anything'
@@ -111,16 +111,16 @@ const CODEX_RESUME_DIRECTORY_INTERACTION_OUTPUT = '\u001b[1;1H\u001b[J'
   + '\u001b[4;3HSession = latest cwd recorded in the resumed session'
   + '\u001b[5;3HCurrent = your current working directory'
   + '\u001b[7;1H› 1. Use session directory'
-  + '\u001b[8;6H(/tmp/old-huawei-deck)'
+  + '\u001b[8;6H(/tmp/old-aico-ppt)'
   + '\u001b[9;3H2.\u001b[9;6HUse\u001b[9;10Hcurrent\u001b[9;18Hdirectory'
-  + '\u001b[9;28H(/tmp/huawei-deck)'
+  + '\u001b[9;28H(/tmp/aico-ppt)'
   + '\u001b[10;3H3.\u001b[10;6HAlways\u001b[10;13Huse\u001b[10;17Hsession'
   + '\u001b[10;25Hdirectory'
   + '\u001b[11;3H4.\u001b[11;6HAlways\u001b[11;13Huse\u001b[11;17Hcurrent'
   + '\u001b[11;25Hdirectory'
   + '\u001b[13;3HPress enter to continue\u001b[?25l';
 const CODEX_READY_OUTPUT = '\u001b[3;1Hmodel: gpt-5.6-sol xhigh   /model to change'
-  + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+  + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/aico-ppt'
   + CODEX_DRAFT_OUTPUT;
 const OPENCODE_READY_OUTPUT = '\u001b[20;2HAsk anything: Ask a question, move files, explore your code...'
   + '\u001b[?25h';
@@ -201,10 +201,10 @@ test('终端 provider 暴露 Codex、Claude Code 与 OpenCode，并使用固定�
     provider:'opencode', label:'OpenCode', executable:'opencode', args:[],
   });
   assert.deepEqual(buildAgentTerminalCommand('opencode', {
-    platform:'win32', conversationId:'ses_huawei_deck_1', resume:true,
+    platform:'win32', conversationId:'ses_aico_ppt_1', resume:true,
   }), {
     provider:'opencode', label:'OpenCode', executable:'opencode.cmd',
-    args:['--session', 'ses_huawei_deck_1'],
+    args:['--session', 'ses_aico_ppt_1'],
   });
   assert.throws(() => buildAgentTerminalCommand('openclaw'), /不支持的终端 Agent/);
 });
@@ -242,7 +242,7 @@ test('三种 Agent 遇到目录信任提示时等待用户确认且不误投初�
     await t.test(scenario.name, async () => {
       const children = [];
       const session = new AgentTerminalSession({
-        projectRoot:'/tmp/huawei-deck',
+        projectRoot:'/tmp/aico-ppt',
         provider:scenario.provider,
         initialPrompt:() => '这条任务必须等目录信任确认后再提交',
         spawnPty:(executable, args, options) => {
@@ -278,7 +278,7 @@ test('三种 Agent 遇到目录信任提示时等待用户确认且不误投初�
 test('Claude Code 启动输出不能误当成可输入提示符', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'claude-code',
     initialPrompt:() => '必须等到 Claude 输入框再提交',
     spawnPty:(executable, args, options) => {
@@ -302,7 +302,7 @@ test('Codex 0.148 初始化草稿框不算就绪，自动回车收到终端回�
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     initialPrompt:() => '这是必须自动发出的初始化说明',
     scheduleSubmit:(callback, delayMs) => {
@@ -349,7 +349,7 @@ test('Codex 完成长输出后再次出现输入框即可接收下一批任务',
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     initialPrompt:() => '',
     scheduleSubmit:(callback, delayMs) => {
@@ -378,7 +378,7 @@ test('Codex 完成长输出后再次出现输入框即可接收下一批任务',
   children[0].events.emit(
     'data',
     '\r\nWorked for 4m 12s'
-      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/aico-ppt'
       + CODEX_DRAFT_OUTPUT,
   );
   assert.equal(session.snapshot().promptReady, true);
@@ -391,7 +391,7 @@ test('Codex 工作期间出现 steer 输入框仍保持活动回合，不能接�
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     initialPrompt:() => '',
     scheduleSubmit:(callback, delayMs) => {
@@ -412,7 +412,7 @@ test('Codex 工作期间出现 steer 输入框仍保持活动回合，不能接�
   session.submitPrompt('处理第一批任务');
   drainUntilEnter(scheduledSubmits, children[0]);
   children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
-  children[0].events.emit('data', '\r\nWorking (1s • esc to interrupt) · /tmp/huawei-deck'
+  children[0].events.emit('data', '\r\nWorking (1s • esc to interrupt) · /tmp/aico-ppt'
     + CODEX_DRAFT_OUTPUT);
 
   assert.equal(session.snapshot().inputVisible, true);
@@ -432,7 +432,7 @@ test('Codex 长步骤挤远活动标记后出现 steer 输入框仍保持活动�
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     initialPrompt:() => '',
     scheduleSubmit:(callback, delayMs) => {
@@ -462,7 +462,7 @@ test('Codex 长步骤挤远活动标记后出现 steer 输入框仍保持活动�
   children[0].events.emit('data', `\r\n${'工具执行输出 '.repeat(420)}`);
   children[0].events.emit(
     'data',
-    '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck' + CODEX_DRAFT_OUTPUT,
+    '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/aico-ppt' + CODEX_DRAFT_OUTPUT,
   );
   assert.equal(session.snapshot().inputVisible, true);
   assert.equal(session.snapshot().turnState, 'active');
@@ -475,7 +475,7 @@ test('Codex 长步骤挤远活动标记后出现 steer 输入框仍保持活动�
   children[0].events.emit(
     'data',
     '\r\nWorked for 2m 10s'
-      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/aico-ppt'
       + CODEX_DRAFT_OUTPUT,
   );
   assert.equal(session.snapshot().turnState, 'idle');
@@ -488,7 +488,7 @@ test('OpenCode 启动 banner 不算就绪，必须等到真实输入框再注入
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'opencode',
     initialPrompt:() => 'OpenCode 初始化说明',
     scheduleSubmit:(callback, delayMs) => {
@@ -525,7 +525,7 @@ test('自动回车没有终端回执时只重试一次并显式失败', async ()
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     initialPrompt:() => '不能静默留在输入框里的初始化说明',
     scheduleSubmit:(callback, delayMs) => {
@@ -559,7 +559,7 @@ test('自动回车没有终端回执时只重试一次并显式失败', async ()
 test('恢复会话的 PTY 已运行但输入框未出现时仍不算就绪', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     resolveConversation:async () => ({
       conversationId:'codex-resumed-trust-session',
       resume:true,
@@ -596,7 +596,7 @@ test('恢复会话的 PTY 已运行但输入框未出现时仍不算就绪', asy
 test('恢复历史中的旧目录信任提示不能覆盖最终空输入框', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     resolveConversation:async () => ({
       conversationId:'codex-resumed-history-trust-session',
@@ -624,7 +624,7 @@ test('恢复历史中的旧目录信任提示不能覆盖最终空输入框', as
 test('恢复超长 Codex 历史时模型标题被裁掉仍可识别最终输入框', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     resolveConversation:async () => ({
       conversationId:'codex-resumed-long-history-session',
@@ -640,7 +640,7 @@ test('恢复超长 Codex 历史时模型标题被裁掉仍可识别最终输入�
   await session.start({ provider:'codex' });
   children[0].events.emit(
     'data',
-    `${'历史内容 '.repeat(220_000)}\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck`
+    `${'历史内容 '.repeat(220_000)}\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/aico-ppt`
       + CODEX_DRAFT_OUTPUT,
   );
   assert.equal(session.snapshot().interactionRequired, null);
@@ -651,7 +651,7 @@ test('恢复超长 Codex 历史时模型标题被裁掉仍可识别最终输入�
 test('恢复普通长度 Codex 历史时最终输入框不因缺少启动 model 行而永久锁定', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     resolveConversation:async () => ({
       conversationId:'codex-resumed-visible-input-session',
@@ -668,7 +668,7 @@ test('恢复普通长度 Codex 历史时最终输入框不因缺少启动 model 
   children[0].events.emit(
     'data',
     '历史会话内容已经恢复\r\n'
-      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck'
+      + '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/aico-ppt'
       + '\u001b[11;1H\u001b[1m›\u001b[11;3H\u001b[2mAsk Codex to do anything'
       + '\u001b[?25h\u001b[11;3H\u001b[?2026l',
   );
@@ -681,7 +681,7 @@ test('恢复普通长度 Codex 历史时最终输入框不因缺少启动 model 
 test('恢复 Codex 已画出输入框但状态栏仍陈旧时只触发一次尺寸重绘', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     resolveConversation:async () => ({
       conversationId:'codex-resumed-stale-loading-session',
@@ -710,7 +710,7 @@ test('Codex 恢复时升级通知不误放行，交互升级页开放键盘并�
   await t.test('纯通知继续等待真实输入框', async () => {
     const children = [];
     const session = new AgentTerminalSession({
-      projectRoot:'/tmp/huawei-deck',
+      projectRoot:'/tmp/aico-ppt',
       provider:'codex',
       resolveConversation:async () => ({
         conversationId:'codex-update-notice-session',
@@ -740,7 +740,7 @@ test('Codex 恢复时升级通知不误放行，交互升级页开放键盘并�
   await t.test('需要按键的升级页进入受控交互态', async () => {
     const children = [];
     const session = new AgentTerminalSession({
-      projectRoot:'/tmp/huawei-deck',
+      projectRoot:'/tmp/aico-ppt',
       provider:'codex',
       resolveConversation:async () => ({
         conversationId:'codex-update-interaction-session',
@@ -776,7 +776,7 @@ test('Codex 恢复时升级通知不误放行，交互升级页开放键盘并�
 test('Codex 恢复目录不一致时开放目录选择页且继续阻断任务', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     resolveConversation:async () => ({
       conversationId:'codex-resume-directory-session',
@@ -811,7 +811,7 @@ test('Codex 恢复目录不一致时开放目录选择页且继续阻断任务',
 test('未知 CLI 编号选择页走通用交互闸门，普通编号日志不误开放键盘', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     initialPrompt:() => '选择完成前不能提交',
     spawnPty:(executable, args, options) => {
@@ -852,7 +852,7 @@ test('未知 CLI 编号选择页走通用交互闸门，普通编号日志不误
 test('恢复 Codex 会话时显式 model loading 仍不能提前接收任务', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     resolveConversation:async () => ({
       conversationId:'codex-resumed-loading-session',
@@ -893,7 +893,7 @@ test('Windows PTY 使用 npm 的 .cmd shim 启动 Agent', async () => {
   const scheduledSubmits = [];
   const scheduledDelays = [];
   const session = new AgentTerminalSession({
-    projectRoot:String.raw`C:\huawei-deck`,
+    projectRoot:String.raw`C:\aico-ppt`,
     provider:'claude-code',
     platform:'win32',
     resolveExecutable:() => 'claude.cmd',
@@ -929,7 +929,7 @@ test('Windows Claude Code 长任务分块穿过 ConPTY 后再自动回车', asyn
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:String.raw`Y:\huawei-deck`,
+    projectRoot:String.raw`Y:\aico-ppt`,
     provider:'claude-code',
     platform:'win32',
     resolveExecutable:() => 'claude.exe',
@@ -947,7 +947,7 @@ test('Windows Claude Code 长任务分块穿过 ConPTY 后再自动回车', asyn
   await session.start();
   children[0].events.emit('data', CLAUDE_READY_OUTPUT);
   const prompt = [
-    String.raw`Deck：Y:\huawei-deck\Deck-Projects\demo\working\deck.html`,
+    String.raw`Deck：Y:\aico-ppt\Deck-Projects\demo\working\deck.html`,
     '只处理本批 ID；不要读取整份历史；保持 action envelope 完整。'.repeat(120),
     '如果收到这里，说明任务指令完整。',
   ].join('\n');
@@ -975,7 +975,7 @@ test('Windows Claude Code 在单次写入只保留末尾 1 KiB 时不得丢失�
   const children = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:String.raw`Y:\huawei-deck`,
+    projectRoot:String.raw`Y:\aico-ppt`,
     provider:'claude-code',
     platform:'win32',
     resolveExecutable:() => 'claude.exe',
@@ -993,7 +993,7 @@ test('Windows Claude Code 在单次写入只保留末尾 1 KiB 时不得丢失�
   await session.start();
   children[0].events.emit('data', CLAUDE_READY_OUTPUT);
   const prompt = buildAgentPrompt({
-    deckPath:String.raw`Y:\huawei-deck\Deck-Projects\demo\.huawei-deck-editor\test\working\deck.html`,
+    deckPath:String.raw`Y:\aico-ppt\Deck-Projects\demo\.aico-ppt-editor\test\working\deck.html`,
     serviceUrl:'http://127.0.0.1:54117',
     token:'secret',
     taskIds:['task-windows-prefix'],
@@ -1021,7 +1021,7 @@ test('Windows Claude Code 分块提交中重启会取消整条旧写入链', asy
   const cancelled = [];
   let nextHandle = 0;
   const session = new AgentTerminalSession({
-    projectRoot:String.raw`C:\huawei-deck`,
+    projectRoot:String.raw`C:\aico-ppt`,
     provider:'claude-code',
     platform:'win32',
     scheduleSubmit:(callback, delayMs) => {
@@ -1054,8 +1054,8 @@ test('Windows Claude Code 分块提交中重启会取消整条旧写入链', asy
 test('Windows PTY 对外保留可信 UNC 项目身份，但用映射盘 cwd 启动 Agent', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:String.raw`\\server\share\huawei-deck`,
-    cwd:String.raw`R:\huawei-deck`,
+    projectRoot:String.raw`\\server\share\aico-ppt`,
+    cwd:String.raw`R:\aico-ppt`,
     provider:'claude-code',
     platform:'win32',
     spawnPty:(executable, args, options) => {
@@ -1065,8 +1065,8 @@ test('Windows PTY 对外保留可信 UNC 项目身份，但用映射盘 cwd 启�
     },
   });
   await session.start();
-  assert.equal(session.snapshot().projectRoot, String.raw`\\server\share\huawei-deck`);
-  assert.equal(children[0].options.cwd, String.raw`R:\huawei-deck`);
+  assert.equal(session.snapshot().projectRoot, String.raw`\\server\share\aico-ppt`);
+  assert.equal(children[0].options.cwd, String.raw`R:\aico-ppt`);
   await session.close();
 });
 
@@ -1080,15 +1080,15 @@ test('Windows Codex 通过 WSL runtime 启动并用 WSL 路径提交与发现会
     cwd:String.raw`C:\Users\tester\workspace\project`,
     provider:'codex',
     platform:'win32',
-    environment:{ HUAWEI_DECK_EDITOR_TOKEN:'secret' },
+    environment:{ AICO_PPT_EDITOR_TOKEN:'secret' },
     runtimePathRoots:[String.raw`C:\Users\tester\workspace\AICO-PPT`],
     prepareRuntime:async () => ({
       kind:'wsl',
       conversationCwd:'/mnt/c/Users/tester/workspace/project',
       spawnCwd:String.raw`C:\Users\tester\workspace\project`,
       environment:{
-        HUAWEI_DECK_EDITOR_TOKEN:'secret',
-        HUAWEI_DECK_CODEX_RUNTIME:'wsl',
+        AICO_PPT_EDITOR_TOKEN:'secret',
+        AICO_PPT_CODEX_RUNTIME:'wsl',
       },
       translateText:text => text
         .replaceAll(String.raw`C:\Users\tester\workspace\project`, '/mnt/c/Users/tester/workspace/project'),
@@ -1129,8 +1129,8 @@ test('Windows Codex 通过 WSL runtime 启动并用 WSL 路径提交与发现会
   assert.equal(children[0].executable, 'wsl.exe');
   assert.equal(children[0].options.cwd, String.raw`C:\Users\tester\workspace\project`);
   assert.deepEqual(resolutions[0][1].environment, {
-    HUAWEI_DECK_EDITOR_TOKEN:'secret',
-    HUAWEI_DECK_CODEX_RUNTIME:'wsl',
+    AICO_PPT_EDITOR_TOKEN:'secret',
+    AICO_PPT_CODEX_RUNTIME:'wsl',
   });
   children[0].events.emit('data', 'Codex ready');
   drainUntilEnter(scheduled, children[0]);
@@ -1139,7 +1139,7 @@ test('Windows Codex 通过 WSL runtime 启动并用 WSL 路径提交与发现会
   children[0].events.emit('data', '\u001b[?25l\u001b[2K• Working');
   assert.equal(session.snapshot().startupPromptState, 'submitted');
   assert.equal(discoveries[0][1].cwd, '/mnt/c/Users/tester/workspace/project');
-  assert.equal(discoveries[0][1].environment.HUAWEI_DECK_CODEX_RUNTIME, 'wsl');
+  assert.equal(discoveries[0][1].environment.AICO_PPT_CODEX_RUNTIME, 'wsl');
   await session.close();
 });
 
@@ -1191,7 +1191,7 @@ test('恢复会话只向浏览器投影最终终端画面，后续输出恢复�
   const sockets = [];
   const projectedChunks = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     provider:'codex',
     initialPrompt:() => '',
     resolveConversation:async () => ({
@@ -1242,8 +1242,8 @@ test('独立 Escape 输入发布批次中断事件，方向键转义序列不误
   const children = [];
   const interrupts = [];
   const projectRoot = process.platform === 'win32'
-    ? String.raw`C:\huawei-deck`
-    : '/tmp/huawei-deck';
+    ? String.raw`C:\aico-ppt`
+    : '/tmp/aico-ppt';
   const session = new AgentTerminalSession({
     projectRoot,
     initialPrompt:() => '',
@@ -1275,7 +1275,7 @@ test('重启会话会取消待发送回车，旧回调不能提交到新 Agent',
   const cancelled = [];
   let scheduled;
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     platform:'linux',
     scheduleSubmit:(callback, delayMs) => {
       scheduled = { callback, delayMs };
@@ -1306,7 +1306,7 @@ test('Codex 初始化指令等待真实输入框就绪，添加任务和新会�
   const resolutions = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     platform:'linux',
     initialPrompt:() => '这是新建 Deck 的初始化说明',
     resolveConversation:async (_provider, options) => {
@@ -1365,7 +1365,7 @@ test('PTY 会话在项目目录启动、回放输出并支持输入、缩放和�
   const providerChanges = [];
   const scheduledSubmits = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     platform:'linux',
     initialPrompt:provider => `初始化 ${provider}`,
     onProviderChange:async provider => providerChanges.push(provider),
@@ -1385,7 +1385,7 @@ test('PTY 会话在项目目录启动、回放输出并支持输入、缩放和�
   const listenerStates = [];
   session.addProviderChangeListener(value => listenerProviders.push(value));
   session.addStateListener(value => listenerStates.push(value.state));
-  session.updateEnvironment({ HUAWEI_DECK_CREATION_URL:'http://127.0.0.1:1234' });
+  session.updateEnvironment({ AICO_PPT_CREATION_URL:'http://127.0.0.1:1234' });
   const sent = [];
   const socket = { readyState:1, send:value => sent.push(JSON.parse(value)) };
   session.attach(socket);
@@ -1395,9 +1395,9 @@ test('PTY 会话在项目目录启动、回放输出并支持输入、缩放和�
   assert.deepEqual(first.args, [
     '--dangerously-bypass-approvals-and-sandbox',
   ]);
-  assert.equal(first.options.cwd, '/tmp/huawei-deck');
+  assert.equal(first.options.cwd, '/tmp/aico-ppt');
   assert.equal(first.options.env.TERM, 'xterm-256color');
-  assert.equal(first.options.env.HUAWEI_DECK_CREATION_URL, 'http://127.0.0.1:1234');
+  assert.equal(first.options.env.AICO_PPT_CREATION_URL, 'http://127.0.0.1:1234');
   first.events.emit('data', '\u001b[31mCodex ready\u001b[0m');
   assert.ok(sent.some(message => message.type === 'output'));
   assert.equal(session.snapshot().startupPromptState, 'submitting');
@@ -1451,8 +1451,8 @@ test('PTY 启动前解析任务专属会话，启动后持久化回执', async (
   const started = [];
   const resolutions = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
-    environment:{ HUAWEI_DECK_TEST:'conversation-env' },
+    projectRoot:'/tmp/aico-ppt',
+    environment:{ AICO_PPT_TEST:'conversation-env' },
     resolveConversation:async (provider, options) => {
       resolutions.push([provider, options]);
       return {
@@ -1499,17 +1499,17 @@ test('PTY 启动前解析任务专属会话，启动后持久化回执', async (
     ['codex', {
       newConversation:false,
       initialPrompt:'继续当前任务',
-      environment:{ HUAWEI_DECK_TEST:'conversation-env' },
+      environment:{ AICO_PPT_TEST:'conversation-env' },
     }],
     ['codex', {
       newConversation:false,
       initialPrompt:'处理新任务',
-      environment:{ HUAWEI_DECK_TEST:'conversation-env' },
+      environment:{ AICO_PPT_TEST:'conversation-env' },
     }],
     ['claude-code', {
       newConversation:true,
       initialPrompt:'继续当前任务',
-      environment:{ HUAWEI_DECK_TEST:'conversation-env' },
+      environment:{ AICO_PPT_TEST:'conversation-env' },
     }],
   ]);
   await session.close();
@@ -1520,7 +1520,7 @@ test('Codex 新会话先显示 PTY，再异步发现并持久化真实 ID', asyn
   const started = [];
   let releaseIdentity;
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     initialPrompt:() => '读取 Skill 并建立编辑上下文',
     resolveConversation:async () => ({
       conversationId:null,
@@ -1560,7 +1560,7 @@ test('Codex 新会话先显示 PTY，再异步发现并持久化真实 ID', asyn
 test('Codex 恢复 ID 已失效时由可见 CLI 失败信号自动切换新会话', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     initialPrompt:() => '读取 Skill',
     resolveConversation:async (_provider, { newConversation }) => newConversation
       ? {
@@ -1598,7 +1598,7 @@ test('Codex 恢复 ID 已失效时由可见 CLI 失败信号自动切换新会�
 test('Claude Code 恢复 ID 已失效时由可见 CLI 失败信号自动切换新会话', async () => {
   const children = [];
   const session = new AgentTerminalSession({
-    projectRoot:'/tmp/huawei-deck',
+    projectRoot:'/tmp/aico-ppt',
     initialPrompt:() => '读取 Skill',
     resolveConversation:async (_provider, { newConversation }) => newConversation
       ? {

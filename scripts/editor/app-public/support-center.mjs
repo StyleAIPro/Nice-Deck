@@ -3,8 +3,8 @@ const SUPPORT_TITLES = {
   help:'帮助中心',
   diagnostics:'安装与诊断',
 };
-const ONBOARDING_STORAGE_KEY = 'huawei-deck-onboarding-v1';
-const GUIDED_TOUR_STORAGE_KEY = 'huawei-deck-guided-tour-v1';
+const ONBOARDING_STORAGE_KEY = 'aico-ppt-onboarding-v1';
+const GUIDED_TOUR_STORAGE_KEY = 'aico-ppt-guided-tour-v1';
 const GUIDED_TOUR_SEQUENCES = {
   home:[
     {
@@ -372,18 +372,19 @@ export function createSupportCenter({
     ui.diagnostics.replaceChildren(
       makeGroup('基础使用', [
         makeRow({
-          label:'Huawei Deck Skill',
+          label:'AICO-PPT Skill',
           description:'让 Codex 发现本仓库的工作流',
           detail:registration ? `${registration.targetPath} · ${registration.state}` : '未找到注册信息',
           state:skillState,
           repair:adoptionRequired ? {
             kind:'skill',
             adoptExisting:true,
-            confirmation:'目标已经指向当前 Huawei Deck 仓库。确认由安装器接管该 Skill 注册，以便后续安全修复和卸载吗？',
+            confirmation:'目标已经指向当前 AICO-PPT 仓库。确认由安装器接管该 Skill 注册，以便后续安全修复和卸载吗？',
           } : { kind:'skill' },
           actionLabel:adoptionRequired ? '接管此安装' : '修复并复检',
         }),
-        profileRow('editor-core', '启动 Editor 与真实 Agent 终端'),
+        profileRow('editor-core', '启动 DSH 中的画布、任务、历史与固化运行时'),
+        profileRow('dev-shell', '开发调试时启动本机 Agent PTY（正式 DSH 使用不需要）'),
       ]),
       makeGroup('质量验证', [profileRow('verify', '截图、溢出检测和动画逐拍检查')]),
       makeGroup('导出与材料', [

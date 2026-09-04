@@ -28,7 +28,7 @@ def run(command: list[str]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="把 Huawei Deck HTML 转成 PPTX")
+    parser = argparse.ArgumentParser(description="把 AICO-PPT HTML 转成 PPTX")
     parser.add_argument("input", help="输入单文件 HTML")
     parser.add_argument("output", nargs="?", help="输出 PPTX；默认与输入同名")
     parser.add_argument("--scale", type=float, default=float(os.environ.get("SCALE", "2")))

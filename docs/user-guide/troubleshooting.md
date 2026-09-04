@@ -27,7 +27,7 @@ Node.js 或 Agent CLI 缺失时需要手工安装。Agent 已安装但未登录�
 
 ### Windows Editor 使用 WSL Codex 时提示找不到 CLI
 
-本机配置位于 `%USERPROFILE%\.huawei-deck-editor\settings.json`。确认其中的
+本机配置位于 `%USERPROFILE%\.aico-ppt-editor\settings.json`。确认其中的
 `wslDistribution`、`wslUser` 与实际环境一致，再在 PowerShell 运行：
 
 ```powershell
@@ -55,7 +55,7 @@ python3 scripts/check_deps.py --profile pptx-export --check-only
 
 ### macOS 显示 Python 包“未就绪”，但终端可以导入
 
-Apple Silicon 上必须通过最新版 `Huawei Deck 编辑器.app` 启动。入口会显式使用 arm64，避免 LaunchServices 把脚本型 App 放进 Rosetta 进程树，导致 arm64 的 `python-pptx`、`pdfplumber` 或 `PyMuPDF` 被误判为不可用。更新入口后请彻底退出旧工作台再重新双击；诊断若仍发现架构冲突，会明确显示“已安装但架构不兼容”。
+Apple Silicon 上必须通过最新版 `AICO-PPT 编辑器.app` 启动。入口会显式使用 arm64，避免 LaunchServices 把脚本型 App 放进 Rosetta 进程树，导致 arm64 的 `python-pptx`、`pdfplumber` 或 `PyMuPDF` 被误判为不可用。更新入口后请彻底退出旧工作台再重新双击；诊断若仍发现架构冲突，会明确显示“已安装但架构不兼容”。
 
 ### LibreOffice 看似已安装但仍不可用
 

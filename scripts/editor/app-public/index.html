@@ -3,9 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Huawei Deck</title>
+  <title>AICO-PPT</title>
   <link rel="icon" href="data:,">
+  <!-- dev-shell-terminal:start -->
   <link rel="stylesheet" href="/app/xterm.css?token=__APP_TOKEN__">
+  <!-- dev-shell-terminal:end -->
   <link rel="stylesheet" href="/app/agent-terminal-panel.css?token=__APP_TOKEN__">
   <link rel="stylesheet" href="/app/app.css?token=__APP_TOKEN__">
   <link rel="stylesheet" href="/app/guided-tour.css?token=__APP_TOKEN__">
@@ -19,13 +21,79 @@
       <img src="/app/huawei-logo.png?token=__APP_TOKEN__" alt="Huawei">
       <span aria-hidden="true"></span>
       <div>
-        <strong>Huawei Deck</strong>
+        <strong>AICO-PPT</strong>
+        <span class="dev-shell-badge" title="独立开发与故障排查入口">DEV SHELL</span>
       </div>
+    </div>
+    <div class="topbar-actions">
+      <nav class="workspace-navigation" data-workspace-navigation hidden aria-label="工作台导航">
+        <button type="button" class="workspace-navigation-button" data-workspace-home
+          aria-label="返回初始页" title="返回初始页" data-toolbar-tooltip="返回初始页"
+          data-pill-nav data-pill-variant="neutral" data-pill-size="md" data-pill-kind="action">
+          <svg class="topbar-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m4 10 8-6 8 6"></path><path d="M6.5 9.5V20h11V9.5"></path>
+            <path d="M9.5 20v-6h5v6"></path>
+          </svg>
+          <span class="topbar-control-label">初始页</span>
+        </button>
+        <button type="button" class="workspace-navigation-button" data-workspace-switch
+          aria-label="切换项目" title="切换项目" data-toolbar-tooltip="切换项目"
+          data-pill-nav data-pill-variant="neutral" data-pill-size="md" data-pill-kind="action">
+          <svg class="topbar-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 7h13"></path><path d="m15 4 3 3-3 3"></path>
+            <path d="M19 17H6"></path><path d="m9 14-3 3 3 3"></path>
+          </svg>
+          <span class="topbar-control-label">切换项目</span>
+        </button>
+      </nav>
+      <div class="dsh-session-control" data-dsh-task-session hidden data-state="loading">
+        <span class="dsh-session-dot" aria-hidden="true"></span>
+        <select data-dsh-task-session-label aria-label="此 Deck 的活动 DSH 会话"
+          title="此 Deck 的活动 DSH 会话"></select>
+      </div>
+      <span class="topbar-action-spacer" aria-hidden="true"></span>
+      <nav class="support-navigation" data-support-navigation hidden aria-label="使用与支持">
+        <button type="button" class="guided-tour-trigger" data-support-open="onboarding"
+          aria-label="新手引导" title="新手引导" data-toolbar-tooltip="新手引导">
+          <svg class="topbar-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M9.7 9a2.45 2.45 0 1 1 3.45 2.24C12.4 11.62 12 12.15 12 13"></path>
+            <path d="M12 17h.01"></path>
+          </svg>
+        </button>
+        <button type="button" class="support-navigation-button" data-support-open="help"
+          aria-label="帮助" title="帮助" data-toolbar-tooltip="帮助">
+          <svg class="topbar-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4.5 5.5A3.5 3.5 0 0 1 8 4h4v15H8a3.5 3.5 0 0 0-3.5 1.5z"></path>
+            <path d="M19.5 5.5A3.5 3.5 0 0 0 16 4h-4v15h4a3.5 3.5 0 0 1 3.5 1.5z"></path>
+          </svg>
+          <span class="topbar-control-label">帮助</span>
+        </button>
+        <button type="button" class="support-navigation-button" data-support-open="diagnostics"
+          aria-label="安装与诊断" title="安装与诊断" data-toolbar-tooltip="安装与诊断">
+          <svg class="topbar-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.5 2.5-3-3z"></path>
+          </svg>
+          <span class="topbar-control-label">安装与诊断</span>
+        </button>
+      </nav>
+      <button type="button" class="guided-tour-trigger creation-guided-tour" data-guided-tour="creation"
+        aria-label="新手引导" title="新手引导" data-toolbar-tooltip="新手引导">
+        <svg class="topbar-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M9.7 9a2.45 2.45 0 1 1 3.45 2.24C12.4 11.62 12 12.15 12 13"></path>
+          <path d="M12 17h.01"></path>
+        </svg>
+      </button>
+      <button type="button" class="terminal-reopen" data-terminal-reopen hidden
+        data-pill-nav data-pill-variant="neutral" data-pill-size="sm" data-pill-kind="action">打开 Agent 对话</button>
+      <span class="local-badge"><i aria-hidden="true"></i>仅在本机运行</span>
       <button type="button" class="workspace-navigation-button exit-editor-button"
         data-exit-editor aria-label="退出编辑器" title="退出编辑器并结束进程"
+        data-toolbar-tooltip="退出编辑器"
         data-pill-nav data-pill-variant="neutral" data-pill-size="md" data-pill-kind="action">
-        <span>退出编辑器</span>
-        <svg class="exit-editor-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <span class="topbar-control-label">退出编辑器</span>
+        <svg class="topbar-control-icon exit-editor-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M10 4H6.8A1.8 1.8 0 0 0 5 5.8v12.4A1.8 1.8 0 0 0 6.8 20H10"></path>
           <path d="M10 4v16"></path>
           <path d="M10 4h4.4A2.6 2.6 0 0 1 17 6.6V8"></path>
@@ -34,39 +102,16 @@
         </svg>
       </button>
     </div>
-    <div class="topbar-actions">
-      <nav class="support-navigation" data-support-navigation hidden aria-label="使用与支持">
-        <button type="button" class="guided-tour-trigger" data-support-open="onboarding"
-          aria-label="新手引导" title="新手引导"><span aria-hidden="true">?</span></button>
-        <button type="button" class="support-navigation-button" data-support-open="help">帮助</button>
-        <button type="button" class="support-navigation-button" data-support-open="diagnostics">安装与诊断</button>
-      </nav>
-      <nav class="workspace-navigation" data-workspace-navigation hidden aria-label="工作台导航">
-        <button type="button" class="guided-tour-trigger" data-guided-tour="creation"
-          aria-label="新手引导" title="新手引导"><span aria-hidden="true">?</span></button>
-        <button type="button" class="workspace-navigation-button" data-workspace-switch
-          data-pill-nav data-pill-variant="neutral" data-pill-size="md" data-pill-kind="action">
-          <span aria-hidden="true">⇄</span>
-          <span>切换项目</span>
-        </button>
-        <button type="button" class="workspace-navigation-button" data-workspace-home
-          data-pill-nav data-pill-variant="neutral" data-pill-size="md" data-pill-kind="action">
-          <span aria-hidden="true">⌂</span>
-          <span>初始页</span>
-        </button>
-      </nav>
-      <button type="button" class="terminal-reopen" data-terminal-reopen hidden
-        data-pill-nav data-pill-variant="neutral" data-pill-size="sm" data-pill-kind="action">打开 Agent 对话</button>
-      <span class="local-badge"><i aria-hidden="true"></i>仅在本机运行</span>
-    </div>
   </header>
+  <div class="topbar-tooltip" id="topbar-tooltip" role="tooltip"
+    data-topbar-tooltip data-visible="false" hidden></div>
 
   <div class="support-layer" data-support-layer hidden>
     <button type="button" class="support-backdrop" data-support-close aria-label="关闭帮助面板"></button>
     <section class="support-panel" role="dialog" aria-modal="true" aria-labelledby="support-title">
       <header class="support-panel-header">
         <div>
-          <p class="eyebrow">HUAWEI DECK GUIDE</p>
+          <p class="eyebrow">AICO-PPT GUIDE</p>
           <h2 id="support-title" data-support-title>开始使用</h2>
         </div>
         <button type="button" class="support-close" data-support-close aria-label="关闭">×</button>
@@ -127,7 +172,7 @@
   <main class="start-shell" data-start-shell>
     <section class="landing" data-landing aria-labelledby="page-title">
       <div class="landing-copy">
-        <p class="eyebrow">HUAWEI DECK WORKSPACE</p>
+        <p class="eyebrow">AICO-PPT WORKSPACE</p>
         <h1 id="page-title">今天从哪里开始？</h1>
         <p>和 Agent 一起从零搭建，也可以打开已有的单文件 Deck 继续微调。</p>
       </div>
@@ -194,7 +239,7 @@
       </button>
       <p class="eyebrow">OPEN A DECK</p>
       <h1 id="existing-title">添加 Deck HTML</h1>
-      <p class="lead">选择已有的 Huawei Deck 单文件 HTML，继续预览、标记和微调。</p>
+      <p class="lead">选择已有的 AICO-PPT 单文件 HTML，继续预览、标记和微调。</p>
       <div class="boundary-note">
         <span aria-hidden="true">1</span>
         <p><strong>一次只处理一份文件</strong>打开编辑器前可返回首页重新选择；进入编辑器后本次会话锁定该 Deck。</p>
@@ -256,7 +301,7 @@
       <p class="lead">Agent 会在这里读取素材、保存 Draft，并制作最终 Deck。浏览器不能直接提交任意路径。</p>
       <div class="project-promise">
         <span aria-hidden="true">⌂</span>
-        <p>建议选择本次 Deck 的独立项目文件夹。Draft 会保存在 <code>.huawei-deck-editor/drafts</code>。</p>
+        <p>建议选择本次 Deck 的独立项目文件夹。Draft 会保存在 <code>.aico-ppt-editor/drafts</code>。</p>
       </div>
       <section class="creation-project-confirmation" data-creation-confirmation hidden>
         <span class="field-label">项目目录</span>
@@ -341,6 +386,12 @@
       </div>
     </aside>
 
+    <section class="dsh-creation-companion" data-dsh-creation-companion hidden>
+      <span class="dsh-creation-companion-mark" aria-hidden="true">↔</span>
+      <strong>在左侧 DSH 会话中继续需求对话</strong>
+      <p>右侧保留 Creation Draft、里程碑和后续 Deck 画布；会话切换不会重载这个工作区。</p>
+    </section>
+
     <section class="creation-deck-stage" data-deck-stage hidden>
       <header class="deck-stage-header">
         <div>
@@ -353,6 +404,7 @@
       </header>
       <div class="creation-deck-viewport">
         <iframe data-deck-preview title="新建 Deck 实时预览"
+          allow="fullscreen *"
           sandbox="allow-scripts allow-same-origin allow-downloads"></iframe>
       </div>
       <p class="deck-stage-message" role="status" aria-live="polite" data-workspace-status></p>
@@ -402,7 +454,9 @@
     </section>
   </div>
 
+  <!-- dev-shell-terminal:start -->
   <script src="/app/xterm.js?token=__APP_TOKEN__"></script>
+  <!-- dev-shell-terminal:end -->
   <script type="module" src="/app/app.mjs?token=__APP_TOKEN__"></script>
 </body>
 </html>

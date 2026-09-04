@@ -28,6 +28,19 @@ const historyUi = {
 };
 const launchParams = new URLSearchParams(window.location.search);
 const token = launchParams.get('token');
+const embeddedDsh = launchParams.get('embedded') === 'dsh';
+const dshParentOrigin = (() => {
+  if (!embeddedDsh) return null;
+  try { return new URL(launchParams.get('parentOrigin')).origin; }
+  catch { return null; }
+})();
+if (embeddedDsh) document.documentElement.dataset.embedded = 'dsh';
+document.documentElement.dataset.runtimeProfile = embeddedDsh ? 'dsh-product' : 'standalone-dev';
+if (embeddedDsh && exitEditorButton) {
+  exitEditorButton.setAttribute('aria-label', '关闭 AICO-PPT 工作台');
+  exitEditorButton.title = '关闭 AICO-PPT 工作台';
+  exitEditorButton.dataset.toolbarTooltip = '关闭工作台';
+}
 let pageIsClosing = false;
 let launcherLeaseHandedOff = false;
 let startupVisualsReleased = false;
@@ -64,14 +77,14 @@ if (isLeavingWorkspace) {
 }
 const requestedWorkspaceView = ['home', 'creation', 'editing'].includes(launchParams.get('view'))
   ? launchParams.get('view') : null;
-const launcherClientId = sessionStorage.getItem('huawei-deck-launcher-client-id')
+const launcherClientId = sessionStorage.getItem('aico-ppt-launcher-client-id')
   ?? globalThis.crypto?.randomUUID?.()
   ?? `${Date.now()}-${Math.random()}`;
-sessionStorage.setItem('huawei-deck-launcher-client-id', launcherClientId);
+sessionStorage.setItem('aico-ppt-launcher-client-id', launcherClientId);
 const launcherClientSequence = Number(
-  sessionStorage.getItem('huawei-deck-launcher-client-sequence') ?? 0,
+  sessionStorage.getItem('aico-ppt-launcher-client-sequence') ?? 0,
 ) + 1;
-sessionStorage.setItem('huawei-deck-launcher-client-sequence', String(launcherClientSequence));
+sessionStorage.setItem('aico-ppt-launcher-client-sequence', String(launcherClientSequence));
 const launcherLeasePromise = fetch(
   `/api/client-connected?token=${encodeURIComponent(token)}`,
   {
@@ -98,9 +111,12 @@ void launcherLeasePromise.then(async connected => {
   });
   launcherLeaseClient.start();
 }).catch(() => {});
-const { AgentTerminalPanel } = await import(
-  `/app/agent-terminal-panel.mjs?token=${encodeURIComponent(token)}`
-);
+let AgentTerminalPanel = null;
+if (!embeddedDsh) {
+  ({ AgentTerminalPanel } = await import(
+    `/app/agent-terminal-panel.mjs?token=${encodeURIComponent(token)}`
+  ));
+}
 const { WorkspaceSwitcher } = await import(
   `/app/workspace-switcher.mjs?token=${encodeURIComponent(token)}`
 );
@@ -110,6 +126,9 @@ const { enhanceSelect } = await import(
 const { applyPill, installPillNav, setPillLabel } = await import(
   `/app/pill-nav.mjs?token=${encodeURIComponent(token)}`
 );
+const { installToolbarTooltip } = await import(
+  `/app/toolbar-tooltip.mjs?token=${encodeURIComponent(token)}`
+);
 const {
   agentProviderDefinition,
   isAgentProviderId,
@@ -118,6 +137,7 @@ const {
 enhanceSelect(provider, { minimumMenuWidth:190 });
 enhanceSelect(document.querySelector('[data-creation-provider]'), { minimumMenuWidth:190 });
 installPillNav(document);
+installToolbarTooltip(document);
 let state = 'idle';
 let appReady = false;
 let candidate = null;
@@ -129,6 +149,20 @@ let creationEvents = null;
 let creationRefreshTimer = null;
 let creationPreviewKey = null;
 let creationHasDeck = false;
+let creationDshPrompt = '';
+let dshBridge = null;
+let deckTaskCoordinator = null;
+let describeDshWorkSessionTarget = () => null;
+let listDshWorkSessionTargets = () => [];
+let dshWorkHistory = null;
+let dshWorkHistoryRequest = null;
+let dshCurrentSession = null;
+let dshSessionNavigationBusy = false;
+let creationDshSessionBusy = false;
+let creationDshSessionRenderVersion = 0;
+let suppressDshSessionNavigation = 0;
+let ignoredHomeSessionId;
+let holdExplicitHome = isLeavingWorkspace && requestedWorkspaceView === 'home';
 
 const creationUi = {
   startShell:document.querySelector('[data-start-shell]'),
@@ -159,6 +193,9 @@ const creationUi = {
   draftTitleSave:document.querySelector('[data-draft-title-save]'),
   draftTitleCancel:document.querySelector('[data-draft-title-cancel]'),
   draftRevision:document.querySelector('[data-draft-revision]'),
+  dshTaskSession:document.querySelector('[data-dsh-task-session]'),
+  dshSession:document.querySelector('[data-dsh-task-session-label]'),
+  dshCompanion:document.querySelector('[data-dsh-creation-companion]'),
   deckStage:document.querySelector('[data-deck-stage]'),
   deckStageTitle:document.querySelector('[data-deck-stage-title]'),
   deckStageStatus:document.querySelector('[data-deck-stage-status]'),
@@ -228,11 +265,61 @@ function post(path, body) {
   return requestJson(path, { method:'POST', body:body ?? {} });
 }
 
+if (embeddedDsh && dshParentOrigin) {
+  const [bridgeModule, { createDeckTaskCoordinator }] = await Promise.all([
+    import(`/app/dsh-work-bridge.mjs?token=${encodeURIComponent(token)}`),
+    import(`/app/deck-task-coordinator.mjs?token=${encodeURIComponent(token)}`),
+  ]);
+  ({ describeDshWorkSessionTarget, listDshWorkSessionTargets } = bridgeModule);
+  dshBridge = bridgeModule.createDshWorkBridge({ targetOrigin:dshParentOrigin });
+  const commandPaths = {
+    'set-workspace':'/api/dsh-work-items/set-workspace',
+    'begin-session':'/api/dsh-work-items/begin-session',
+    'complete-session':'/api/dsh-work-items/complete-session',
+    'fail-session':'/api/dsh-work-items/fail-session',
+    'activate-session':'/api/dsh-work-items/activate-session',
+    'archive-sessions':'/api/dsh-work-items/archive-sessions',
+    'resolve-session':'/api/dsh-work-items/resolve-session',
+  };
+  deckTaskCoordinator = createDeckTaskCoordinator({
+    bridge:dshBridge,
+    catalogCommand:(command, payload) => {
+      const path = commandPaths[command];
+      if (!path) throw new Error(`不支持的 WorkCatalog 命令：${command}`);
+      return post(path, payload);
+    },
+  });
+  dshBridge.registerWorkSessionCreator(createCurrentCreationDshWorkSession);
+  dshBridge.registerWorkSessionTargetNavigator(navigateToCreationDshWorkSessionTarget);
+  void requestJson('/api/work-history').then(history => {
+    dshWorkHistory = history;
+    publishCreationDshWorkContext({ refreshHistory:false });
+  }).catch(error => {
+    console.warn('无法发布 AICO-PPT 项目会话目标列表。', error);
+  });
+}
+
+function editorNavigationUrl(value) {
+  if (!embeddedDsh) return value;
+  const url = new URL(value);
+  url.searchParams.set('embedded', 'dsh');
+  if (dshParentOrigin) url.searchParams.set('parentOrigin', dshParentOrigin);
+  window.parent.postMessage({
+    type:'aico-ppt:dsh-frame-origin',
+    origin:url.origin,
+  }, dshParentOrigin);
+  return url.href;
+}
+
 function workspaceNavigationUrl(destination) {
   const url = new URL('/app/', location.origin);
   url.searchParams.set('token', token);
   url.searchParams.set('view', destination);
   url.searchParams.set('leaveWorkspace', '1');
+  if (embeddedDsh) {
+    url.searchParams.set('embedded', 'dsh');
+    url.searchParams.set('parentOrigin', dshParentOrigin);
+  }
   return url.href;
 }
 
@@ -244,9 +331,196 @@ function workspaceTaskNavigationUrl(kind, entry) {
     url.searchParams.set('draftId', entry.draftId);
   } else {
     url.searchParams.set('deckPath', entry.deckPath);
-    if (typeof entry.workId === 'string') url.searchParams.set('workId', entry.workId);
   }
+  if (typeof entry.workId === 'string') url.searchParams.set('workId', entry.workId);
   return url.href;
+}
+
+function currentWorkspaceWorkId() {
+  return activeCreationWorkItem?.workId ?? candidate?.workId ?? launchParams.get('workId') ?? null;
+}
+
+function publishCreationDshWorkContext({ refreshHistory = true } = {}) {
+  if (!dshBridge) return;
+  const context = describeDshWorkSessionTarget(activeCreationWorkItem);
+  const historyTargets = listDshWorkSessionTargets(dshWorkHistory, activeCreationWorkItem?.workId);
+  const targets = context === null
+    ? historyTargets
+    : [context, ...historyTargets.filter(target => target.workId !== context.workId)];
+  dshBridge.publishWorkContext(context, targets);
+  if (!refreshHistory || dshWorkHistoryRequest) return;
+  dshWorkHistoryRequest = requestJson('/api/work-history').then(history => {
+    dshWorkHistory = history;
+    publishCreationDshWorkContext({ refreshHistory:false });
+  }).catch(error => {
+    console.warn('无法刷新 AICO-PPT 任务会话目标列表。', error);
+  }).finally(() => {
+    dshWorkHistoryRequest = null;
+  });
+}
+
+async function navigateToCreationDshWorkSessionTarget({ workId, contextKey }) {
+  const history = await requestJson('/api/work-history');
+  dshWorkHistory = history;
+  const entry = [...(history.creation ?? []), ...(history.editing ?? [])]
+    .find(candidate => candidate.workId === workId);
+  const target = describeDshWorkSessionTarget(entry);
+  if (!entry || target?.contextKey !== contextKey) {
+    throw new Error('所选 Deck 任务已变化，请重新打开“新会话”菜单选择');
+  }
+  if (activeCreationWorkItem?.workId === workId) {
+    publishCreationDshWorkContext({ refreshHistory:false });
+    return;
+  }
+  location.replace(workspaceTaskNavigationUrl(entry.kind, entry));
+}
+
+function requestedWorkspaceMatches(workItem) {
+  if (!workItem || launchParams.get('switchKind') !== workItem.kind) return false;
+  if (typeof workItem.workId === 'string' && launchParams.get('workId') === workItem.workId) {
+    return true;
+  }
+  if (workItem.kind === 'creation') {
+    return launchParams.get('draftId') === workItem.draftId
+      && launchParams.get('projectRoot') === workItem.projectRoot;
+  }
+  return launchParams.get('deckPath') === workItem.deckPath;
+}
+
+async function withDshNavigationSuppressed(operation) {
+  suppressDshSessionNavigation += 1;
+  try { return await operation(); }
+  finally { suppressDshSessionNavigation -= 1; }
+}
+
+async function activateLinkedDshSession(workItem) {
+  if (!deckTaskCoordinator || !workItem?.dshBinding?.activeSessionId) return workItem;
+  if (dshCurrentSession?.sessionId === workItem.dshBinding.activeSessionId) return workItem;
+  const result = await withDshNavigationSuppressed(() => deckTaskCoordinator.activate({ workItem }));
+  return result.workItem;
+}
+
+async function createDshWorkSession(workItem, prompt) {
+  if (!deckTaskCoordinator || !workItem) return workItem;
+  const result = await withDshNavigationSuppressed(() => (
+    deckTaskCoordinator.createSession({ workItem })
+  ));
+  if (prompt) {
+    await deckTaskCoordinator.send(
+      result.workItem.dshBinding.activeSessionId,
+      prompt,
+    );
+  }
+  return result.workItem;
+}
+
+function updateCreationDshSessionStatus() {
+  const control = creationUi.dshTaskSession;
+  const select = creationUi.dshSession;
+  if (!control || !select) return;
+  publishCreationDshWorkContext();
+  const renderVersion = ++creationDshSessionRenderVersion;
+  const binding = activeCreationWorkItem?.dshBinding ?? null;
+  const links = binding?.sessions?.filter(link => (
+    link.state === 'available' && link.workspaceId === binding.workspaceId
+  )) ?? [];
+  const render = (rows = []) => {
+    if (renderVersion !== creationDshSessionRenderVersion) return;
+    const rowById = new Map(rows.filter(Boolean).map(row => [row.sessionId, row]));
+    const archivedIds = new Set(rows.filter(row => row?.archived === true)
+      .map(row => row.sessionId));
+    const visibleLinks = links.filter(link => !archivedIds.has(link.sessionId));
+    if (archivedIds.size > 0 && deckTaskCoordinator && activeCreationWorkItem) {
+      void deckTaskCoordinator.reconcileArchivedSessions({
+        workItem:activeCreationWorkItem,
+        sessionIds:[...archivedIds],
+      }).then(result => {
+        if (renderVersion !== creationDshSessionRenderVersion) return;
+        activeCreationWorkItem = result.workItem;
+        updateCreationDshSessionStatus();
+      }).catch(error => {
+        console.warn('无法持久化 Creation 任务的 DSH 会话归档状态。', error);
+      });
+    }
+    select.replaceChildren();
+    if (visibleLinks.length === 0) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = '尚未创建任务会话';
+      select.append(option);
+      select.disabled = true;
+      control.dataset.state = 'missing';
+      control.title = '请从左侧“新会话”创建此 Deck 的任务会话';
+      return;
+    }
+    for (const link of visibleLinks) {
+      const row = rowById.get(link.sessionId);
+      const describedTitle = typeof row?.title === 'string'
+        && row.title
+        && row.title !== link.sessionId
+        ? row.title
+        : null;
+      const option = document.createElement('option');
+      option.value = link.sessionId;
+      option.textContent = describedTitle || deckTaskCoordinator.sessionTitle({
+        workItem:activeCreationWorkItem,
+        sessionId:link.sessionId,
+      });
+      select.append(option);
+    }
+    const activeSessionId = visibleLinks.some(link => link.sessionId === binding.activeSessionId)
+      ? binding.activeSessionId : null;
+    select.value = activeSessionId ?? visibleLinks[0].sessionId;
+    select.disabled = creationDshSessionBusy;
+    const matchingCurrent = dshCurrentSession?.sessionId === activeSessionId;
+    control.dataset.state = matchingCurrent ? 'active' : 'detached';
+    control.title = matchingCurrent
+      ? '当前 DSH 会话已关联此 Deck'
+      : '当前 DSH 会话未关联此 Deck；提交任务时会切回活动任务会话';
+  };
+  render();
+  if (dshBridge && links.length) {
+    void dshBridge.request('describe-sessions', {
+      sessionIds:links.map(link => link.sessionId),
+    }).then(render).catch(() => {});
+  }
+}
+
+if (dshBridge) {
+  dshBridge.subscribeCurrentSession(session => {
+    dshCurrentSession = session;
+    updateCreationDshSessionStatus();
+    if (holdExplicitHome) {
+      const sessionId = session?.sessionId ?? null;
+      if (ignoredHomeSessionId === undefined) ignoredHomeSessionId = sessionId;
+      if (sessionId === ignoredHomeSessionId) return;
+      holdExplicitHome = false;
+    }
+    if (!session?.sessionId || suppressDshSessionNavigation > 0 || dshSessionNavigationBusy) return;
+    dshSessionNavigationBusy = true;
+    void deckTaskCoordinator.resolveBySession(session.sessionId).then(async result => {
+      let workItem = result?.workItem ?? null;
+      if (!workItem) return;
+      if (workItem.dshBinding.activeSessionId !== session.sessionId) {
+        const activated = await post('/api/dsh-work-items/activate-session', {
+          workId:workItem.workId,
+          sessionId:session.sessionId,
+          expectedBindingRevision:workItem.dshBinding.revision,
+        });
+        workItem = activated.workItem;
+      }
+      if (workItem.workId === currentWorkspaceWorkId() || requestedWorkspaceMatches(workItem)) {
+        if (workItem.kind === 'creation') activeCreationWorkItem = workItem;
+        updateCreationDshSessionStatus();
+        return;
+      }
+      location.replace(workspaceTaskNavigationUrl(workItem.kind, workItem));
+    }).catch(error => {
+      console.warn('无法按 DSH 会话切换 AICO-PPT 工作项。', error);
+    }).finally(() => {
+      dshSessionNavigationBusy = false;
+    });
+  });
 }
 
 function navigateFromCreation(destination) {
@@ -257,6 +531,10 @@ function navigateFromCreation(destination) {
 }
 
 function terminateEditorProcess() {
+  if (embeddedDsh && dshParentOrigin) {
+    window.parent.postMessage({ type:'aico-ppt:close-workbench' }, dshParentOrigin);
+    return;
+  }
   document.documentElement.dataset.processExiting = 'true';
   creationUi.switchWorkspace.disabled = true;
   creationUi.home.disabled = true;
@@ -671,6 +949,7 @@ async function resumeDeckTask(entry) {
   setState('resuming-deck', '正在恢复 Deck 工作区…', 'working');
   historyStatus('editing', '正在恢复工作副本与 Agent 上下文…', 'working');
   try {
+    entry = await activateLinkedDshSession(entry);
     const result = await post('/api/resume-deck', {
       workId:entry.workId,
       deckPath:entry.deckPath,
@@ -685,7 +964,7 @@ async function resumeDeckTask(entry) {
     historyStatus('editing', `正在打开 ${result.deckName}…`, 'working');
     releaseStartupVisuals();
     launcherLeaseHandedOff = true;
-    window.location.replace(result.editorUrl);
+    window.location.replace(editorNavigationUrl(result.editorUrl));
   } catch (error) {
     candidate = null;
     confirmation.hidden = true;
@@ -713,8 +992,17 @@ async function resumeCreationTask(entry) {
     if (result.status !== 'building' || !result.draft) throw new Error('Draft 没有返回有效状态');
     creationDraft = result.draft;
     activeCreationWorkItem = result.workItem ?? entry;
+    creationDshPrompt = result.dshPrompt ?? '';
     state = 'building';
     enterCreationBuilder(result.terminal?.provider ?? creationDraft.provider);
+    if (embeddedDsh) {
+      workspaceStatus('正在恢复任务会话…', 'working');
+      // 切换或恢复工作项只激活已关联会话，不产生新的 Agent 消息。
+      // 初始上下文只在明确创建会话时发送一次。
+      activeCreationWorkItem = await activateLinkedDshSession(activeCreationWorkItem);
+      updateCreationDshSessionStatus();
+      workspaceStatus('Creation Draft 与 DSH 任务会话已恢复');
+    }
   } catch (error) {
     setState('idle', error.message || 'Creation Draft 恢复失败', 'error');
     historyStatus('creation', error.message || 'Creation Draft 恢复失败', 'error');
@@ -798,11 +1086,23 @@ openButton.addEventListener('click', async () => {
     if (result.status !== 'selected' || !result.editorUrl) {
       throw new Error('编辑器没有返回有效地址');
     }
+    if (embeddedDsh && result.workItem) {
+      setStatus('正在创建这份 Deck 的独立 DSH 会话…', 'working');
+      const linked = await createDshWorkSession(result.workItem, [
+        '/aico-ppt', '',
+        '你正在处理一个明确关联到 AICO-PPT Editor 的修改任务。',
+        `Work Item：${result.workItem.workId}`,
+        `项目目录：${result.workItem.projectRoot}`,
+        `Deck 文件：${result.workItem.deckPath}`,
+        '右侧 Editor 保持这份 Deck 的托管工作副本；后续修改请求只处理这个 Work Item，不要切换到其他 Deck。',
+      ].join('\n'));
+      result.workItem = linked;
+    }
     state = 'selected';
     setStatus(`已锁定 ${result.deckName}，正在打开编辑器`, 'working');
     releaseStartupVisuals();
     launcherLeaseHandedOff = true;
-    window.location.replace(result.editorUrl);
+    window.location.replace(editorNavigationUrl(result.editorUrl));
   } catch (error) {
     setState('deck-selected', error.message || '编辑器启动失败，请重试', 'error');
   }
@@ -881,19 +1181,35 @@ creationUi.createDraft.addEventListener('click', async () => {
     return;
   }
   setCreationChoiceState('creating-draft', '正在创建 Draft 并启动 Agent…', 'working');
+  let result;
   try {
-    const result = await post('/api/creation-drafts', {
+    result = await post('/api/creation-drafts', {
       candidateNonce:creationCandidate.candidateNonce,
       selectionRevision:creationCandidate.selectionRevision,
       provider:creationUi.provider.value,
       confirmProjectRoot:creationUi.confirmProject.checked,
     });
-    creationDraft = result.draft;
-    activeCreationWorkItem = result.workItem ?? null;
-    state = 'building';
-    enterCreationBuilder(result.terminal?.provider ?? creationUi.provider.value);
   } catch (error) {
     setCreationChoiceState('creation-project-selected', error.message || 'Draft 创建失败', 'error');
+    return;
+  }
+  creationDraft = result.draft;
+  activeCreationWorkItem = result.workItem ?? null;
+  creationDshPrompt = result.dshPrompt ?? '';
+  state = 'building';
+  enterCreationBuilder(result.terminal?.provider ?? creationUi.provider.value);
+  if (embeddedDsh) {
+    workspaceStatus('正在创建独立的 DSH Workspace 与任务会话…', 'working');
+    try {
+      activeCreationWorkItem = await createDshWorkSession(
+        activeCreationWorkItem,
+        creationDshPrompt,
+      );
+      updateCreationDshSessionStatus();
+      workspaceStatus('项目目录、Creation Draft 与 DSH 任务会话已关联');
+    } catch (error) {
+      workspaceStatus(`Draft 已保存，但任务会话尚未就绪：${error.message}`, 'error');
+    }
   }
 });
 
@@ -906,7 +1222,7 @@ function enterCreationBuilder(providerName) {
   creationUi.workspaceNavigation.hidden = false;
   exitEditorButton.hidden = false;
   exitEditorButton.disabled = false;
-  if (!creationTerminalPanel) {
+  if (!embeddedDsh && !creationTerminalPanel) {
     creationTerminalPanel = new AgentTerminalPanel(creationUi.terminalRoot, {
       token,
       editorToken:token,
@@ -922,9 +1238,11 @@ function enterCreationBuilder(providerName) {
       },
     });
   }
-  creationUi.builder.dataset.terminalHidden = 'false';
+  creationUi.builder.dataset.terminalHidden = String(embeddedDsh);
   creationUi.terminalReopen.hidden = true;
-  creationTerminalPanel.open(providerName);
+  if (embeddedDsh) creationUi.terminalRoot.hidden = true;
+  else creationTerminalPanel.open(providerName);
+  creationUi.dshTaskSession.hidden = !embeddedDsh;
   connectCreationEvents();
   renderCreationDraft();
 }
@@ -1008,8 +1326,18 @@ new WorkspaceSwitcher({
     && creationDraft?.draftId === entry.draftId
     && creationDraft?.projectRoot === entry.projectRoot,
   onRename:input => post('/api/work-items/rename', input),
-  onSelect:(kind, entry) => {
+  onSelect:async (kind, entry) => {
+    creationUi.switchWorkspace.disabled = true;
     creationUi.home.disabled = true;
+    if (embeddedDsh && entry.dshBinding?.activeSessionId) {
+      try { entry = await activateLinkedDshSession(entry); }
+      catch (error) {
+        workspaceStatus(`无法切换任务会话：${error.message}`, 'error');
+        creationUi.switchWorkspace.disabled = false;
+        creationUi.home.disabled = false;
+        return;
+      }
+    }
     location.replace(workspaceTaskNavigationUrl(kind, entry));
   },
 });
@@ -1019,6 +1347,63 @@ exitEditorButton.addEventListener('click', terminateEditorProcess);
 creationUi.terminalReopen.addEventListener('click', () => {
   ensureCreationTerminalOpen(creationDraft?.provider);
 });
+
+creationUi.dshSession?.addEventListener('change', async () => {
+  const sessionId = creationUi.dshSession.value;
+  if (!activeCreationWorkItem || !deckTaskCoordinator || !sessionId || creationDshSessionBusy) return;
+  creationDshSessionBusy = true;
+  void updateCreationDshSessionStatus();
+  workspaceStatus('正在切换此 Deck 的活动任务会话…', 'working');
+  try {
+    const result = await withDshNavigationSuppressed(() => deckTaskCoordinator.activate({
+      workItem:activeCreationWorkItem,
+      sessionId,
+    }));
+    activeCreationWorkItem = result.workItem;
+    workspaceStatus('已切换此 Deck 的活动任务会话');
+  } catch (error) {
+    workspaceStatus(error.message || '无法切换任务会话', 'error');
+  } finally {
+    creationDshSessionBusy = false;
+    void updateCreationDshSessionStatus();
+  }
+});
+
+async function createCurrentCreationDshWorkSession({ workId, contextKey } = {}) {
+  if (!activeCreationWorkItem || !deckTaskCoordinator) throw new Error('当前 Deck 任务尚未就绪');
+  const currentKey = `${activeCreationWorkItem.workId}:${activeCreationWorkItem.dshBinding?.revision ?? activeCreationWorkItem.revision}`;
+  if (workId !== activeCreationWorkItem.workId || contextKey !== currentKey) {
+    throw new Error('当前 Deck 已切换，请从左侧“新会话”重新选择');
+  }
+  if (creationDshSessionBusy) throw new Error('任务会话正在处理中，请稍候');
+  creationDshSessionBusy = true;
+  void updateCreationDshSessionStatus();
+  workspaceStatus('正在为此 Deck 新建独立 DSH 会话…', 'working');
+  try {
+    activeCreationWorkItem = await createDshWorkSession(
+      activeCreationWorkItem,
+      creationDshPrompt || [
+        '/aico-ppt', '',
+        `这是用户为 AICO-PPT Creation Work Item 明确新建的任务会话：${activeCreationWorkItem.workId}。`,
+        `项目目录：${activeCreationWorkItem.projectRoot}`,
+        `Creation Draft：${activeCreationWorkItem.draftId}`,
+        '请读取现有 Draft 状态；等待用户指令后再处理当前任务，不要自行追加操作。',
+      ].join('\n'),
+    );
+    updateCreationDshSessionStatus();
+    workspaceStatus('新的任务会话已创建并设为活动会话');
+    return {
+      workId:activeCreationWorkItem.workId,
+      sessionId:activeCreationWorkItem.dshBinding.activeSessionId,
+    };
+  } catch (error) {
+    workspaceStatus(error.message || '无法创建任务会话', 'error');
+    throw error;
+  } finally {
+    creationDshSessionBusy = false;
+    void updateCreationDshSessionStatus();
+  }
+}
 
 function ensureCreationTerminalOpen(providerName = creationDraft?.provider) {
   if (!creationTerminalPanel) return false;
@@ -1044,6 +1429,22 @@ function connectCreationEvents() {
     if (message?.type === 'agent-terminal-updated'
       && message.payload?.interactionRequired?.kind) {
       ensureCreationTerminalOpen(message.payload.provider);
+    }
+    if (message?.type === 'dsh-creation-request'
+      && typeof message.payload?.requestId === 'string'
+      && typeof message.payload?.sessionId === 'string'
+      && typeof message.payload?.prompt === 'string') {
+      void dshBridge?.request('send-to-session', {
+        sessionId:message.payload.sessionId,
+        prompt:message.payload.prompt,
+      }).then(() => post('/api/creation-dsh-requests/acknowledge', {
+        requestId:message.payload.requestId,
+        accepted:true,
+      })).catch(error => post('/api/creation-dsh-requests/acknowledge', {
+        requestId:message.payload.requestId,
+        accepted:false,
+        message:error.message || 'DSH 会话没有接收 Creation 提示词',
+      }).catch(() => {}));
     }
     scheduleCreationRefresh();
   });
@@ -1149,6 +1550,8 @@ function renderCreationDraft() {
   renderMilestones(milestones);
 
   creationUi.builder.dataset.hasDeck = String(hasDeck);
+  creationUi.dshCompanion.hidden = !embeddedDsh || hasDeck;
+  updateCreationDshSessionStatus();
   creationUi.deckStage.hidden = !hasDeck;
   if (hasDeck) {
     creationUi.deckStageTitle.textContent = creationDraft.brief?.title || '未命名 Deck';
@@ -1188,7 +1591,7 @@ creationUi.openGenerated.addEventListener('click', async () => {
     state = 'selected';
     releaseStartupVisuals();
     launcherLeaseHandedOff = true;
-    window.location.replace(result.editorUrl);
+    window.location.replace(editorNavigationUrl(result.editorUrl));
   } catch (error) {
     workspaceStatus(error.message || '无法打开编辑器', 'error');
   }
@@ -1244,6 +1647,10 @@ if (isLeavingWorkspace) {
   }
   const cleanUrl = new URL('/app/', location.origin);
   cleanUrl.searchParams.set('token', token);
+  if (embeddedDsh) {
+    cleanUrl.searchParams.set('embedded', 'dsh');
+    cleanUrl.searchParams.set('parentOrigin', dshParentOrigin);
+  }
   if (requestedWorkspaceView) cleanUrl.searchParams.set('view', requestedWorkspaceView);
   history.replaceState(null, '', cleanUrl);
 }
@@ -1263,7 +1670,7 @@ if (requestedWorkspaceTask && !navigationError) {
   && connectedState.status === 'selected' && connectedState.editorUrl) {
   releaseStartupVisuals();
   launcherLeaseHandedOff = true;
-  window.location.replace(connectedState.editorUrl);
+  window.location.replace(editorNavigationUrl(connectedState.editorUrl));
 } else if (!isLeavingWorkspace && connectedState.status === 'deck-selected') {
   renderCandidate(connectedState);
 } else if (!isLeavingWorkspace && connectedState.status === 'creation-project-selected') {
@@ -1301,4 +1708,8 @@ createSupportCenter({
 appReady = true;
 syncLandingButtons();
 document.documentElement.dataset.appReady = 'true';
-delete document.documentElement.dataset.workspaceNavigationState;
+// Editing 跳转在目标随机端口提交页面前仍停留在当前路由文档；此时保留遮罩，
+// 避免浏览器在 location.replace 与真正换页之间重新露出启动页。
+if (!launcherLeaseHandedOff) {
+  delete document.documentElement.dataset.workspaceNavigationState;
+}

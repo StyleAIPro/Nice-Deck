@@ -17,9 +17,9 @@ function runCli(app, args) {
     stdio:['ignore', 'pipe', 'pipe'],
     env:{
       ...process.env,
-      HUAWEI_DECK_EDITOR_URL:app.url,
-      HUAWEI_DECK_EDITOR_TOKEN:app.token,
-      HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE:'',
+      AICO_PPT_EDITOR_URL:app.url,
+      AICO_PPT_EDITOR_TOKEN:app.token,
+      AICO_PPT_WORKSPACE_CAPABILITY_FILE:'',
     },
   });
   let stdout = '';

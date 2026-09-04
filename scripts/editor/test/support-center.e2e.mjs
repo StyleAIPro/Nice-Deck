@@ -10,7 +10,7 @@ import { startAppServer } from '../app-server.mjs';
 function environmentSnapshot() {
   const checks = [
     { key:'node', label:'Node.js', profiles:['editor-core', 'verify', 'pptx-export'], present:true, optional:false },
-    { key:'agent-cli', label:'Agent CLI', profiles:['editor-core'], present:true, optional:false },
+    { key:'agent-cli', label:'Agent CLI', profiles:['dev-shell'], present:true, optional:false },
     { key:'soffice', label:'LibreOffice(soffice)', profiles:['materials'], present:false, optional:false },
   ];
   return {
@@ -19,6 +19,7 @@ function environmentSnapshot() {
     checks,
     profiles:{
       'editor-core':{ id:'editor-core', label:'Editor Core', ready:true, state:'ready', missing:[] },
+      'dev-shell':{ id:'dev-shell', label:'独立 Dev Shell', ready:true, state:'ready', missing:[] },
       verify:{ id:'verify', label:'质量验证', ready:true, state:'ready', missing:[] },
       'pptx-export':{ id:'pptx-export', label:'PPTX 导出', ready:true, state:'ready', missing:[] },
       materials:{
@@ -31,7 +32,7 @@ function environmentSnapshot() {
 
 
 test('开始使用、帮助、诊断与示例副本形成完整首页路径', async t => {
-  const sampleParent = await mkdtemp(join(tmpdir(), 'huawei-deck-onboarding-e2e-'));
+  const sampleParent = await mkdtemp(join(tmpdir(), 'aico-ppt-onboarding-e2e-'));
   t.after(() => rm(sampleParent, { recursive:true, force:true }));
   const installation = {
     schemaVersion:1,
@@ -39,7 +40,7 @@ test('开始使用、帮助、诊断与示例副本形成完整首页路径', as
     ready:true,
     registrations:[{
       host:'codex', state:'ready', managed:true,
-      targetPath:'/test/.agents/skills/huawei-deck',
+      targetPath:'/test/.agents/skills/aico-ppt',
     }],
   };
   const app = await startAppServer({
@@ -58,7 +59,8 @@ test('开始使用、帮助、诊断与示例副本形成完整首页路径', as
   await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
   const guidedTourTrigger = page.getByRole('button', { name:'新手引导', exact:true });
   assert.equal(await guidedTourTrigger.getAttribute('title'), '新手引导');
-  assert.equal(await guidedTourTrigger.innerText(), '?');
+  assert.equal(await guidedTourTrigger.locator('.topbar-control-icon').count(), 1);
+  assert.equal(await guidedTourTrigger.locator('circle').count(), 1);
   assert.deepEqual(await guidedTourTrigger.evaluate(node => {
     const style = getComputedStyle(node);
     return { width:style.width, height:style.height, borderRadius:style.borderRadius };
@@ -66,6 +68,10 @@ test('开始使用、帮助、诊断与示例副本形成完整首页路径', as
   await guidedTourTrigger.click();
   await page.getByRole('heading', { name:'从零创建一份 Deck' }).waitFor();
   assert.equal(await page.locator('[data-tour-dots] i').count(), 5);
+  await page.waitForFunction(() => (
+    document.querySelector('[data-tour-arrow-shape]')
+      ?.getAttribute('transform')?.startsWith('translate(')
+  ));
   assert.match(
     await page.locator('[data-tour-arrow-shape]').getAttribute('transform'),
     /^translate\(/,
@@ -99,7 +105,7 @@ test('开始使用、帮助、诊断与示例副本形成完整首页路径', as
   assert.equal(await page.locator('.support-navigation').isHidden(), true,
     '进入修改 Deck 流程后也只保留初始页的使用与支持入口');
   const deckName = await page.locator('[data-deck-name]').innerText();
-  assert.equal(deckName, 'Huawei Deck 示例.html');
+  assert.equal(deckName, 'AICO-PPT 示例.html');
   const projectRoot = await page.locator('[data-project-root]').innerText();
   await access(join(projectRoot, deckName));
 });
@@ -131,6 +137,7 @@ test('修复操作立即显示进度，复检后明确区分已修复和手动�
     ],
     profiles:{
       'editor-core':{ id:'editor-core', label:'Editor Core', ready:true, state:'ready', missing:[] },
+      'dev-shell':{ id:'dev-shell', label:'独立 Dev Shell', ready:true, state:'ready', missing:[] },
       verify:{ id:'verify', label:'质量验证', ready:true, state:'ready', missing:[] },
       'pptx-export':{
         id:'pptx-export', label:'PPTX 导出', ready:repaired,
@@ -146,7 +153,7 @@ test('修复操作立即显示进度，复检后明确区分已修复和手动�
     token:'support-repair-feedback-secret',
     inspectInstallation:async () => ({
       schemaVersion:1, ready:true, state:'ready',
-      registrations:[{ host:'codex', state:'ready', targetPath:'/test/huawei-deck' }],
+      registrations:[{ host:'codex', state:'ready', targetPath:'/test/aico-ppt' }],
     }),
     inspectEnvironment:async ({ repair:shouldRepair } = {}) => {
       if (shouldRepair) {
@@ -192,7 +199,7 @@ test('已有同源 Skill 链接必须由用户明确确认后才接管', async t
       host:'codex',
       state:adopted ? 'ready' : 'adoption-required',
       managed:adopted,
-      targetPath:'/test/.agents/skills/huawei-deck',
+      targetPath:'/test/.agents/skills/aico-ppt',
     }],
   });
   const app = await startAppServer({
@@ -220,10 +227,10 @@ test('已有同源 Skill 链接必须由用户明确确认后才接管', async t
   await page.goto(app.appUrl);
   await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
   await page.getByRole('button', { name:'安装与诊断', exact:true }).click();
-  const row = page.locator('.diagnostic-row', { hasText:'Huawei Deck Skill' });
+  const row = page.locator('.diagnostic-row', { hasText:'AICO-PPT Skill' });
   await row.getByRole('button', { name:'接管此安装' }).click();
 
-  await page.getByText('Huawei Deck Skill已修复并通过复检。').waitFor();
+  await page.getByText('AICO-PPT Skill已修复并通过复检。').waitFor();
   assert.match(confirmationText, /由安装器接管/);
   assert.equal(repairOptions?.adoptExisting, true);
   assert.equal(await row.getAttribute('data-state'), 'ready');

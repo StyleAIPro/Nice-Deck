@@ -21,9 +21,9 @@ def _load(name, path):
     return module
 
 
-eb = _load("huawei_deck_edit_bundle", ROOT / "scripts/edit-bundle.py")
+eb = _load("aico_ppt_edit_bundle", ROOT / "scripts/edit-bundle.py")
 patch_bundle = _load(
-    "huawei_deck_patch_bundle", ROOT / "scripts/editor/patch_bundle.py"
+    "aico_ppt_patch_bundle", ROOT / "scripts/editor/patch_bundle.py"
 )
 
 

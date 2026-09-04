@@ -13,12 +13,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const execFileAsync = promisify(execFile);
 
 function wslCodexRuntime(environment) {
-  if (environment.HUAWEI_DECK_CODEX_RUNTIME !== 'wsl') return null;
-  const distribution = environment.HUAWEI_DECK_WSL_DISTRO;
-  const user = environment.HUAWEI_DECK_WSL_USER;
-  const node = environment.HUAWEI_DECK_WSL_NODE;
-  const codexHome = environment.HUAWEI_DECK_WSL_CODEX_HOME;
-  const helper = environment.HUAWEI_DECK_WSL_SESSION_HELPER;
+  const value = name => environment[`AICO_PPT_${name}`]
+    ?? environment[`HUAWEI_DECK_${name}`];
+  if (value('CODEX_RUNTIME') !== 'wsl') return null;
+  const distribution = value('WSL_DISTRO');
+  const user = value('WSL_USER');
+  const node = value('WSL_NODE');
+  const codexHome = value('WSL_CODEX_HOME');
+  const helper = value('WSL_SESSION_HELPER');
   if (typeof distribution !== 'string' || !distribution
     || typeof user !== 'string' || !/^[a-z_][a-z0-9_-]{0,63}$/i.test(user)
     || typeof node !== 'string' || !node.startsWith('/')

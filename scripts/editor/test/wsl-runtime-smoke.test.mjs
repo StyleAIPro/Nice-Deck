@@ -15,7 +15,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const PROJECT_DIR = resolve(fileURLToPath(import.meta.url), '../../../..');
-const ENABLED = process.platform === 'win32' && process.env.HUAWEI_DECK_WSL_SMOKE === '1';
+const ENABLED = process.platform === 'win32' && process.env.AICO_PPT_WSL_SMOKE === '1';
 
 async function waitFor(predicate, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
@@ -29,7 +29,7 @@ async function waitFor(predicate, timeoutMs = 10_000) {
 
 test('本机 Windows Editor 可通过 WSL runtime 启动 Codex', { skip:!ENABLED }, async () => {
   const settings = loadAgentRuntimeSettings({
-    settingsPath:join(homedir(), '.huawei-deck-editor', 'settings.json'),
+    settingsPath:join(homedir(), '.aico-ppt-editor', 'settings.json'),
   });
   const runtime = await prepareAgentTerminalRuntime('codex', {
     settings,
@@ -53,11 +53,11 @@ test('本机 Windows Editor 可通过 WSL runtime 启动 Codex', { skip:!ENABLED
   assert.match(version.stdout, /codex-cli\s+\d+/);
 
   const helper = await execFileAsync('wsl.exe', [
-    '-d', runtime.environment.HUAWEI_DECK_WSL_DISTRO,
-    '-u', runtime.environment.HUAWEI_DECK_WSL_USER,
-    '--exec', runtime.environment.HUAWEI_DECK_WSL_NODE,
-    runtime.environment.HUAWEI_DECK_WSL_SESSION_HELPER,
-    'list-rollouts', runtime.environment.HUAWEI_DECK_WSL_CODEX_HOME,
+    '-d', runtime.environment.AICO_PPT_WSL_DISTRO,
+    '-u', runtime.environment.AICO_PPT_WSL_USER,
+    '--exec', runtime.environment.AICO_PPT_WSL_NODE,
+    runtime.environment.AICO_PPT_WSL_SESSION_HELPER,
+    'list-rollouts', runtime.environment.AICO_PPT_WSL_CODEX_HOME,
   ], { encoding:'utf8', timeout:15_000, windowsHide:true });
   assert.ok(Array.isArray(JSON.parse(helper.stdout).ids));
 
@@ -90,7 +90,7 @@ test('真实 WSL Codex 目录信任提示会解除 Agent 切换遮罩', {
   const trustProject = await mkdtemp(join(tmpdir(), 'deck-wsl-trust-'));
   t.after(() => rm(trustProject, { recursive:true, force:true }));
   const settings = loadAgentRuntimeSettings({
-    settingsPath:join(homedir(), '.huawei-deck-editor', 'settings.json'),
+    settingsPath:join(homedir(), '.aico-ppt-editor', 'settings.json'),
   });
   const terminal = new AgentTerminalSession({
     projectRoot:trustProject,

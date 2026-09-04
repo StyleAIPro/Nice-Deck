@@ -29,12 +29,12 @@ test('Windows WSL Codex 在 WSL 内建立 rollout 基线', async () => {
   const result = await createTerminalConversation('codex', {
     idFactory:() => '019ff4b7-0622-7272-b0e2-394f6316b52a',
     environment:{
-      HUAWEI_DECK_CODEX_RUNTIME:'wsl',
-      HUAWEI_DECK_WSL_DISTRO:'Ubuntu-26.04',
-      HUAWEI_DECK_WSL_USER:'root',
-      HUAWEI_DECK_WSL_NODE:'/usr/bin/node',
-      HUAWEI_DECK_WSL_CODEX_HOME:'/root/.codex',
-      HUAWEI_DECK_WSL_SESSION_HELPER:'/mnt/c/workspace/scripts/editor/wsl-codex-session-helper.mjs',
+      AICO_PPT_CODEX_RUNTIME:'wsl',
+      AICO_PPT_WSL_DISTRO:'Ubuntu-26.04',
+      AICO_PPT_WSL_USER:'root',
+      AICO_PPT_WSL_NODE:'/usr/bin/node',
+      AICO_PPT_WSL_CODEX_HOME:'/root/.codex',
+      AICO_PPT_WSL_SESSION_HELPER:'/mnt/c/workspace/scripts/editor/wsl-codex-session-helper.mjs',
     },
     runWslCodexHelper:async (operation, args) => {
       calls.push({ operation, args });
@@ -57,7 +57,7 @@ test('Codex 可见首轮落盘后按唯一标识发现真实 ID', async () => {
         assert.equal(method, 'thread/list');
         requests += 1;
         return requests === 1 ? { data:[] } : {
-          data:[{ id, preview:'[Huawei Deck 会话标识：019ff4b7-0622-7272-b0e2-394f6316b52a]' }],
+          data:[{ id, preview:'[AICO-PPT 会话标识：019ff4b7-0622-7272-b0e2-394f6316b52a]' }],
         };
       },
       async close() { closed = true; },
@@ -80,12 +80,12 @@ test('Windows WSL Codex 只在 WSL 内发现会话且不启动 Windows App Serve
     knownConversationIds:[],
     cwd:'/mnt/c/Users/测试 用户/演示 项目',
     environment:{
-      HUAWEI_DECK_CODEX_RUNTIME:'wsl',
-      HUAWEI_DECK_WSL_DISTRO:'Ubuntu-26.04',
-      HUAWEI_DECK_WSL_USER:'root',
-      HUAWEI_DECK_WSL_NODE:'/usr/bin/node',
-      HUAWEI_DECK_WSL_CODEX_HOME:'/root/.codex',
-      HUAWEI_DECK_WSL_SESSION_HELPER:'/mnt/c/workspace/scripts/editor/wsl-codex-session-helper.mjs',
+      AICO_PPT_CODEX_RUNTIME:'wsl',
+      AICO_PPT_WSL_DISTRO:'Ubuntu-26.04',
+      AICO_PPT_WSL_USER:'root',
+      AICO_PPT_WSL_NODE:'/usr/bin/node',
+      AICO_PPT_WSL_CODEX_HOME:'/root/.codex',
+      AICO_PPT_WSL_SESSION_HELPER:'/mnt/c/workspace/scripts/editor/wsl-codex-session-helper.mjs',
     },
     pollMs:1,
     timeoutMs:1_000,
@@ -126,7 +126,7 @@ test('OpenCode 可见 TUI 使用固定标识发现并恢复真实 session', asyn
         ? [{ id:'ses_existing', title:'旧会话', cwd:'/tmp/project' }]
         : [
           { id:'ses_existing', title:'旧会话', cwd:'/tmp/project' },
-          { id:'ses_new', title:`[Huawei Deck 会话标识：${discoveryToken}]`, cwd:'/tmp/project' },
+          { id:'ses_new', title:`[AICO-PPT 会话标识：${discoveryToken}]`, cwd:'/tmp/project' },
         ];
     },
   });
@@ -151,7 +151,7 @@ test('同目录并发创建 Codex 时只认领包含本次唯一标识的 rollou
   });
   await writeFile(join(directory, `rollout-now-${competing}.jsonl`), `${meta(competing)}\n其他会话\n`);
   await writeFile(join(directory, `rollout-now-${expected}.jsonl`),
-    `${meta(expected)}\n[Huawei Deck 会话标识：019ff4b7-0622-7272-b0e2-394f6316b52a]\n`);
+    `${meta(expected)}\n[AICO-PPT 会话标识：019ff4b7-0622-7272-b0e2-394f6316b52a]\n`);
 
   const discovered = await discoverTerminalConversation('codex', {
     discoveryToken:'019ff4b7-0622-7272-b0e2-394f6316b52a',

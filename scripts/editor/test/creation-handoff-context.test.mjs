@@ -51,8 +51,8 @@ function draft(projectRoot, draftDir) {
 test('Creation 交接持久化设计文稿、素材库和已确认上下文', async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-handoff-'));
   t.after(() => rm(projectRoot, { recursive:true, force:true }));
-  const draftDir = join(projectRoot, '.huawei-deck-editor', 'drafts', 'draft-continuity');
-  const sessionDir = join(projectRoot, '.huawei-deck-editor', 'sessions', 'editing');
+  const draftDir = join(projectRoot, '.aico-ppt-editor', 'drafts', 'draft-continuity');
+  const sessionDir = join(projectRoot, '.aico-ppt-editor', 'sessions', 'editing');
   await Promise.all([
     mkdir(join(draftDir, 'materials'), { recursive:true }),
     mkdir(join(draftDir, 'diagnostics'), { recursive:true }),
@@ -97,8 +97,8 @@ test('Creation 交接持久化设计文稿、素材库和已确认上下文', as
 test('Creation 交接拒绝引用项目目录之外的素材与设计文件', async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-handoff-unsafe-'));
   t.after(() => rm(projectRoot, { recursive:true, force:true }));
-  const draftDir = join(projectRoot, '.huawei-deck-editor', 'drafts', 'draft-continuity');
-  const sessionDir = join(projectRoot, '.huawei-deck-editor', 'sessions', 'editing');
+  const draftDir = join(projectRoot, '.aico-ppt-editor', 'drafts', 'draft-continuity');
+  const sessionDir = join(projectRoot, '.aico-ppt-editor', 'sessions', 'editing');
   await Promise.all([mkdir(draftDir, { recursive:true }), mkdir(sessionDir, { recursive:true })]);
   const value = draft(projectRoot, draftDir);
   value.generation.publishedPlan = '/tmp/foreign.plan.md';
@@ -112,8 +112,8 @@ test('Creation 交接拒绝引用项目目录之外的素材与设计文件', as
 test('旧版 creation.json 在首次打开修改任务时迁移为正式上下文', async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-handoff-legacy-'));
   t.after(() => rm(projectRoot, { recursive:true, force:true }));
-  const draftDir = join(projectRoot, '.huawei-deck-editor', 'drafts', 'draft-continuity');
-  const sessionDir = join(projectRoot, '.huawei-deck-editor', 'sessions', 'editing');
+  const draftDir = join(projectRoot, '.aico-ppt-editor', 'drafts', 'draft-continuity');
+  const sessionDir = join(projectRoot, '.aico-ppt-editor', 'sessions', 'editing');
   await Promise.all([mkdir(draftDir, { recursive:true }), mkdir(sessionDir, { recursive:true })]);
   const value = draft(projectRoot, draftDir);
   await writeFile(join(sessionDir, 'creation.json'), `${JSON.stringify(value)}\n`);

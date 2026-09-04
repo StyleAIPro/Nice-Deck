@@ -5,17 +5,17 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleDisplayName</key>
-  <string>Huawei Deck 编辑器</string>
+  <string>AICO-PPT 编辑器</string>
   <key>CFBundleExecutable</key>
-  <string>HuaweiDeckEditor</string>
+  <string>AICOPPTEditor</string>
   <key>CFBundleIconFile</key>
-  <string>HuaweiDeckEditor</string>
+  <string>AICOPPTEditor</string>
   <key>CFBundleIdentifier</key>
-  <string>com.local.huawei-deck-editor</string>
+  <string>com.aico.ppt-editor</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Huawei Deck 编辑器</string>
+  <string>AICO-PPT 编辑器</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

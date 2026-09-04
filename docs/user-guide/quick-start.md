@@ -4,18 +4,18 @@
 
 ## 前置状态
 
-- Huawei Deck Skill 已注册；
+- AICO-PPT Skill 已注册；
 - Editor Core 已就绪；
 - Codex、Claude Code 或 OpenCode 至少一个已安装并登录。
 
 ## 操作步骤
 
-1. 双击 `Huawei Deck 编辑器.app`（macOS）或 `Huawei Deck 编辑器.cmd`（Windows）；Windows 首次运行后可改用同目录自动生成的带图标快捷方式。
+1. 双击 `AICO-PPT 编辑器.app`（macOS）或 `AICO-PPT 编辑器.cmd`（Windows）；Windows 首次运行后可改用同目录自动生成的带图标快捷方式。
 2. 第一次使用先点击“安装与诊断”，确认“基础使用”没有阻塞项。
 3. 点击“开始使用”，再点击“创建示例副本”。
 4. 选择一个空目录；Editor 会复制一份示例 Deck，不修改内置模板。
 5. 确认 Agent 项目目录，选择已经登录的 Agent，然后打开编辑器。
-6. 在右侧终端输入：“把封面标题改成我的第一个 Huawei Deck”。
+6. 在右侧终端输入：“把封面标题改成我的第一个 AICO-PPT”。
 7. 在画布中确认变化；需要永久写回时点击“固化修改”。
 
 ## 完成标志

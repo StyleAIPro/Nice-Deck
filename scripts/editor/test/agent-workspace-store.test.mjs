@@ -6,8 +6,8 @@ import { createEmptyWorkspace } from '../agent-workspace/schema.mjs';
 
 const SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ROOT = process.platform === 'win32'
-  ? String.raw`C:\huawei-deck-project`
-  : '/tmp/huawei-deck-project';
+  ? String.raw`C:\aico-ppt-project`
+  : '/tmp/aico-ppt-project';
 
 function memorySidecar({ persisted = null, failWrite = null } = {}) {
   let disk = persisted === null ? null : structuredClone(persisted);
@@ -70,8 +70,8 @@ test('旧会话保存了其他系统的绝对路径时，open 修复为当前已
     now:() => '2026-08-09T12:00:00.000Z',
   });
   persisted.projectRoot = process.platform === 'win32'
-    ? '/Users/tester/huawei-deck'
-    : '\\\\Mac\\Home\\zyq_workspace\\huawei-deck';
+    ? '/Users/tester/aico-ppt'
+    : '\\\\Mac\\Home\\zyq_workspace\\aico-ppt';
   const sidecarIO = memorySidecar({ persisted });
 
   const store = await openStore(sidecarIO, { projectRootSource:'git-root' });

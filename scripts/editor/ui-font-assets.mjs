@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
 const FONT_SOURCE = resolve(EDITOR_DIR, '../../assets/training-deck.html');
 const SOURCE_FAMILY = 'Noto Sans SC';
-const UI_FAMILY = 'Huawei Deck UI';
+const UI_FAMILY = 'AICO-PPT UI';
 
 let cachedAssets;
 

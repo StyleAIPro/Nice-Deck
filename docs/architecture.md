@@ -1,4 +1,4 @@
-# huawei-deck · 设计原则、工作流与代码架构梳理
+# aico-ppt · 设计原则、工作流与代码架构梳理
 
 > 本文是对本 skill 的系统性梳理：它按什么原则设计、用户与 Agent 按什么流程协作、代码分几层各干什么。
 > 与 `docs/design/` 的关系：`design-spec.md` / `implementation-plan.md` 是**构建时**的规格与计划（记录「当初怎么做出来的」）；本文描述**现状**（现在的结构是什么、为什么这样设计）。改动仓库时若行为与本文不符，以 `SKILL.md` 与 `references/` 为准并回来同步本文。
@@ -7,7 +7,7 @@
 
 ## 1. 这是什么
 
-huawei-deck 是一个符合 `SKILL.md` 目录约定的 **Agent Skill**，不是普通应用代码库。它交付的能力是：从三套华为红品牌模板出发，做出 1920×1080、离线可拷走的**单文件 HTML 演示（网页 PPT）**，并可一键导出 PPTX。
+aico-ppt 是一个符合 `SKILL.md` 目录约定的 **Agent Skill**，不是普通应用代码库。它交付的能力是：从三套华为红品牌模板出发，做出 1920×1080、离线可拷走的**单文件 HTML 演示（网页 PPT）**，并可一键导出 PPTX。
 
 交付物四块：
 
@@ -151,7 +151,7 @@ flowchart LR
 
 ### 3.7 环境体检
 
-动手前运行 macOS / Linux 的 `python3 scripts/check_deps.py --profile editor-core --check-only` 或 Windows 的 `py -3 scripts\check_deps.py --profile editor-core --check-only`。`EnvironmentManager` 的外部 Interface 投影为 `editor-core`、`verify`、`pptx-export`、`materials` 和兼容用的 `full`：每个依赖只在相关 Profile 内决定退出码，LibreOffice 缺失不能把 Editor Core 判为失败。`--repair` 修复 pip/npm/npx 项并复检，Node、Chrome、Agent CLI、soffice 等返回人工操作提示；`--json` 是 Editor 诊断页与自动化共用的结构化 Interface。
+动手前，DSH Editor Core 运行 macOS / Linux 的 `python3 scripts/check_deps.py --profile editor-core --check-only` 或 Windows 的 `py -3 scripts\check_deps.py --profile editor-core --check-only`；独立桌面入口改用 `--profile dev-shell`。`EnvironmentManager` 的外部 Interface 投影为 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`materials` 和兼容用的 `full`：`editor-core` 只包含画布、任务、历史和固化所需模块，`dev-shell` 才加入 `node-pty`、xterm 与 Agent CLI。每个依赖只在相关 Profile 内决定退出码，本机 Agent CLI 或 LibreOffice 缺失不能把 DSH Editor Core 判为失败。`--repair` 修复 pip/npm/npx 项并复检；`--json` 是 Editor 诊断页与自动化共用的结构化 Interface。
 
 ### 3.8 后期可视化微调工作流
 
@@ -166,7 +166,7 @@ python3 scripts/deck-editor.py <deck.html>
 python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 ```
 
-浏览器提供预览、编辑、区域标记三种一级模式；`edit` 在 frame 内统一路由文字、移动和缩放，旧 `text` / `move` / `resize` 消息会规范化为 `edit`，但不再作为界面工具出现。文字目标内部投影文本光标，首次 pointerdown 即建立直接编辑态但不阻止浏览器默认事件，使单击放置光标、按住拖动形成原生选区；红色选框用四条 frame-owned 透明命中带承接移动，只有边缘显示抓取光标并移动元素，右下控制点继续缩放；移动与缩放超过 7 个屏幕像素才更新预览，避免单击和双击误提交动作。parent 与 frame 都监听无修饰键 `R`：仅在持久模式为编辑、且焦点不在输入控件或直接文字编辑中时，按下会把有效模式临时投影为区域标记，松开恢复编辑；恢复消息显式保留已创建的区域标注输入框。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；页码 badge 只投影 pending / processing / failed / needs-confirmation 状态，completed 任务默认收进闭合分组。未固化的非末尾 Agent 任务可通过追加补偿修改撤回，补偿本身再由顶栏按顺序撤销 / 重做；固化后完成项保留供查看但移除撤回入口。待处理、失败和待确认任务可经 `PATCH /api/tasks/<TASK_ID>` 修改说明，或经 `DELETE` 二次确认删除，Agent run 活跃时服务端统一拒绝，已完成任务需先撤回。任务删除先提交权威 session，再清理截图与附件；清理失败只留下可对账孤儿，不会恢复任务或制造悬空引用。文字编辑始终复用单击后出现的红色选框，框内普通文字和局部格式片段共享同一个独立布局盒编辑范围。frame 的文字单击同时建立直接编辑态和整个独立布局盒的红色选框；即使落点位于局部格式 wrapper，局部格式也不会拆成独立编辑框，唯一 `contenteditable` 仍挂在整个红框文字盒。进入编辑时记录原始 HTML 和全部 childNodes 文本路径，退出时先恢复原 DOM；若结构稳定，只为实际变化的文本节点生成最多 32 层的规范 `textPath` 动作，从而保留未改 `strong` / `span` 与 `<br>`，整段替换造成结构变化时才退化为 element 级纯文本动作；全选删除的空字符串仍是有效动作，不会当成取消。action compiler 的状态键包含 `textPath`，但 locator 仍跨片段和动作类型复用同一元素的最早安全指纹。运行时局部格式 wrapper 可因同范围样式覆盖或撤销而拆装；旧 `textPath` 无法直达文本节点时，patch runtime 使用动作的 `before` 在同一文字盒内唯一定位并按绝对字符范围替换，零匹配返回 `TARGET_NOT_FOUND`，多匹配返回 `TARGET_AMBIGUOUS`。首次按下文字时进入编辑，浏览器默认事件负责放置折叠光标和拖选，blur 或 `Cmd/Ctrl+Enter` 统一提交动作。移动命中则沿祖先寻找最近的 positioned 或 block / flex / grid 等独立布局盒，不依赖 class，同时排除 section / stage / canvas 等结构容器。图片内文字、SVG、链接和交互组件仍 fail closed。外部 Codex / Claude Code / Agent 不是内置聊天机器人；drawer 不承载对话，但“交给 Agent”会经固定 schema 的 `POST /api/agent-runs` 立即触发当前批次。Agent 通过 CLI / HTTP 读取 session / tasks、用 `locate-text` 或 editor capability 定位文字、以 `POST /api/actions` 提交细节修改，并经统一 group API 撤销 / 重做；`POST /api/write-deck` 只建立检查点，真实发布必须先调用 `POST /api/solidify-preflight`，再用一次性预检令牌调用 `POST /api/solidify-deck`。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务、文字定位和 ACK，不对外提交动作。
+浏览器提供预览、编辑、区域标记三种一级模式；`edit` 在 frame 内统一路由文字、移动和缩放，旧 `text` / `move` / `resize` 消息会规范化为 `edit`，但不再作为界面工具出现。模式栏左侧花形按钮把 Editor 模式切到 `preview`，再同步触发 Deck 内 `[data-mode="present"]`，由 Deck 原生放映运行时持有 Fullscreen API、逐拍导航与 `Esc` 退出；画布状态区不再保留重复全屏入口。DSH / Creation 父 iframe 与 Editor 内 `#deck-frame` 必须通过 `allow="fullscreen *"` 显式向跨源后代委托权限，不能依赖默认 `self` allowlist。文字目标内部投影文本光标，首次 pointerdown 即建立直接编辑态但不阻止浏览器默认事件，使单击放置光标、按住拖动形成原生选区；红色选框用四条 frame-owned 透明命中带承接移动，只有边缘显示抓取光标并移动元素，右下控制点继续缩放；移动与缩放超过 7 个屏幕像素才更新预览，避免单击和双击误提交动作。parent 与 frame 都监听无修饰键 `R`：仅在持久模式为编辑、且焦点不在输入控件或直接文字编辑中时，按下会把有效模式临时投影为区域标记，松开恢复编辑；恢复消息显式保留已创建的区域标注输入框。区域拉框后在旁侧输入说明，任务可跨页进入 Agent 任务 drawer；页码 badge 只投影 pending / processing / failed / needs-confirmation 状态，completed 任务默认收进闭合分组。Agent 任务一旦完成就永久保持 `completed`；任务行与顶栏的撤销 / 重做只切换 `effectState=active|undone`，非末尾 ActionMutation 通过追加补偿修改实现，绝不恢复页码 badge、进入未完成列表或再次提交给 Agent。固化后完成项保留供查看但移除历史入口。待处理、失败和待确认任务可经 `PATCH /api/tasks/<TASK_ID>` 修改说明，或经 `DELETE` 二次确认删除；当前执行批次成员由服务端锁定，运行期间新建的下一批任务仍可改删，未固化完成项则始终锁定。任务删除先提交权威 session，再清理截图与附件；清理失败只留下可对账孤儿，不会恢复任务或制造悬空引用。文字编辑始终复用单击后出现的红色选框，框内普通文字和局部格式片段共享同一个独立布局盒编辑范围。frame 的文字单击同时建立直接编辑态和整个独立布局盒的红色选框；即使落点位于局部格式 wrapper，局部格式也不会拆成独立编辑框，唯一 `contenteditable` 仍挂在整个红框文字盒。进入编辑时记录原始 HTML 和全部 childNodes 文本路径，退出时先恢复原 DOM；若结构稳定，只为实际变化的文本节点生成最多 32 层的规范 `textPath` 动作，从而保留未改 `strong` / `span` 与 `<br>`，整段替换造成结构变化时才退化为 element 级纯文本动作；全选删除的空字符串仍是有效动作，不会当成取消。action compiler 的状态键包含 `textPath`，但 locator 仍跨片段和动作类型复用同一元素的最早安全指纹。运行时局部格式 wrapper 可因同范围样式覆盖或撤销而拆装；旧 `textPath` 无法直达文本节点时，patch runtime 使用动作的 `before` 在同一文字盒内唯一定位并按绝对字符范围替换，零匹配返回 `TARGET_NOT_FOUND`，多匹配返回 `TARGET_AMBIGUOUS`。首次按下文字时进入编辑，浏览器默认事件负责放置折叠光标和拖选，blur 或 `Cmd/Ctrl+Enter` 统一提交动作。移动命中则沿祖先寻找最近的 positioned 或 block / flex / grid 等独立布局盒，不依赖 class，同时排除 section / stage / canvas 等结构容器。图片内文字、SVG、链接和交互组件仍 fail closed。外部 Codex / Claude Code / Agent 不是内置聊天机器人；drawer 不承载对话，但“交给 Agent”会经固定 schema 的 `POST /api/agent-runs` 立即触发当前批次。Agent 通过 CLI / HTTP 读取 session / tasks、用 `locate-text` 或 editor capability 定位文字、以 `POST /api/actions` 提交细节修改，并经统一 group API 撤销 / 重做；`POST /api/write-deck` 只建立检查点，真实发布必须先调用 `POST /api/solidify-preflight`，再用一次性预检令牌调用 `POST /api/solidify-deck`。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务、文字定位和 ACK，不对外提交动作。
 
 受控 Agent HTTP 明确包含 `GET /api/session`、`GET /api/tasks`、`POST /api/actions`、`POST /api/groups/<GROUP_ID>/undo`、`POST /api/groups/<GROUP_ID>/redo` 与检查点 `POST /api/write-deck`；正式发布先经 `POST /api/solidify-preflight` 取得绑定 revision、文件指纹、诊断和动作投影均匹配的一次性令牌，再调用唯一写入入口 `POST /api/solidify-deck`。可见 Editor 由浏览器用户确认，无窗口 Skill 仅按用户明确的完成、保存或正式写入要求调用。
 
@@ -176,7 +176,7 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 
 顶栏的“撤销 / 重做”只移动编辑时间线的唯一历史游标，覆盖人工文字、移动、缩放、Agent 动作和结构修改；新修改会截断游标之后的旧重做分支。parent 与 frame 分别监听键盘并通过受限 `history-shortcut` 消息汇合到同一 `changeHistory`：`Cmd/Ctrl+Z` 撤销，`Cmd/Ctrl+Shift+Z` 重做，Windows 兼容 `Ctrl+Y`；输入框、`role=textbox` 与 `contenteditable` 保留浏览器原生撤销。任务行撤回非末尾 Agent ActionMutation 时，不会停用旧条目，而是计算当下状态的反事实差异并追加补偿修改；补偿无法保持后续修改或涉及 SourceMutation 时返回冲突。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
 
-Editor 启动后真实 source deck 只读，预览读取 sidecar 托管工作副本。`.huawei-deck-editor/` 自动保存会话、任务、快照、ActionMutation、SourceMutation、诊断、工作版本与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。session v2 以 `timeline.entries + timeline.cursor` 为权威，`groups / redo` 仅是兼容旧界面与旧客户端的投影视图；旧版带 active 空洞的历史在启动时线性化，无法证明有效的 redo 进入迁移归档。工作台不绑定 `Cmd/Ctrl+S`。用户二次确认“固化修改”后，浏览器先调用 `POST /api/solidify-preflight` 校验 revision、文件绑定、双指纹、页面目标、诊断和动作投影，再携带 60 秒内一次性令牌调用 `POST /api/solidify-deck` 原子发布真实 Deck。成功后创建固化检查点、归档旧时间线并从空时间线继续；连续固化不丢上一轮内容，也不追加脚本块。浏览器标签页的 `×` 会直接关闭，不触发 Chrome 通用离开提醒；网页无法用自定义弹窗接管标签页关闭。要离开编辑器，应点击品牌区右侧、页面左上角独立的“退出编辑”；右侧工作区导航继续保留“初始页”按钮，二者不能互相替换。有未固化历史或 Agent 正在运行时，“退出编辑”会直接打开页面内未固化任务清单，按最新修改倒序列出游标前仍生效条目关联任务的页码与说明，并汇总未绑定任务的直接编辑 / 结构修改与游标后的重做历史；操作项为“继续编辑”“暂不固化，退出”“固化并退出”。“固化并退出”仍走同一预检与安全写入闸门；未固化历史与工作副本保留到下次打开。`POST /api/write-deck` 只检查并保存会话检查点。冲突或验证失败拒绝覆盖。
+Editor 启动后真实 source deck 只读，预览读取 sidecar 托管工作副本。`.aico-ppt-editor/` 自动保存会话、任务、快照、ActionMutation、SourceMutation、诊断、工作版本与备份；它不进入最终交付 deck，并由仓库 `.gitignore` 忽略提交。session v2 以 `timeline.entries + timeline.cursor` 为权威，`groups / redo` 仅是兼容旧界面与旧客户端的投影视图；旧版带 active 空洞的历史在启动时线性化，无法证明有效的 redo 进入迁移归档。工作台不绑定 `Cmd/Ctrl+S`。用户二次确认“固化修改”后，浏览器先调用 `POST /api/solidify-preflight` 校验 revision、文件绑定、双指纹、页面目标、诊断和动作投影，再携带 60 秒内一次性令牌调用 `POST /api/solidify-deck` 原子发布真实 Deck。成功后创建固化检查点、归档旧时间线并从空时间线继续；连续固化不丢上一轮内容，也不追加脚本块。浏览器标签页的 `×` 会直接关闭，不触发 Chrome 通用离开提醒；网页无法用自定义弹窗接管标签页关闭。要离开编辑器，应点击品牌区右侧、页面左上角独立的“退出编辑”；右侧工作区导航继续保留“初始页”按钮，二者不能互相替换。有未固化历史或 Agent 正在运行时，“退出编辑”会直接打开页面内未固化任务清单，按最新修改倒序列出游标前仍生效条目关联任务的页码与说明，并汇总未绑定任务的直接编辑 / 结构修改与游标后的重做历史；操作项为“继续编辑”“暂不固化，退出”“固化并退出”。“固化并退出”仍走同一预检与安全写入闸门；未固化历史与工作副本保留到下次打开。`POST /api/write-deck` 只检查并保存会话检查点。冲突或验证失败拒绝覆盖。
 
 当前退出交互以“退出编辑器”为唯一文案：初始页、流程页和各编辑页面的品牌区右侧保持同一位置，文字右侧使用品牌红线性的门框与向右退出箭头，不带独立底框。退出通过同时校验当前浏览器 Origin 与独立 editor capability token 的 `/api/shutdown` 显式关闭启动器、全部编辑运行时与 Agent 终端；Agent 的通用 API token 不能关闭承载自身 PTY 的服务。退出弹窗覆盖游标前全部生效条目，按 `taskId` 分组；任务默认只显示任务说明与下拉箭头，首次展开时才生成页码、条目数和具体 action / source 修改类型。`taskId:null` 的直接编辑 / 结构修改与游标后的重做历史独立显示。
 
@@ -192,7 +192,9 @@ Editor 启动后真实 source deck 只读，预览读取 sidecar 托管工作副
 
 ## 4. 代码架构
 
-任务删除权限以 canonical history 为边界：上文“已完成任务需先撤销”只适用于仍有 `groupId` 的任务；已固化任务可删除记录，删除不会改变 Deck 中已经固化的修改。删除仍先提交权威 session，再清理任务的局部截图与附件。
+任务删除权限以 canonical history 为边界：仍有 `groupId` 的未固化完成任务永久保留在“已完成”，只能切换修改效果，不能编辑或删除；已固化任务清除历史关联后可删除记录，且不会改变 Deck 中已经固化的修改。删除仍先提交权威 session，再清理任务的局部截图与附件。
+
+产品壳的优先级由 `docs/adr/0002-dsh-primary-and-standalone-dev-shell.md` 固定：DSH 是正式窗口入口，独立 Editor 只作为开发、回归和故障排查用 Dev Shell。两者共用本章的 Editor Core；DSH 通过 `dshAgentBridge` 使用当前工作项显式关联的活动原生会话，并在服务端跳过 Agent Terminal 构造、xterm 资源快照和浏览器资源下发。工作项与 DSH 会话的关系由 `docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md` 固定：全局新会话保持普通会话，只有携带 `workId` 的 Deck 入口建立关联；普通会话切换不改变工作项或重载 Editor。`agent-terminal-loader.mjs` 是可选 PTY 能力的唯一加载门，`server.mjs` / `app-server.mjs` 不得顶层导入原生终端实现。
 
 ### 4.1 单文件 bundle 格式与浏览器端 loader
 
@@ -321,11 +323,11 @@ flowchart LR
 
 可见 Editor 和无窗口 workspace 只在交互外壳上不同：前者让用户看画布并使用内嵌终端，后者由后台 Chrome 承载相同的 frame bridge。Mutation、revision、诊断、撤销 / 重做和固化没有第二套实现。
 
-统一工作台的启动 seam 是 `scripts/deck-editor.py`：macOS 的 `Huawei Deck 编辑器.app` 与 Windows 的 `Huawei Deck 编辑器.cmd` 都是薄桌面 adapter，Python 启动器是统一命令 adapter。macOS 用户双击 `Huawei Deck 编辑器.app`、Windows 用户双击 `Huawei Deck 编辑器.cmd` 后，先进入本地工作台启动页。首页以“新建 Deck / 修改 Deck（打开已有 Deck）”两张工作卡展示可继续任务；`work-history-store.mjs` 是启动页唯一的历史 Interface，只保存 `projectRoot + draftId` 或 `deckPath` 指针，权威状态仍在 Draft 和 Deck sidecar 中。点击历史项直接重新获取锁、恢复工作状态并以持久 conversation ID 启动同一 Agent 会话；卡片右下角小加号才进入新任务流程。Creation Draft 锁记录 token、PID 与心跳时间；窗口事件 WebSocket 全部断开且超过重连宽限期时，App Server 自动关闭并释放锁，崩溃遗留的过期租约可由新服务接管。新建 Deck 先确认 Agent 项目目录；打开已有 Deck 通过系统文件选择器添加一份 HTML。两条流程的路径候选都可反复更改；在创建 Draft 或打开 Editor 前，“返回”会同时废弃前端与服务端候选，回到 idle，因而可安全切换入口。只有创建 Draft、恢复任务或打开 Editor 才会锁定当前工作对象并结束启动态。命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。
+统一工作台的启动 seam 是 `scripts/deck-editor.py`：macOS 的 `AICO-PPT 编辑器.app` 与 Windows 的 `AICO-PPT 编辑器.cmd` 都是薄桌面 adapter，Python 启动器是统一命令 adapter。macOS 用户双击 `AICO-PPT 编辑器.app`、Windows 用户双击 `AICO-PPT 编辑器.cmd` 后，先进入本地工作台启动页。首页以“新建 Deck / 修改 Deck（打开已有 Deck）”两张工作卡展示可继续任务；`work-history-store.mjs` 是启动页唯一的历史 Interface，只保存 `projectRoot + draftId` 或 `deckPath` 指针，权威状态仍在 Draft 和 Deck sidecar 中。点击历史项直接重新获取锁、恢复工作状态并以持久 conversation ID 启动同一 Agent 会话；卡片右下角小加号才进入新任务流程。Creation Draft 锁记录 token、PID 与心跳时间；窗口事件 WebSocket 全部断开且超过重连宽限期时，App Server 自动关闭并释放锁，崩溃遗留的过期租约可由新服务接管。新建 Deck 先确认 Agent 项目目录；打开已有 Deck 通过系统文件选择器添加一份 HTML。两条流程的路径候选都可反复更改；在创建 Draft 或打开 Editor 前，“返回”会同时废弃前端与服务端候选，回到 idle，因而可安全切换入口。只有创建 Draft、恢复任务或打开 Editor 才会锁定当前工作对象并结束启动态。命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。
 
 平台图标仍属于薄 adapter：macOS 在 App bundle 的 `Info.plist` 登记内置 `.icns`；Windows `.cmd` 无法原生携带图标，因此首次启动调用 `scripts/create_windows_launcher_shortcut.ps1`，在仓库根目录生成引用 `.ico` 的本机 `.lnk`。`.lnk` 使用当前仓库绝对路径并被 Git 忽略，仓库迁移后通过删除旧快捷方式、再次运行 `.cmd` 重建，不改变统一 Python 启动 seam。
 
-安装与首启不塞进 launcher。`scripts/install.py` 的 `InstallationManager` 通过 `inspect → plan → apply` 小 Interface 隐藏 host 路径、POSIX symlink、Windows junction、安装状态和所有权复核；Codex 标准注册目标是 `~/.agents/skills/huawei-deck`，冲突目标停止，同源但无记录的目标进入 `adoption-required` 并要求 `--adopt-existing` 明确确认，卸载只移除记录且仍指向当前仓库的注册项，批量卸载失败会恢复已删除链接与原状态记录。`scripts/editor/environment-doctor.mjs` 只把 `check_deps.py --json` 与 `install.py --json` 适配为 App Server 的 `/api/diagnostics` 和显式 repair / adoption 路径。首页顶栏的“开始使用 / 帮助 / 安装与诊断”由 `support-center.mjs` 呈现；帮助正文来自 `docs/user-guide/` 的只读 Markdown catalog，示例流程复制模板到用户选择的新目录后复用正常的打开 Deck 状态机，不另建示例专用 Editor。
+安装与首启不塞进 launcher。`scripts/install.py` 的 `InstallationManager` 通过 `inspect → plan → apply` 小 Interface 隐藏 host 路径、POSIX symlink、Windows junction、安装状态和所有权复核；Codex 标准注册目标是 `~/.agents/skills/aico-ppt`，冲突目标停止，同源但无记录的目标进入 `adoption-required` 并要求 `--adopt-existing` 明确确认，卸载只移除记录且仍指向当前仓库的注册项，批量卸载失败会恢复已删除链接与原状态记录。`scripts/editor/environment-doctor.mjs` 只把 `check_deps.py --json` 与 `install.py --json` 适配为 App Server 的 `/api/diagnostics` 和显式 repair / adoption 路径。首页顶栏的“开始使用 / 帮助 / 安装与诊断”由 `support-center.mjs` 呈现；帮助正文来自 `docs/user-guide/` 的只读 Markdown catalog，示例流程复制模板到用户选择的新目录后复用正常的打开 Deck 状态机，不另建示例专用 Editor。
 
 无路径时，Python 只启动 `app-server.mjs`；它以随机 token 保护 loopback 导入页，按钮请求只能触发本机选择器，浏览器不能提交任意文件路径。选择成功后，它在同一 Node 进程启动现有 `server.mjs` 并跳转到编辑工作台。有路径时则绕过导入页，直接进入 `server.mjs`，因此 Skill 生成第一版后仍可直接带路径打开。编辑服务启动时一次性读取并固定 index、frame bridge、协议、runtime 与全部前端资产；运行中磁盘代码变化不会形成“新前端 + 旧服务”混合版本，开发代码更新后必须重启编辑服务。带路径的 Python 入口自动捕获 `CODEX_THREAD_ID`，macOS App 参数也可显式传 `--agent-thread-id`；该启动值只是 Deck-Agent 连接模块的高优先级输入，解析后会写入 Deck sidecar。以后独立导入同一份 Deck 时即使没有启动参数，也会恢复持久化连接。两条路径共享 deck 校验、依赖探测、编辑服务、Agent 调度、bundle adapter、BridgeService 与写回闸门；桌面 adapter 仅增加一次性导入、原生错误提示、缺失 Node 模块自动安装和浏览器关闭后的延迟退出。
 
@@ -335,26 +337,27 @@ Node → Python 是单一 UTF-8 进程协议边界。`python-utf8.mjs` 为全部
 
 桌面入口的默认 provider 是 `auto`：Python 启动器按当前系统真实 executable 选择 Codex、Claude Code 或 OpenCode，并把结果显式传给唯一 App Server。Windows 优先 native `.exe`，兼容 npm `.cmd` / `.bat` shim；只有 Claude Code 的测试机不会错误落到 Codex。Claude 的 Windows 输入有两层闸门：先只以 Ink 空 `❯` 输入行与反色光标确认 ready，启动 banner、历史恢复和 PTY 存活都不算；每次 Enter 后清空扫描窗口并重新等待下一个提示符。再使用 bracketed paste，正文按 UTF-8 字节拆成不超过 512 B 的分块并以 30ms 间隔写入，关闭 paste 后再按总字节数等待 3–6 秒并独立发送 Enter。输入态闸门避免恢复长会话时前几个 512 B 分块被启动画面吞掉，字节闸门则给只保留单次大块写入末尾的 ConPTY / Ink 组合留出余量。PTY 退出 / 切换会取消当前分块链并等待 `onExit` 回收 native handle，避免正文缺头缺尾、回车被吞和旧输入串入新会话。
 
-macOS App 的主可执行文件只做短时派发：经 `nohup` 启动 Python 后立即退出，编辑服务独立持有生命周期。不能让 shell 型 App 主进程随编辑服务长期存活，否则 LaunchServices 会把它当成单实例应用；第二次双击无法向非 Cocoa 进程投递 reopen 事件并返回 `-600`。真正的工作台单实例由 Python 启动 seam 负责：它以 `O_EXCL` 原子认领权限为 0600 的临时登记文件，记录 owner PID、service PID 与带随机令牌的 loopback URL；重复派发不会再打开第二个工作台页面，而是先核对进程与页面健康状态。已有实例在线时，macOS 用参数化 AppleScript 先按精确 URL、再按“Huawei Deck”标题定位 Chrome / Safari 标签页并将对应窗口前置；脚本明确返回未找到时，启动器先向旧 service 发送 `SIGTERM`、等待 owner 释放登记，再原子认领并启动加载当前固定资源快照的新 App Server。Automation 权限或 osascript 异常时保守复用已有 URL，避免不确定状态下误关仍在工作的页面。只有 owner 已消失、浏览器标签明确不存在或登记确实陈旧时才接管。健康请求使用无代理 opener，不能继承 macOS 系统代理，否则 `127.0.0.1` 超时会被误判并重新制造一套 App Server。App 必须保留在 skill 根目录，若被单独移动则以原生对话框明确提示，而不是静默退出。
+macOS App 的主可执行文件只做短时派发：经 `nohup` 启动 Python 后立即退出，编辑服务独立持有生命周期。不能让 shell 型 App 主进程随编辑服务长期存活，否则 LaunchServices 会把它当成单实例应用；第二次双击无法向非 Cocoa 进程投递 reopen 事件并返回 `-600`。真正的工作台单实例由 Python 启动 seam 负责：它以 `O_EXCL` 原子认领权限为 0600 的临时登记文件，记录 owner PID、service PID 与带随机令牌的 loopback URL；重复派发不会再打开第二个工作台页面，而是先核对进程与页面健康状态。已有实例在线时，macOS 用参数化 AppleScript 先按精确 URL、再按“AICO-PPT”标题定位 Chrome / Safari 标签页并将对应窗口前置；脚本明确返回未找到时，启动器先向旧 service 发送 `SIGTERM`、等待 owner 释放登记，再原子认领并启动加载当前固定资源快照的新 App Server。Automation 权限或 osascript 异常时保守复用已有 URL，避免不确定状态下误关仍在工作的页面。只有 owner 已消失、浏览器标签明确不存在或登记确实陈旧时才接管。健康请求使用无代理 opener，不能继承 macOS 系统代理，否则 `127.0.0.1` 超时会被误判并重新制造一套 App Server。App 必须保留在 skill 根目录，若被单独移动则以原生对话框明确提示，而不是静默退出。
 
-Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动带 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 的标准 Python 子进程后立即退出；常驻 App Server、Node/Python helper、系统选择器和依赖安装路径统一隐藏控制台。App Server 通过带随机令牌的 `GET /api/launcher-status` 只向桌面启动器公开 `{state, activePageCount, everConnected}` 页面租约摘要。重复启动若发现活动租约，只尽力通过隐藏 PowerShell UI Automation 选择 Chrome / Edge / Firefox 中的 Huawei Deck 标签并前置窗口，激活失败也不打开第二页；发现曾连接但现为零租约时，先短暂复查页面跳转竞态，再结束旧 service 并原子重启。服务尚在启动且从未连入页面时，第二次派发保持静默；超出启动窗口仍从未连入时才补开同一个 URL。
+Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动带 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 的标准 Python 子进程后立即退出；常驻 App Server、Node/Python helper、系统选择器和依赖安装路径统一隐藏控制台。App Server 通过带随机令牌的 `GET /api/launcher-status` 只向桌面启动器公开 `{state, activePageCount, everConnected}` 页面租约摘要。重复启动若发现活动租约，只尽力通过隐藏 PowerShell UI Automation 选择 Chrome / Edge / Firefox 中的 AICO-PPT 标签并前置窗口，激活失败也不打开第二页；发现曾连接但现为零租约时，先短暂复查页面跳转竞态，再结束旧 service 并原子重启。服务尚在启动且从未连入页面时，第二次派发保持静默；超出启动窗口仍从未连入时才补开同一个 URL。
 
 页面租约的活性由 `launcher-lease-client.mjs` 与 App Server 的 `/launcher-lease` WebSocket 共同维护，而不是只相信一次 HTTP 登记。`pagehide` beacon 是正常关闭的快速路径；浏览器进程崩溃或被强制结束时，loopback socket 断开，服务等待 5 秒给 App → Editor 导航或短暂重连接管，仍无连接才执行统一 `close()`。HTTP 登记后还有 15 秒握手上限，覆盖脚本载入前崩溃。`close()` 依次终止 Creation/Editing runtime、Agent PTY、活动 writer、WebSocket/HTTP、binding coordinator 与 sidecar helper；macOS 与 Windows 共用该 Node 生命周期，不依赖 `.app` shell 或 `.cmd` 窗口存活。
 
-后期编辑器由 browser parent 和 preview frame 两层组成：parent 的 `public/editor.mjs` 管模式、页列表、task drawer、session 拉取与外部事件；frame 中注入 `frame-bridge.mjs` 和 `runtime/patch-runtime.js`，负责坐标换算、locator、区域快照、直接操作与 tentative DOM 变更。两层通过同源 `postMessage` 协作，frame 不获得通用文件系统能力。编辑选框与缩放手柄使用视口坐标绘制，因此 frame 在捕获阶段监听任意滚动容器并按动画帧重新读取目标矩形，不能只在拖动或动作回执后刷新。Editor UI 从离线模板复用 Noto Sans SC 400–700 子集并以 `Huawei Deck UI` 统一加载；parent、frame 浮层和自绘原生控件都以它为首选字体，不依赖 macOS 的 PingFang SC 或 Windows 的 Microsoft YaHei 回退。
+后期编辑器由 browser parent 和 preview frame 两层组成：parent 的 `public/editor.mjs` 管模式、页列表、task drawer、session 拉取与外部事件；frame 中注入 `frame-bridge.mjs` 和 `runtime/patch-runtime.js`，负责坐标换算、locator、区域快照、直接操作与 tentative DOM 变更。两层通过同源 `postMessage` 协作，frame 不获得通用文件系统能力。编辑选框与缩放手柄使用视口坐标绘制，因此 frame 在捕获阶段监听任意滚动容器并按动画帧重新读取目标矩形，不能只在拖动或动作回执后刷新。Editor UI 从离线模板复用 Noto Sans SC 400–700 子集并以 `AICO-PPT UI` 统一加载；parent、frame 浮层和自绘原生控件都以它为首选字体，不依赖 macOS 的 PingFang SC 或 Windows 的 Microsoft YaHei 回退。
 
 核心组件职责如下：
 
 | 组件 | 职责 |
 |---|---|
-| `Huawei Deck 编辑器.app` / `Huawei Deck 编辑器.cmd` / `deck-editor.py` | macOS、Windows 桌面入口与统一命令入口；无路径进入一次性网页导入，有路径直接接收 deck |
+| `AICO-PPT 编辑器.app` / `AICO-PPT 编辑器.cmd` / `deck-editor.py` | macOS、Windows 桌面入口与统一命令入口；无路径进入一次性网页导入，有路径直接接收 deck |
 | `app-server.mjs` | loopback 导入页与 idle → choosing → selected 状态机；成功后关闭自身并启动既有编辑服务 |
-| `WorkCatalog` | `work-catalog.json` schema v2 的唯一读写边界；用稳定 `workId` / `deckId` 管理创建与编辑工作项、独立显示名称、隐藏记录和文件绑定缓存，并幂等吸收旧历史 |
+| `WorkCatalog` | `work-catalog.json` schema v3 的唯一读写边界；用稳定 `workId` / `deckId` 管理创建与编辑工作项、独立显示名称、隐藏记录、文件绑定以及 DSH Workspace / Session Link；提供 Session 反向索引、revision 冲突和 pending operation 恢复 |
 | `DeckBindingCoordinator` | 源文件身份、父目录 watcher、有界可信根搜索、自动 / 手动重新绑定和固化闸门的深模块；调用者只读取带 revision 的 binding snapshot，不自行组合路径、stat、hash 与 watcher |
 | `deck-quality-contract.mjs` | 所有 Deck 工作原样复用的单一质量契约入口；不接受新建 / 修改 phase 分支，统一 Skill / 核心 references 加载要求，以及标题、字号、密度、卡片和语言约束 |
 | `TemplateCatalog` | 解码三套模板 bundle 并自动枚举全部实际页面；合并稳定语义 ID、视觉家族、密度、节奏角色、来源与兼容性元数据。`pageTypes` 表示当前外壳原生页，`availablePageTypes` 再加入允许借入的共享页；页面规划同时校验固定角色、排版 / 配图依据和版式轮换 |
 | `DeckFactory` + `deck_factory.py` | 复制 staging、写入逐页真实模板来源、封面 / 感谢页结构锁、plan、页面规划契约与目录契约；`import-page` 只从目录白名单导入整页并合并其引用的 manifest 资源。发布前逐页核对 PagePlan 的页数、顺序、页型、来源、pageId、chapterId 与 label，再执行目录动画 / bundle / overflow 闸门和不覆盖发布 |
-| `creation-managed-deck.mjs` | 新建流程对 Managed Workspace 的深接口；负责打开临时 Editor、等待画布与诊断就绪、发布前 flush / 固化，以及不关闭共享 PTY 的运行时释放 |
+| `creation-managed-deck.mjs` | 新建流程对 Managed Workspace 的深接口；负责打开临时 Editor、等待画布与诊断就绪、发布前 flush / 固化，并按运行壳复用共享 PTY 或 DSH Work Item 协调器 |
+| `DeckTaskCoordinator` + `DshWorkBridge` | 浏览器端 DSH 深模块；前者封装 Workspace 幂等解析、Session 预分配、pending 恢复、Link 完成、激活和精确发送，后者只传输带 requestId 的白名单命令与当前 Session 通知 |
 | observer WebSocket | 普通 token 客户端连接 `/events`，只订阅 revision、task、action、undo / redo 与冲突广播，不能发送动作命令 |
 | editor capability WebSocket | 同一 `/events` 端点上额外携带 `editorToken`；只允许一个 editor client，服务用它下发 frame 事务 / 诊断命令并接收 ACK |
 | `BridgeService` | mutation queue 串行化任务、动作、undo / redo、补偿、固化预检和写回；执行页面事务与 durable session 的两阶段收敛 |
@@ -366,7 +369,7 @@ Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动
 | `HeadlessEditorRuntime` + workspace capability | 无可见窗口时启动同一 Editor 页面与受控 frame，写出权限为 0600 的短期 capability；不复制 Mutation、诊断或固化实现 |
 | `agent-provider-registry.mjs` | 窗口化 Agent Host 的单一 provider 注册表；统一服务端、启动页和终端 UI 的 Codex / Claude Code / OpenCode 标识、标签与固定命令 |
 | `AgentTerminalSession` | 在项目根目录管理唯一真实 PTY、WSL / CLI / 历史投影阶段、服务端终端帧投影、原始输入、resize、三个注册 provider 与固定 bypass 命令，并在目录信任、恢复目录和通用编号选择交互解除前阻止自动 Prompt |
-| `AgentBatchCoordinator` | 原子捕获并持久化一次点击的任务 ID，限制单批并发，管理 queued / running / succeeded / failed，并投影活动批次、下一批候选和剩余任务；默认把任务 Prompt 写入当前 `AgentTerminalSession` |
+| `AgentBatchCoordinator` | 原子捕获并持久化一次点击的任务 ID，限制单批并发，管理 queued / running / succeeded / failed，并投影活动批次、下一批候选和剩余任务；Dev Shell 写入当前 `AgentTerminalSession`，DSH 在捕获时固定 `assignedSessionId` 并精确发送 |
 | persistent dirfd helper / Windows path helper | Python JSONL 长驻 sidecar 进程；macOS/Linux 绑定目录 fd，Windows 绑定真实路径与 dev/ino 身份并拒绝 symlink/junction/reparse point；两者都执行同目录原子持久化，并负责真实 Deck 的备份、transaction 与原子发布 |
 | bundle adapter | Python `bundle_adapter.py`；只在可信临时副本上调用 `scripts/edit-bundle.py`，构造离线补丁块并做 bundle verify |
 | diagnostics / watch / write gate | frame 诊断 1920×1080 溢出，watch 监测外部 deck 指纹，write gate 聚合 online、fingerprint、overflow 与 bundle 校验 |
@@ -379,6 +382,8 @@ Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动
 
 项目根也是任务身份的持久化部分。`RecentDeckStore.record()` 在 Creation→Editing 交接和普通打开时保存已确认根；旧任务缺失该字段时，`RecentDeckStore` 只从发布 Deck、Draft 根和上下文根三者校验一致的 `creation-context.json` 恢复。`server.mjs` 收到该 `persisted` 根时修复旧版 cwd 污染的活动会话；收到用户 `explicit` 换根时保留会话历史但清空活动指针，阻止 CLI 跨目录 resume 后再次弹出目录选择。
 
+DSH 模式在此项目根之上增加两层明确关系：规范 `projectRoot` 经 `workspaces.create({path})` 幂等解析为一个 DSH Workspace；工作项再通过 `dshBinding` 关联该 Workspace 内一个或多个 Session。`activeSessionId` 只决定下一批请求目标，已经捕获的执行批次仍保存提交时的 `assignedSessionId`。Session 创建采用 `begin-session → sessions.create(preallocated id) → complete-session`，进程或响应在中间中断时保留 pending operation，并用相同身份恢复，避免产生无法反查的重复会话。Creation 发布后由 `WorkCatalog.promoteCreationToEditing()` 原位补上 `deckId` 与文件绑定，保留 `workId`、显示名称、项目根和全部 DSH Link。
+
 #### Agent 批处理与 provider seam
 
 Windows WSL Codex 由 App Server 在打开任务前预热；进程级 runtime cache 按 `wsl.exe + distribution + user` 保存登录环境中的 Codex / Node 命令、HOME 与每条 Windows 路径的 `wslpath` 结果，并合并并发探测。`startupPhase` 依次投影 `wsl-preparing`、`codex-starting` 和 `history-redraw`。恢复期间 PTY ANSI 只进入服务端 `@xterm/headless`，浏览器 WebSocket 不接收历史 `output` chunk；真实输入态成立后，`@xterm/addon-serialize` 生成无 scrollback 的最终 framebuffer，通过单条 `projection` 消息替换浏览器 xterm。最终投影完成前 `resumePending`、键盘、`waitUntilReady()` 与 Agent 任务继续锁定；目录信任或交互式更新提示是唯一提前投影当前画面的例外。
@@ -387,7 +392,7 @@ Windows WSL Codex 由 App Server 在打开任务前预热；进程级 runtime ca
 
 浏览器点击“交给 Agent”时只向 `POST /api/agent-runs` 发送 `expectedRevision` 和下一批候选中仍为 pending / failed 的任务 ID。`BridgeService.captureAgentBatch()` 在现有 mutation queue 内校验 revision、任务存在性和可处理状态，先把成员不可变的 `agentBatches[]` 记录持久化并增加 revision，`AgentBatchCoordinator` 才把该批次提交到终端；因此提交回执丢失、页面刷新或进程退出都不会丢失批次边界。后续快照通过 `GET /api/agent-runs/current` 和 observer WebSocket 的 `agent-run-updated` 同时投影 `activeBatch`、`nextBatch` 与 `residualBatches`。浏览器不能指定 executable、命令参数或 Prompt，因此该入口不是任意命令执行器。点击之后新建的任务不属于已冻结批次；活动批次成员禁止改删，下一批候选仍可继续编辑和删除。
 
-导入器先按 git 根、`AGENTS.md` / `SKILL.md` 标记和 Deck 父目录的顺序识别项目根目录，并在进入编辑器前让用户可见确认。默认流程没有手动会话绑定：Editor 启动新编辑任务时，立即为注册 provider 创建可恢复 CLI 会话，再由交互式 PTY 接管。Codex 从首个可见 turn 的 `thread.started` 发现真实 conversation ID；Claude Code 使用预分配 `--session-id` / `--resume`；OpenCode 以本轮唯一标识从 `opencode session list --format json` 发现真实 session，恢复时使用 `--session`。Codex 或 Claude Code 的 resume 子进程若从可见输出明确命中“会话 ID 不存在”，退出回调才以 `newConversation:true` 重启并持久化替代 ID；工作副本和待办不变，其他失败保持原绑定并向用户显示。首个 Prompt 对当前 `huawei-deck` Skill 只初始化一次，打开抽屉不会再创建第二个进程。项目根、活动 provider 与会话标识由独立 `workspaceRevision` 管理，不增加 Deck revision，也不进入编辑时间线或固化历史。旧 `session.json.agentConnection` 只读迁移，默认路径不再写它。
+导入器先按 git 根、`AGENTS.md` / `SKILL.md` 标记和 Deck 父目录的顺序识别项目根目录，并在进入编辑器前让用户可见确认。独立 Dev Shell 没有手动会话绑定：Editor 启动新编辑任务时，立即为注册 provider 创建可恢复 CLI 会话，再由交互式 PTY 接管。Codex 从首个可见 turn 的 `thread.started` 发现真实 conversation ID；Claude Code 使用预分配 `--session-id` / `--resume`；OpenCode 以本轮唯一标识从 `opencode session list --format json` 发现真实 session，恢复时使用 `--session`。Codex 或 Claude Code 的 resume 子进程若从可见输出明确命中“会话 ID 不存在”，退出回调才以 `newConversation:true` 重启并持久化替代 ID；工作副本和待办不变，其他失败保持原绑定并向用户显示。首个 Prompt 对当前 `aico-ppt` Skill 只初始化一次，打开抽屉不会再创建第二个进程。项目根、活动 provider 与会话标识由独立 `workspaceRevision` 管理，不增加 Deck revision，也不进入编辑时间线或固化历史。旧 `session.json.agentConnection` 只读迁移，默认路径不再写它。
 
 Agent 执行只有一条产品路径：`AgentTerminalSession` 统一管理 PTY 生命周期、输出缓冲、输入、resize、provider 白名单和重启；`AgentBatchCoordinator` 负责捕获、提交、结算冻结批次并核对成员是否真正完成，`AgentRunCoordinator` 仅保留为旧调用名的兼容别名。旧 provider adapters、会话扫描 catalog、手动 connection API 与结构化 Agent runtime 已删除。Editor URL 与 token 经环境变量传递，Agent 修改 Deck 仍只能走受控 CLI / HTTP action 协议。
 
@@ -418,7 +423,7 @@ Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begi
 
 #### sidecar、恢复与持久化
 
-`.huawei-deck-editor/` 根下的 `sessions.json` 是 session registry；每个注册 session 包含 `session.json`、`working/deck.html`、`working/versions/<sha256>.html`、`snapshots/`、`backups/`、`transactions/`、`write-errors/`、正式附件目录 `attachments/` 与上传暂存目录 `attachments/.staging/`。真实 Deck 会话内只读；预览读取工作副本，结构历史从内容寻址版本恢复。目录不进入最终交付 deck；仓库 `.gitignore` 忽略提交它。helper 启动后持有根目录锁，所有实际读取与写入都相对已绑定 dirfd 完成，并拒绝符号链接替换、未注册 session 和不可信 record。`attachments/` 与 `attachments/.staging/` 的 dirfd 在恢复校验后绑定，并与 helper 生命周期一致；服务关闭时先收敛附件 writer，再释放附件 dirfd 和核心 dirfd。
+`.aico-ppt-editor/` 根下的 `sessions.json` 是 session registry；每个注册 session 包含 `session.json`、`working/deck.html`、`working/versions/<sha256>.html`、`snapshots/`、`backups/`、`transactions/`、`write-errors/`、正式附件目录 `attachments/` 与上传暂存目录 `attachments/.staging/`。真实 Deck 会话内只读；预览读取工作副本，结构历史从内容寻址版本恢复。目录不进入最终交付 deck；仓库 `.gitignore` 忽略提交它。helper 启动后持有根目录锁，所有实际读取与写入都相对已绑定 dirfd 完成，并拒绝符号链接替换、未注册 session 和不可信 record。`attachments/` 与 `attachments/.staging/` 的 dirfd 在恢复校验后绑定，并与 helper 生命周期一致；服务关闭时先收敛附件 writer，再释放附件 dirfd 和核心 dirfd。
 
 工作项目录与 Session 目录分工明确：`work-catalog.json` 保存稳定 Work Item / Deck 身份和当前 FileBinding 缓存，Session registry 保存工作副本、编辑历史与成功固化检查点。源 HTML 在 Editor 外改名后，同一平台文件见证唯一命中时只更新 binding 与 watcher，Session 目录不搬迁；无法唯一确认时工作副本照常保存，但 binding 进入 `needs-rebind` / `conflict` 并持续阻断固化。若原子发布成功后 FileBinding 缓存写回遗漏，活动 runtime 先调用自身 Coordinator 重新检查文件再补写；冷启动只在 Session `deckId`、当前 source fingerprint 与最近 checkpoint 三者严格一致时重新捕获 FileWitness。没有检查点、指纹不同或 Session 已有冲突时绝不恢复。启动页与 Editor 都通过系统文件选择器重新绑定，浏览器不能提交任意本地路径。
 

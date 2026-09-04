@@ -70,8 +70,8 @@ export class CodexAppServerClient {
 
     await this.request('initialize', {
       clientInfo:{
-        name:'huawei_deck_editor',
-        title:'Huawei Deck 编辑器',
+        name:'aico_ppt_editor',
+        title:'AICO-PPT 编辑器',
         version:'1',
       },
       capabilities:{ experimentalApi:true },

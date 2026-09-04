@@ -82,11 +82,11 @@ redoGroup = redo 最后一个 ID 对应的 inactive group
 
 - 对应 group 变为 inactive；
 - group ID 进入现有 `redo`；
-- 任务状态由 `completed` 恢复为 `pending`；
+- 任务状态永久保持 `completed`，原始 `groupId` 保留，只有 `effectState` 变为 `undone`；
 - 顶部“重做”立即指向这次定点撤销；
 - 顶部“撤销”跳过该 inactive group，寻找最近的 active group。
 
-重做该 group 后，任务重新变为 `completed`，并恢复原 `groupId`。
+重做该 group 后，任务仍为 `completed`，`effectState` 恢复为 `active`。任务行按钮随效果状态在“撤销”和“重做”之间切换，任务不会回到未完成列表、恢复页码 badge 或再次进入 Agent 队列。非末尾任务通过追加补偿修改切换效果，完成状态同样保持不变。
 
 ### 4.4 请求与同步
 
@@ -193,7 +193,7 @@ pasted-image-YYYYMMDD-HHmmss-NNN.png
 
 ```json
 {
-  "path": "/absolute/project/.huawei-deck-editor/<session>/attachments/..."
+  "path": "/absolute/project/.aico-ppt-editor/<session>/attachments/..."
 }
 ```
 
@@ -239,7 +239,7 @@ multipart 包含：
 - Deck 动作撤销或重做不删除附件；
 - Deck 正式写回不复制或嵌入附件；
 - 关闭并重启编辑器后附件继续可用；
-- 删除整个 `.huawei-deck-editor/` 会连同任务、快照和附件一起清理；
+- 删除整个 `.aico-ppt-editor/` 会连同任务、快照和附件一起清理；
 - 第一版不提供单独删除已提交任务或已发布附件的 UI。
 
 ## 8. 错误处理

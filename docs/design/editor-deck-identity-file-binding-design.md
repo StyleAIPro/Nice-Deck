@@ -1,4 +1,4 @@
-# Huawei Deck Editor 工作项命名、Deck 身份与文件重新绑定设计
+# AICO-PPT Editor 工作项命名、Deck 身份与文件重新绑定设计
 
 > 状态：已接受，核心安全闭环已实现；增强项继续开发
 > 日期：2026-08-16
@@ -18,7 +18,7 @@ Editor 不再把 HTML 文件路径当作 Deck 身份。
 - 保护状态下继续保存工作副本、历史和 Agent 上下文，但禁止固化；
 - 用户完成重新绑定后，原编辑会话无缝继续；
 - 固化必须穿过文件绑定闸门，永远不能直接写入启动时缓存的旧路径；
-- 编辑租约只保证 Huawei Deck Editor 体系内的独占写入，不承诺在 macOS 上阻止 Finder 或其他程序改名。
+- 编辑租约只保证 AICO-PPT Editor 体系内的独占写入，不承诺在 macOS 上阻止 Finder 或其他程序改名。
 
 这项设计的首要不变量是：
 
@@ -242,7 +242,7 @@ type FileWitness =
 - EditSession 继续持有 tasks、groups、redo、diagnostics、Agent workspace 和 source edit；
 - Session 持久化 deckId，不再以文件名相同作为恢复前提；
 - WorkingCopy 继续位于稳定的 Session 存储目录；
-- EditLease 以 deckId 为粒度，而不是锁住整个 .huawei-deck-editor 根目录；
+- EditLease 以 deckId 为粒度，而不是锁住整个 .aico-ppt-editor 根目录；
 - 同一 deckId 同时只允许一个写入 Runtime；第二个 Editor 返回 DECK_LEASE_HELD，后续可以增加只读打开；
 - macOS/POSIX adapter 使用带元数据的 advisory lock；Windows adapter 可额外持有不共享 delete/rename 权限的句柄；
 - 进程退出或崩溃后操作系统释放锁，租约文件中的旧元数据只用于诊断，不能永久占用；
@@ -570,7 +570,7 @@ RecentDeckStore 和 WorkHistoryStore 的路径拼装、去重和缺失过滤收�
 
 - 同目录目标 2 秒内完成；
 - 项目搜索最多检查 10,000 个目录项或 3 秒，以先到者为准；
-- 忽略 .git、node_modules、.huawei-deck-editor 和其他隐藏状态目录；
+- 忽略 .git、node_modules、.aico-ppt-editor 和其他隐藏状态目录；
 - 先比见证，再只对少量候选计算 SHA-256；
 - 大小写不敏感文件系统仍使用目录返回的实际拼写更新 UI；
 - case-only rename 必须视为合法路径变化。
@@ -660,7 +660,7 @@ type BindingPublishTransaction = {
 ### 11.1 全局 Work Catalog
 
 ~~~text
-~/.huawei-deck-editor/
+~/.aico-ppt-editor/
   work-catalog.json    # schema v2，Work Item 权威记录 + Deck binding 缓存
 ~~~
 
@@ -669,7 +669,7 @@ Work Catalog 是 displayName、nameSource、隐藏状态和最近打开顺序的
 ### 11.2 本地 Deck 状态
 
 ~~~text
-<storage-root>/.huawei-deck-editor/
+<storage-root>/.aico-ppt-editor/
   decks.json
   leases/
     deck-<deckId>.lock

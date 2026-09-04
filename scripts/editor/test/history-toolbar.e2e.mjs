@@ -122,6 +122,84 @@ test('历史已恢复但画布尚未 ready 时仍可固化', async t => {
   assert.deepEqual(resourceProblems, []);
 });
 
+test('累计超过十条修改时只弹出一次固化提醒并可直接打开固化确认', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+
+  const target = await page.locator('#deck-frame').evaluate(frame => (
+    frame.contentWindow.HuaweiDeckPatchRuntime.makeLocator(
+      frame.contentDocument.querySelector('h2'),
+    )
+  ));
+  const reminder = page.locator('[data-solidify-reminder]');
+  assert.equal(await reminder.isHidden(), true);
+
+  for (let index = 1; index <= 10; index += 1) {
+    const applied = await postJson(app, '/api/actions', {
+      expectedRevision:index - 1,
+      taskId:null,
+      actions:[{
+        id:`solidify-reminder-${index}`,
+        taskId:null,
+        target,
+        kind:'setText',
+        payload:{ text:`固化提醒阈值标题 ${index}` },
+      }],
+    });
+    assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  }
+  await waitForRevision(page, 10);
+  await waitForHistoryReady(page);
+  assert.equal(await reminder.isHidden(), true, '第十组修改仍不得打扰用户');
+
+  const eleventh = await postJson(app, '/api/actions', {
+    expectedRevision:10,
+    taskId:null,
+    actions:[{
+      id:'solidify-reminder-11',
+      taskId:null,
+      target,
+      kind:'setText',
+      payload:{ text:'固化提醒阈值标题 11' },
+    }],
+  });
+  assert.equal(eleventh.response.status, 200, JSON.stringify(eleventh.body));
+  await waitForRevision(page, 11);
+  await waitForHistoryReady(page);
+  await reminder.waitFor({ state:'visible' });
+  assert.match(await reminder.textContent(), /已有 11 条修改待固化/);
+  if (process.env.SOLIDIFY_REMINDER_SCREENSHOT) {
+    await page.waitForTimeout(220);
+    await page.screenshot({ path:process.env.SOLIDIFY_REMINDER_SCREENSHOT, fullPage:true });
+  }
+
+  await reminder.locator('[data-solidify-reminder-action]').click();
+  await expectDialogOpen(page.locator('[data-solidify-dialog]'));
+  assert.equal(await reminder.isHidden(), true);
+  await page.locator('[data-solidify-cancel]').click();
+
+  const twelfth = await postJson(app, '/api/actions', {
+    expectedRevision:11,
+    taskId:null,
+    actions:[{
+      id:'solidify-reminder-12',
+      taskId:null,
+      target,
+      kind:'setText',
+      payload:{ text:'固化提醒阈值标题 12' },
+    }],
+  });
+  assert.equal(twelfth.response.status, 200, JSON.stringify(twelfth.body));
+  await waitForRevision(page, 12);
+  await waitForHistoryReady(page);
+  assert.equal(await reminder.isHidden(), true, '同一轮关闭后不得逐条重复提醒');
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
 test('固化修改永久写盘，退出编辑时显示自定义未固化清单且不触发原生离开确认', async t => {
   const app = await startFixtureServer({ bundle:true });
   t.after(() => app.close());
@@ -139,8 +217,25 @@ test('固化修改永久写盘，退出编辑时显示自定义未固化清单�
     frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
   });
 
-  assert.equal(await page.locator('.brand-block > [data-exit-editor]').count(), 1,
-    '退出编辑器必须作为左上角独立入口');
+  assert.equal(await page.locator('.topbar-actions > [data-exit-editor]').count(), 1,
+    '退出编辑器必须作为右上角末尾的独立入口');
+  assert.deepEqual(
+    await page.locator('.topbar-actions').evaluate(element => (
+      [...element.querySelectorAll(
+        '[data-workspace-home], [data-workspace-switch], [data-history-undo], [data-history-redo], '
+        + '[data-solidify], [data-agent-status], [data-guided-tour="editing"], [data-exit-editor]',
+      )].map(button => (
+        button.hasAttribute('data-workspace-home') ? 'home'
+          : button.hasAttribute('data-workspace-switch') ? 'switch'
+            : button.hasAttribute('data-history-undo') ? 'undo'
+              : button.hasAttribute('data-history-redo') ? 'redo'
+                : button.hasAttribute('data-solidify') ? 'solidify'
+                  : button.hasAttribute('data-agent-status') ? 'agent'
+                    : button.hasAttribute('data-guided-tour') ? 'guide' : 'exit'
+      ))
+    )),
+    ['home', 'switch', 'undo', 'redo', 'solidify', 'agent', 'guide', 'exit'],
+  );
   assert.equal(
     await page.locator('[data-exit-editor] .pill-nav-label-default').innerText(),
     '退出编辑器',

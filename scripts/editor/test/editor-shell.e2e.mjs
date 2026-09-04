@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import WebSocket from 'ws';
@@ -70,10 +71,14 @@ test('修改页使用统一问号入口打开手绘箭头新手引导', async t 
   const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
   t.after(() => browser.close());
 
+  assert.equal(await page.locator('html').getAttribute('data-runtime-profile'), 'standalone-dev');
+  assert.equal(await page.locator('.dev-shell-badge').isVisible(), true);
+
   const trigger = page.locator('[data-guided-tour="editing"]');
   assert.equal(await trigger.getAttribute('aria-label'), '新手引导');
   assert.equal(await trigger.getAttribute('title'), '新手引导');
-  assert.equal(await trigger.innerText(), '?');
+  assert.equal(await trigger.locator('.topbar-control-icon').count(), 1);
+  assert.equal(await trigger.locator('circle').count(), 1);
   assert.deepEqual(await trigger.evaluate(node => {
     const style = getComputedStyle(node);
     return { width:style.width, height:style.height, borderRadius:style.borderRadius };
@@ -92,6 +97,83 @@ test('修改页使用统一问号入口打开手绘箭头新手引导', async t 
   assert.equal(await page.locator('.onboarding-tour').isHidden(), true);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
+});
+
+test('花形按钮在 DSH 跨源工作台中直接进入 Deck 全屏放映', async t => {
+  const app = await startFixtureServer({
+    fixtureTransform:html => html.replace('</body>', `
+      <button type="button" data-mode="present" aria-label="放映模式">放映模式</button>
+      <script>
+        document.querySelector('[data-mode="present"]').addEventListener('click', () => {
+          document.documentElement.dataset.presentationStarted = 'true';
+          document.documentElement.requestFullscreen().catch(error => {
+            document.documentElement.dataset.presentationError = error.message;
+          });
+        });
+      <\/script>
+    </body>`),
+  });
+  t.after(() => app.close());
+
+  let editorUrl = '';
+  const parent = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type':'text/html; charset=utf-8' });
+    response.end(`<!doctype html><html><body style="margin:0">
+      <iframe title="DSH AICO-PPT 工作台" src="${editorUrl}"
+        allow="fullscreen *"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups"
+        style="display:block;width:100vw;height:100vh;border:0"></iframe>
+    </body></html>`);
+  });
+  await new Promise((resolvePromise, reject) => {
+    parent.once('error', reject);
+    parent.listen(0, '127.0.0.1', resolvePromise);
+  });
+  t.after(() => new Promise(resolvePromise => parent.close(resolvePromise)));
+  const parentAddress = parent.address();
+  assert.equal(typeof parentAddress, 'object');
+  const parentOrigin = `http://127.0.0.1:${parentAddress.port}`;
+  editorUrl = `${app.url}/?token=${encodeURIComponent(app.token)}`
+    + `&editorToken=${encodeURIComponent(app.editorToken)}`
+    + `&embedded=dsh&parentOrigin=${encodeURIComponent(parentOrigin)}`;
+
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:1440, height:900 } });
+  const browserProblems = [];
+  page.on('console', message => {
+    if (['error', 'warning'].includes(message.type())) browserProblems.push(message.text());
+  });
+  page.on('pageerror', error => browserProblems.push(error.message));
+  await page.goto(parentOrigin);
+  const editor = page.frameLocator('iframe[title="DSH AICO-PPT 工作台"]');
+  await editor.locator('[data-page-key]').first().waitFor();
+
+  const enter = editor.locator('[data-canvas-present]');
+  assert.equal(await enter.getAttribute('aria-label'), '全屏播放');
+  assert.equal(await enter.getAttribute('title'), '全屏播放');
+  assert.equal(await editor.locator('[data-canvas-fullscreen]').count(), 0,
+    '画布工具栏不应保留重复的独立全屏图标');
+  await enter.click();
+
+  await page.waitForFunction(() => document.fullscreenElement?.tagName === 'IFRAME');
+  const editorFrame = page.frames().find(frame => frame.url().includes(`token=${app.token}`));
+  assert.ok(editorFrame, '应找到 DSH 中的 Editor frame');
+  await editorFrame.waitForFunction(() => document.fullscreenElement?.id === 'deck-frame');
+  const previewFrame = page.frames().find(frame => frame.url().includes('/preview?'));
+  assert.ok(previewFrame, '应找到 Deck 预览 frame');
+  await previewFrame.waitForFunction(() => (
+    document.fullscreenElement === document.documentElement
+    && document.documentElement.dataset.presentationStarted === 'true'
+  ));
+  assert.equal(await editor.locator('[data-mode="preview"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(await editor.locator('[data-history-notice]').count(), 0,
+    '成功进入放映后不应产生错误提示');
+
+  await previewFrame.evaluate(() => document.exitFullscreen());
+  await page.waitForFunction(() => document.fullscreenElement === null);
+  assert.deepEqual(browserProblems, []);
 });
 
 test('页面抽屉箭头使用统一圆形样式并随状态反向', async t => {
@@ -182,6 +264,7 @@ test('画布工具栏用品牌导出图标下载当前工作副本 PPTX', async 
   const resolution = page.locator('.canvas-resolution');
   assert.equal(await button.getAttribute('aria-label'), '导出为 PPTX');
   assert.equal(await button.getAttribute('title'), '导出为 PPTX');
+  assert.equal(await button.getAttribute('data-toolbar-tooltip'), '导出为 PPTX');
   assert.equal(await button.locator('.pill-nav-label-default .canvas-export-icon').count(), 1);
   assert.equal(await button.locator('.pill-nav-label-default path').count(), 3);
   assert.ok(await button.evaluate((node, resolutionNode) => (
@@ -195,6 +278,11 @@ test('画布工具栏用品牌导出图标下载当前工作副本 PPTX', async 
   assert.equal(await button.locator('.pill-nav-label-default').evaluate(node => (
     getComputedStyle(node).color
   )), 'rgb(168, 0, 9)');
+  await button.hover();
+  await page.waitForFunction(() => (
+    document.querySelector('[data-topbar-tooltip]')?.dataset.visible === 'true'
+  ));
+  assert.equal(await page.locator('[data-topbar-tooltip]').textContent(), '导出为 PPTX');
 
   const downloadPromise = page.waitForEvent('download');
   await button.click();
@@ -430,7 +518,9 @@ test('iframe 挂载后发现两个同名页并显示独立页序', async t => {
   assert.equal(await page.locator('.mode-tools').getAttribute('data-active-mode'), 'edit');
   await page.waitForFunction(() => {
     const style = getComputedStyle(document.querySelector('[data-mode="edit"]'));
-    return style.backgroundColor === 'rgb(227, 229, 233)' && style.color === 'rgb(168, 0, 9)';
+    return style.backgroundColor === 'rgb(227, 229, 233)'
+      && style.color === 'rgb(168, 0, 9)'
+      && style.boxShadow === 'none';
   });
   assert.equal(await page.locator('[data-mode="edit"]').evaluate(element => (
     getComputedStyle(element).backgroundColor

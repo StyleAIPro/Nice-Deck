@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
-MAC_APP = ROOT / "Huawei Deck 编辑器.app"
+MAC_APP = ROOT / "AICO-PPT 编辑器.app"
 
 
 def load_module(name, path):
@@ -33,8 +33,8 @@ class LauncherTest(unittest.TestCase):
         with plist_path.open("rb") as handle:
             info = plistlib.load(handle)
 
-        self.assertEqual(info["CFBundleIconFile"], "HuaweiDeckEditor")
-        icon = MAC_APP / "Contents/Resources/HuaweiDeckEditor.icns"
+        self.assertEqual(info["CFBundleIconFile"], "AICOPPTEditor")
+        icon = MAC_APP / "Contents/Resources/AICOPPTEditor.icns"
         self.assertEqual(icon.read_bytes()[:4], b"icns")
 
     def test_desktop_instance_url_only_accepts_authenticated_loopback_workspace(self):
@@ -94,7 +94,7 @@ class LauncherTest(unittest.TestCase):
             settings.write_text('{"codexRuntime":"wsl","wslDistribution":""}', encoding="utf-8")
             with mock.patch.dict(
                 os.environ,
-                {"HUAWEI_DECK_EDITOR_STATE_ROOT": directory},
+                {"AICO_PPT_EDITOR_STATE_ROOT": directory},
                 clear=False,
             ):
                 with self.assertRaisesRegex(launcher.LauncherError, "WSL 发行版"):
@@ -485,7 +485,7 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("-WindowStyle", command)
         self.assertTrue(options["creationflags"] & 0x08000000)
         script = base64.b64decode(command[-1]).decode("utf-16le")
-        self.assertIn("Huawei Deck", script)
+        self.assertIn("AICO-PPT", script)
         self.assertIn("SelectionItemPattern", script)
         self.assertNotIn("token=existing", script)
 
@@ -521,7 +521,7 @@ class LauncherTest(unittest.TestCase):
             "http://127.0.0.1:45678/api/launcher-status?token=existing",
         )
 
-    def test_macos_activation_focuses_existing_huawei_deck_tab(self):
+    def test_macos_activation_focuses_existing_aico_ppt_tab(self):
         completed = mock.Mock(returncode=0, stdout="activated\n")
         with mock.patch.object(
             launcher.subprocess, "run", return_value=completed,
@@ -537,7 +537,7 @@ class LauncherTest(unittest.TestCase):
         ])
         script = run.call_args.kwargs["input"]
         self.assertIn('application id "com.google.Chrome"', script)
-        self.assertIn('candidateTitle is "Huawei Deck"', script)
+        self.assertIn('candidateTitle is "AICO-PPT"', script)
         self.assertNotIn("token=existing", script)
         self.assertLess(
             script.index("activateSafariWorkspace(targetURL, false)"),
@@ -606,7 +606,7 @@ class LauncherTest(unittest.TestCase):
                 return False
 
             def read(self, _limit):
-                return b"<title>Huawei Deck</title>"
+                return b"<title>AICO-PPT</title>"
 
         opener = mock.Mock()
         opener.open.return_value = Response()
@@ -704,8 +704,8 @@ class LauncherTest(unittest.TestCase):
                 launcher.prepare_editor_runtime(auto_install=True)
 
     def test_macos_app_bundle_points_to_unified_launcher(self):
-        app = ROOT / "Huawei Deck 编辑器.app"
-        executable = app / "Contents/MacOS/HuaweiDeckEditor"
+        app = ROOT / "AICO-PPT 编辑器.app"
+        executable = app / "Contents/MacOS/AICOPPTEditor"
         with (app / "Contents/Info.plist").open("rb") as source:
             info = plistlib.load(source)
         self.assertEqual(info["CFBundleExecutable"], executable.name)

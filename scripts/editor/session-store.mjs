@@ -4,6 +4,7 @@ import { basename, dirname, join, parse } from 'node:path';
 import { validateTask } from './protocol.mjs';
 import { EditTimeline } from './edit-timeline.mjs';
 import { localDurableIO } from './sidecar-io.mjs';
+import { resolveProjectStateRoot } from './state-paths.mjs';
 
 export class RevisionConflict extends Error {}
 
@@ -56,6 +57,23 @@ function normalizePersistedTask(task) {
 
 function normalizePersistedTasks(tasks) {
   return (Array.isArray(tasks) ? tasks : []).map(normalizePersistedTask);
+}
+
+function migrateCompletedTaskHistoryState(state) {
+  let changed = false;
+  for (const task of state.tasks ?? []) {
+    if (task?.effectState !== 'compensated') continue;
+    const primaryGroup = state.groups?.find(group => group?.taskId === task.id)
+      ?? (task.entryIds ?? [])
+        .map(entryId => state.groups?.find(group => group?.id === entryId))
+        .find(group => group?.taskId === task.id);
+    task.status = 'completed';
+    task.effectState = 'undone';
+    task.candidates = [];
+    if (primaryGroup?.id) task.groupId = primaryGroup.id;
+    changed = true;
+  }
+  return changed;
 }
 
 const AGENT_BATCH_OUTCOMES = new Set(['succeeded', 'partial', 'failed', 'cancelled']);
@@ -225,7 +243,7 @@ function decodeSnapshot(snapshot) {
 export class SessionStore {
   static async open({
     deckPath,
-    rootDir = join(dirname(deckPath), '.huawei-deck-editor'),
+    rootDir = resolveProjectStateRoot(dirname(deckPath)),
     sessionDir: selectedSessionDir,
     sidecarGuard = async () => {},
     sidecarIO = localDurableIO,
@@ -283,10 +301,11 @@ export class SessionStore {
         sourceEdit:normalizePersistedSourceEdit(persisted.sourceEdit),
       };
       EditTimeline.open(store.state);
+      return migrateCompletedTaskHistoryState(store.state);
     };
     await sidecarGuard();
     if (persisted === null) await store.#persist();
-    else applyPersisted(persisted);
+    else if (applyPersisted(persisted)) await store.persistState(store.state);
     return store;
   }
 
@@ -543,7 +562,7 @@ export class SessionStore {
       );
     }
     if (!MUTABLE_TASK_STATUSES.has(task.status) || task.groupId) {
-      throw snapshotError('TASK_LOCKED', 409, '处理中或已完成的任务不能编辑；已完成任务请先撤销');
+      throw snapshotError('TASK_LOCKED', 409, '处理中或已完成的任务不能编辑');
     }
     task.instruction = normalizedInstruction;
     task.status = 'pending';

@@ -4,6 +4,7 @@ import {
 } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { syncDirectory } from './durable-fs.mjs';
+import { resolveProjectStateRoot } from './state-paths.mjs';
 
 function adapterError(code, statusCode, message, cause) {
   return Object.assign(new Error(message, cause ? { cause } : undefined), { code, statusCode });
@@ -30,9 +31,10 @@ export async function inspectCreationDraftLock(lockPath, {
   isProcessAlive = processIsAlive,
 } = {}) {
   let handle;
+  let info;
   try {
     handle = await open(lockPath, 'r');
-    const info = await handle.stat();
+    info = await handle.stat();
     if (!info.isFile()) return { locked:true, stale:false, unsafe:true };
     const raw = await handle.readFile('utf8');
     const lock = JSON.parse(raw);
@@ -51,7 +53,20 @@ export async function inspectCreationDraftLock(lockPath, {
     };
   } catch (error) {
     if (error.code === 'ENOENT') return { locked:false, stale:false };
-    if (error instanceof SyntaxError) return { locked:true, stale:false, corrupt:true };
+    if (error instanceof SyntaxError && info?.isFile()) {
+      // truncate 与心跳写入之间异常退出会留下空文件。短时间内仍按活锁保护，
+      // 防止把正在写入的租约误删；超过租约后则允许按 inode 安全接管。
+      const current = now().getTime();
+      const fresh = Number.isFinite(current) && Number.isFinite(info.mtimeMs)
+        && current - info.mtimeMs <= lockLeaseMs;
+      return {
+        locked:fresh,
+        stale:!fresh,
+        corrupt:true,
+        dev:String(info.dev),
+        ino:String(info.ino),
+      };
+    }
     return { locked:true, stale:false, unsafe:true };
   } finally {
     await handle?.close().catch(() => {});
@@ -134,7 +149,11 @@ export class CreationDraftFileAdapter {
       throw adapterError('INVALID_CREATION_DRAFT_ID', 400, 'draftId 无效');
     }
     const root = await canonicalDirectory(projectRoot, '项目目录');
-    const sidecar = await ensureOwnedDirectory(root, '.huawei-deck-editor', { create });
+    const sidecar = await ensureOwnedDirectory(
+      root, basename(resolveProjectStateRoot(root, {
+        existingChild:['drafts', draftId],
+      })), { create },
+    );
     const drafts = await ensureOwnedDirectory(sidecar, 'drafts', { create });
     const draftDir = await ensureOwnedDirectory(drafts, draftId, { create });
     if (create) {
@@ -206,8 +225,10 @@ export class CreationDraftFileAdapter {
       startedAt:this.startedAt ?? timestamp, heartbeatAt:timestamp,
     })}\n`;
     this.startedAt ??= timestamp;
-    await this.lockHandle.truncate(0);
+    // 先覆盖完整心跳再收缩尾部，避免进程在 truncate 与 write 之间退出时
+    // 留下 0 字节锁；即使写入中断，陈旧损坏锁也会在租约后自动回收。
     await this.lockHandle.write(value, 0, 'utf8');
+    await this.lockHandle.truncate(Buffer.byteLength(value, 'utf8'));
     await this.lockHandle.sync();
   }
 

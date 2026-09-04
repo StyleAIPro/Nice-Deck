@@ -77,7 +77,7 @@ class WindowsPublishRaceContractTest(unittest.TestCase):
         self.assertFalse(self.deck.exists())
         self.assertEqual(moved.read_bytes(), b"original-deck")
         transaction = (
-            self.project / ".huawei-deck-editor" / self.session_name
+            self.project / ".aico-ppt-editor" / self.session_name
             / "transactions" / f"{TRANSACTION_ID}.json"
         )
         self.assertFalse(transaction.exists())

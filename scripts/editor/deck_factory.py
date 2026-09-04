@@ -19,7 +19,7 @@ EDIT_BUNDLE_PATH = PROJECT_DIR / "scripts" / "edit-bundle.py"
 
 
 def load_edit_bundle():
-    spec = importlib.util.spec_from_file_location("huawei_deck_edit_bundle", EDIT_BUNDLE_PATH)
+    spec = importlib.util.spec_from_file_location("aico_ppt_edit_bundle", EDIT_BUNDLE_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError("无法加载 scripts/edit-bundle.py")
     module = importlib.util.module_from_spec(spec)
@@ -419,7 +419,7 @@ def verify(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Huawei Deck 新建流程验证适配层")
+    parser = argparse.ArgumentParser(description="AICO-PPT 新建流程验证适配层")
     subparsers = parser.add_subparsers(dest="command", required=True)
     verify_parser = subparsers.add_parser("verify", help="验证单文件 bundle 结构")
     verify_parser.add_argument("deck")

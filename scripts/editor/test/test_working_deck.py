@@ -7,7 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
-    "huawei_deck_working_deck", ROOT / "scripts" / "editor" / "working_deck.py"
+    "aico_ppt_working_deck", ROOT / "scripts" / "editor" / "working_deck.py"
 )
 working_deck = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(working_deck)

@@ -20,6 +20,11 @@ import stat
 import sys
 import uuid
 
+try:
+    from product_paths import resolve_project_state_root
+except ModuleNotFoundError:
+    from scripts.editor.product_paths import resolve_project_state_root
+
 from sidecar_io import (
     MAX_AGENT_WORKSPACE_BYTES,
     MAX_AGENT_WORKSPACE_REQUEST_BYTES,
@@ -420,7 +425,7 @@ class WindowsPersistentHelper:
         if "root" in payload:
             self.root = _assert_external_directory(payload["root"])
         else:
-            root_path = os.path.join(self.project["path"], ".huawei-deck-editor")
+            root_path = str(resolve_project_state_root(Path(self.project["path"])))
             os.makedirs(_filesystem_path(root_path), exist_ok=True)
             self.root = _capture_directory(root_path)
         if self.root["dev"] != self.project["dev"]:

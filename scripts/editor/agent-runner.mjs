@@ -42,12 +42,12 @@ function persistedBatches(session, current) {
 
 export function buildAgentPrompt({
   deckPath, serviceUrl, token, taskIds, sourceThreadId, loadSkill = false,
-  skillRoot = SKILL_ROOT, skillInvocation = '$huawei-deck', environmentCredentials = false,
+  skillRoot = SKILL_ROOT, skillInvocation = '$aico-ppt', environmentCredentials = false,
   creationContextPath = null,
 }) {
   const cli = environmentCredentials
-    ? `node ${JSON.stringify(CLI_PATH)} --url "$HUAWEI_DECK_EDITOR_URL"`
-      + ' --token "$HUAWEI_DECK_EDITOR_TOKEN"'
+    ? `node ${JSON.stringify(CLI_PATH)} --url "$AICO_PPT_EDITOR_URL"`
+      + ' --token "$AICO_PPT_EDITOR_TOKEN"'
     : `node ${JSON.stringify(CLI_PATH)} --url ${JSON.stringify(serviceUrl)}`
       + ` --token ${JSON.stringify(token)}`;
   const skillContext = loadSkill
@@ -55,14 +55,14 @@ export function buildAgentPrompt({
         skillInvocation,
         '',
         '这是独立打开编辑器后创建的专用任务；首次处理必须加载 Deck 制作规范。',
-        `必须使用 huawei-deck skill，并先完整读取 ${JSON.stringify(join(skillRoot, 'SKILL.md'))}。`,
+        `必须使用 aico-ppt skill，并先完整读取 ${JSON.stringify(join(skillRoot, 'SKILL.md'))}。`,
         '按 SKILL.md 的文件导航读取本次修改所需 references；不得跳过 bundle 编辑不变量和视觉规范。',
       ]
     : [
         sourceThreadId
           ? '这是本 Deck 已绑定的 Agent 任务；请沿用已有制作上下文。'
           : '这是独立编辑器的后续批次；请沿用本专用任务已有上下文。',
-        'huawei-deck skill 已在本任务中加载，不要再次完整读取 SKILL.md；只在本批修改确有需要时读取对应 reference。',
+        'aico-ppt skill 已在本任务中加载，不要再次完整读取 SKILL.md；只在本批修改确有需要时读取对应 reference。',
       ];
   return [
     ...skillContext,
@@ -77,7 +77,7 @@ export function buildAgentPrompt({
     '',
     '请立即批量处理以上任务：',
     `1. 用 ${cli} revision 只读取权威 revision，再对每个本批 ID 用 ${cli} task TASK_ID 读取任务详情；不要用 status 拉取整份历史，只处理本批 ID。`,
-    `2. 结合任务区域、附件、Deck 源文件和 huawei-deck 规范判断修改。先区分修改本质：现有元素的文字、样式、移动、缩放、显隐走 ActionMutation；页面结构和复杂 DOM 走 SourceMutation。动作 envelope 为 {expectedRevision,taskId,actions:[{id,taskId,target,kind,payload}]}；target 优先原样使用任务候选中的 pageKey/path/tag/fingerprint/rect。仅当具体 action 字段不确定时，定点读取 ${JSON.stringify(join(skillRoot, 'scripts/editor/protocol.mjs'))} 的 validateAction 与 ${JSON.stringify(join(skillRoot, 'references/editing-guide.md'))} 的“Agent / CLI”小节，不要完整打印两个文件。`,
+    `2. 结合任务区域、附件、Deck 源文件和 aico-ppt 规范判断修改。先区分修改本质：现有元素的文字、样式、移动、缩放、显隐走 ActionMutation；页面结构和复杂 DOM 走 SourceMutation。动作 envelope 为 {expectedRevision,taskId,actions:[{id,taskId,target,kind,payload}]}；target 优先原样使用任务候选中的 pageKey/path/tag/fingerprint/rect。仅当具体 action 字段不确定时，定点读取 ${JSON.stringify(join(skillRoot, 'scripts/editor/protocol.mjs'))} 的 validateAction 与 ${JSON.stringify(join(skillRoot, 'references/editing-guide.md'))} 的“Agent / CLI”小节，不要完整打印两个文件。`,
     '3. ActionMutation：每个任务生成受控 action JSON，并用 CLI apply 提交；发生 REVISION_CONFLICT 时重新读取 revision 后继续。',
     `4. 页面增删排序、模板升级或复杂 DOM 重构：逐个任务先用 ${cli} begin-source-task TASK_ID 创建源码事务，保存返回的 sourceEditId 与预留 revision；只有 begin 成功后，才用 ${JSON.stringify(join(skillRoot, 'scripts/edit-bundle.py'))} 只修改 Deck 所指向的托管工作副本（deckPath），保持 slide / nav / chapters 同步并一次原子保存。写盘成功后必须用 ${cli} --expected-revision PREPARED_REVISION commit-source-edit SOURCE_EDIT_ID 显式登记 SourceMutation；写盘前或写盘后失败则用同一预留 revision 调用 cancel-source-edit SOURCE_EDIT_ID 回滚。删除区域任务所在整页时必须使用任务的 pageKey 调用 delete_page_by_id，不能按页序猜测，也不能用 hide 代替。即使待删除页仍被旧的已固化 action 引用，也不得提前放弃事务或手工修改补丁块；Editor 会在 commit 时仅对 PAGE_NOT_FOUND / TARGET_NOT_FOUND 的已取代固化动作做受控清理并完整重放。commit 成功后再用 ${cli} task TASK_ID 确认 completed，随后才处理下一项。`,
     '5. 不得手工编辑 bundle 或 huawei-deck-editor-patches 块；不调用 write-deck，不调用 /api/shutdown 或任何关闭 / 重启当前 Editor 的接口，不修改真实 Deck，不处理提交按钮之后新增加的任务。',
@@ -87,12 +87,12 @@ export function buildAgentPrompt({
 
 export function buildSessionInitializationPrompt({
   deckPath, sourceDeckPath = null, projectPath, skillRoot = SKILL_ROOT,
-  skillInvocation = '$huawei-deck', creationContextPath = null,
+  skillInvocation = '$aico-ppt', creationContextPath = null,
 }) {
   return [
     skillInvocation,
     '',
-    '这是 Huawei Deck 编辑器刚创建的专用会话。',
+    '这是 AICO-PPT 编辑器刚创建的专用会话。',
     `项目目录：${projectPath}`,
     `Editor 托管工作副本：${deckPath}`,
     ...(sourceDeckPath ? [`真实 Deck（会话内只读）：${sourceDeckPath}`] : []),

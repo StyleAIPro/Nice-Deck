@@ -75,7 +75,7 @@ function providerLabel(provider) {
   catch { return provider; }
 }
 
-const TERMINAL_WIDTH_KEY = 'huawei-deck-agent-terminal-width-v2';
+const TERMINAL_WIDTH_KEY = 'aico-ppt-agent-terminal-width-v2';
 const MIN_TERMINAL_WIDTH = 340;
 const MIN_CANVAS_COLUMN_WIDTH = 480;
 

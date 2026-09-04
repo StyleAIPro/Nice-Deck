@@ -8,20 +8,28 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
-    "huawei_deck_check_deps", ROOT / "scripts" / "check_deps.py"
+    "aico_ppt_check_deps", ROOT / "scripts" / "check_deps.py"
 )
 doctor = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(doctor)
 
 
 class CheckDepsTest(unittest.TestCase):
-    def test_profiles_keep_editor_core_independent_from_material_tools(self):
+    def test_profiles_keep_editor_core_independent_from_dev_shell_and_material_tools(self):
         editor_profiles, editor_checks = doctor.checks_for_profiles(["editor-core"])
+        dev_profiles, dev_checks = doctor.checks_for_profiles(["dev-shell"])
         material_profiles, material_checks = doctor.checks_for_profiles(["materials"])
 
         self.assertEqual(editor_profiles, ("editor-core",))
-        self.assertIn("node-pty", {check["key"] for check in editor_checks})
+        self.assertNotIn("node-pty", {check["key"] for check in editor_checks})
+        self.assertNotIn("agent-cli", {check["key"] for check in editor_checks})
         self.assertNotIn("soffice", {check["key"] for check in editor_checks})
+        self.assertEqual(dev_profiles, ("dev-shell",))
+        self.assertIn("node-pty", {check["key"] for check in dev_checks})
+        self.assertIn("@xterm/headless", {check["key"] for check in dev_checks})
+        self.assertIn("@xterm/addon-serialize", {check["key"] for check in dev_checks})
+        self.assertIn("agent-cli", {check["key"] for check in dev_checks})
+        self.assertIn("html2canvas", {check["key"] for check in dev_checks})
         self.assertEqual(material_profiles, ("materials",))
         self.assertIn("soffice", {check["key"] for check in material_checks})
         self.assertNotIn("node-pty", {check["key"] for check in material_checks})
@@ -34,6 +42,8 @@ class CheckDepsTest(unittest.TestCase):
             "busboy": (True, "ok"),
             "node-pty": (True, "ok"),
             "@xterm/xterm": (True, "ok"),
+            "@xterm/headless": (True, "ok"),
+            "@xterm/addon-serialize": (True, "ok"),
             "three": (True, "ok"),
             "agent-cli": (True, "ok"),
             "soffice": (False, "未找到 soffice"),
@@ -44,12 +54,31 @@ class CheckDepsTest(unittest.TestCase):
 
         with mock.patch.object(doctor, "do_probe", side_effect=fake_probe):
             editor = doctor.dependency_snapshot(["editor-core"])
+            dev_shell = doctor.dependency_snapshot(["dev-shell"])
             materials = doctor.dependency_snapshot(["materials"])
 
         self.assertTrue(editor["ready"])
+        self.assertTrue(dev_shell["ready"])
         self.assertFalse(materials["ready"])
         self.assertEqual(
             materials["profiles"]["materials"]["state"],
+            "manual-action-required",
+        )
+
+    def test_missing_agent_cli_does_not_block_editor_core_but_blocks_dev_shell(self):
+        def fake_probe(check):
+            if check["key"] == "agent-cli":
+                return False, "未找到 Agent CLI"
+            return True, "ok"
+
+        with mock.patch.object(doctor, "do_probe", side_effect=fake_probe):
+            editor = doctor.dependency_snapshot(["editor-core"])
+            dev_shell = doctor.dependency_snapshot(["dev-shell"])
+
+        self.assertTrue(editor["ready"])
+        self.assertFalse(dev_shell["ready"])
+        self.assertEqual(
+            dev_shell["profiles"]["dev-shell"]["state"],
             "manual-action-required",
         )
 

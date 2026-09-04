@@ -8,6 +8,10 @@ import { createRecentDeckStore } from './recent-deck-store.mjs';
 import { inspectCreationDraftLock } from './creation-draft-file-adapter.mjs';
 import { isAgentProviderId } from './agent-provider-registry.mjs';
 import { resolveEditorStateRoot } from './editor-state-root.mjs';
+import {
+  isProjectStateDirectoryName,
+  resolveProjectStateRoot,
+} from './state-paths.mjs';
 
 const SCHEMA_VERSION = 1;
 const DEFAULT_LIMIT = 12;
@@ -103,7 +107,7 @@ export class WorkHistoryStore {
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const child = join(root, entry.name);
-      if (entry.name === '.huawei-deck-editor') {
+      if (isProjectStateDirectoryName(entry.name)) {
         const canonicalRoot = await realpath(root).catch(() => root);
         const drafts = await readdir(join(child, 'drafts'), { withFileTypes:true }).catch(() => []);
         for (const draft of drafts) {
@@ -126,7 +130,9 @@ export class WorkHistoryStore {
       const rootInfo = await stat(projectRoot);
       if (!rootInfo.isDirectory()) return null;
       const draftDir = await realpath(join(
-        projectRoot, '.huawei-deck-editor', 'drafts', entry.draftId,
+        resolveProjectStateRoot(projectRoot, {
+          existingChild:['drafts', entry.draftId],
+        }), 'drafts', entry.draftId,
       ));
       if (!contains(projectRoot, draftDir)) return null;
       const draftPath = join(draftDir, 'draft.json');

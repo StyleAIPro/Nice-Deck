@@ -202,6 +202,40 @@ test('页面登记后在持续租约握手前崩溃也会超时回收', async t 
   assert.equal(app.state, 'closed');
 });
 
+test('DSH 嵌入运行时由 Host 持有，不随 iframe 页面租约断开关闭', async t => {
+  let terminalCreations = 0;
+  const app = await startAppServer({
+    token:'dsh-host-lifetime-secret',
+    embeddedMode:'dsh',
+    createAgentTerminal:async () => {
+      terminalCreations += 1;
+      throw new Error('DSH 不应创建 Agent Terminal');
+    },
+    launcherClientCloseGraceMs:10,
+    launcherLeaseHandshakeMs:15,
+  });
+  t.after(() => app.close());
+  await postJson(app, '/api/client-connected', { clientId:'dsh-frame', sequence:1 });
+  await fetch(`${app.url}/api/close?token=${encodeURIComponent(app.token)}`
+    + '&clientId=dsh-frame&sequence=1', { method:'POST', headers:{ origin:app.url } });
+
+  await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+  assert.notEqual(app.state, 'closed');
+  const response = await fetch(app.appUrl);
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.equal(terminalCreations, 0);
+  assert.doesNotMatch(html, /xterm\.(?:js|css)/u);
+  assert.match(
+    response.headers.get('content-security-policy') ?? '',
+    /frame-ancestors http:\/\/127\.0\.0\.1:\* http:\/\/localhost:\*/u,
+  );
+  assert.doesNotMatch(
+    response.headers.get('content-security-policy') ?? '',
+    /frame-ancestors 'none'/u,
+  );
+});
+
 test('导入页声明一次只添加一份 HTML，并要求随机令牌', async t => {
   const app = await startAppServer({ token:'app-secret', pickDeck:async () => null });
   t.after(() => app.close());
@@ -392,6 +426,7 @@ test('明确重新打开已隐藏 Deck 后返回首页仍可继续正在运行�
     legacyHistory:workHistoryStore,
   });
   const original = (await workCatalog.list()).editing[0];
+  let startOptions = null;
   await workHistoryStore.dismissDeck(deckPath);
   await workCatalog.dismiss({
     workId:original.workId,
@@ -408,10 +443,13 @@ test('明确重新打开已隐藏 Deck 后返回首页仍可继续正在运行�
       identity:{ originalPath:root, realPath:root, dev:'1', ino:'2' },
     }),
     assertAgentProject:async project => project.path,
-    startEditor:async () => ({
-      url:'http://127.0.0.1:45690', token:'deck-token', editorToken:'editor-token',
-      close:async () => {},
-    }),
+    startEditor:async options => {
+      startOptions = options;
+      return {
+        url:'http://127.0.0.1:45690', token:'deck-token', editorToken:'editor-token',
+        close:async () => {},
+      };
+    },
   });
   t.after(() => app.close());
 
@@ -421,6 +459,8 @@ test('明确重新打开已隐藏 Deck 后返回首页仍可继续正在运行�
     selectionRevision:selected.selectionRevision,
     provider:'codex',
   });
+  assert.equal(startOptions.workId, original.workId,
+    'Editor 命令端点必须收到当前 Work Item 身份');
   await postJson(app, '/api/leave-workspace', { destination:'home' });
 
   const history = await fetch(`${app.url}/api/work-history?token=${encodeURIComponent(app.token)}`)
@@ -754,7 +794,7 @@ test('同一目录中的多个新建 Deck Draft 各自保持 Agent 运行时', a
   assert.equal(history.creation.filter(entry => entry.runtimeState === 'background').length, 2);
 
   const firstCapability = JSON.parse(await readFile(
-    terminals[0].options.environment.HUAWEI_DECK_CREATION_CAPABILITY_FILE,
+    terminals[0].options.environment.AICO_PPT_CREATION_CAPABILITY_FILE,
     'utf8',
   ));
   const backgroundUpdate = await fetch(`${app.url}/api/creation-draft/commands`, {
@@ -1324,8 +1364,8 @@ test('新建入口选择项目后创建持久 Draft，并通过统一命令更�
   }).then(response => response.json());
   assert.equal(created.status, 'building');
   assert.equal(created.draft.phase, 'brief');
-  assert.equal(terminal.options.environment.HUAWEI_DECK_CREATION_URL, app.url);
-  assert.match(terminal.options.environment.HUAWEI_DECK_CREATION_CAPABILITY_FILE, /agent-capability\.json$/);
+  assert.equal(terminal.options.environment.AICO_PPT_CREATION_URL, app.url);
+  assert.match(terminal.options.environment.AICO_PPT_CREATION_CAPABILITY_FILE, /agent-capability\.json$/);
 
   const updated = await postJson(app, '/api/creation-draft/commands', {
     type:'update-brief', expectedRevision:0,
@@ -1336,6 +1376,229 @@ test('新建入口选择项目后创建持久 Draft，并通过统一命令更�
     .then(response => response.json());
   assert.equal(restored.revision, 1);
   assert.equal(app.state, 'building');
+});
+
+test('DSH 新建 Deck 先选择目录并创建可关联的 Creation Work Item，不启动 PTY', async t => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'deck-app-dsh-create-'));
+  const recentDeckStore = createRecentDeckStore({
+    filePath:join(projectRoot, 'recent-decks.json'), discoveryRoots:[],
+  });
+  const workHistoryStore = createWorkHistoryStore({
+    filePath:join(projectRoot, 'recent-work.json'), discoveryRoots:[], recentDeckStore,
+  });
+  const workCatalog = new WorkCatalog({
+    filePath:join(projectRoot, 'work-catalog.json'), legacyHistory:workHistoryStore,
+  });
+  let terminalCreations = 0;
+  const app = await startAppServer({
+    token:'dsh-create-secret',
+    embeddedMode:'dsh',
+    pickAgentProjectDirectory:async () => projectRoot,
+    workCatalog,
+    recentDeckStore,
+    workHistoryStore,
+    createAgentTerminal:async () => {
+      terminalCreations += 1;
+      throw new Error('DSH 新建流程不应创建 PTY');
+    },
+  });
+  t.after(async () => {
+    await app.close();
+    await rm(projectRoot, { recursive:true, force:true, maxRetries:10, retryDelay:100 });
+  });
+  const selected = await post(app, '/api/choose-creation-project').then(response => response.json());
+  assert.equal(selected.projectRoot.path, await realpath(projectRoot));
+  const response = await postJson(app, '/api/creation-drafts', {
+    candidateNonce:selected.candidateNonce,
+    selectionRevision:selected.selectionRevision,
+    provider:'codex',
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+  const created = await response.json();
+  assert.equal(terminalCreations, 0);
+  assert.equal(created.status, 'building');
+  assert.equal(created.workItem.kind, 'creation');
+  assert.equal(created.workItem.projectRoot, await realpath(projectRoot));
+  assert.deepEqual(created.workItem.dshBinding, {
+    revision:0,
+    workspaceId:null,
+    activeSessionId:null,
+    sessions:[],
+    pendingOperation:null,
+  });
+  assert.match(created.dshPrompt, /你正在 AICO-PPT 编辑器的“新建 Deck”构建工作区/u);
+  assert.match(created.dshPrompt, new RegExp(created.workItem.projectRoot, 'u'));
+
+  const operationId = '51111111-1111-4111-8111-111111111111';
+  const begun = await postJson(app, '/api/dsh-work-items/begin-session', {
+    workId:created.workItem.workId,
+    operationId,
+    workspaceId:'workspace-project',
+    sessionId:'session-project',
+    origin:'fresh',
+    expectedBindingRevision:0,
+  }).then(result => result.json());
+  assert.equal(begun.workItem.dshBinding.pendingOperation.sessionId, 'session-project');
+  const completed = await postJson(app, '/api/dsh-work-items/complete-session', {
+    workId:created.workItem.workId,
+    operationId,
+  }).then(result => result.json());
+  assert.equal(completed.workItem.dshBinding.activeSessionId, 'session-project');
+  assert.equal(app.creationTerminal.snapshot().conversationId, 'session-project');
+
+  const dshOrigin = 'http://127.0.0.1:3080';
+  const resolved = await fetch(
+    `${app.url}/api/dsh-work-items/resolve-session?token=${encodeURIComponent(app.token)}`,
+    {
+      method:'POST',
+      headers:{ origin:dshOrigin, 'content-type':'text/plain;charset=UTF-8' },
+      body:JSON.stringify({ sessionId:'session-project' }),
+    },
+  );
+  assert.equal(resolved.status, 200, await resolved.clone().text());
+  assert.equal(resolved.headers.get('access-control-allow-origin'), dshOrigin);
+  assert.equal((await resolved.json()).status, 'linked');
+
+  const dshHistory = await fetch(
+    `${app.url}/api/work-history?token=${encodeURIComponent(app.token)}`,
+    { headers:{ origin:dshOrigin } },
+  );
+  assert.equal(dshHistory.status, 200, await dshHistory.clone().text());
+  assert.equal(dshHistory.headers.get('access-control-allow-origin'), dshOrigin);
+  assert.equal((await dshHistory.json()).creation.length, 1);
+
+  const forbiddenOrigin = await fetch(
+    `${app.url}/api/dsh-work-items/resolve-session?token=${encodeURIComponent(app.token)}`,
+    {
+      method:'POST',
+      headers:{ origin:'https://outside.example.test', 'content-type':'text/plain;charset=UTF-8' },
+      body:JSON.stringify({ sessionId:'session-project' }),
+    },
+  );
+  assert.equal(forbiddenOrigin.status, 403);
+  assert.equal(forbiddenOrigin.headers.get('access-control-allow-origin'), null);
+});
+
+test('DSH Creation 发布后原任务原位进入 Editing，并继续使用已关联会话', async t => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'deck-app-dsh-promote-'));
+  const deckPath = join(projectRoot, 'published.html');
+  await writeFile(deckPath, '<!doctype html><title>published</title>');
+  const recentDeckStore = createRecentDeckStore({
+    filePath:join(projectRoot, 'recent-decks.json'), discoveryRoots:[],
+  });
+  let creationRecorded = false;
+  let editingRecorded = false;
+  const workHistoryStore = {
+    async list() {
+      return {
+        version:1,
+        creation:creationRecorded ? [{
+          kind:'creation',
+          draftId:'draft-dsh-promote',
+          projectRoot,
+          title:'同一个 Deck 任务',
+          provider:'codex',
+          phase:'ready',
+          progress:'初稿已生成',
+          updatedAt:'2026-09-03T00:00:00.000Z',
+        }] : [],
+        editing:editingRecorded ? [{ deckPath, projectRoot, provider:'codex' }] : [],
+      };
+    },
+    async recordCreation() { creationRecorded = true; },
+    async recordDeck() { editingRecorded = true; },
+    async completeCreation() { creationRecorded = false; },
+  };
+  const workCatalog = new WorkCatalog({
+    filePath:join(projectRoot, 'work-catalog.json'), legacyHistory:workHistoryStore,
+  });
+  const deckId = '53333333-3333-4333-8333-333333333333';
+  const binding = await openDeckBinding({
+    deckId,
+    initialBinding:{
+      revision:0, state:'bound', reason:'none', currentPath:deckPath,
+      previousPath:null, trustedRoot:projectRoot,
+    },
+    storageRoot:projectRoot,
+    watch:false,
+  });
+  const draft = {
+    version:1,
+    draftId:'draft-dsh-promote',
+    revision:8,
+    phase:'ready',
+    provider:'codex',
+    projectRoot,
+    brief:{ title:'同一个 Deck 任务' },
+    generation:{ status:'published', publishedDeck:deckPath },
+  };
+  const finalEditor = {
+    url:'http://127.0.0.1:45690',
+    token:'dsh-editor-token',
+    editorToken:'dsh-browser-token',
+    deckId,
+    binding,
+    session:{ sessionId:'dsh-published-editor' },
+    close:async () => {},
+  };
+  const workspace = {
+    capabilityToken:'dsh-capability-token',
+    capabilityPath:join(projectRoot, 'capability.json'),
+    draftId:draft.draftId,
+    snapshot:() => structuredClone(draft),
+    templates:() => ({ version:1, templates:[] }),
+    subscribe:() => () => {},
+    attachTerminal(value) { this.terminal = value; },
+    takePublishedEditor:() => finalEditor,
+    close:async () => {},
+  };
+  const app = await startAppServer({
+    token:'dsh-promote-secret',
+    embeddedMode:'dsh',
+    pickAgentProjectDirectory:async () => projectRoot,
+    createCreationWorkspace:async () => workspace,
+    workCatalog,
+    recentDeckStore,
+    workHistoryStore,
+  });
+  t.after(async () => {
+    await app.close();
+    await binding.close();
+    await rm(projectRoot, { recursive:true, force:true, maxRetries:10, retryDelay:100 });
+  });
+  const selected = await post(app, '/api/choose-creation-project').then(result => result.json());
+  const created = await postJson(app, '/api/creation-drafts', {
+    candidateNonce:selected.candidateNonce,
+    selectionRevision:selected.selectionRevision,
+    provider:'codex',
+  }).then(result => result.json());
+  const creationWorkId = created.workItem.workId;
+  const operationId = '54444444-4444-4444-8444-444444444444';
+  await postJson(app, '/api/dsh-work-items/begin-session', {
+    workId:creationWorkId,
+    operationId,
+    workspaceId:'workspace-project',
+    sessionId:'session-project',
+    origin:'fresh',
+    expectedBindingRevision:0,
+  });
+  await postJson(app, '/api/dsh-work-items/complete-session', {
+    workId:creationWorkId,
+    operationId,
+  });
+
+  const opened = await postJson(app, '/api/creation-draft/open-editor', {})
+    .then(result => result.json());
+
+  assert.equal(opened.workItem.kind, 'editing');
+  assert.equal(opened.workItem.workId, creationWorkId);
+  assert.equal(opened.workItem.deckId, deckId);
+  assert.equal(opened.workItem.dshBinding.activeSessionId, 'session-project');
+  assert.equal(new URL(opened.editorUrl).searchParams.get('workspaceKind'), 'editing');
+  const history = await workCatalog.list();
+  assert.equal(history.creation.length, 0);
+  assert.deepEqual(history.editing.map(item => item.workId), [creationWorkId]);
+  assert.equal((await workCatalog.resolveByDshSession('session-project')).kind, 'editing');
 });
 
 test('新建 Deck 对话页切换项目时保留 Agent 运行时并在返回时直接复用', async t => {
@@ -1487,7 +1750,7 @@ test('生成成功后 Editor 接收同一个 PTY runtime，交接请求保持幂
   const workspace = {
     capabilityToken:'creation-token', capabilityPath:join(projectRoot, 'capability.json'),
     draftId:'draft-ready',
-    draftDir:join(projectRoot, '.huawei-deck-editor', 'drafts', 'draft-ready'),
+    draftDir:join(projectRoot, '.aico-ppt-editor', 'drafts', 'draft-ready'),
     snapshot:() => structuredClone(draft),
     templates:() => ({ version:1, templates:[] }),
     subscribe:() => () => {},

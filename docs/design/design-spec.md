@@ -1,4 +1,4 @@
-# 华为风 HTML 演示模板 skill（huawei-deck）· 设计规格
+# 华为风 HTML 演示模板 skill（aico-ppt）· 设计规格
 
 > 2026-07-06。基于《训练Infra课程-独立版 (2).html》（77 页成品 deck）提炼一套可复用、可分发的
 > 华为红品牌单文件 HTML 演示模板，打包为自包含 Claude Code skill。
@@ -21,11 +21,11 @@
 
 ## 2. 交付物：skill 目录结构
 
-构建位置 `class-1/huawei-deck/`，完成后复制到 `~/.claude/skills/huawei-deck/` 本机可用；
+构建位置 `class-1/aico-ppt/`，完成后复制到 `~/.claude/skills/aico-ppt/` 本机可用；
 分发 = 打包该目录给他人放进其 skills 目录。
 
 ```
-huawei-deck/
+aico-ppt/
 ├── SKILL.md                  # 入口：触发条件、快速上手工作流、设计铁律摘要、文件导航
 ├── assets/
 │   └── training-deck.html    # ★授课模板 deck：页型画廊 ~25-35 页，全部运行时补丁内置，约 5-8MB

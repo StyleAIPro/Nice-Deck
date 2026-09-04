@@ -1,4 +1,4 @@
-# Huawei Deck Editor 新建 Deck 对话工作区设计
+# AICO-PPT Editor 新建 Deck 对话工作区设计
 
 > 状态：已实施（2026-08-12，Managed Workspace 统一完成）
 > 日期：2026-08-11，2026-08-12 修订
@@ -68,7 +68,7 @@
 - 是项目范围内的可信普通文件；
 - 不是符号链接；
 - 包含完整 HTML；
-- 同时包含 `__bundler/manifest` 与 `__bundler/template`，可作为独立 Huawei Deck 打开。
+- 同时包含 `__bundler/manifest` 与 `__bundler/template`，可作为独立 AICO-PPT 打开。
 
 Deck 首次出现时页面自动切换，不需要用户点击。生成失败但 staging Deck 仍可渲染时，画布继续保留，方便用户和 Agent 对照修复。
 
@@ -109,7 +109,7 @@ Brief、Outline、PagePlan 仍然是顺序依赖，但它们不表现为三个�
 Draft 目录：
 
 ```text
-<project-root>/.huawei-deck-editor/
+<project-root>/.aico-ppt-editor/
   drafts/
     <draft-id>/
       draft.json

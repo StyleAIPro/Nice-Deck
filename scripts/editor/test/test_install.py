@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
-    "huawei_deck_install", ROOT / "scripts" / "install.py"
+    "aico_ppt_install", ROOT / "scripts" / "install.py"
 )
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
@@ -30,18 +30,60 @@ class InstallationManagerTest(unittest.TestCase):
             root = base / "repo"
             home = base / "home"
             root.mkdir()
-            (root / "SKILL.md").write_text("---\nname: huawei-deck\n---\n", encoding="utf-8")
+            (root / "SKILL.md").write_text("---\nname: aico-ppt\n---\n", encoding="utf-8")
             manager = self.make_manager(root, home)
 
             first = manager.apply(manager.plan("install"))
             second = manager.apply(manager.plan("repair"))
 
-            target = home / ".agents" / "skills" / "huawei-deck"
+            target = home / ".agents" / "skills" / "aico-ppt"
             self.assertTrue(target.is_symlink())
             self.assertEqual(target.resolve(), root.resolve())
             self.assertTrue(first["snapshot"]["ready"])
             self.assertTrue(second["snapshot"]["ready"])
             record = json.loads((home / "state" / "install-state.json").read_text("utf-8"))
+            self.assertEqual(record["ownedPaths"], [str(manager.target_for("codex"))])
+
+    def test_install_atomically_migrates_managed_legacy_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            home = base / "home"
+            root.mkdir()
+            (root / "SKILL.md").write_text("---\nname: aico-ppt\n---\n", encoding="utf-8")
+            legacy_target = home / ".agents" / "skills" / "huawei-deck"
+            legacy_target.parent.mkdir(parents=True)
+            legacy_target.symlink_to(root, target_is_directory=True)
+            legacy_state = installer.legacy_state_file(platform="darwin", home=home)
+            legacy_state.parent.mkdir(parents=True)
+            legacy_state.write_text(json.dumps({
+                "schemaVersion":installer.SCHEMA_VERSION,
+                "installId":"legacy-install",
+                "channel":"developer",
+                "productVersion":"0.1.0-dev",
+                "installRoot":str(root.resolve()),
+                "registrations":[{
+                    "host":"codex", "targetPath":str(legacy_target), "method":"symlink",
+                }],
+                "ownedPaths":[str(legacy_target)],
+                "installedAt":"2026-08-01T00:00:00+00:00",
+                "updatedAt":"2026-08-01T00:00:00+00:00",
+            }), encoding="utf-8")
+            manager = installer.InstallationManager(
+                root=root, home=home, hosts=("codex",), platform="darwin",
+            )
+
+            result = manager.apply(manager.plan("install"))
+
+            current_target = home / ".agents" / "skills" / "aico-ppt"
+            self.assertTrue(result["snapshot"]["ready"])
+            self.assertTrue(current_target.is_symlink())
+            self.assertEqual(current_target.resolve(), root.resolve())
+            self.assertFalse(legacy_target.exists())
+            self.assertFalse(legacy_state.exists())
+            current_state = installer.default_state_file(platform="darwin", home=home)
+            record = json.loads(current_state.read_text("utf-8"))
+            self.assertEqual(record["installId"], "legacy-install")
             self.assertEqual(record["ownedPaths"], [str(manager.target_for("codex"))])
 
     def test_unknown_existing_target_is_not_overwritten(self):
@@ -51,7 +93,7 @@ class InstallationManagerTest(unittest.TestCase):
             home = base / "home"
             root.mkdir()
             (root / "SKILL.md").write_text("skill", encoding="utf-8")
-            target = home / ".agents" / "skills" / "huawei-deck"
+            target = home / ".agents" / "skills" / "aico-ppt"
             target.mkdir(parents=True)
             (target / "user-file.txt").write_text("keep", encoding="utf-8")
             manager = self.make_manager(root, home)
@@ -69,7 +111,7 @@ class InstallationManagerTest(unittest.TestCase):
             home = base / "home"
             root.mkdir()
             (root / "SKILL.md").write_text("skill", encoding="utf-8")
-            target = home / ".agents" / "skills" / "huawei-deck"
+            target = home / ".agents" / "skills" / "aico-ppt"
             target.parent.mkdir(parents=True)
             target.symlink_to(root, target_is_directory=True)
             manager = self.make_manager(root, home)
@@ -103,7 +145,7 @@ class InstallationManagerTest(unittest.TestCase):
 
             result = manager.apply(manager.plan("uninstall"))
 
-            target = home / ".agents" / "skills" / "huawei-deck"
+            target = home / ".agents" / "skills" / "aico-ppt"
             self.assertFalse(target.exists())
             self.assertFalse((home / "state" / "install-state.json").exists())
             self.assertEqual(result["status"], "uninstalled")
@@ -147,7 +189,7 @@ class InstallationManagerTest(unittest.TestCase):
             (root / "SKILL.md").write_text("skill", encoding="utf-8")
             manager = self.make_manager(root, home)
             manager.apply(manager.plan("install"))
-            target = home / ".agents" / "skills" / "huawei-deck"
+            target = home / ".agents" / "skills" / "aico-ppt"
             target.unlink()
             target.symlink_to(other, target_is_directory=True)
 

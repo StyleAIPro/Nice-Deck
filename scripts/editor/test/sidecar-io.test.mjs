@@ -74,7 +74,7 @@ test('持久 helper 长期持有 root dirfd，换根后 discover 仍只读取原
   assert.equal(typeof createPersistentSidecarIO, 'function');
 
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-persistent-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   await mkdir(root);
   const io = await createPersistentSidecarIO({
     project:await identity(project),
@@ -99,7 +99,7 @@ test('持久 helper 长期持有 root dirfd，换根后 discover 仍只读取原
 test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 API 无通用文件能力', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-bound-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const sessionId = '123e4567-e89b-42d3-a456-426614174000';
   const transactionId = '123e4567-e89b-42d3-a456-426614174000';
   const deckBytes = Buffer.from('trusted-deck');
@@ -149,7 +149,7 @@ test('session/transaction/backup/deck 的实际读取只走已绑定 dirfd 且 A
 
     const movedProject = `${project}.trusted`;
     await rename(project, movedProject);
-    const forgedSession = join(project, '.huawei-deck-editor', sessionName);
+    const forgedSession = join(project, '.aico-ppt-editor', sessionName);
     await mkdir(join(forgedSession, 'backups'), { recursive:true });
     await mkdir(join(forgedSession, 'transactions'));
     await writeFile(join(project, 'deck.html'), 'forged-deck');
@@ -178,7 +178,7 @@ test('托管工作副本按指纹写入、归档并可恢复历史版本', async
   const project = await mkdtemp(join(tmpdir(), 'deck-working-copy-'));
   const deckBytes = Buffer.from('real-deck');
   const fingerprint = sha256(deckBytes);
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const sessionId = '123e4567-e89b-42d3-a456-426614174000';
   const sessionName = `deck-${fingerprint.slice(0, 8)}`;
   await writeFile(join(project, 'deck.html'), deckBytes);
@@ -285,7 +285,7 @@ test('Node helper wrapper 精确透传附件事务与只读验证命令', async 
 test('registry 原子发布后 discovery 只接受注册 session，未注册伪造目录保持只读', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-registry-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const initialFingerprint = sha256('deck');
   const sessionName = `deck-${initialFingerprint.slice(0, 8)}`;
   const sessionId = '123e4567-e89b-42d3-a456-426614174000';
@@ -354,7 +354,7 @@ test('registry 原子发布后 discovery 只接受注册 session，未注册伪�
 test('registry preparing 在两处崩溃后都可由重启安全完成而非遗留未注册 session', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-preparing-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const deckName = 'deck.html';
   const initialFingerprint = sha256('deck');
   const sessionName = `deck-${initialFingerprint.slice(0, 8)}`;
@@ -403,7 +403,7 @@ test('registry preparing 在两处崩溃后都可由重启安全完成而非遗�
 test('bind-session 必须携带并匹配 registry sessionId', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-bind-id-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const deckName = 'deck.html';
   const fingerprint = sha256('deck');
   const sessionName = `deck-${fingerprint.slice(0, 8)}`;
@@ -431,7 +431,7 @@ test('bind-session 必须携带并匹配 registry sessionId', async () => {
 test('transactions 中任意非 UUID .json 都按不可信 record 拒绝', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-invalid-transaction-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const deckName = 'deck.html';
   const fingerprint = sha256('deck');
   const sessionName = `deck-${fingerprint.slice(0, 8)}`;
@@ -459,7 +459,7 @@ test('transactions 中任意非 UUID .json 都按不可信 record 拒绝', async
 test('session JSON 可跨过 1MiB 旧限制并可完整读回', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-large-session-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const deckName = 'deck.html';
   const fingerprint = sha256('deck');
   const sessionName = `deck-${fingerprint.slice(0, 8)}`;
@@ -495,7 +495,7 @@ test('session JSON 可跨过 1MiB 旧限制并可完整读回', async () => {
 test('Agent Workspace 通过固定命令原子写入并完整读回', async () => {
   const { createPersistentSidecarIO } = await import('../sidecar-io.mjs');
   const project = await mkdtemp(join(tmpdir(), 'deck-sidecar-agent-workspace-'));
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const deckName = 'deck.html';
   const fingerprint = sha256('deck');
   const sessionName = `deck-${fingerprint.slice(0, 8)}`;

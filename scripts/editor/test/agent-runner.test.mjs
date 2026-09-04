@@ -122,7 +122,7 @@ test('终端任务 Prompt 限定批次、Skill 与写回边界', () => {
     token:'secret', taskIds:['task-a'], sourceThreadId:null,
     loadSkill:true, skillRoot:'/skill',
   });
-  assert.match(prompt, /^\$huawei-deck/m);
+  assert.match(prompt, /^\$aico-ppt/m);
   assert.match(prompt, /完整读取 "[\\/]+skill[\\/]+SKILL\.md"/);
   assert.match(prompt, /只处理本批 ID/);
   assert.match(prompt, /不调用 write-deck/);

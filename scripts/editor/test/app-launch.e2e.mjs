@@ -131,6 +131,207 @@ test('启动状态恢复完成前入口不可点击，完成后选择的流程�
   assert.equal(await page.locator('[data-landing]').isHidden(), true);
 });
 
+test('DSH 窄工作台的起始页顶栏保持图标顺序与悬浮说明', async t => {
+  const app = await startAppServer({ token:'dsh-start-toolbar-secret' });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport:{ width:600, height:800 } });
+  const url = new URL(app.appUrl);
+  url.searchParams.set('embedded', 'dsh');
+  url.searchParams.set('parentOrigin', app.url);
+
+  await page.goto(url.href);
+  await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
+  assert.equal(await page.locator('html').getAttribute('data-embedded'), 'dsh');
+  assert.equal(await page.locator('html').getAttribute('data-runtime-profile'), 'dsh-product');
+  assert.equal(await page.locator('.dev-shell-badge').isHidden(), true);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 600);
+  assert.deepEqual(
+    await page.locator('[data-support-navigation] button, [data-exit-editor]')
+      .evaluateAll(buttons => buttons.filter(button => button.offsetParent !== null).map(button => {
+        const label = button.querySelector('.topbar-control-label');
+        return {
+          key:button.dataset.supportOpen ?? 'exit',
+          width:button.getBoundingClientRect().width,
+          labelDisplay:label ? getComputedStyle(label).display : 'none',
+          hasIcon:Boolean(button.querySelector('.topbar-control-icon')),
+        };
+      })),
+    [
+      { key:'onboarding', width:36, labelDisplay:'none', hasIcon:true },
+      { key:'help', width:36, labelDisplay:'none', hasIcon:true },
+      { key:'diagnostics', width:36, labelDisplay:'none', hasIcon:true },
+      { key:'exit', width:36, labelDisplay:'none', hasIcon:true },
+    ],
+  );
+  assert.equal(
+    await page.locator('[data-exit-editor]').getAttribute('aria-label'),
+    '关闭 AICO-PPT 工作台',
+  );
+  await page.locator('[data-support-open="diagnostics"]').hover();
+  await page.waitForFunction(() => (
+    document.querySelector('[data-topbar-tooltip]')?.dataset.visible === 'true'
+  ));
+  assert.equal(await page.locator('[data-topbar-tooltip]').textContent(), '安装与诊断');
+});
+
+test('DSH 新建 Deck 任务把会话选择器放在与修改任务一致的顶栏位置', async t => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-dsh-session-control-'));
+  const history = { creation:[], editing:[] };
+  const workHistoryStore = {
+    filePath:join(projectRoot, 'legacy-history.json'),
+    async list() { return structuredClone({ version:1, ...history }); },
+    async recordCreation({ projectRoot:root, draftId, provider }) {
+      const entry = {
+        kind:'creation', projectRoot:root, draftId, provider,
+        title:'未命名 Deck', projectName:'测试项目', phase:'brief', progress:'需求沟通中',
+      };
+      history.creation = [entry];
+      return entry;
+    },
+    async resolveCreation({ projectRoot:root, draftId }) {
+      return history.creation.find(entry => entry.projectRoot === root && entry.draftId === draftId)
+        ?? null;
+    },
+  };
+  const workCatalog = new WorkCatalog({
+    filePath:join(projectRoot, 'work-catalog.json'),
+    legacyHistory:workHistoryStore,
+  });
+  const app = await startAppServer({
+    token:'creation-dsh-session-control-secret',
+    embeddedMode:'dsh',
+    pickAgentProjectDirectory:async () => projectRoot,
+    workHistoryStore,
+    workCatalog,
+  });
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(async () => {
+    await browser.close();
+    await app.close();
+    await rm(projectRoot, { recursive:true, force:true });
+  });
+  const page = await browser.newPage({ viewport:{ width:900, height:800 } });
+  await page.addInitScript(root => {
+    const sessions = new Map();
+    const archivedSessions = new Set();
+    let currentSessionId = null;
+    window.archiveDshSession = sessionId => {
+      archivedSessions.add(sessionId);
+      window.postMessage({
+        type:'aico-ppt:dsh-session-changed',
+        session:sessions.get(currentSessionId) ?? null,
+      }, location.origin);
+    };
+    window.addEventListener('message', event => {
+      if (event.data?.type === 'aico-ppt:dsh-work-context') {
+        window.currentAicoPptWorkContext = event.data.context;
+        return;
+      }
+      if (event.data?.type !== 'aico-ppt:dsh-request') return;
+      const { requestId, command, payload } = event.data;
+      let result;
+      if (command === 'ensure-workspace') {
+        result = { workspaceId:'workspace-creation', path:root, title:'测试项目' };
+      } else if (command === 'create-session') {
+        const session = {
+          sessionId:payload.sessionId,
+          title:payload.title,
+          cwd:root,
+          running:false,
+        };
+        sessions.set(payload.sessionId, session);
+        result = session;
+      } else if (command === 'describe-sessions') {
+        // DSH 可能在中文标题尚未持久时把 sessionId 当作临时标题返回。
+        // 任务页不能被这个占位值反向覆盖。
+        result = payload.sessionIds.map(sessionId => (
+          sessions.has(sessionId)
+            ? { sessionId, title:sessionId, archived:archivedSessions.has(sessionId) }
+            : null
+        ));
+      } else if (command === 'open-session') {
+        currentSessionId = payload.sessionId;
+        result = sessions.get(payload.sessionId) ?? { sessionId:payload.sessionId };
+        queueMicrotask(() => window.postMessage({
+          type:'aico-ppt:dsh-session-changed', session:result,
+        }, location.origin));
+      } else if (command === 'send-to-session') {
+        result = { accepted:true, sessionId:payload.sessionId };
+      } else {
+        result = null;
+      }
+      window.postMessage({
+        type:'aico-ppt:dsh-result', requestId, ok:true, result,
+      }, location.origin);
+    });
+  }, projectRoot);
+  const url = new URL(app.appUrl);
+  url.searchParams.set('parentOrigin', app.url);
+  await page.goto(url.href);
+  await page.getByRole('button', { name:/从0开始创建一个新的deck，新任务/ }).click();
+  await page.getByRole('button', { name:/选择项目目录/ }).click();
+  const confirmation = page.locator('[data-confirm-creation-project]');
+  if (await confirmation.isVisible()) await confirmation.check();
+  await page.getByRole('button', { name:/创建 Draft 并开始对话/ }).click();
+  const control = page.locator('[data-dsh-task-session]');
+  await control.waitFor({ state:'visible' });
+  await page.waitForFunction(() => (
+    document.querySelector('[data-dsh-task-session-label]')?.value.startsWith('session-')
+  ));
+  assert.equal(await control.evaluate(node => node.parentElement?.classList.contains('topbar-actions')), true,
+    'Creation 会话控件必须位于顶栏，不能留在左侧里程碑栏');
+  assert.equal(await page.locator('.milestone-rail [data-dsh-task-session]').count(), 0);
+  const select = control.getByRole('combobox');
+  const initialSessionId = await select.inputValue();
+  assert.match(initialSessionId, /^session-/u);
+  assert.match(await select.locator('option:checked').textContent(), /创建 Deck：/u);
+  assert.deepEqual(await control.evaluate(node => {
+    const style = getComputedStyle(node);
+    return { height:style.height, borderRadius:style.borderRadius };
+  }), { height:'38px', borderRadius:'999px' });
+  await page.waitForFunction(() => Boolean(window.currentAicoPptWorkContext?.contextKey));
+  await page.evaluate(() => window.postMessage({
+    type:'aico-ppt:create-work-session-request',
+    requestId:'left-new-session-entry',
+    workId:window.currentAicoPptWorkContext.workId,
+    contextKey:window.currentAicoPptWorkContext.contextKey,
+  }, location.origin));
+  await page.waitForFunction(() => (
+    document.querySelectorAll('[data-dsh-task-session-label] option').length === 2
+  ));
+  assert.match(await select.locator('option:checked').textContent(), /会话 2/u);
+  const archivedSessionId = await select.inputValue();
+  await select.selectOption(initialSessionId);
+  await page.waitForFunction(sessionId => (
+    document.querySelector('[data-dsh-task-session-label]')?.value === sessionId
+    && document.querySelector('[data-dsh-task-session]')?.dataset.state === 'active'
+  ), initialSessionId);
+  await page.evaluate(sessionId => window.archiveDshSession(sessionId), archivedSessionId);
+  await page.waitForTimeout(100);
+  assert.equal(
+    await select.locator('option').count(),
+    1,
+    '归档的 DSH 会话必须从右侧 Deck 任务会话选择器消失',
+  );
+  let persisted;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    persisted = (await workCatalog.list()).creation[0];
+    if (persisted?.dshBinding.sessions.some(link => (
+      link.sessionId === archivedSessionId && link.state === 'archived'
+    ))) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(
+    persisted.dshBinding.sessions.find(link => link.sessionId === archivedSessionId)?.state,
+    'archived',
+    '归档状态必须写回 WorkCatalog，刷新后不能重新出现',
+  );
+});
+
 test('用户在网页点击添加后才打开选择器，取消后仍可重试', async t => {
   let picks = 0;
   const app = await startAppServer({
@@ -285,7 +486,7 @@ test('启动页流体背景保留动效且不以超长任务阻塞首次交互',
 });
 
 test('Windows 可见 Chrome 的流体动效不拖慢页面合成帧', {
-  skip:process.platform !== 'win32' || process.env.HUAWEI_DECK_HEADED_PERF !== '1',
+  skip:process.platform !== 'win32' || process.env.AICO_PPT_HEADED_PERF !== '1',
 }, async t => {
   const app = await startAppServer({ token:'browser-liquid-headed-performance-secret' });
   t.after(() => app.close());
@@ -642,8 +843,8 @@ test('选择 Deck 后先确认项目目录和 provider，点击打开才启动 E
     token:'browser-confirm-secret',
     pickDeck:async () => '/tmp/renzhi-deck.html',
     resolveAgentProject:async () => ({
-      path:'/tmp/huawei-deck', source:'git-root', needsConfirmation:false, warning:null,
-      identity:{ originalPath:'/tmp/huawei-deck', realPath:'/tmp/huawei-deck', dev:'1', ino:'2' },
+      path:'/tmp/aico-ppt', source:'git-root', needsConfirmation:false, warning:null,
+      identity:{ originalPath:'/tmp/aico-ppt', realPath:'/tmp/aico-ppt', dev:'1', ino:'2' },
     }),
     assertAgentProject:async project => project.path,
     startEditor:async options => {
@@ -663,7 +864,7 @@ test('选择 Deck 后先确认项目目录和 provider，点击打开才启动 E
   await page.goto(app.appUrl);
   await page.getByRole('button', { name:/修改已经写好的deck，新任务/ }).click();
   await page.getByRole('button', { name:/添加 Deck HTML/ }).click();
-  await page.getByText('/tmp/huawei-deck').waitFor();
+  await page.getByText('/tmp/aico-ppt').waitFor();
   assert.equal(startOptions, null);
   const providerSelect = page.locator('[data-provider]');
   assert.equal(await providerSelect.locator('option').count(), 3);
@@ -672,7 +873,7 @@ test('选择 Deck 后先确认项目目录和 provider，点击打开才启动 E
   await page.getByRole('option', { name:'Claude Code' }).click();
   await page.getByRole('button', { name:/打开编辑器/ }).click();
   await started;
-  assert.equal(startOptions.agentProjectRoot, '/tmp/huawei-deck');
+  assert.equal(startOptions.agentProjectRoot, '/tmp/aico-ppt');
   assert.equal(startOptions.agentProvider, 'claude-code');
 });
 
@@ -932,7 +1133,8 @@ test('新建 Deck 终端复用修改页密度，输入行始终位于窗口内',
   assert.equal(await supportNavigation.isHidden(), true, '新建 Deck 对话页不应重复显示使用与支持');
   const guidedTourTrigger = page.getByRole('button', { name:'新手引导', exact:true });
   assert.equal(await guidedTourTrigger.getAttribute('title'), '新手引导');
-  assert.equal(await guidedTourTrigger.innerText(), '?');
+  assert.equal(await guidedTourTrigger.locator('.topbar-control-icon').count(), 1);
+  assert.equal(await guidedTourTrigger.locator('circle').count(), 1);
   await guidedTourTrigger.click();
   await page.getByRole('heading', { name:'四个里程碑自动点亮' }).waitFor();
   assert.equal(await page.locator('[data-tour-dots] i').count(), 4);
@@ -1017,7 +1219,7 @@ test('新建 Deck 终端复用修改页密度，输入行始终位于窗口内',
   assert.equal(layout.fontSize, '12px');
   assert.match(layout.terminalFontFamily, /SFMono-Regular/);
   assert.equal(layout.terminalTextColor, 'rgb(229, 231, 235)');
-  assert.match(layout.panelFontFamily, /Huawei Deck UI/);
+  assert.match(layout.panelFontFamily, /AICO-PPT UI/);
   assert.equal(layout.panelBorderRadius, '18px');
   assert.equal(layout.sharedStyleLoaded, true);
   assert.ok(terminal.resizes.at(-1)?.[1] >= 48, JSON.stringify(terminal.resizes));
@@ -1103,8 +1305,17 @@ test('新建 Deck 对话页按任务类型下拉并直接切换项目', async t 
   };
 
   await page.goto(app.appUrl);
+  await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
   const exitEditor = page.getByRole('button', { name:'退出编辑器' });
-  assert.equal(await exitEditor.isVisible(), true, '初始页左上角必须显示退出编辑器');
+  assert.equal(await exitEditor.isVisible(), true, '初始页右上角必须显示退出编辑器');
+  assert.deepEqual(
+    await page.locator('[data-support-navigation] button, [data-exit-editor]')
+      .evaluateAll(buttons => buttons.filter(button => button.offsetParent !== null).map(button => (
+        button.dataset.supportOpen ?? 'exit'
+      ))),
+    ['onboarding', 'help', 'diagnostics', 'exit'],
+    '起始页辅助入口应从引导到帮助与诊断，最后才是退出',
+  );
   await enterBuilder();
   assert.equal(await exitEditor.isVisible(), true);
   assert.equal(await exitEditor.locator('.pill-nav-label-default').innerText(), '退出编辑器');
@@ -1127,6 +1338,17 @@ test('新建 Deck 对话页按任务类型下拉并直接切换项目', async t 
   )), '999px');
   assert.equal(await page.locator('.workspace-navigation .pill-nav-label-default').count(), 2);
   assert.equal(await page.locator('.workspace-navigation .pill-nav-label-hover').count(), 2);
+  const creationToolbarOrder = await page.locator('.topbar-actions').evaluate(element => (
+    [...element.querySelectorAll('button')]
+      .filter(button => button.offsetParent !== null)
+      .map(button => (
+        button.hasAttribute('data-workspace-home') ? 'home'
+          : button.hasAttribute('data-workspace-switch') ? 'switch'
+            : button.dataset.guidedTour === 'creation' ? 'guide'
+              : button.hasAttribute('data-exit-editor') ? 'exit' : 'other'
+      ))
+  ));
+  assert.deepEqual(creationToolbarOrder, ['home', 'switch', 'guide', 'exit']);
   await page.getByRole('button', { name:'切换项目' }).hover();
   await page.waitForTimeout(360);
   assert.equal(await page.getByRole('button', { name:'切换项目' }).locator('.pill-nav-label-default').evaluate(element => (
@@ -1296,6 +1518,69 @@ test('修改 Deck 编辑页按任务类型下拉并直接切换项目', async t 
   assert.equal(app.state, 'idle');
   assert.equal(editorStarts, 1);
   assert.equal((await fetch(previousEditorUrl)).status, 200, '返回首页后 Editor 应继续后台运行');
+});
+
+test('任务切换等待目标运行时时不暴露启动初始页', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-direct-navigation-e2e-'));
+  const deckPath = join(root, '直接切换.html');
+  await copyFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), deckPath);
+  let releaseEditorStart;
+  const editorStartGate = new Promise(resolvePromise => { releaseEditorStart = resolvePromise; });
+  let editorStartReleased = false;
+  let app;
+  app = await startAppServer({
+    token:'direct-navigation-e2e-secret',
+    workHistoryStore:{
+      async list() {
+        return { version:1, creation:[], editing:[{
+          deckPath, projectRoot:root, provider:'codex',
+        }] };
+      },
+      async resolveDeck(value) { return value === deckPath ? deckPath : null; },
+      async recordDeck() {},
+    },
+    resolveAgentProject:async () => ({
+      path:root, source:'persisted', needsConfirmation:false, warning:null,
+      identity:{ originalPath:root, realPath:root, dev:'1', ino:'2' },
+    }),
+    assertAgentProject:async project => project.path,
+    startEditor:async options => {
+      await editorStartGate;
+      return startServer({ ...options, autoStartAgentTerminal:false });
+    },
+  });
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(async () => {
+    if (!editorStartReleased) releaseEditorStart();
+    await browser.close();
+    await app.close();
+    await rm(root, { recursive:true, force:true, maxRetries:10, retryDelay:100 });
+  });
+  const page = await browser.newPage({ viewport:{ width:1440, height:900 } });
+  await page.goto(app.appUrl);
+  await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
+
+  const target = new URL(app.appUrl);
+  target.searchParams.set('view', 'editing');
+  target.searchParams.set('leaveWorkspace', '1');
+  target.searchParams.set('switchKind', 'editing');
+  target.searchParams.set('deckPath', deckPath);
+  const switchingHtml = await fetch(target).then(response => response.text());
+  assert.match(switchingHtml,
+    /<html[^>]+data-workspace-navigation-state="pending"/u,
+    '切换文档必须在浏览器首次绘制前进入过渡态');
+  await page.goto(target.href, { waitUntil:'commit' });
+  await page.waitForFunction(() => (
+    document.documentElement.dataset.workspaceNavigationState === 'pending'
+  ));
+  assert.equal(await page.locator('[data-landing]').isVisible(), false,
+    '目标运行时尚未就绪时不得短暂显示初始页');
+
+  editorStartReleased = true;
+  releaseEditorStart();
+  await page.waitForURL(/\/editor\//u);
+  await page.locator('[data-workspace-navigation]').waitFor({ state:'visible' });
 });
 
 test('修改 Deck 在 Agent 执行和未固化修改并存时可多任务往返切换', async t => {
@@ -1856,7 +2141,7 @@ test('Creation 发布后的中间画布与微调页复用同一个最终 Editor 
       deck:{ complete:true, state:'complete' },
     },
     previewDeck:{
-      path:join(projectRoot, '.huawei-deck-editor', 'working', 'deck.html'),
+      path:join(projectRoot, '.aico-ppt-editor', 'working', 'deck.html'),
       revision:0, status:'published', managed:true, editorUrl,
     },
   };

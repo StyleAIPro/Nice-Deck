@@ -107,7 +107,7 @@ class SidecarAgentWorkspaceIOTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         project = Path(temporary.name)
-        root = project / ".huawei-deck-editor"
+        root = project / ".aico-ppt-editor"
         root.mkdir()
         deck = project / "deck.html"
         deck.write_bytes(b"deck")
@@ -265,7 +265,7 @@ class SidecarAttachmentIOTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         project = Path(temporary.name)
-        root = project / ".huawei-deck-editor"
+        root = project / ".aico-ppt-editor"
         root.mkdir()
         deck = project / "deck.html"
         deck.write_bytes(b"deck")

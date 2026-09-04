@@ -18,7 +18,7 @@ const materialResourceProblems = problems => problems.filter(problem => (
 
 async function openDsResourceEditor(t) {
   const sourceHash = sha256(await readFile(SOURCE_DECK));
-  const root = await mkdtemp(join(tmpdir(), 'huawei-deck-ds-state-'));
+  const root = await mkdtemp(join(tmpdir(), 'aico-ppt-ds-state-'));
   const deckPath = join(root, 'interactive-state-deck.html');
   await copyFile(SOURCE_DECK, deckPath);
   const app = await startServer({

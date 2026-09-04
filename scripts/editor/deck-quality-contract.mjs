@@ -13,7 +13,7 @@ const CORE_RULES = Object.freeze([
 export function buildSkillContractInstructions({ skillRoot } = {}) {
   const root = String(skillRoot ?? '').replace(/\/$/, '');
   return [
-    '当前执行 Huawei Deck 单一作业规范。不得按“新建 / 初版制作 / 修改 / 区域任务”切换、删减或降级质量要求；入口差异只决定当前是否已有合法 Deck，以及需要先收集需求、建立规划还是直接处理现有内容。',
+    '当前执行 AICO-PPT 单一作业规范。不得按“新建 / 初版制作 / 修改 / 区域任务”切换、删减或降级质量要求；入口差异只决定当前是否已有合法 Deck，以及需要先收集需求、建立规划还是直接处理现有内容。',
     `必须完整读取并遵循 ${JSON.stringify(`${root}/SKILL.md`)}。`,
     `随后读取 ${JSON.stringify(`${root}/references/workflow.md`)}、${JSON.stringify(`${root}/references/template-pages.md`)}、${JSON.stringify(`${root}/references/animation.md`)}、${JSON.stringify(`${root}/references/design-system.md`)}、${JSON.stringify(`${root}/references/artwork.md`)} 和 ${JSON.stringify(`${root}/references/huawei-style.md`)}。`,
     '所有入口原样复用以下单一质量契约：',

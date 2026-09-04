@@ -253,7 +253,7 @@ test('已完成任务的旧目标不可定位时仍显示完成且不触发缺�
       }],
       onLocate() { window.__completedMissingTaskLocated = true; },
       onProcessAll() { window.__completedMissingTaskProcessed = true; },
-      onUndo() {},
+      onHistory() {},
     });
   }, app.token);
 

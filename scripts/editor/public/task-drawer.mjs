@@ -49,6 +49,26 @@ function runMessage(run) {
   return run.message || defaults[run.status] || '';
 }
 
+export function taskHistoryControl(task, groups = []) {
+  if (task?.status !== 'completed' || typeof task.groupId !== 'string') return null;
+  const safeGroups = Array.isArray(groups) ? groups : [];
+  const originalGroup = safeGroups.find(group => group?.id === task.groupId) ?? null;
+  const effectUndone = ['undone', 'compensated'].includes(task.effectState);
+  if (!effectUndone) {
+    return { method:'undo', groupId:originalGroup?.id ?? task.groupId, label:'撤销' };
+  }
+  const activeCompensation = [...safeGroups].reverse().find(group => (
+    group?.active === true && group?.compensation?.taskId === task.id
+  ));
+  if (activeCompensation) {
+    return { method:'undo', groupId:activeCompensation.id, label:'重做' };
+  }
+  if (originalGroup?.active === false) {
+    return { method:'redo', groupId:originalGroup.id, label:'重做' };
+  }
+  return null;
+}
+
 function drawerBatchProjection(tasks, agentRun) {
   const activeBatch = agentRun?.activeBatch ?? null;
   const activeIds = new Set(activeBatch?.taskIds ?? []);
@@ -123,9 +143,9 @@ export function setTaskDrawerOpen(root, open) {
 }
 
 export function renderTaskDrawer(root, {
-  tasks, agentRun = { status:'idle' },
+  tasks, groups = [], agentRun = { status:'idle' },
   submissionBlocked = false, submissionBlockedMessage = '',
-  onLocate, onProcessAll, onUndo, onEdit, onDelete,
+  onLocate, onProcessAll, onHistory, onEdit, onDelete,
 }) {
   const completedCount = tasks.filter(task => task.status === 'completed').length;
   const pendingCount = tasks.length - completedCount;
@@ -224,6 +244,8 @@ export function renderTaskDrawer(root, {
     const row = element('article', 'task-row');
     row.dataset.taskRow = task.id;
     const needsConfirmation = task.status === 'needs-confirmation';
+    const effectUndone = task.status === 'completed'
+      && ['undone', 'compensated'].includes(task.effectState);
     const targetMissing = task.targetMissing === true;
     const unresolvedTargetMissing = targetMissing && task.status !== 'completed';
     const residualBatch = residualByTask.get(task.id) ?? null;
@@ -256,7 +278,9 @@ export function renderTaskDrawer(root, {
         ? 'task-status-target-missing' : `task-status-${task.status}`}`,
       unresolvedTargetMissing
         ? '目标不可定位'
-        : (membershipStatus ?? STATUS_LABELS[task.status] ?? task.status),
+        : effectUndone
+          ? '已完成 · 修改已撤销'
+          : (membershipStatus ?? STATUS_LABELS[task.status] ?? task.status),
     );
     meta.append(status);
     locate.append(meta, element('p', 'task-instruction', task.instruction));
@@ -407,14 +431,19 @@ export function renderTaskDrawer(root, {
       }
       row.append(actions);
     }
-    if (task.groupId && onUndo) {
-      const undo = element('button', 'task-undo', '撤销');
-      undo.type = 'button';
-      undo.dataset.taskUndo = task.id;
-      undo.disabled = activeIds.has(task.id);
-      applyPill(undo, { variant:'neutral', size:'sm', kind:'action' });
-      undo.addEventListener('click', () => onUndo(task));
-      row.append(undo);
+    const historyControl = taskHistoryControl(task, groups);
+    if (historyControl && onHistory) {
+      const history = element(
+        'button', `task-history task-${historyControl.method}`, historyControl.label,
+      );
+      history.type = 'button';
+      history.dataset[historyControl.label === '重做' ? 'taskRedo' : 'taskUndo'] = task.id;
+      history.dataset.groupId = historyControl.groupId;
+      history.dataset.historyMethod = historyControl.method;
+      history.disabled = activeIds.has(task.id);
+      applyPill(history, { variant:'neutral', size:'sm', kind:'action' });
+      history.addEventListener('click', () => onHistory(task, historyControl));
+      row.append(history);
     }
     if (Array.isArray(task.attachments) && task.attachments.length > 0) {
       const attachmentsId = `task-attachments-${taskIndex}`;
@@ -552,11 +581,11 @@ export function renderTaskDrawer(root, {
     completedGroup.open = root.dataset.completedOpen === 'true';
     const completedSummary = element('summary', 'task-completed-summary');
     const undoableCompleted = orderedCompletedRows.some(
-      row => row.querySelector('[data-task-undo]'),
+      row => row.querySelector('[data-task-undo], [data-task-redo]'),
     );
     completedSummary.append(
       element('strong', '', `已完成 ${completedRows.length} 条`),
-      element('span', '', undoableCompleted ? '可展开查看与撤销' : '已固化，可删除记录'),
+      element('span', '', undoableCompleted ? '可展开查看、撤销与重做' : '已固化，可删除记录'),
     );
     const completedList = element('div', 'task-completed-list');
     completedList.append(...orderedCompletedRows);

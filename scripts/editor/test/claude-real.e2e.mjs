@@ -8,7 +8,7 @@ import { AgentTerminalSession } from '../agent-terminal-session.mjs';
 import { buildAgentPrompt } from '../agent-runner.mjs';
 
 const enabled = process.platform === 'win32'
-  && process.env.HUAWEI_DECK_REAL_CLAUDE_E2E === '1';
+  && process.env.AICO_PPT_REAL_CLAUDE_E2E === '1';
 
 function count(text, needle) {
   return String(text).split(needle).length - 1;
@@ -179,7 +179,7 @@ test('Windows 真实 Claude Code 自动提交初始指令和完整长任务', {
   const resumedPrompt = [
     resumedBeginMarker,
     buildAgentPrompt({
-      deckPath:String.raw`Y:\huawei-deck\Deck-Projects\demo\.huawei-deck-editor\real-e2e\working\deck.html`,
+      deckPath:String.raw`Y:\aico-ppt\Deck-Projects\demo\.aico-ppt-editor\real-e2e\working\deck.html`,
       serviceUrl:'http://127.0.0.1:54117',
       token:'real-e2e-token',
       taskIds:['task-windows-resume-prefix'],

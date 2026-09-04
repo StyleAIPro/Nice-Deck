@@ -51,6 +51,15 @@ export async function startFixtureServer(options = {}) {
       pickDeckFile:options.pickDeckFile,
       agentRunTimeoutMs: options.agentRunTimeoutMs,
       agentRunAdapter: options.agentRunAdapter,
+      dshAgentBridge: options.dshAgentBridge,
+      ...(options.dshAgentBridge ? {
+        workId:options.workId ?? '11111111-1111-4111-8111-111111111111',
+        dshWorkItemProvider:options.dshWorkItemProvider ?? (async () => ({
+          workId:options.workId ?? '11111111-1111-4111-8111-111111111111',
+          dshBinding:{ activeSessionId:'dsh-test-session' },
+        })),
+        dshWorkItemCommand:options.dshWorkItemCommand ?? (async () => ({ workItem:null })),
+      } : {}),
       editorAssets: options.editorAssets,
     });
     const closeServer = app.close;
@@ -155,11 +164,19 @@ export async function openEditor(app, options = {}) {
         resourceProblems.push(`${type} ${response.status()} ${response.url()}`);
       }
     });
+    if (typeof options.initScript === 'function' || typeof options.initScript === 'string') {
+      await page.addInitScript(options.initScript, options.initScriptArg);
+    }
     const workspaceQuery = options.workspaceUrl
       ? `&workspaceUrl=${encodeURIComponent(options.workspaceUrl)}`
       : '';
+    const embeddedQuery = options.embeddedMode
+      ? `&embedded=${encodeURIComponent(options.embeddedMode)}`
+        + (options.parentOrigin
+          ? `&parentOrigin=${encodeURIComponent(options.parentOrigin)}` : '')
+      : '';
     await page.goto(`${app.url}/?token=${encodeURIComponent(app.token)}`
-      + `&editorToken=${encodeURIComponent(app.editorToken)}${workspaceQuery}`);
+      + `&editorToken=${encodeURIComponent(app.editorToken)}${workspaceQuery}${embeddedQuery}`);
     // 大型离线 bundle 在整套串行 E2E 中可能遇到磁盘/CPU 峰值；iframe 元素本身
     // 与 deck-ready 使用同一等待预算，避免已可见却刚好越过 3 秒硬阈值的假失败。
     await page.waitForSelector('#deck-frame', { timeout:options.readyTimeoutMs ?? 12_000 });
@@ -497,8 +514,9 @@ export async function applyPilotActions(app, page, task) {
     app,
     state => state.revision === afterActions.revision + 1
       && state.groups.find(candidate => candidate.id === group.id)?.active === false
-      && state.tasks.find(candidate => candidate.id === task.id)?.status === 'pending'
-      && state.tasks.find(candidate => candidate.id === task.id)?.groupId === undefined,
+      && state.tasks.find(candidate => candidate.id === task.id)?.status === 'completed'
+      && state.tasks.find(candidate => candidate.id === task.id)?.groupId === group.id
+      && state.tasks.find(candidate => candidate.id === task.id)?.effectState === 'undone',
     '等待试点 undo 持久化超时',
   );
   const redone = await pilotPost(app, `/api/groups/${encodeURIComponent(group.id)}/redo`, {
@@ -509,7 +527,8 @@ export async function applyPilotActions(app, page, task) {
     state => state.revision === afterUndo.revision + 1
       && state.groups.find(candidate => candidate.id === group.id)?.active === true
       && state.tasks.find(candidate => candidate.id === task.id)?.status === 'completed'
-      && state.tasks.find(candidate => candidate.id === task.id)?.groupId === group.id,
+      && state.tasks.find(candidate => candidate.id === task.id)?.groupId === group.id
+      && state.tasks.find(candidate => candidate.id === task.id)?.effectState === 'active',
     '等待试点 redo 持久化超时',
   );
   if (undone.groupId !== group.id || redone.groupId !== group.id) {

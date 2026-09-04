@@ -21,7 +21,7 @@
     inset 0 .5px .5px rgb(255 255 255 / 55%), inset 0 2.5px 4px -2px rgb(255 255 255 / 34%),
     inset 0 -.5px .5px rgb(255 255 255 / 26%);
   color: #e5e7eb;
-  font-family: "Huawei Deck UI", "Noto Sans SC", sans-serif;
+  font-family: "AICO-PPT UI", "Noto Sans SC", sans-serif;
   font-synthesis: none;
   animation: agent-drawer-in 220ms cubic-bezier(.2, .8, .2, 1) both;
 }
@@ -259,7 +259,7 @@
   gap: 10px;
   background: rgb(21 23 27 / 94%);
   color: rgb(229 231 235 / 76%);
-  font: 500 12px/1.4 "Huawei Deck UI", "Noto Sans SC", sans-serif;
+  font: 500 12px/1.4 "AICO-PPT UI", "Noto Sans SC", sans-serif;
   letter-spacing: .01em;
   cursor: wait;
   pointer-events: auto;

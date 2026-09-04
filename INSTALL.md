@@ -1,11 +1,12 @@
-# Huawei Deck 安装指南
+# AICO-PPT 安装指南
 
-Huawei Deck 包含两层：
+AICO-PPT 包含三个清晰分层：
 
-- **Skill**：让 Codex、Claude Code 等 Agent 能发现 Huawei Deck 的工作流；
-- **Editor**：提供新建、预览、区域任务、直接编辑、撤销和固化界面。
+- **Skill**：让 Codex、Claude Code 等 Agent 能发现 AICO-PPT 的工作流；
+- **DSH Plugin**：正式窗口壳，提供左侧 DSH 原生对话与右侧 Editor；
+- **独立 Dev Shell**：保留原 PTY 工作台，仅用于开发、回归和 DSH 不可用时排障。
 
-两层可以独立使用。Editor 的导出和材料解析能力按需安装，不会阻塞基础启动。
+三者共用同一份 `SKILL.md`、Editor Core 和 Managed Workspace。DSH 不要求本机 Codex / Claude Code / OpenCode CLI，也不会加载 `node-pty`；导出和材料解析能力按需安装，不会阻塞 Editor Core。
 
 ## 1. 准备仓库
 
@@ -14,10 +15,20 @@ Huawei Deck 包含两层：
 基础要求：
 
 - Python 3.9 或更高版本；
-- 使用 Editor 时需要 Node.js 18 或更高版本；
-- 至少安装并登录 Codex、Claude Code 或 OpenCode 中的一个。
+- 使用 Editor Core 时需要 Node.js 18 或更高版本；
+- 只有独立 Dev Shell 才要求至少安装并登录 Codex、Claude Code 或 OpenCode 中的一个。
 
-## 2. macOS 安装
+## 2. 安装 DSH Plugin（推荐窗口入口）
+
+从仓库根目录执行：
+
+```bash
+dsh plugin --profile web add .
+```
+
+随后重启 DSH `web` profile。左侧边栏底部会出现 `AICO-PPT`；点击后保持左侧会话，并在右侧打开 Editor。DSH 的模型、审批、计划与聊天是唯一 Agent 宿主，右侧不再创建第二套 PTY。
+
+## 3. macOS 安装独立 Dev Shell
 
 在仓库根目录运行：
 
@@ -27,13 +38,15 @@ python3 scripts/install.py install
 
 默认行为：
 
-1. 把当前仓库注册到 `~/.agents/skills/huawei-deck`；
-2. 检查并修复 Editor Core 的项目依赖；
+1. 把当前仓库注册到 `~/.agents/skills/aico-ppt`；
+2. 检查并修复 `dev-shell` Profile（Editor Core、PTY、xterm 与本机 Agent CLI）；
 3. 不安装 LibreOffice、PPTX 导出或材料解析能力。
 
-安装后重新打开 Codex 任务，再双击根目录的 `Huawei Deck 编辑器.app`。
+安装后重新打开 Codex 任务。仅在开发、回归或排障时双击根目录的 `AICO-PPT 编辑器.app`；页面顶栏会显示 `DEV SHELL`。
 
-## 3. Windows 安装
+若机器上已有旧版注册，安装器会先创建并验证 `~/.agents/skills/aico-ppt`，写入新的安装记录后，才删除由旧安装记录明确拥有的注册。来源不明的同名目录或链接一律不会被覆盖或删除。旧项目 sidecar 与旧本机状态目录继续原位兼容读取，避免 Draft、工作副本或会话绑定失联。
+
+## 4. Windows 安装独立 Dev Shell
 
 在仓库根目录打开 PowerShell：
 
@@ -41,7 +54,7 @@ python3 scripts/install.py install
 py -3 scripts\install.py install
 ```
 
-安装器会使用目录 junction 注册 Skill，不要求开启 Windows Developer Mode。安装后重新打开 Codex 任务，再双击 `Huawei Deck 编辑器.cmd`；它会在同目录生成带图标的 `Huawei Deck 编辑器（Windows）.lnk`，以后可直接使用该快捷方式。
+安装器会使用目录 junction 注册 Skill，不要求开启 Windows Developer Mode。仅在开发、回归或排障时双击 `AICO-PPT 编辑器.cmd`；它会在同目录生成带图标的 `AICO-PPT 编辑器（Windows）.lnk`，以后可直接使用该快捷方式。
 
 如果系统没有 `py`，可改用：
 
@@ -52,7 +65,7 @@ python scripts\install.py install
 ### Windows Editor 使用安装在 WSL2 内的 Codex
 
 如果 Editor 在 Windows 启动，而 Codex CLI 只安装在 WSL2，可在
-`%USERPROFILE%\.huawei-deck-editor\settings.json` 写入本机配置：
+`%USERPROFILE%\.aico-ppt-editor\settings.json` 写入本机配置：
 
 ```json
 {
@@ -79,9 +92,9 @@ Codex、Node、HOME 与 Windows→WSL 路径映射。任务终端依次显示“
 终端画面一次性投影到浏览器，避免长会话逐块重绘。
 修改配置或更新 Editor 代码后，需要彻底退出旧 Editor 后台再重新双击启动。
 
-## 4. 只安装 Skill
+## 5. 只安装 Skill
 
-如果暂时不使用窗口化 Editor：
+如果只在 Codex / Claude Code 中调用 Skill，或窗口化操作全部交给 DSH：
 
 ```bash
 python3 scripts/install.py install --skill-only
@@ -93,9 +106,9 @@ Windows：
 py -3 scripts\install.py install --skill-only
 ```
 
-## 5. 兼容其他 Agent
+## 6. 兼容其他 Agent
 
-默认只注册 Codex 当前使用的通用目录 `~/.agents/skills/huawei-deck`。
+默认只注册 Codex 当前使用的通用目录 `~/.agents/skills/aico-ppt`。
 
 同时注册 Claude Code：
 
@@ -113,13 +126,13 @@ python3 scripts/install.py repair --hosts all
 
 | Host | 注册位置 |
 |---|---|
-| Codex | `~/.agents/skills/huawei-deck` |
-| Claude Code | `~/.claude/skills/huawei-deck` |
-| 旧版 Codex 兼容 | `~/.codex/skills/huawei-deck` |
+| Codex | `~/.agents/skills/aico-ppt` |
+| Claude Code | `~/.claude/skills/aico-ppt` |
+| 旧版 Codex 兼容 | `~/.codex/skills/aico-ppt` |
 
-## 6. 检查和修复
+## 7. 检查和修复
 
-只检查 Skill 与 Editor Core：
+检查 Skill 与独立 Dev Shell：
 
 ```bash
 python3 scripts/install.py inspect
@@ -145,7 +158,7 @@ python3 scripts/install.py inspect --json
 
 如果注册目标已经存在且不指向当前仓库，安装器会返回 `INSTALL_TARGET_OCCUPIED` 并停止，不会覆盖原目录。请先确认旧目录来源，再手工移动或删除；不要对不明目录执行递归删除。
 
-如果注册目标已经指向当前仓库，但没有本安装器的所有权记录，检查结果会显示 `adoption-required`，普通安装或修复会返回 `INSTALL_ADOPTION_REQUIRED`，不会静默接管。确认该链接确实应由 Huawei Deck 管理后运行：
+如果注册目标已经指向当前仓库，但没有本安装器的所有权记录，检查结果会显示 `adoption-required`，普通安装或修复会返回 `INSTALL_ADOPTION_REQUIRED`，不会静默接管。确认该链接确实应由 AICO-PPT 管理后运行：
 
 ```bash
 python3 scripts/install.py repair --adopt-existing
@@ -153,12 +166,18 @@ python3 scripts/install.py repair --adopt-existing
 
 Windows PowerShell 使用 `py -3 scripts\install.py repair --adopt-existing`。Editor 首页的“安装与诊断”也会显示“接管此安装”，并在写入所有权记录前要求明确确认。
 
-## 7. 按任务准备能力
+## 8. 按任务准备能力
 
-基础 Editor：
+DSH Editor Core（不含本机 PTY 和 Agent CLI）：
 
 ```bash
 python3 scripts/check_deps.py --profile editor-core --repair
+```
+
+独立 Dev Shell：
+
+```bash
+python3 scripts/check_deps.py --profile dev-shell --repair
 ```
 
 截图、溢出和逐拍验证：
@@ -179,17 +198,19 @@ PDF/PPTX 外部材料解析：
 python3 scripts/check_deps.py --profile materials --repair
 ```
 
-Windows 把 `python3` 换成 `py -3`。Chrome、LibreOffice、Node.js 和 Agent CLI 需要用户按诊断提示手工安装或登录。
+Windows 把 `python3` 换成 `py -3`。Chrome、LibreOffice 和 Node.js 需要用户按诊断提示手工安装；Agent CLI 只属于 `dev-shell` Profile。
 
-## 8. 启动 Editor
+## 9. 启动独立 Dev Shell
 
-macOS：双击 `Huawei Deck 编辑器.app`，或：
+本节不是正式 DSH 使用路径，只用于开发、回归与故障排查。
+
+macOS：双击 `AICO-PPT 编辑器.app`，或：
 
 ```bash
 python3 scripts/deck-editor.py --app
 ```
 
-Windows：首次双击 `Huawei Deck 编辑器.cmd` 会生成带图标的 `Huawei Deck 编辑器（Windows）.lnk`；之后可双击快捷方式，也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上。快捷方式保存当前机器的绝对路径，移动仓库后删除旧 `.lnk` 并重新运行 `.cmd` 即可重建。
+Windows：首次双击 `AICO-PPT 编辑器.cmd` 会生成带图标的 `AICO-PPT 编辑器（Windows）.lnk`；之后可双击快捷方式，也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上。快捷方式保存当前机器的绝对路径，移动仓库后删除旧 `.lnk` 并重新运行 `.cmd` 即可重建。
 
 命令行直接打开一份 Deck：
 
@@ -203,7 +224,7 @@ Windows：
 py -3 scripts\deck-editor.py C:\absolute\path\to\deck.html
 ```
 
-## 9. 卸载
+## 10. 卸载
 
 ```bash
 python3 scripts/install.py uninstall
@@ -213,14 +234,14 @@ python3 scripts/install.py uninstall
 
 - 当前仓库；
 - 用户创建的 Deck；
-- `.huawei-deck-editor` 中的工作副本和会话；
+- `.aico-ppt-editor` 中的工作副本和会话；
 - Python、Node.js、Chrome、LibreOffice 或 Agent CLI。
 
 如果注册目标在安装后被改到别处，卸载会返回 `UNINSTALL_TARGET_CHANGED` 并拒绝删除。
 
 多 Host 卸载按事务执行；任一注册项删除失败时，安装器会恢复此前已经移除的链接和原安装记录，避免留下半卸载状态。
 
-## 10. 常见问题
+## 11. 常见问题
 
 ### Skill 安装后没有触发
 
@@ -228,7 +249,7 @@ python3 scripts/install.py uninstall
 
 ### Editor 能打开，但验证或导出不可用
 
-这属于 Feature Pack 未就绪，不是 Editor Core 安装失败。进入 Editor 的“安装与诊断”，按任务修复 `verify` 或 `pptx-export`。
+这属于 Feature Pack 未就绪，不是 Editor Core 或 `dev-shell` 安装失败。进入 Editor 的“安装与诊断”，按任务修复 `verify` 或 `pptx-export`。
 
 ### macOS 已安装 Python 包，Editor 却显示未就绪
 
@@ -246,7 +267,7 @@ python3 scripts/install.py uninstall
 
 ### Windows 已配置 WSL Codex，但 Editor 仍无法启动 Agent
 
-运行 `py -3 scripts\check_deps.py --profile editor-core --check-only`。诊断结果应显示
+运行 `py -3 scripts\check_deps.py --profile dev-shell --check-only`。诊断结果应显示
 `Codex: WSL <发行版>/<用户> · <版本>`。如果提示发行版、用户或 Codex 不可用，请先用
 上面的 `wsl.exe` 命令核对名称、登录状态和登录 `PATH`；不要在 Windows 侧复制
 `/root/.codex` 或登录凭据。

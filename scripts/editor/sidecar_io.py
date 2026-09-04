@@ -22,6 +22,19 @@ import re
 import struct
 
 try:
+    from product_paths import (
+        LEGACY_PROJECT_STATE_DIRECTORY,
+        PROJECT_STATE_DIRECTORY,
+        resolve_project_state_root,
+    )
+except ModuleNotFoundError:
+    from scripts.editor.product_paths import (
+        LEGACY_PROJECT_STATE_DIRECTORY,
+        PROJECT_STATE_DIRECTORY,
+        resolve_project_state_root,
+    )
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover - 当前生产平台为 macOS/Linux
     fcntl = None
@@ -932,6 +945,7 @@ class PersistentHelper:
         self.root_fd = None
         self.project_identity = None
         self.root_identity = None
+        self.root_name = None
         self.root_locked = False
         self.deck_name = None
         self.session_id = None
@@ -1473,7 +1487,7 @@ class PersistentHelper:
 
     def _assert_bound_directories(self, *, include_attachments):
         checks = [
-            (self.project_fd, ".huawei-deck-editor", self.root_fd),
+            (self.project_fd, self.root_name, self.root_fd),
             (self.root_fd, self.session_name, self.session_fd),
             (self.session_fd, "snapshots", self.snapshots_fd),
             (self.session_fd, "backups", self.backups_fd),
@@ -2004,10 +2018,17 @@ class PersistentHelper:
         self.project_fd = _open_directory(self.project_identity)
         if "root" in payload:
             self.root_identity = _require_identity(payload["root"])
+            self.root_name = Path(self.root_identity["path"]).name
+            if self.root_name not in {
+                PROJECT_STATE_DIRECTORY, LEGACY_PROJECT_STATE_DIRECTORY,
+            }:
+                raise SidecarIOError("sidecar root 名称不受支持")
             self.root_fd = _open_directory(self.root_identity)
             _require_same_mount(self.project_fd, self.root_fd)
         else:
-            root_name = ".huawei-deck-editor"
+            root_name = resolve_project_state_root(
+                Path(self.project_identity["path"])
+            ).name
             try:
                 os.mkdir(root_name, 0o700, dir_fd=self.project_fd)
                 os.fsync(self.project_fd)
@@ -2021,6 +2042,7 @@ class PersistentHelper:
                 str(Path(self.project_identity["path"]) / root_name),
                 str(Path(self.project_identity["realPath"]) / root_name),
             )
+            self.root_name = root_name
         self._acquire_session_lock()
         return {"ready": True, "root": self.root_identity}
 

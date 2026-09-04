@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""依赖体检 doctor —— 按任务 Profile 检查和修复 Huawei Deck 依赖。
+"""依赖体检 doctor —— 按任务 Profile 检查和修复 AICO-PPT 依赖。
 
 覆盖：
   · 外部依赖 skill：pdf（vendored 于 .agents/skills/pdf/）及其 Python 库 pypdf / pdfplumber
   · 本 skill 运行时：Node ≥ 18、playwright-core（三级查找）、python-pptx、pymupdf、Chrome、soffice(LibreOffice)
-  · 可视化编辑器：ws、html2canvas、busboy、node-pty、@xterm/xterm、three
+  · Editor Core：ws、html2canvas、busboy、three
+  · 独立 Dev Shell：node-pty、@xterm/xterm、@xterm/headless、@xterm/addon-serialize、Agent CLI
 
 Profile：
-  editor-core  启动窗口化 Editor 所需的 Node、前端模块和 Agent CLI
+  editor-core  启动 DSH Editor Runtime 所需的 Node 与前端模块
+  dev-shell    独立开发/调试壳所需的 Editor Core、PTY、xterm 和 Agent CLI
   verify       浏览器截图、溢出检查和逐拍验证
   pptx-export  HTML → PPTX 导出
   materials    PDF/PPTX 外部材料读取与转换
@@ -23,7 +25,7 @@ Profile：
 
 用法：
   python3 scripts/check_deps.py --profile editor-core --check-only
-  python3 scripts/check_deps.py --profile editor-core --repair
+  python3 scripts/check_deps.py --profile dev-shell --repair
   python3 scripts/check_deps.py --profile full --check-only --json
 """
 import argparse
@@ -34,6 +36,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+try:
+    from editor.product_paths import resolve_user_state_root
+except ModuleNotFoundError:  # importlib 测试从仓库根加载脚本
+    from scripts.editor.product_paths import resolve_user_state_root
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -78,10 +85,7 @@ def run(cmd, **kw):
 def load_agent_runtime_settings(environment=None):
     """读取 Editor 本机配置；doctor 与启动器必须使用同一契约。"""
     environment = os.environ if environment is None else environment
-    state_root = environment.get("HUAWEI_DECK_EDITOR_STATE_ROOT")
-    settings_path = (
-        Path(state_root).resolve() if state_root else Path.home() / ".huawei-deck-editor"
-    ) / "settings.json"
+    settings_path = resolve_user_state_root(environment) / "settings.json"
     if not settings_path.is_file():
         return {"codexRuntime": "native"}
     try:
@@ -396,10 +400,15 @@ CHECKS = [
     dict(key="busboy", label="busboy", why="可视化编辑器任务附件上传",
          probe=probe_nodemod("busboy"), install=["npm", "i", "busboy@1.6.0"], install_cwd=str(REPO)),
     dict(key="node-pty", label="node-pty", why="可视化编辑器真实 Agent 终端",
-         probe=probe_node_pty, install=["npm", "i", "--save-exact", "node-pty@1.2.0-beta.15"],
+         probe=probe_node_pty, install=["npm", "i", "--no-save", "--save-exact", "node-pty@1.2.0-beta.15"],
          install_cwd=str(REPO)),
     dict(key="@xterm/xterm", label="@xterm/xterm", why="浏览器 ANSI 终端渲染与输入",
-         probe=probe_nodemod("@xterm/xterm"), install=["npm", "i", "@xterm/xterm@5.5.0"], install_cwd=str(REPO)),
+         probe=probe_nodemod("@xterm/xterm"), install=["npm", "i", "--no-save", "@xterm/xterm@5.5.0"], install_cwd=str(REPO)),
+    dict(key="@xterm/headless", label="@xterm/headless", why="独立 Dev Shell 终端状态投影",
+         probe=probe_nodemod("@xterm/headless"), install=["npm", "i", "--no-save", "@xterm/headless@5.5.0"], install_cwd=str(REPO)),
+    dict(key="@xterm/addon-serialize", label="@xterm/addon-serialize", why="独立 Dev Shell 终端快照",
+         probe=probe_nodemod("@xterm/addon-serialize"),
+         install=["npm", "i", "--no-save", "@xterm/addon-serialize@0.13.0"], install_cwd=str(REPO)),
     dict(key="three", label="three", why="启动页红白流体交互背景",
          probe=probe_nodemod("three"), install=["npm", "i", "three@0.185.1"], install_cwd=str(REPO)),
     dict(key="agent-cli", label="Agent CLI", why="可视化编辑器 Agent 终端",
@@ -424,9 +433,10 @@ CHECKS = [
 ]
 
 
-PROFILE_ORDER = ("editor-core", "verify", "pptx-export", "materials")
+PROFILE_ORDER = ("editor-core", "dev-shell", "verify", "pptx-export", "materials")
 PROFILE_LABELS = {
     "editor-core": "Editor Core",
+    "dev-shell": "独立 Dev Shell",
     "verify": "质量验证",
     "pptx-export": "PPTX 导出",
     "materials": "外部材料解析",
@@ -434,8 +444,11 @@ PROFILE_LABELS = {
 }
 PROFILE_MEMBERS = {
     "editor-core": {
-        "node", "ws", "html2canvas", "busboy", "node-pty", "@xterm/xterm",
-        "three", "agent-cli",
+        "node", "ws", "html2canvas", "busboy", "three",
+    },
+    "dev-shell": {
+        "node", "ws", "html2canvas", "busboy", "three", "node-pty",
+        "@xterm/xterm", "@xterm/headless", "@xterm/addon-serialize", "agent-cli",
     },
     "verify": {"node", "playwright-core", "chrome"},
     "pptx-export": {"node", "playwright-core", "chrome", "python-pptx"},
@@ -576,7 +589,7 @@ def _print_snapshot(snapshot):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="huawei-deck 依赖体检")
+    ap = argparse.ArgumentParser(description="aico-ppt 依赖体检")
     ap.add_argument("--profile", action="append", choices=tuple(PROFILE_LABELS),
                     help="要检查的能力 Profile；可重复传入，默认 full")
     ap.add_argument("--check-only", action="store_true",

@@ -271,7 +271,7 @@ test('bypass Agent 遇到目录信任提示时自动展开右侧终端并等待�
   assert.deepEqual(children[0].writes, ['\r']);
   children[0].events.emit('data', '\r\nCodex ready\r\n');
   for (let attempt = 0; attempt < 700
-    && (!children[0].writes.some(value => value.includes('Huawei Deck'))
+    && (!children[0].writes.some(value => value.includes('AICO-PPT'))
       || children[0].writes.at(-1) !== '\r'); attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -281,7 +281,7 @@ test('bypass Agent 遇到目录信任提示时自动展开右侧终端并等待�
     document.querySelector('[data-agent-status]')?.dataset.agentStatus === 'online'
   ));
   assert.ok(
-    children[0].writes.some(value => value.includes('Huawei Deck')),
+    children[0].writes.some(value => value.includes('AICO-PPT')),
     '确认信任并进入正常输入框后才应提交初始化任务',
   );
   assert.deepEqual(browserProblems, []);
@@ -307,8 +307,8 @@ test('Codex 恢复目录选择页自动展开终端、撤掉遮罩并接收键�
           + '\u001b[2;29Hresume\u001b[2;36Hthis\u001b[2;41Hsession'
           + '\u001b[4;3HSession = latest cwd recorded in the resumed session'
           + '\u001b[5;3HCurrent = your current working directory'
-          + '\u001b[7;1H› 1. Use session directory\u001b[8;6H(/tmp/old-huawei-deck)'
-          + '\u001b[9;3H2.\u001b[9;6HUse current directory (/tmp/huawei-deck)'
+          + '\u001b[7;1H› 1. Use session directory\u001b[8;6H(/tmp/old-aico-ppt)'
+          + '\u001b[9;3H2.\u001b[9;6HUse current directory (/tmp/aico-ppt)'
           + '\u001b[10;3H3.\u001b[10;6HAlways use session directory'
           + '\u001b[11;3H4.\u001b[11;6HAlways use current directory'
           + '\u001b[13;3HPress enter to continue\u001b[?25l',
@@ -440,7 +440,9 @@ test('恢复旧 Codex 会话进入输入框前保持遮罩并拒绝输入与 Age
   assert.deepEqual(resourceProblems, []);
 });
 
-test('Windows 终端的 Ctrl+V 只粘贴一次，选中文字后 Ctrl+C 只复制且不中断 Codex', async t => {
+test('Windows 终端的 Ctrl+V 只粘贴一次，选中文字后 Ctrl+C 只复制且不中断 Codex', {
+  skip:process.platform !== 'win32',
+}, async t => {
   const children = [];
   const app = await startFixtureServer({
     autoStartAgentTerminal:true,
@@ -649,7 +651,7 @@ test('Editor 后台预启动 bypass 终端，右上角负责展开、重连、�
     'resume', '--dangerously-bypass-approvals-and-sandbox', 'codex-terminal-e2e-1',
   ]);
   assert.equal(children[0].args.length, 3);
-  assert.match(createdPrompts[0], /huawei-deck/);
+  assert.match(createdPrompts[0], /aico-ppt/);
   assert.equal(children[0].options.cwd, app.agentTerminal.cwd);
   assert.equal(app.agentTerminal.projectRoot, app.agentWorkspace.snapshot().projectRoot);
   assert.equal(await panel.locator('[data-agent-chat-input], .agent-chat-tabs, .agent-chat-composer').count(), 0);
@@ -749,7 +751,7 @@ test('Editor 后台预启动 bypass 终端，右上角负责展开、重连、�
     '--dangerously-bypass-approvals-and-sandbox',
   ]);
   assert.match(children[1].writes[0], /019ff4b7-0622-7272-b0e2-394f6316b52a/);
-  assert.match(children[1].writes[0], /huawei-deck/);
+  assert.match(children[1].writes[0], /aico-ppt/);
   assert.equal(children[1].writes.at(-1), '\r');
   assert.equal(
     await panel.getAttribute('data-conversation-id'),
@@ -893,7 +895,7 @@ test('任务批次进入同一 bypass PTY，权威 action 完成后退出 pendin
   }
   const startupPrompt = children[0].writes.find(value => value.includes(created.task.id));
   assert.match(startupPrompt, new RegExp(created.task.id));
-  assert.match(startupPrompt, /huawei-deck/);
+  assert.match(startupPrompt, /aico-ppt/);
 
   const capturedRunResponse = await fetch(
     `${app.url}/api/agent-runs/current?token=${encodeURIComponent(app.token)}`,

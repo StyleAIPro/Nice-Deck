@@ -1,6 +1,6 @@
 import { applyPill } from './pill-nav.mjs';
 
-const STYLE_ID = 'huawei-deck-native-controls';
+const STYLE_ID = 'aico-ppt-native-controls';
 const monitoredControls = new Set();
 let disconnectionObserver = null;
 
@@ -16,7 +16,7 @@ const CONTROL_STYLES = `
   .ui-select[data-open="true"] .ui-select-chevron{transform:translateY(2px) rotate(225deg)}
   .ui-select-menu{position:fixed;z-index:2147483646;max-height:min(280px,calc(100vh - 24px));padding:5px;overflow:auto;border:1px solid rgba(20,22,28,.13);border-radius:12px;background:rgba(255,255,255,.985);box-shadow:0 18px 48px rgba(20,22,28,.2),0 2px 8px rgba(20,22,28,.08);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
   .ui-select-menu[hidden]{display:none!important}
-  .ui-select-option{width:100%;min-height:34px;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 10px;border:0;border-radius:8px;color:#34383e;background:transparent;font:600 12px/1.25 "Huawei Deck UI","Noto Sans SC",sans-serif;text-align:left;cursor:pointer}
+  .ui-select-option{width:100%;min-height:34px;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 10px;border:0;border-radius:8px;color:#34383e;background:transparent;font:600 12px/1.25 "AICO-PPT UI","Noto Sans SC",sans-serif;text-align:left;cursor:pointer}
   .ui-select-option:hover,.ui-select-option:focus-visible{outline:none;background:rgba(199,0,11,.065);color:#9f0009}
   .ui-select-option[aria-selected="true"]{background:#fff0f1;color:#a80009}
   .ui-select-option[aria-selected="true"]::after{content:"";width:7px;height:4px;border-left:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:translateY(-1px) rotate(-45deg)}
@@ -27,7 +27,7 @@ const CONTROL_STYLES = `
   .ui-modal-panel{position:relative;z-index:1;animation:ui-modal-enter .22s cubic-bezier(.22,1,.36,1) both}
   .ui-color-trigger{width:100%;height:100%;min-width:24px;min-height:24px;padding:0;border:0;border-radius:inherit;background:var(--ui-color,#191919);box-shadow:inset 0 0 0 1px rgba(20,22,28,.14);cursor:pointer}
   .ui-color-trigger:focus-visible{outline:2px solid rgba(199,0,11,.48);outline-offset:2px}
-  .ui-color-popover{position:fixed;z-index:2147483646;width:232px;padding:12px;border:1px solid rgba(20,22,28,.13);border-radius:12px;background:rgba(255,255,255,.99);box-shadow:0 18px 48px rgba(20,22,28,.2),0 2px 8px rgba(20,22,28,.08);font:600 12px/1.3 "Huawei Deck UI","Noto Sans SC",sans-serif}
+  .ui-color-popover{position:fixed;z-index:2147483646;width:232px;padding:12px;border:1px solid rgba(20,22,28,.13);border-radius:12px;background:rgba(255,255,255,.99);box-shadow:0 18px 48px rgba(20,22,28,.2),0 2px 8px rgba(20,22,28,.08);font:600 12px/1.3 "AICO-PPT UI","Noto Sans SC",sans-serif}
   .ui-color-popover[hidden]{display:none!important}
   .ui-color-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-bottom:11px}
   .ui-color-swatch{aspect-ratio:1;border:1px solid rgba(20,22,28,.13);border-radius:7px;background:var(--swatch);box-shadow:inset 0 0 0 1px rgba(255,255,255,.35);cursor:pointer}
@@ -35,7 +35,7 @@ const CONTROL_STYLES = `
   .ui-color-entry{display:flex;align-items:center;gap:7px}
   .ui-color-entry input{min-width:0;height:34px;flex:1;padding:0 9px;border:1px solid rgba(20,22,28,.14);border-radius:8px;outline:0;color:#30343a;background:#fff;font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase}
   .ui-color-entry input:focus{border-color:#df6c73;box-shadow:0 0 0 3px rgba(199,0,11,.08)}
-  .ui-color-apply{height:34px;flex:none;font:700 12px/1 "Huawei Deck UI","Noto Sans SC",sans-serif}
+  .ui-color-apply{height:34px;flex:none;font:700 12px/1 "AICO-PPT UI","Noto Sans SC",sans-serif}
   @keyframes ui-modal-fade{from{opacity:0}to{opacity:1}}
   @keyframes ui-modal-enter{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
   @media(prefers-reduced-motion:reduce){.ui-select-trigger,.ui-select-chevron,.ui-modal-backdrop,.ui-modal-panel{transition:none;animation:none}}

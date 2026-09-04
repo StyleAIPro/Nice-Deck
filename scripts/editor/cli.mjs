@@ -6,9 +6,9 @@ import { readWorkspaceCapability } from './workspace-capability.mjs';
 const HELP = {
   usage: 'node scripts/editor/cli.mjs [连接选项] COMMAND [ARG]',
   environment: [
-    'HUAWEI_DECK_EDITOR_URL',
-    'HUAWEI_DECK_EDITOR_TOKEN',
-    'HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE',
+    'AICO_PPT_EDITOR_URL',
+    'AICO_PPT_EDITOR_TOKEN',
+    'AICO_PPT_WORKSPACE_CAPABILITY_FILE',
   ],
   options: [
     '--url URL', '--token TOKEN', '--capability-file FILE',
@@ -25,8 +25,8 @@ const HELP = {
 const CREATION_HELP = {
   usage:'node scripts/editor/cli.mjs creation COMMAND [选项]',
   environment:[
-    'HUAWEI_DECK_CREATION_URL',
-    'HUAWEI_DECK_CREATION_CAPABILITY_FILE',
+    'AICO_PPT_CREATION_URL',
+    'AICO_PPT_CREATION_CAPABILITY_FILE',
   ],
   commands:[
     'status', 'templates', 'update-brief', 'confirm-brief', 'propose-outline', 'confirm-outline',
@@ -49,9 +49,10 @@ function writeJson(stream, value) {
 }
 
 function parseArguments(argv) {
-  let url = process.env.HUAWEI_DECK_EDITOR_URL;
-  let token = process.env.HUAWEI_DECK_EDITOR_TOKEN;
-  let capabilityFile = process.env.HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE;
+  let url = process.env.AICO_PPT_EDITOR_URL ?? process.env.HUAWEI_DECK_EDITOR_URL;
+  let token = process.env.AICO_PPT_EDITOR_TOKEN ?? process.env.HUAWEI_DECK_EDITOR_TOKEN;
+  let capabilityFile = process.env.AICO_PPT_WORKSPACE_CAPABILITY_FILE
+    ?? process.env.HUAWEI_DECK_WORKSPACE_CAPABILITY_FILE;
   let expectedRevision = null;
   const positional = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -114,12 +115,12 @@ async function editorCredentials(options) {
   }
   if (!url) {
     throw new CliError(
-      '缺少 Editor URL；请设置 HUAWEI_DECK_EDITOR_URL、--url 或 --capability-file',
+      '缺少 Editor URL；请设置 AICO_PPT_EDITOR_URL、--url 或 --capability-file',
     );
   }
   if (!token) {
     throw new CliError(
-      '缺少 Editor token；请设置 HUAWEI_DECK_EDITOR_TOKEN、--token 或 --capability-file',
+      '缺少 Editor token；请设置 AICO_PPT_EDITOR_TOKEN、--token 或 --capability-file',
     );
   }
   return { ...options, url, token, baseUrl:normalizedBaseUrl(url) };
@@ -190,9 +191,10 @@ function parseCreationArguments(argv) {
   }
   const result = {
     help:false, command,
-    url:process.env.HUAWEI_DECK_CREATION_URL,
-    token:process.env.HUAWEI_DECK_CREATION_TOKEN,
-    capabilityFile:process.env.HUAWEI_DECK_CREATION_CAPABILITY_FILE,
+    url:process.env.AICO_PPT_CREATION_URL ?? process.env.HUAWEI_DECK_CREATION_URL,
+    token:process.env.AICO_PPT_CREATION_TOKEN ?? process.env.HUAWEI_DECK_CREATION_TOKEN,
+    capabilityFile:process.env.AICO_PPT_CREATION_CAPABILITY_FILE
+      ?? process.env.HUAWEI_DECK_CREATION_CAPABILITY_FILE,
     jsonPath:null,
     expectedRevision:null,
   };
@@ -215,7 +217,7 @@ function parseCreationArguments(argv) {
     }
     index += 1;
   }
-  if (!result.url) throw new CliError('缺少创建工作区 URL；请设置 HUAWEI_DECK_CREATION_URL 或 --url');
+  if (!result.url) throw new CliError('缺少创建工作区 URL；请设置 AICO_PPT_CREATION_URL 或 --url');
   try { result.baseUrl = new URL(result.url); }
   catch { throw new CliError(`无效创建工作区 URL: ${result.url}`); }
   if (!['http:', 'https:'].includes(result.baseUrl.protocol)) {
@@ -227,7 +229,7 @@ function parseCreationArguments(argv) {
 async function creationCredentials(options) {
   if (options.token) return options;
   if (!options.capabilityFile) {
-    throw new CliError('缺少创建 Draft capability；请设置 HUAWEI_DECK_CREATION_CAPABILITY_FILE 或 --token');
+    throw new CliError('缺少创建 Draft capability；请设置 AICO_PPT_CREATION_CAPABILITY_FILE 或 --token');
   }
   const capability = await readJsonFile(options.capabilityFile, ' capability 文件');
   if (capability.scope !== 'creation-draft' || typeof capability.token !== 'string' || !capability.token) {

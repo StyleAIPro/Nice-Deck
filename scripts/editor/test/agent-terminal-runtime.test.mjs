@@ -11,7 +11,7 @@ import {
 } from '../agent-terminal-runtime.mjs';
 
 test('本机 Agent 配置严格读取 WSL Codex 目标，缺省保持 native', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'huawei-deck-runtime-settings-'));
+  const directory = await mkdtemp(join(tmpdir(), 'aico-ppt-runtime-settings-'));
   t.after(() => rm(directory, { recursive:true, force:true }));
   const path = join(directory, 'settings.json');
   assert.deepEqual(loadAgentRuntimeSettings({ settingsPath:path }), {
@@ -67,9 +67,9 @@ test('Windows WSL Codex 使用登录 PATH、wslpath、WSLENV 和固定参数启�
     environment:{
       PATH:String.raw`C:\Windows\System32`,
       WSLENV:'EXISTING_VALUE',
-      HUAWEI_DECK_EDITOR_URL:'http://127.0.0.1:45678',
-      HUAWEI_DECK_EDITOR_TOKEN:'secret',
-      HUAWEI_DECK_SOURCE_PATH:sourcePath,
+      AICO_PPT_EDITOR_URL:'http://127.0.0.1:45678',
+      AICO_PPT_EDITOR_TOKEN:'secret',
+      AICO_PPT_SOURCE_PATH:sourcePath,
     },
     projectRoot,
     cwd,
@@ -81,16 +81,16 @@ test('Windows WSL Codex 使用登录 PATH、wslpath、WSLENV 和固定参数启�
 
   assert.equal(runtime.kind, 'wsl');
   assert.equal(runtime.conversationCwd, '/mnt/c/Users/tester/workspace/Deck 项目');
-  assert.equal(runtime.environment.HUAWEI_DECK_CODEX_RUNTIME, 'wsl');
-  assert.equal(runtime.environment.HUAWEI_DECK_WSL_CODEX_HOME, '/root/.codex');
-  assert.equal(runtime.environment.HUAWEI_DECK_WSL_NODE, '/usr/bin/node');
+  assert.equal(runtime.environment.AICO_PPT_CODEX_RUNTIME, 'wsl');
+  assert.equal(runtime.environment.AICO_PPT_WSL_CODEX_HOME, '/root/.codex');
+  assert.equal(runtime.environment.AICO_PPT_WSL_NODE, '/usr/bin/node');
   assert.equal(
-    runtime.environment.HUAWEI_DECK_WSL_SESSION_HELPER,
+    runtime.environment.AICO_PPT_WSL_SESSION_HELPER,
     '/mnt/c/Users/tester/workspace/AICO-PPT/scripts/editor/wsl-codex-session-helper.mjs',
   );
   assert.match(runtime.environment.WSLENV, /(?:^|:)EXISTING_VALUE(?:$|:)/);
-  assert.match(runtime.environment.WSLENV, /HUAWEI_DECK_EDITOR_TOKEN/);
-  assert.match(runtime.environment.WSLENV, /HUAWEI_DECK_SOURCE_PATH\/p/);
+  assert.match(runtime.environment.WSLENV, /AICO_PPT_EDITOR_TOKEN/);
+  assert.match(runtime.environment.WSLENV, /AICO_PPT_SOURCE_PATH\/p/);
   assert.equal(
     runtime.translateText(`项目：${cwd}\nCLI：${projectRoot}\\scripts\\editor\\cli.mjs`),
     '项目：/mnt/c/Users/tester/workspace/Deck 项目\n'
@@ -106,7 +106,7 @@ test('Windows WSL Codex 使用登录 PATH、wslpath、WSLENV 和固定参数启�
     args:[
       '-d', 'Ubuntu-26.04', '-u', 'root',
       '--cd', '/mnt/c/Users/tester/workspace/Deck 项目',
-      '--exec', 'bash', '-lic', 'exec "$@"', 'huawei-deck-codex',
+      '--exec', 'bash', '-lic', 'exec "$@"', 'aico-ppt-codex',
       '/usr/local/bin/codex',
       'resume', '--dangerously-bypass-approvals-and-sandbox', 'thread-id',
     ],
@@ -150,9 +150,9 @@ test('WSL runtime 预热并缓存命令、HOME 与路径映射，后续会话不
   const runWsl = async args => {
     calls.push(args);
     if (args.includes('bash') && args.includes('-lic')) {
-      return 'HUAWEI_DECK_CODEX=/usr/local/bin/codex\n'
-        + 'HUAWEI_DECK_NODE=/usr/bin/node\n'
-        + 'HUAWEI_DECK_HOME=/root\n';
+      return 'AICO_PPT_CODEX=/usr/local/bin/codex\n'
+        + 'AICO_PPT_NODE=/usr/bin/node\n'
+        + 'AICO_PPT_HOME=/root\n';
     }
     if (args.includes('wslpath')) return `${mappings.get(args.at(-1))}\n`;
     throw new Error(`未覆盖的 WSL 调用：${JSON.stringify(args)}`);
@@ -162,7 +162,7 @@ test('WSL runtime 预热并缓存命令、HOME 与路径映射，后续会话不
     settings:{
       codexRuntime:'wsl', wslDistribution:'Ubuntu-26.04', wslUser:'root',
     },
-    environment:{ HUAWEI_DECK_SOURCE_PATH:sourcePath },
+    environment:{ AICO_PPT_SOURCE_PATH:sourcePath },
     projectRoot,
     cwd,
     pathRoots:[projectRoot],
@@ -174,7 +174,7 @@ test('WSL runtime 预热并缓存命令、HOME 与路径映射，后续会话不
   const runtime = await prepareAgentTerminalRuntime('codex', options);
 
   assert.equal(calls.length, afterPrewarm, '同一进程后续启动不应重复调用 wsl.exe');
-  assert.equal(runtime.environment.HUAWEI_DECK_WSL_NODE, '/usr/bin/node');
-  assert.equal(runtime.environment.HUAWEI_DECK_WSL_CODEX_HOME, '/root/.codex');
+  assert.equal(runtime.environment.AICO_PPT_WSL_NODE, '/usr/bin/node');
+  assert.equal(runtime.environment.AICO_PPT_WSL_CODEX_HOME, '/root/.codex');
   assert.equal(runtime.conversationCwd, '/mnt/c/Users/tester/workspace/Deck 项目');
 });

@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { buildOpenCommand, startServer } from './server.mjs';
 import { isMainModule } from './main-module.mjs';
-import { AgentTerminalSession } from './agent-terminal-session.mjs';
 import { prewarmAgentTerminalRuntime } from './agent-terminal-runtime.mjs';
+import { createAgentTerminalSession } from './agent-terminal-loader.mjs';
 import {
   DraftAgentConversationStore,
   discoverTerminalConversation,
@@ -39,6 +39,8 @@ import {
   inspectEnvironment as inspectEnvironmentWithPython,
   inspectInstallation as inspectInstallationWithPython,
 } from './environment-doctor.mjs';
+import { createDshPromptRelay } from './dsh-prompt-relay.mjs';
+import { withLegacyAicoPptEnvironment } from './environment-aliases.mjs';
 
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
@@ -88,6 +90,9 @@ const APP_ASSETS = new Map([
   ['/app/pill-nav.mjs', {
     path:join(EDITOR_DIR, 'public/pill-nav.mjs'), type:'text/javascript; charset=utf-8',
   }],
+  ['/app/toolbar-tooltip.mjs', {
+    path:join(EDITOR_DIR, 'public/toolbar-tooltip.mjs'), type:'text/javascript; charset=utf-8',
+  }],
   ['/app/pill-nav.css', {
     path:join(EDITOR_DIR, 'public/pill-nav.css'), type:'text/css; charset=utf-8',
   }],
@@ -120,6 +125,14 @@ const APP_ASSETS = new Map([
     path:join(EDITOR_DIR, 'public/workspace-switcher.mjs'),
     type:'text/javascript; charset=utf-8',
   }],
+  ['/app/dsh-work-bridge.mjs', {
+    path:join(EDITOR_DIR, 'public/dsh-work-bridge.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
+  ['/app/deck-task-coordinator.mjs', {
+    path:join(EDITOR_DIR, 'public/deck-task-coordinator.mjs'),
+    type:'text/javascript; charset=utf-8',
+  }],
   ['/app/xterm.js', {
     path:join(PROJECT_DIR, 'node_modules/@xterm/xterm/lib/xterm.js'),
     type:'text/javascript; charset=utf-8',
@@ -143,6 +156,22 @@ function loopbackHost(host) {
   return normalized;
 }
 
+function loopbackHttpOrigin(value) {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const ipv4Loopback = isIP(hostname) === 4 && hostname.startsWith('127.');
+    const ipv6Loopback = hostname === '::1' || hostname === '[::1]';
+    if (url.protocol !== 'http:'
+      || url.origin !== value
+      || (!ipv4Loopback && !ipv6Loopback && hostname !== 'localhost')) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 function tokenMatches(actual, expected) {
   const left = Buffer.from(String(actual ?? ''));
   const right = Buffer.from(String(expected));
@@ -151,7 +180,7 @@ function tokenMatches(actual, expected) {
 
 function authCookieName(token) {
   const sessionId = createHash('sha256').update(token).digest('hex').slice(0, 16);
-  return `huawei_deck_app_${sessionId}`;
+  return `aico_ppt_app_${sessionId}`;
 }
 
 function cookieValue(request, name) {
@@ -212,8 +241,8 @@ export async function createOnboardingSample({
     throw Object.assign(new Error('示例项目目录无效'), { code:'INVALID_SAMPLE_DIRECTORY' });
   }
   const parent = await realpath(parentDirectory);
-  const directory = await mkdtemp(join(parent, 'Huawei Deck 示例-'));
-  const deckPath = join(directory, 'Huawei Deck 示例.html');
+  const directory = await mkdtemp(join(parent, 'AICO-PPT 示例-'));
+  const deckPath = join(directory, 'AICO-PPT 示例.html');
   await copyFile(sourceDeck, deckPath);
   return { projectRoot:directory, deckPath, deckName:basename(deckPath) };
 }
@@ -232,7 +261,7 @@ export async function startAppServer({
   resolveCreationProject = options => resolveSelectedProjectRoot(options),
   createCreationWorkspace = options => DeckCreationWorkspace.create(options),
   openCreationWorkspace = options => DeckCreationWorkspace.open(options),
-  createAgentTerminal = options => new AgentTerminalSession(options),
+  createAgentTerminal = createAgentTerminalSession,
   prewarmAgentRuntime = prewarmAgentTerminalRuntime,
   loadHelpCatalog = () => buildHelpCatalog({ projectRoot:PROJECT_DIR }),
   inspectEnvironment = options => inspectEnvironmentWithPython({
@@ -257,25 +286,39 @@ export async function startAppServer({
   launcherClientCloseGraceMs = 5_000,
   launcherLeaseHandshakeMs = 15_000,
   agentProvider = 'codex',
+  embeddedMode = null,
+  embeddedParentOrigin = null,
 } = {}) {
   host = loopbackHost(host);
+  if (![null, 'dsh'].includes(embeddedMode)) {
+    throw new TypeError('embeddedMode 只支持 null 或 dsh');
+  }
+  if (embeddedMode === 'dsh' && embeddedParentOrigin !== null) {
+    try { embeddedParentOrigin = new URL(embeddedParentOrigin).origin; }
+    catch { throw new TypeError('embeddedParentOrigin 必须是有效 Origin'); }
+  }
   if (!isAgentProviderId(agentProvider)) {
     throw new TypeError(`Agent provider 不受支持：${agentProvider}`);
   }
   if (typeof prewarmAgentRuntime !== 'function') {
     throw new TypeError('prewarmAgentRuntime 必须是函数');
   }
-  try {
-    const prewarm = prewarmAgentRuntime(agentProvider, {
-      projectRoot:PROJECT_DIR,
-      cwd:PROJECT_DIR,
-      pathRoots:[PROJECT_DIR],
-    });
-    prewarm?.catch?.(() => {
-      // 预热只隐藏 WSL 冷启动；失败由真正打开终端时的显式状态负责报告。
-    });
-  } catch {
-    // 同上：启动页本身不能因可选预热失败而退出。
+  if (typeof createAgentTerminal !== 'function') {
+    throw new TypeError('createAgentTerminal 必须是函数');
+  }
+  if (embeddedMode !== 'dsh') {
+    try {
+      const prewarm = prewarmAgentRuntime(agentProvider, {
+        projectRoot:PROJECT_DIR,
+        cwd:PROJECT_DIR,
+        pathRoots:[PROJECT_DIR],
+      });
+      prewarm?.catch?.(() => {
+        // 预热只隐藏 WSL 冷启动；失败由真正打开终端时的显式状态负责报告。
+      });
+    } catch {
+      // 同上：启动页本身不能因可选预热失败而退出。
+    }
   }
   const activeWorkCatalog = workCatalog ?? createWorkCatalog({
     legacyHistory:workHistoryStore,
@@ -386,6 +429,10 @@ export async function startAppServer({
       }
     }
     if (activeLauncherClientLeases.size > 0) return;
+    // 独立启动器由页面租约管理生命周期；DSH 嵌入运行时则由 Host
+    // 插件的 effect 统一持有。工作台折叠、页面刷新或会话切换都可能短暂
+    // 断开 iframe，此时不能把仍被 Host 持有的 Editor 服务误关掉。
+    if (embeddedMode === 'dsh') return;
     cancelLauncherClientClose();
     launcherClientCloseTimer = setTimeout(() => {
       launcherClientCloseTimer = null;
@@ -396,6 +443,7 @@ export async function startAppServer({
   };
   const scheduleCreationClientClose = () => {
     if (state !== 'building' || appClosePromise) return;
+    if (embeddedMode === 'dsh') return;
     cancelCreationClientClose();
     creationClientCloseTimer = setTimeout(() => {
       creationClientCloseTimer = null;
@@ -428,7 +476,7 @@ export async function startAppServer({
   const activateEditingRuntime = runtime => {
     runtime.editorUrl = editorUrlWithWorkspaceNavigation(
       runtime.app,
-      runtime.terminalHandedOff ? 'creation' : 'editing',
+      'editing',
     );
     activeEditingRuntimeKey = runtime.key;
     activeCreationRuntimeKey = null;
@@ -528,7 +576,117 @@ export async function startAppServer({
     )) ?? null;
   };
 
+  const synchronizeRuntimeDshBinding = workItem => {
+    const sessionId = workItem?.dshBinding?.activeSessionId ?? null;
+    if (workItem?.kind === 'creation') {
+      const runtime = creationRuntimes.get(creationRuntimeKey(workItem));
+      if (runtime) {
+        runtime.dshSessionId = sessionId;
+        runtime.candidate.workId = workItem.workId;
+        runtime.candidate.workItem = workItem;
+      }
+    } else if (workItem?.kind === 'editing') {
+      const runtime = findEditingRuntime(workItem);
+      if (runtime) {
+        runtime.dshSessionId = sessionId;
+        runtime.candidate.workId = workItem.workId;
+        runtime.candidate.workItem = workItem;
+      }
+    }
+    return workItem;
+  };
+  const executeDshWorkItemCommand = async (command, input) => {
+    if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+      code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+    });
+    switch (command) {
+      case 'set-workspace':
+        return {
+          status:'updated',
+          workItem:synchronizeRuntimeDshBinding(await activeWorkCatalog.setDshWorkspace(input)),
+        };
+      case 'begin-session':
+        return {
+          status:'pending',
+          workItem:await activeWorkCatalog.beginDshSessionProvision(input),
+        };
+      case 'complete-session':
+        return {
+          status:'linked',
+          workItem:synchronizeRuntimeDshBinding(
+            await activeWorkCatalog.completeDshSessionProvision(input),
+          ),
+        };
+      case 'fail-session':
+        return {
+          status:'recovered',
+          workItem:synchronizeRuntimeDshBinding(
+            await activeWorkCatalog.failDshSessionProvision(input),
+          ),
+        };
+      case 'activate-session':
+        return {
+          status:'active',
+          workItem:synchronizeRuntimeDshBinding(await activeWorkCatalog.activateDshSession(input)),
+        };
+      case 'archive-sessions':
+        return {
+          status:'archived',
+          workItem:synchronizeRuntimeDshBinding(await activeWorkCatalog.archiveDshSessions(input)),
+        };
+      case 'resolve-session': {
+        const workItem = await activeWorkCatalog.resolveByDshSession(input.sessionId);
+        return { status:workItem ? 'linked' : 'unlinked', workItem };
+      }
+      default:
+        throw Object.assign(new Error(`不支持的 DSH 工作项命令：${String(command)}`), {
+          code:'INVALID_DSH_COMMAND', statusCode:400,
+        });
+    }
+  };
+
   const attachCreationRuntime = async ({ workspace, project, provider, resumed = false }) => {
+    if (embeddedMode === 'dsh') {
+      const runtime = {
+        key:creationRuntimeKey({ projectRoot:project.path, draftId:workspace.draftId }),
+        workspace,
+        terminal:null,
+        unsubscribe:null,
+        dshSessionId:null,
+        candidate:{
+          nonce:randomUUID(),
+          revision:selectionRevision += 1,
+          project,
+          provider,
+          workId:null,
+        },
+      };
+      const existingWorkItem = await workItemForCreation(workspace.snapshot());
+      runtime.candidate.workId = existingWorkItem?.workId ?? null;
+      runtime.dshSessionId = existingWorkItem?.dshBinding?.activeSessionId ?? null;
+      runtime.terminal = createDshPromptRelay({
+        cwd:project.identity.originalPath,
+        getSessionId:() => runtime.dshSessionId,
+        publishRequest:request => broadcastCreation({
+          type:'dsh-creation-request',
+          revision:workspace.snapshot().revision,
+          payload:request,
+        }),
+      });
+      try {
+        await workspace.attachTerminal(runtime.terminal);
+        runtime.unsubscribe = workspace.subscribe(event => {
+          if (activeCreationRuntimeKey === runtime.key) broadcastCreation(event);
+        });
+        creationRuntimes.set(runtime.key, runtime);
+        activateCreationRuntime(runtime);
+      } catch (error) {
+        runtime.unsubscribe?.();
+        await runtime.terminal.close().catch(() => {});
+        throw error;
+      }
+      return runtime;
+    }
     const runtime = {
       key:creationRuntimeKey({ projectRoot:project.path, draftId:workspace.draftId }),
       workspace,
@@ -546,16 +704,16 @@ export async function startAppServer({
       taskId:workspace.draftId,
       projectRoot:project.path,
     }) : null;
-    const terminal = createAgentTerminal({
+    const terminal = await createAgentTerminal({
       projectRoot:project.path,
       cwd:project.identity.originalPath,
       runtimePathRoots:[PROJECT_DIR],
       provider,
-      environment:{
+      environment:withLegacyAicoPptEnvironment({
         ...process.env,
-        HUAWEI_DECK_CREATION_URL:serviceOrigin,
-        HUAWEI_DECK_CREATION_CAPABILITY_FILE:workspace.capabilityPath,
-      },
+        AICO_PPT_CREATION_URL:serviceOrigin,
+        AICO_PPT_CREATION_CAPABILITY_FILE:workspace.capabilityPath,
+      }),
       initialPrompt:() => resumed
         ? buildCreationResumePrompt({
             snapshot:workspace.snapshot(), capabilityPath:workspace.capabilityPath,
@@ -606,6 +764,8 @@ export async function startAppServer({
   const workspaceAppUrl = () => {
     const url = new URL('/app/', serviceOrigin);
     url.searchParams.set('token', token);
+    if (embeddedMode) url.searchParams.set('embedded', embeddedMode);
+    if (embeddedParentOrigin) url.searchParams.set('parentOrigin', embeddedParentOrigin);
     if (activeLauncherClientLease) {
       url.searchParams.set('clientId', activeLauncherClientLease.clientId);
       url.searchParams.set('sequence', String(activeLauncherClientLease.sequence));
@@ -618,27 +778,42 @@ export async function startAppServer({
     url.searchParams.set('editorToken', app.editorToken);
     url.searchParams.set('workspaceUrl', workspaceAppUrl());
     url.searchParams.set('workspaceKind', kind);
+    if (embeddedMode) url.searchParams.set('embedded', embeddedMode);
+    if (embeddedParentOrigin) url.searchParams.set('parentOrigin', embeddedParentOrigin);
     return url.href;
   };
-  const openCreationManagedDeck = options => CreationManagedDeck.open({
-    ...options,
-    editorCloseGraceMs,
-    startEditor:startCreationEditor ?? startEditor,
-    workspaceHistoryProvider:runtimeAwareHistory,
-    onEditorClose:({ editor }) => {
-      const runtime = [...editingRuntimes.values()].find(value => value.app === editor);
-      if (!runtime) return;
-      editingRuntimes.delete(runtime.key);
-      void runtime.terminal?.close?.().catch(() => {});
-      if (activeEditingRuntimeKey === runtime.key) {
-        activeEditingRuntimeKey = null;
-        editorApp = null;
-      }
-    },
-  });
+  const openCreationManagedDeck = async options => {
+    const creationDraft = options.creationHandoff?.draft ?? options.creationDraft ?? null;
+    const creationWorkItem = embeddedMode === 'dsh' && creationDraft
+      ? await workItemForCreation(creationDraft)
+      : null;
+    return CreationManagedDeck.open({
+      ...options,
+      editorCloseGraceMs,
+      startEditor:startCreationEditor ?? startEditor,
+      workspaceHistoryProvider:runtimeAwareHistory,
+      ...(creationWorkItem ? {
+        dshAgentBridge:true,
+        workId:creationWorkItem.workId,
+        dshWorkItemProvider:() => activeWorkCatalog.resolve(creationWorkItem.workId),
+        dshWorkItemCommand:(command, input) => executeDshWorkItemCommand(command, input),
+      } : {}),
+      onEditorClose:({ editor }) => {
+        const runtime = [...editingRuntimes.values()].find(value => value.app === editor);
+        if (!runtime) return;
+        editingRuntimes.delete(runtime.key);
+        void runtime.terminal?.close?.().catch(() => {});
+        if (activeEditingRuntimeKey === runtime.key) {
+          activeEditingRuntimeKey = null;
+          editorApp = null;
+        }
+      },
+    });
+  };
   const startDeckEditor = async (selectedCandidate, provider) => {
     await workHistoryStore.recordDeck({
       deckPath:selectedCandidate.deckPath,
+      ...(selectedCandidate.workId ? { workId:selectedCandidate.workId } : {}),
       provider,
       projectRoot:selectedCandidate.project.path,
     }).catch(() => {});
@@ -655,6 +830,7 @@ export async function startAppServer({
       selectedCandidate.workId = workItem.workId;
       selectedCandidate.deckId = workItem.deckId;
       selectedCandidate.binding = workItem.binding;
+      selectedCandidate.workItem = workItem;
     }
     const key = await deckRuntimeKey(selectedCandidate.deckPath, selectedCandidate.deckId);
     const existing = findEditingRuntime({
@@ -678,12 +854,20 @@ export async function startAppServer({
       agentProjectRoot:selectedCandidate.project.path,
       agentProjectRootSource:selectedCandidate.project.source,
       agentTerminalCwd:selectedCandidate.project.identity.originalPath,
-      autoStartAgentTerminal:true,
+      autoStartAgentTerminal:embeddedMode !== 'dsh',
+      dshAgentBridge:embeddedMode === 'dsh',
       pythonExecutable,
       workspaceHistoryProvider:runtimeAwareHistory,
+      workId:selectedCandidate.workId,
       deckId:selectedCandidate.deckId,
       deckBinding:selectedCandidate.binding,
       renameWorkItem:input => activeWorkCatalog.rename(input),
+      dshWorkItemProvider:selectedCandidate.workId
+        ? () => activeWorkCatalog.resolve(selectedCandidate.workId)
+        : null,
+      dshWorkItemCommand:embeddedMode === 'dsh'
+        ? (command, input) => executeDshWorkItemCommand(command, input)
+        : null,
       updateWorkItemBinding:selectedCandidate.workId && selectedCandidate.deckId
         ? binding => activeWorkCatalog.updateEditingBinding({
             workId:selectedCandidate.workId,
@@ -736,17 +920,46 @@ export async function startAppServer({
       capabilityRuntime
       && requestUrl.pathname.startsWith('/api/creation-draft'),
     );
+    const dshBridgeOrigin = embeddedMode === 'dsh'
+      && (
+        (request.method === 'POST'
+          && requestUrl.pathname === '/api/dsh-work-items/resolve-session')
+        || (request.method === 'GET' && requestUrl.pathname === '/api/work-history')
+      )
+      ? loopbackHttpOrigin(request.headers.origin)
+      : null;
     const requestCreationWorkspace = agentAuthorized
       ? capabilityRuntime.workspace : creationWorkspace;
     if (!browserAuthorized && !agentAuthorized) {
       sendJson(response, 403, { code:'FORBIDDEN', message:'导入页令牌无效' });
       return;
     }
+    if (dshBridgeOrigin !== null) {
+      response.setHeader('access-control-allow-origin', dshBridgeOrigin);
+      response.setHeader('vary', 'Origin');
+    }
 
     if (request.method === 'GET' && (requestUrl.pathname === '/' || requestUrl.pathname === '/app/')) {
       cancelCreationClientClose();
       cancelLauncherClientClose();
-      const html = appHtml.replaceAll('__APP_TOKEN__', encodeURIComponent(token));
+      const navigationPending = requestUrl.searchParams.get('leaveWorkspace') === '1'
+        || requestUrl.searchParams.has('switchKind');
+      const html = appHtml
+        .replace(
+          'data-file-picker-mode="system"',
+          `data-file-picker-mode="system"${navigationPending
+            ? ' data-workspace-navigation-state="pending"' : ''}`,
+        )
+        .replaceAll('__APP_TOKEN__', encodeURIComponent(token))
+        .replace(
+          embeddedMode === 'dsh'
+            ? /<!-- dev-shell-terminal:start -->[\s\S]*?<!-- dev-shell-terminal:end -->/gu
+            : /<!-- dev-shell-terminal:(?:start|end) -->/gu,
+          '',
+        );
+      const frameAncestors = embeddedMode === 'dsh'
+        ? "frame-ancestors http://127.0.0.1:* http://localhost:*"
+        : "frame-ancestors 'none'";
       response.writeHead(200, {
         'cache-control':'no-store',
         'content-security-policy':[
@@ -754,7 +967,7 @@ export async function startAppServer({
           "img-src 'self' data:", "connect-src 'self'", "worker-src 'self'",
           "frame-src 'self' http://127.0.0.1:* http://localhost:*",
           "base-uri 'none'",
-          "form-action 'none'", "frame-ancestors 'none'",
+          "form-action 'none'", frameAncestors,
         ].join('; '),
         'content-type':'text/html; charset=utf-8',
         'set-cookie':`${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`,
@@ -946,7 +1159,9 @@ export async function startAppServer({
       sendJson(response, 404, { code:'NOT_FOUND', message:'接口不存在' });
       return;
     }
-    if (!agentAuthorized && request.headers.origin !== serviceOrigin) {
+    if (!agentAuthorized
+      && request.headers.origin !== serviceOrigin
+      && dshBridgeOrigin === null) {
       sendJson(response, 403, { code:'FORBIDDEN', message:'只接受导入页自身发起的请求' });
       return;
     }
@@ -969,6 +1184,7 @@ export async function startAppServer({
       provider:candidate.provider,
       workId:candidate.workId ?? null,
       deckId:candidate.deckId ?? null,
+      workItem:candidate.workItem ?? null,
     });
     const publicCreationCandidate = status => ({
       status,
@@ -1006,7 +1222,7 @@ export async function startAppServer({
           return;
         }
         if (body.kind === 'profile'
-          && ['editor-core', 'verify', 'pptx-export', 'materials'].includes(body.profile)) {
+          && ['editor-core', 'dev-shell', 'verify', 'pptx-export', 'materials'].includes(body.profile)) {
           sendJson(response, 200, {
             kind:'profile', profile:body.profile,
             result:await inspectEnvironment({ profiles:[body.profile], repair:true }),
@@ -1169,6 +1385,90 @@ export async function startAppServer({
           expectedRevision:body.expectedRevision,
         });
         sendJson(response, 200, { status:'renamed', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/set-workspace') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const workItem = synchronizeRuntimeDshBinding(await activeWorkCatalog.setDshWorkspace(
+          await readJson(request),
+        ));
+        sendJson(response, 200, { status:'updated', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/begin-session') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const workItem = await activeWorkCatalog.beginDshSessionProvision(await readJson(request));
+        sendJson(response, 200, { status:'pending', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/complete-session') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const workItem = synchronizeRuntimeDshBinding(
+          await activeWorkCatalog.completeDshSessionProvision(await readJson(request)),
+        );
+        sendJson(response, 200, { status:'linked', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/fail-session') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const workItem = synchronizeRuntimeDshBinding(
+          await activeWorkCatalog.failDshSessionProvision(await readJson(request)),
+        );
+        sendJson(response, 200, { status:'recovered', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/activate-session') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const workItem = synchronizeRuntimeDshBinding(
+          await activeWorkCatalog.activateDshSession(await readJson(request)),
+        );
+        sendJson(response, 200, { status:'active', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/archive-sessions') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const workItem = synchronizeRuntimeDshBinding(
+          await activeWorkCatalog.archiveDshSessions(await readJson(request)),
+        );
+        sendJson(response, 200, { status:'archived', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/resolve-session') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const { sessionId } = await readJson(request);
+        const workItem = await activeWorkCatalog.resolveByDshSession(sessionId);
+        sendJson(response, 200, { status:workItem ? 'linked' : 'unlinked', workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/creation-dsh-requests/acknowledge') {
+        if (embeddedMode !== 'dsh' || !creationTerminal?.acknowledge) {
+          throw Object.assign(new Error('当前没有可接收回执的 DSH Creation 请求'), {
+            code:'DSH_CREATION_BRIDGE_UNAVAILABLE', statusCode:409,
+          });
+        }
+        sendJson(response, 200, creationTerminal.acknowledge(await readJson(request)));
         return;
       }
 
@@ -1433,6 +1733,12 @@ export async function startAppServer({
           workItem,
           templates:creationWorkspace.templates(),
           terminal:creationTerminal.snapshot(),
+          ...(embeddedMode === 'dsh' ? {
+            dshPrompt:buildCreationInitializationPrompt({
+              projectRoot:creationWorkspace.snapshot().projectRoot,
+              capabilityPath:creationWorkspace.capabilityPath,
+            }),
+          } : {}),
         });
         scheduleCreationClientClose();
         return;
@@ -1467,6 +1773,12 @@ export async function startAppServer({
             workItem:await workItemForCreation(existingRuntime.workspace.snapshot()),
             templates:existingRuntime.workspace.templates(),
             terminal:existingRuntime.terminal.snapshot(),
+            ...(embeddedMode === 'dsh' ? {
+              dshPrompt:buildCreationResumePrompt({
+                snapshot:existingRuntime.workspace.snapshot(),
+                capabilityPath:existingRuntime.workspace.capabilityPath,
+              }),
+            } : {}),
           });
           return;
         }
@@ -1509,6 +1821,12 @@ export async function startAppServer({
           workItem,
           templates:creationWorkspace.templates(),
           terminal:creationTerminal.snapshot(),
+          ...(embeddedMode === 'dsh' ? {
+            dshPrompt:buildCreationResumePrompt({
+              snapshot:creationWorkspace.snapshot(),
+              capabilityPath:creationWorkspace.capabilityPath,
+            }),
+          } : {}),
         });
         scheduleCreationClientClose();
         return;
@@ -1540,10 +1858,14 @@ export async function startAppServer({
         state = 'handing-off';
         const draft = creationWorkspace.snapshot();
         const sourceRuntime = activeCreationRuntime();
+        const creationWorkItem = await workItemForCreation(draft);
         let app;
         let runtimeKey;
+        let publishedDeckPath;
         try {
-          runtimeKey = await deckRuntimeKey(draft.generation.publishedDeck);
+          publishedDeckPath = await realpath(draft.generation.publishedDeck)
+            .catch(() => resolve(draft.generation.publishedDeck));
+          runtimeKey = await deckRuntimeKey(publishedDeckPath);
           app = creationWorkspace.takePublishedEditor();
         } catch (error) {
           state = 'building';
@@ -1552,8 +1874,8 @@ export async function startAppServer({
         const handoffCandidate = {
           nonce:randomUUID(),
           revision:selectionRevision += 1,
-          deckPath:runtimeKey,
-          deckName:basename(runtimeKey),
+          deckPath:publishedDeckPath,
+          deckName:basename(publishedDeckPath),
           project:sourceRuntime?.candidate.project ?? {
             path:draft.projectRoot,
             source:'creation-draft',
@@ -1563,19 +1885,9 @@ export async function startAppServer({
           },
           provider:draft.provider,
         };
-        const editingRuntime = {
-          key:runtimeKey,
-          taskId:app.session?.sessionId ?? runtimeKey,
-          deckPath:runtimeKey,
-          app,
-          terminal:creationTerminal,
-          candidate:handoffCandidate,
-          terminalHandedOff:true,
-          editorUrl:editorUrlWithWorkspaceNavigation(app, 'creation'),
-        };
-        editingRuntimes.set(runtimeKey, editingRuntime);
         await workHistoryStore.recordDeck({
           deckPath:draft.generation.publishedDeck,
+          ...(creationWorkItem ? { workId:creationWorkItem.workId } : {}),
           provider:draft.provider,
           projectRoot:draft.projectRoot,
         }).catch(() => {});
@@ -1583,12 +1895,44 @@ export async function startAppServer({
           projectRoot:draft.projectRoot,
           draftId:draft.draftId,
         }).catch(() => {});
+        let editingWorkItem = null;
+        if (creationWorkItem && app?.deckId && typeof app.binding?.snapshot === 'function') {
+          editingWorkItem = await activeWorkCatalog.promoteCreationToEditing({
+            workId:creationWorkItem.workId,
+            deckPath:publishedDeckPath,
+            deckId:app.deckId,
+            binding:app.binding.snapshot(),
+            provider:draft.provider,
+            projectRoot:draft.projectRoot,
+          });
+          handoffCandidate.workId = editingWorkItem.workId;
+          handoffCandidate.deckId = editingWorkItem.deckId;
+          handoffCandidate.binding = editingWorkItem.binding;
+          handoffCandidate.workItem = editingWorkItem;
+          runtimeKey = editingWorkItem.deckId;
+        }
+        const editingRuntime = {
+          key:runtimeKey,
+          taskId:app.session?.sessionId ?? runtimeKey,
+          deckPath:publishedDeckPath,
+          app,
+          terminal:creationTerminal,
+          dshSessionId:editingWorkItem?.dshBinding?.activeSessionId ?? null,
+          candidate:handoffCandidate,
+          terminalHandedOff:true,
+          editorUrl:editorUrlWithWorkspaceNavigation(app, 'editing'),
+        };
+        editingRuntimes.set(runtimeKey, editingRuntime);
         sourceRuntime?.unsubscribe?.();
         if (sourceRuntime) creationRuntimes.delete(sourceRuntime.key);
         await sourceRuntime?.workspace.close({ reason:'handoff' });
         activateEditingRuntime(editingRuntime);
         state = 'selected';
-        sendJson(response, 200, { status:'selected', editorUrl:editingRuntime.editorUrl });
+        sendJson(response, 200, {
+          status:'selected',
+          editorUrl:editingRuntime.editorUrl,
+          ...(editingWorkItem ? { workItem:editingWorkItem } : {}),
+        });
         return;
       }
 
@@ -1945,11 +2289,12 @@ export async function startAppServer({
   serviceOrigin = `http://${urlHost}:${actualPort}`;
   return {
     url:serviceOrigin,
-    appUrl:`${serviceOrigin}/app/?token=${encodeURIComponent(token)}`,
+    appUrl:workspaceAppUrl(),
     port:actualPort,
     token,
     get state() { return state; },
     get editorApp() { return editorApp; },
+    get creationTerminal() { return creationTerminal; },
     close,
   };
 }

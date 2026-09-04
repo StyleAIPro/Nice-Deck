@@ -12,7 +12,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
   AgentBatchCoordinator, buildAgentPrompt, buildSessionInitializationPrompt,
 } from './agent-runner.mjs';
-import { AgentTerminalSession } from './agent-terminal-session.mjs';
+import { createAgentTerminalSession } from './agent-terminal-loader.mjs';
 import {
   createTerminalConversation,
   discoverTerminalConversation,
@@ -55,6 +55,8 @@ import {
   isAgentProviderId,
 } from './agent-provider-registry.mjs';
 import { loadUiFontAssets } from './ui-font-assets.mjs';
+import { createDshAgentRunAdapter } from './dsh-agent-run-adapter.mjs';
+import { withLegacyAicoPptEnvironment } from './environment-aliases.mjs';
 
 const DEFAULT_PYTHON_EXECUTABLE = defaultPythonExecutable();
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
@@ -76,6 +78,9 @@ const EDITOR_ASSETS = new Map([
   ['/editor/pill-nav.mjs', {
     path: join(PUBLIC_DIR, 'pill-nav.mjs'), type: 'text/javascript; charset=utf-8',
   }],
+  ['/editor/toolbar-tooltip.mjs', {
+    path: join(PUBLIC_DIR, 'toolbar-tooltip.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
   ['/editor/pill-nav.css', {
     path: join(PUBLIC_DIR, 'pill-nav.css'), type: 'text/css; charset=utf-8',
   }],
@@ -87,6 +92,12 @@ const EDITOR_ASSETS = new Map([
   }],
   ['/editor/workspace-switcher.mjs', {
     path: join(PUBLIC_DIR, 'workspace-switcher.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/dsh-work-bridge.mjs', {
+    path: join(PUBLIC_DIR, 'dsh-work-bridge.mjs'), type: 'text/javascript; charset=utf-8',
+  }],
+  ['/editor/deck-task-coordinator.mjs', {
+    path: join(PUBLIC_DIR, 'deck-task-coordinator.mjs'), type: 'text/javascript; charset=utf-8',
   }],
   ['/editor/agent-terminal-panel.mjs', {
     path: join(PUBLIC_DIR, 'agent-terminal-panel.mjs'), type: 'text/javascript; charset=utf-8',
@@ -240,12 +251,15 @@ function migrateSessionToPersistentPageIds(state, workingDeck, fingerprintMap = 
   return changed ? candidate : null;
 }
 
-async function snapshotEditorAssets(overrides = null) {
+async function snapshotEditorAssets(overrides = null, { includeAgentTerminal = true } = {}) {
   if (overrides !== null && !(overrides instanceof Map)) {
     throw new TypeError('editorAssets 必须是 Map 或 null');
   }
   const assets = new Map();
   for (const [pathname, asset] of EDITOR_ASSETS) {
+    if (!includeAgentTerminal && ['/editor/xterm.js', '/editor/xterm.css'].includes(pathname)) {
+      continue;
+    }
     const override = overrides?.get(pathname);
     if (override !== undefined && (!override || typeof override !== 'object'
       || (!Buffer.isBuffer(override.contents) && typeof override.contents !== 'string')
@@ -498,7 +512,7 @@ async function validateWriterResult(
 
 function authCookieName(token) {
   const sessionId = createHash('sha256').update(token).digest('hex').slice(0, 16);
-  return `huawei_deck_editor_${sessionId}`;
+  return `aico_ppt_editor_${sessionId}`;
 }
 
 function cookieValue(request, name) {
@@ -683,7 +697,8 @@ function errorResponse(response, error) {
   if (typeof error?.stage === 'string') details.stage = error.stage;
   if (typeof error?.recovery === 'string') details.recovery = error.recovery;
   if (typeof error?.diagnostic === 'string') details.diagnostic = error.diagnostic;
-  if (process.env.HUAWEI_DECK_DEBUG_ERRORS === '1' && !details.diagnostic
+  if ((process.env.AICO_PPT_DEBUG_ERRORS ?? process.env.HUAWEI_DECK_DEBUG_ERRORS) === '1'
+    && !details.diagnostic
     && typeof error?.message === 'string') {
     details.diagnostic = error.message.slice(0, 1_024);
   }
@@ -1334,6 +1349,7 @@ function recoverablePublishedCheckpoint(state, { deckId, currentFingerprint }) {
 
 export async function startServer({
   deckPath,
+  workId = null,
   deckId = null,
   deckBinding = null,
   pickDeckFile = options => pickDeckWithSystemPicker({ pythonExecutable, ...options }),
@@ -1361,7 +1377,9 @@ export async function startServer({
   agentTerminalCwd = null,
   agentLaunchCwd = process.cwd(),
   agentRunAdapter = null,
+  dshAgentBridge = false,
   spawnAgentTerminal = null,
+  createAgentTerminal = createAgentTerminalSession,
   createAgentTerminalConversation = createTerminalConversation,
   discoverAgentTerminalConversation = discoverTerminalConversation,
   resumeAgentTerminalConversation = resumeTerminalConversation,
@@ -1379,6 +1397,8 @@ export async function startServer({
   workspaceHistoryProvider = async () => ({ version:1, creation:[], editing:[] }),
   renameWorkItem = null,
   updateWorkItemBinding = null,
+  dshWorkItemProvider = null,
+  dshWorkItemCommand = null,
 } = {}) {
   void openBrowser;
   if (!deckPath) throw new TypeError('缺少 deckPath');
@@ -1388,6 +1408,24 @@ export async function startServer({
   if (typeof onClose !== 'function') throw new TypeError('onClose 必须是函数');
   if (typeof autoStartAgentTerminal !== 'boolean') {
     throw new TypeError('autoStartAgentTerminal 必须是布尔值');
+  }
+  if (typeof dshAgentBridge !== 'boolean') {
+    throw new TypeError('dshAgentBridge 必须是布尔值');
+  }
+  if (dshAgentBridge && agentRunAdapter !== null) {
+    throw new TypeError('dshAgentBridge 与 agentRunAdapter 不能同时设置');
+  }
+  if (dshAgentBridge && agentTerminalSession !== null) {
+    throw new TypeError('DSH bridge 不能接管独立 Agent Terminal Session');
+  }
+  if (dshAgentBridge && typeof dshWorkItemProvider !== 'function') {
+    throw new TypeError('DSH bridge 必须提供 dshWorkItemProvider');
+  }
+  if (dshAgentBridge && typeof dshWorkItemCommand !== 'function') {
+    throw new TypeError('DSH bridge 必须提供 dshWorkItemCommand');
+  }
+  if (typeof createAgentTerminal !== 'function') {
+    throw new TypeError('createAgentTerminal 必须是函数');
   }
   if (creationHandoff !== null
     && (!creationHandoff || typeof creationHandoff !== 'object' || Array.isArray(creationHandoff))) {
@@ -1427,8 +1465,16 @@ export async function startServer({
   const absoluteDeckPath = resolve(deckPath);
   let currentDeckPath = absoluteDeckPath;
   let defaultAgentProject = dirname(absoluteDeckPath);
-  const pinnedEditorAssets = await snapshotEditorAssets(editorAssets);
-  const pinnedEditorIndex = await readFile(join(PUBLIC_DIR, 'index.html'));
+  const pinnedEditorAssets = await snapshotEditorAssets(editorAssets, {
+    includeAgentTerminal:!dshAgentBridge,
+  });
+  const rawEditorIndex = await readFile(join(PUBLIC_DIR, 'index.html'), 'utf8');
+  const pinnedEditorIndex = rawEditorIndex.replace(
+    dshAgentBridge
+      ? /<!-- dev-shell-terminal:start -->[\s\S]*?<!-- dev-shell-terminal:end -->/gu
+      : /<!-- dev-shell-terminal:(?:start|end) -->/gu,
+    '',
+  ).replace('__DSH_WORK_ITEM_COORDINATOR__', String(dshAgentBridge));
   let sidecarBoundary;
   let initialization;
   try {
@@ -1638,6 +1684,7 @@ export async function startServer({
   let editorCloseTimer;
   let closePromise;
   let agentRuns;
+  let dshRunAdapter = null;
   let agentTerminal;
   let detachTerminalState = null;
   let detachTerminalProvider = null;
@@ -1750,8 +1797,8 @@ export async function startServer({
             sourceThreadId:null,
             loadSkill:firstTurn,
             skillInvocation:provider === 'codex'
-              ? '$huawei-deck'
-              : '请先读取并使用 huawei-deck Skill。',
+              ? '$aico-ppt'
+              : '请先读取并使用 aico-ppt Skill。',
             environmentCredentials:true,
           });
           context.onProgress?.({
@@ -1840,7 +1887,17 @@ export async function startServer({
           }
         },
     };
-    const runAdapter = agentRunAdapter ?? terminalAdapter;
+    dshRunAdapter = dshAgentBridge ? createDshAgentRunAdapter({
+      getSession:() => sessionStore.state,
+      getAssignedSessionId:async () => (
+        (await dshWorkItemProvider())?.dshBinding?.activeSessionId ?? null
+      ),
+      publishRequest:request => broadcast(
+        'dsh-agent-request', sessionStore.state.revision, request,
+      ),
+      runTimeoutMs:agentRunTimeoutMs,
+    }) : null;
+    const runAdapter = agentRunAdapter ?? dshRunAdapter ?? terminalAdapter;
     agentRuns = new AgentBatchCoordinator({
       provider:runAdapter.id,
       adapter:runAdapter,
@@ -2186,6 +2243,24 @@ export async function startServer({
         json(response, 200, await workspaceHistoryProvider());
         return;
       }
+      if (request.method === 'GET' && pathname === '/api/dsh-work-item') {
+        if (!dshAgentBridge) {
+          throw httpError('DSH_AGENT_BRIDGE_UNAVAILABLE', 409, '当前 Editor 未启用 DSH 工作项协调器');
+        }
+        json(response, 200, { workItem:await dshWorkItemProvider() });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/dsh-work-item/commands') {
+        if (!dshAgentBridge) {
+          throw httpError('DSH_AGENT_BRIDGE_UNAVAILABLE', 409, '当前 Editor 未启用 DSH 工作项协调器');
+        }
+        const { command, ...input } = await readJson(request);
+        if (typeof command !== 'string' || !command) {
+          throw httpError('INVALID_DSH_COMMAND', 400, 'DSH 工作项命令无效');
+        }
+        json(response, 200, await dshWorkItemCommand(command, { ...input, workId }));
+        return;
+      }
       if (request.method === 'POST' && pathname === '/api/work-items/rename') {
         if (!renameWorkItem) {
           throw httpError('WORK_ITEM_RENAME_UNAVAILABLE', 409, '当前启动方式不支持修改工作项名称');
@@ -2257,6 +2332,14 @@ export async function startServer({
         }
         const run = await agentRuns.submit({ expectedRevision, taskIds });
         json(response, 202, run);
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/dsh-agent-requests/acknowledge') {
+        if (!dshRunAdapter) {
+          throw httpError('DSH_AGENT_BRIDGE_UNAVAILABLE', 409, '当前 Editor 未启用 DSH Agent 适配器');
+        }
+        const result = dshRunAdapter.acknowledge(await readJson(request));
+        json(response, 200, result);
         return;
       }
       if (request.method === 'POST' && pathname === '/api/tasks') {
@@ -2771,6 +2854,10 @@ export async function startServer({
   });
 
   terminalSockets.on('connection', socket => {
+    if (!agentTerminal) {
+      socket.close(1011, '当前运行模式不提供独立 Agent 终端');
+      return;
+    }
     const detach = agentTerminal.attach(socket);
     let commandChain = Promise.resolve();
     socket.on('message', data => {
@@ -2888,7 +2975,7 @@ export async function startServer({
           nextProvider.conversations.push({
             id:conversationId,
             ownership:'editor-created',
-            title:'Huawei Deck 专用会话',
+            title:'AICO-PPT 专用会话',
             projectRoot:draft.projectRoot,
             createdAt:timestamp,
             updatedAt:timestamp,
@@ -2935,28 +3022,28 @@ export async function startServer({
       cwd:agentTerminalCwd,
       runtimePathRoots:[PROJECT_DIR],
       provider:storedTerminalProvider,
-      environment:{
+      environment:withLegacyAicoPptEnvironment({
         ...process.env,
-        HUAWEI_DECK_EDITOR_URL:serviceOrigin,
-        HUAWEI_DECK_EDITOR_TOKEN:token,
-        HUAWEI_DECK_SOURCE_PATH:currentDeckPath,
-        HUAWEI_DECK_WORKING_PATH:workingDeckStore.path,
+        AICO_PPT_EDITOR_URL:serviceOrigin,
+        AICO_PPT_EDITOR_TOKEN:token,
+        AICO_PPT_SOURCE_PATH:currentDeckPath,
+        AICO_PPT_WORKING_PATH:workingDeckStore.path,
         ...(creationHandoffState ? {
-          HUAWEI_DECK_CREATION_CONTEXT:creationHandoffState.path,
-          HUAWEI_DECK_CREATION_MATERIALS:
+          AICO_PPT_CREATION_CONTEXT:creationHandoffState.path,
+          AICO_PPT_CREATION_MATERIALS:
             creationHandoffState.context.artifacts.materialsDirectory,
           ...(creationHandoffState.context.artifacts.planPath ? {
-            HUAWEI_DECK_CREATION_PLAN:creationHandoffState.context.artifacts.planPath,
+            AICO_PPT_CREATION_PLAN:creationHandoffState.context.artifacts.planPath,
           } : {}),
         } : {}),
-      },
+      }),
       initialPrompt:provider => buildSessionInitializationPrompt({
         deckPath:workingDeckStore.path,
         sourceDeckPath:currentDeckPath,
         projectPath:agentWorkspaceStore.snapshot().projectRoot,
         skillInvocation:provider === 'codex'
-          ? '$huawei-deck'
-          : '请先读取并使用 huawei-deck Skill。',
+          ? '$aico-ppt'
+          : '请先读取并使用 aico-ppt Skill。',
         creationContextPath:creationHandoffState?.path ?? null,
       }),
       resolveConversation:resolveTerminalConversation,
@@ -3012,15 +3099,15 @@ export async function startServer({
           }
         }
       }
-    } else {
-      agentTerminal = new AgentTerminalSession(terminalOptions);
+    } else if (!dshAgentBridge) {
+      agentTerminal = await createAgentTerminal(terminalOptions);
     }
-    detachTerminalInterrupt = agentTerminal.addInterruptListener?.(() => {
+    detachTerminalInterrupt = agentTerminal?.addInterruptListener?.(() => {
       agentRuns.cancel(
         '已在 Agent CLI 中按 Esc 中断本批任务，未完成任务可重新提交',
       );
     }) ?? null;
-    if (autoStartAgentTerminal && !agentTerminalSession) {
+    if (autoStartAgentTerminal && !agentTerminalSession && agentTerminal) {
       void agentTerminal.start({ provider:terminalOptions.provider }).catch(() => {
         // 启动失败已进入 terminal snapshot，不能阻断 Editor 主服务。
       });
@@ -3035,10 +3122,10 @@ export async function startServer({
       watchedDeckPath = currentDeckPath;
       watchFile(watchedDeckPath, { interval:500 }, watchListener);
       deckWatcherStarted = true;
-      agentTerminal?.updateEnvironment?.({
+      agentTerminal?.updateEnvironment?.(withLegacyAicoPptEnvironment({
         ...terminalOptions.environment,
-        HUAWEI_DECK_SOURCE_PATH:currentDeckPath,
-      });
+        AICO_PPT_SOURCE_PATH:currentDeckPath,
+      }));
     };
     restartDeckWatcher();
     if (workingDeckStore.managed) {
@@ -3072,6 +3159,7 @@ export async function startServer({
       detachTerminalProvider = null;
       detachTerminalInterrupt = null;
       const agentClosed = agentRuns.close();
+      dshRunAdapter?.close();
       const terminalClosed = closeAgentTerminalOnShutdown
         ? agentTerminal?.close() ?? Promise.resolve()
         : Promise.resolve();

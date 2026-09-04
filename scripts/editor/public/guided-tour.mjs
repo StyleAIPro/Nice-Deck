@@ -82,7 +82,7 @@ function clamp(value, minimum, maximum) {
 
 export function createGuidedTour({
   sequences,
-  storageKeyPrefix = 'huawei-deck-guided-tour',
+  storageKeyPrefix = 'aico-ppt-guided-tour',
   canStart = () => true,
 } = {}) {
   if (!sequences || typeof sequences !== 'object') throw new TypeError('sequences 必须是对象');
@@ -189,6 +189,9 @@ export function createGuidedTour({
       dot.dataset.active = String(index === stepIndex);
       return dot;
     }));
+    // 首次展示时先同步完成定位，避免对话卡片已经可见、箭头却要等到
+    // 下一帧才出现；随后仍排队复算一次，以吸收 focus 等引起的布局变化。
+    position();
     queuePosition();
     ui.next.focus();
   };

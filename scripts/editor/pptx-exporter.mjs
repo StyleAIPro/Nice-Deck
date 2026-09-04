@@ -100,7 +100,7 @@ export async function exportPptxSnapshot({
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new TypeError('PPTX 导出超时必须为正整数毫秒');
   }
-  const temporary = await mkdtemp(join(tmpdir(), 'huawei-deck-pptx-'));
+  const temporary = await mkdtemp(join(tmpdir(), 'aico-ppt-pptx-'));
   const inputPath = join(temporary, 'deck.html');
   const outputPath = join(temporary, 'deck.pptx');
   try {

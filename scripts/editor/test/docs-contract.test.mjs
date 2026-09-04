@@ -28,16 +28,16 @@ test('四份入口文档共享后期微调、安全写回与结构编辑边界',
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
       '启动命令': /python3 scripts\/deck-editor\.py <deck\.html>/,
-      'macOS 双击入口': /双击[^。\n]{0,100}`Huawei Deck 编辑器\.app`/,
+      'macOS 双击入口': /双击[^。\n]{0,100}`AICO-PPT 编辑器\.app`/,
       '启动页提供双入口': /(?:启动页|本地工作台)[\s\S]{0,180}新建 Deck[\s\S]{0,180}打开已有 Deck/,
       '重复启动不打开第二个工作台页面': /重复(?:双击|启动|派发)[^。\n]{0,300}不会再打开第二个工作台页面/,
       '新建先确认项目目录': /新建 Deck[\s\S]{0,180}项目目录/,
       '打开已有 Deck 使用文件选择器': /打开已有 Deck[\s\S]{0,220}(?:系统文件选择器|添加一份 HTML|添加 Deck HTML)/,
       '命令式入口保留': /命令式入口[^。\n]{0,80}(?:保留|保持)[\s\S]{0,180}python3 scripts\/deck-editor\.py <deck\.html>/,
-      'sidecar 托管工作副本': /(?:\.huawei-deck-editor\/[\s\S]{0,120})?(?:sidecar[^。\n]{0,120})?working\/deck\.html|sidecar[^。\n]{0,120}工作副本/i,
+      'sidecar 托管工作副本': /(?:\.aico-ppt-editor\/[\s\S]{0,120})?(?:sidecar[^。\n]{0,120})?working\/deck\.html|sidecar[^。\n]{0,120}工作副本/i,
       'Skill 不依赖窗口化 Editor': /(?:没有 Editor 窗口也必须|窗口化 Editor[^。\n]{0,80}(?:可选增强|不是使用前提)|无窗口 Managed Workspace)/,
       '窗口 Agent Host 注册三个 provider': /Codex[\s\S]{0,140}Claude Code[\s\S]{0,140}OpenCode/,
-      '结构修改经 edit-bundle 作用于工作副本': /(?:结构工作|结构修改|结构能力)[\s\S]{0,180}scripts\/edit-bundle\.py[\s\S]{0,180}(?:工作副本|HUAWEI_DECK_WORKING_PATH)/,
+      '结构修改经 edit-bundle 作用于工作副本': /(?:结构工作|结构修改|结构能力)[\s\S]{0,180}scripts\/edit-bundle\.py[\s\S]{0,180}(?:工作副本|AICO_PPT_WORKING_PATH)/,
       '只有固化发布真实 Deck': /(?:固化修改|solidify-deck)[\s\S]{0,220}(?:唯一|原子)[^。\n]{0,80}(?:发布|替换)[^。\n]{0,40}(?:真实 Deck|真实文件)/i,
       '后期动作层不直接增删页': /(?:后期编辑器|后期 iframe|iframe 动作层)[\s\S]{0,80}不直接增删页/,
       '后期动作层不调整页序': /不直接增删页、调整页序/,
@@ -168,8 +168,8 @@ test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 side
     '跨页任务 drawer': /跨页[\s\S]{0,100}(?:task drawer|任务 drawer|Agent drawer)/i,
     '直接文字移动缩放': /(?:直接)?文字[\s\S]{0,80}移动[\s\S]{0,80}缩放/,
     '外部 Agent 读任务和提交动作': /GET \/api\/tasks[\s\S]{0,260}POST \/api\/actions/,
-    'sidecar 内容': /\.huawei-deck-editor\/[\s\S]{0,500}(?:会话|session)[\s\S]{0,220}(?:任务|tasks?)[\s\S]{0,220}(?:ActionMutation|动作)[\s\S]{0,220}(?:SourceMutation|工作版本)[\s\S]{0,220}备份/i,
-    'sidecar 不进交付与版本控制': /\.huawei-deck-editor\/[\s\S]{0,300}(?:不进入|不会进入)[^\n]{0,60}(?:交付 deck|最终交付)[\s\S]{0,180}(?:忽略提交|Git 忽略|gitignore)/i,
+    'sidecar 内容': /\.aico-ppt-editor\/[\s\S]{0,500}(?:会话|session)[\s\S]{0,220}(?:任务|tasks?)[\s\S]{0,220}(?:ActionMutation|动作)[\s\S]{0,220}(?:SourceMutation|工作版本)[\s\S]{0,220}备份/i,
+    'sidecar 不进交付与版本控制': /\.aico-ppt-editor\/[\s\S]{0,300}(?:不进入|不会进入)[^\n]{0,60}(?:交付 deck|最终交付)[\s\S]{0,180}(?:忽略提交|Git 忽略|gitignore)/i,
     '固化发布闸门': /solidify-preflight[\s\S]{0,500}(?:revision|版本)[\s\S]{0,500}(?:文件绑定|binding)[\s\S]{0,500}(?:双指纹|fingerprint)[\s\S]{0,500}(?:诊断|diagnostics)[\s\S]{0,500}(?:动作投影|projection)/i,
     '预览和自动保存不碰 source deck': /(?:真实 source deck|source deck|真实 Deck)[^。\n]{0,120}(?:只读|字节保持不变)[\s\S]{0,220}预览[\s\S]{0,220}(?:自动(?:会话)?保存|session)/i,
     'Agent 动作安全字段': /token[\s\S]{0,100}revision[\s\S]{0,100}locator[\s\S]{0,100}事务/i,
@@ -223,7 +223,7 @@ test('四份入口文档共享单一 bypass PTY 与自动 CLI 会话契约', asy
     requireClaims(file, contents, {
       '三个终端 provider': /Codex[\s\S]{0,140}Claude Code[\s\S]{0,140}OpenCode/,
       '默认后台 CLI 会话': /(?:Editor|编辑服务)[^。\n]{0,80}(?:打开|启动)[^。\n]{0,80}后台[^。\n]{0,40}(?:创建|启动)[^。\n]{0,40}(?:CLI|PTY|终端)[^。\n]{0,20}会话/i,
-      'Skill 只初始化一次': /(?:huawei-deck|Skill)[^。\n]{0,120}(?:只初始化一次|加载一次|初始化一次)/i,
+      'Skill 只初始化一次': /(?:aico-ppt|Skill)[^。\n]{0,120}(?:只初始化一次|加载一次|初始化一次)/i,
       '项目根目录确认': /项目根目录[^。\n]{0,100}(?:确认|可见)/,
       '独立 workspaceRevision': /agent-workspace\.json[\s\S]{0,160}workspaceRevision[\s\S]{0,160}(?:不增加|不改变)[^。\n]{0,40}Deck revision/i,
       'PTY 是唯一交互界面': /(?:唯一的? Agent 交互终端|唯一交互终端|不再维护结构化对话)/,
@@ -266,7 +266,8 @@ test('四份入口文档共享未完成 badge、完成任务折叠和实时终�
     requireClaims(file, contents, {
       '页码 badge 不显示完成任务': /(?:页码|页序)[^。\n]{0,80}badge[^。\n]{0,140}(?:完成项(?:不再|默认)|completed|已完成任务不再)/i,
       '完成任务默认折叠': /(?:完成项|已完成任务|completed 任务)[^。\n]{0,40}默认[^。\n]{0,40}闭合[^。\n]{0,30}(?:分组|已完成)/i,
-      '完成任务仍可撤回': /(?:完成项|已完成任务|completed 任务)[^。\n]{0,140}(?:展开后[^。\n]{0,40})?撤回/i,
+      '完成任务永久完成且历史只切换效果': /任务一旦完成[^。\n]{0,50}永久保持 `completed`[^。\n]{0,160}撤销[^。\n]{0,50}重做[^。\n]{0,90}只切换[^。\n]{0,50}(?:修改效果|effectState)/i,
+      '完成任务不会再次提交 Agent': /(?:完成项|已完成任务|Agent 任务|任务一旦完成)[^。\n]{0,220}(?:不会|绝不)[^。\n]{0,80}(?:(?:再次提交|再次进入)[^。\n]{0,30}Agent|送回下一批)/i,
       '已固化任务可删除且不影响 Deck': /(?:固化后|已固化)[^。\n]{0,120}删除[^。\n]{0,120}(?:不会|不改变)[^。\n]{0,40}Deck/i,
       'Editor 终端是实时视图': /终端[^。\n]{0,80}Editor[^。\n]{0,80}实时交互视图/i,
       '任务状态仍以 sidecar 为权威': /任务完成[^。\n]{0,100}sidecar[^。\n]{0,40}权威/i,
@@ -278,7 +279,7 @@ test('四份入口文档共享未完成 badge、完成任务折叠和实时终�
 test('Skill、README 与架构文档各自承担入口、仓库和开发者职责', async () => {
   const documents = await loadDocuments();
   requireClaims('SKILL.md', documents['SKILL.md'], {
-    '初版生成后直接打开应用': /第一版[\s\S]{0,180}open -n "Huawei Deck 编辑器\.app" --args/,
+    '初版生成后直接打开应用': /第一版[\s\S]{0,180}open -n "AICO-PPT 编辑器\.app" --args/,
     '启动器文件导航': /`scripts\/deck-editor\.py`/,
     '编辑器目录文件导航': /`scripts\/editor\/`/,
     '批量重构仍由 Agent 完成': /(?:新建|批量重构)[\s\S]{0,180}Agent[\s\S]{0,120}edit-bundle/,
@@ -370,7 +371,7 @@ test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与�
       '用户固化 API': /\/api\/solidify-preflight[\s\S]{0,260}\/api\/solidify-deck[\s\S]{0,700}(?:用户|确认|固化)[\s\S]{0,500}(?:发布|真实 Deck)/i,
       'observer WS 只订阅 events': /observer WebSocket[\s\S]{0,100}\/events[\s\S]{0,100}(?:只|仅)[^。\n]{0,40}(?:订阅|接收)/i,
       '唯一 editor capability 只传 frame 事务 ACK': /唯一 editor capability WebSocket[\s\S]{0,160}frame[\s\S]{0,100}(?:事务|命令)[\s\S]{0,80}ACK[\s\S]{0,100}(?:不对外|不能用于|不用于)[^。\n]{0,40}(?:提交|动作)/i,
-      'edit-bundle 只操作托管工作副本': /scripts\/edit-bundle\.py[\s\S]{0,220}(?:托管工作副本|HUAWEI_DECK_WORKING_PATH)/,
+      'edit-bundle 只操作托管工作副本': /scripts\/edit-bundle\.py[\s\S]{0,220}(?:托管工作副本|AICO_PPT_WORKING_PATH)/,
       'sidecar 负责原子发布': /(?:sidecar helper|可信 sidecar|WorkingDeckStore|helper 为真实 Deck)[\s\S]{0,780}(?:os\.replace|原子替换|原子发布)/i,
     });
     assert.doesNotMatch(
@@ -386,12 +387,12 @@ test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与�
   }
 });
 
-test('editing guide 准确说明 drawer 撤回且不承诺缩略图', async () => {
+test('editing guide 准确说明 drawer 切换完成任务效果且不承诺缩略图', async () => {
   const documents = await loadDocuments();
   const guide = documents['references/editing-guide.md'];
   requireClaims('references/editing-guide.md', guide, {
     '左栏是文字页序列表和 badge': /左侧文字页序列表[\s\S]{0,100}badge/,
-    'drawer 可撤回已完成任务': /drawer[\s\S]{0,180}已完成[\s\S]{0,120}撤回/,
+    'drawer 可撤销或重做已完成任务效果': /drawer[\s\S]{0,180}已完成[\s\S]{0,160}撤销[\s\S]{0,40}重做/,
     'undo 由 CLI 或 HTTP 完成': /undo[\s\S]{0,100}(?:CLI|HTTP)/i,
     'redo 由 HTTP 完成': /redo[\s\S]{0,100}HTTP/i,
   });

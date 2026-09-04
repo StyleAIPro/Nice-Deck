@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { CreationDraftStore } from '../creation-draft-store.mjs';
-import { CreationDraftFileAdapter } from '../creation-draft-file-adapter.mjs';
+import {
+  CreationDraftFileAdapter, inspectCreationDraftLock,
+} from '../creation-draft-file-adapter.mjs';
 
 test('文件 Adapter 原子持久化 Draft，并在关闭后释放会话锁', async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-'));
@@ -27,6 +29,23 @@ test('文件 Adapter 原子持久化 Draft，并在关闭后释放会话锁', as
   const reopened = await CreationDraftStore.open({ adapter:reopenedAdapter });
   assert.equal(reopened.snapshot().revision, 1);
   await reopened.close();
+});
+
+test('已有旧 sidecar 的 Creation Draft 原位恢复，不创建空的新目录', async t => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-legacy-'));
+  t.after(() => rm(projectRoot, { recursive:true, force:true }));
+  await mkdir(join(projectRoot, '.huawei-deck-editor'));
+
+  const adapter = await CreationDraftFileAdapter.create({
+    projectRoot, draftId:'legacy-draft',
+  });
+  assert.equal(adapter.draftDir,
+    join(await realpath(projectRoot), '.huawei-deck-editor', 'drafts', 'legacy-draft'));
+  await adapter.close();
+  await assert.rejects(
+    readFile(join(projectRoot, '.aico-ppt-editor', 'drafts', 'legacy-draft', 'draft.json')),
+    error => error.code === 'ENOENT',
+  );
 });
 
 test('同一 Draft 的活动锁拒绝第二个服务', async t => {
@@ -62,6 +81,45 @@ test('已失去浏览器窗口的陈旧锁即使宿主进程仍活着也可安�
   await reopened.close();
 });
 
+test('异常中断留下的空锁在租约内保持保护，过期后可安全接管', async t => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-empty-lock-'));
+  t.after(() => rm(projectRoot, { recursive:true, force:true }));
+  const first = await CreationDraftFileAdapter.create({ projectRoot, draftId:'draft-a' });
+  const lockPath = first.lockPath;
+  await first.close();
+  await writeFile(lockPath, '');
+  const lockTime = new Date('2026-08-11T00:00:00.000Z');
+  await utimes(lockPath, lockTime, lockTime);
+
+  const fresh = await inspectCreationDraftLock(lockPath, {
+    now:() => new Date('2026-08-11T00:00:10.000Z'),
+    lockLeaseMs:30_000,
+  });
+  assert.equal(fresh.locked, true);
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.corrupt, true);
+  assert.equal(typeof fresh.dev, 'string');
+  assert.equal(typeof fresh.ino, 'string');
+
+  const expired = await inspectCreationDraftLock(lockPath, {
+    now:() => new Date('2026-08-11T00:02:00.000Z'),
+    lockLeaseMs:30_000,
+  });
+  assert.equal(expired.locked, false);
+  assert.equal(expired.stale, true);
+  assert.equal(expired.corrupt, true);
+  assert.equal(typeof expired.dev, 'string');
+  assert.equal(typeof expired.ino, 'string');
+
+  const reopened = await CreationDraftFileAdapter.open({
+    projectRoot,
+    draftId:'draft-a',
+    now:() => new Date('2026-08-11T00:02:00.000Z'),
+    lockLeaseMs:30_000,
+  });
+  await reopened.close();
+});
+
 test('sidecar 目录是符号链接时拒绝创建 Draft', async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-link-'));
   const outside = await mkdtemp(join(tmpdir(), 'deck-creation-outside-'));
@@ -71,7 +129,7 @@ test('sidecar 目录是符号链接时拒绝创建 Draft', async t => {
   ]));
   await mkdir(join(outside, 'drafts'));
   try {
-    await symlink(outside, join(projectRoot, '.huawei-deck-editor'));
+    await symlink(outside, join(projectRoot, '.aico-ppt-editor'));
   } catch (error) {
     if (process.platform === 'win32' && error.code === 'EPERM') {
       t.skip('Windows 未启用 Developer Mode，当前用户不能创建 symlink');

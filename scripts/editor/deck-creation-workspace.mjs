@@ -30,7 +30,9 @@ function diagnostic(error) {
 
 export function buildCreationInitializationPrompt({ projectRoot, capabilityPath } = {}) {
   return [
-    '你正在 Huawei Deck 编辑器的“新建 Deck”构建工作区中。',
+    '/aico-ppt',
+    '',
+    '你正在 AICO-PPT 编辑器的“新建 Deck”构建工作区中。',
     `项目目录：${projectRoot}`,
     ...buildSkillContractInstructions({ skillRoot:PROJECT_DIR }),
     '当前页面在 Deck 出现前只有对话工作区；请通过自然对话逐步问清主题与标题、听众、场景与时长、期望行动、现有素材、品牌和交付格式。',
@@ -58,7 +60,9 @@ export function buildCreationResumePrompt({ snapshot, capabilityPath } = {}) {
     .map(([key]) => ({ brief:'需求', outline:'大纲', pagePlan:'页面规划', deck:'Deck' })[key] ?? key);
   const managed = snapshot?.managedDeck;
   const lines = [
-    `继续 Huawei Deck Creation Draft：${snapshot?.draftId ?? '未知 Draft'}。`,
+    '/aico-ppt',
+    '',
+    `继续 AICO-PPT Creation Draft：${snapshot?.draftId ?? '未知 Draft'}。`,
     `当前标题：${snapshot?.brief?.title || '未命名 Deck'}`,
     `当前阶段：${snapshot?.phase ?? 'brief'}；revision：${snapshot?.revision ?? 0}。`,
     `已完成里程碑：${completed.length ? completed.join('、') : '暂无'}。`,
@@ -324,6 +328,7 @@ export class DeckCreationWorkspace {
     this.managedDeck = await this.openManagedDeck({
       sourceDeckPath,
       projectRoot:snapshot.projectRoot,
+      creationDraft:snapshot,
       provider:snapshot.provider,
       terminal:this.terminal,
       terminalCwd:this.terminal.cwd ?? snapshot.projectRoot,

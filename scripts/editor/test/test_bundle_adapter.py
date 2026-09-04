@@ -35,7 +35,7 @@ def minimal_bundle(path, template=None):
 
 
 def sidecar_session(deck):
-    return deck.parent / ".huawei-deck-editor" / "deck-session"
+    return deck.parent / ".aico-ppt-editor" / "deck-session"
 
 
 def directory_identity(path):
@@ -228,7 +228,7 @@ class BundleAdapterTest(unittest.TestCase):
                 original = deck.read_bytes()
                 outside = Path(td) / "outside"
                 outside.mkdir()
-                sidecar_root = project / ".huawei-deck-editor"
+                sidecar_root = project / ".aico-ppt-editor"
                 session = sidecar_root / "deck-session"
                 if level == "root":
                     sidecar_root.symlink_to(outside, target_is_directory=True)
@@ -256,7 +256,7 @@ class BundleAdapterTest(unittest.TestCase):
                 deck = project / "deck.html"
                 minimal_bundle(deck)
                 original = deck.read_bytes()
-                root = project / ".huawei-deck-editor"
+                root = project / ".aico-ppt-editor"
                 session = root / "deck-session"
                 backups = session / "backups"
                 transactions = session / "transactions"
@@ -294,7 +294,7 @@ class BundleAdapterTest(unittest.TestCase):
             deck = project / "deck.html"
             minimal_bundle(deck)
             original_fingerprint = hashlib.sha256(deck.read_bytes()).hexdigest()
-            session = project / ".huawei-deck-editor" / "deck-session"
+            session = project / ".aico-ppt-editor" / "deck-session"
             transaction_id = "123e4567-e89b-42d3-a456-426614174000"
             session_id = "223e4567-e89b-42d3-a456-426614174000"
 
@@ -397,7 +397,7 @@ class BundleAdapterTest(unittest.TestCase):
             deck = project / "deck.html"
             minimal_bundle(deck)
             original = deck.read_bytes()
-            root = project / ".huawei-deck-editor"
+            root = project / ".aico-ppt-editor"
             session = root / "deck-session"
             backups = session / "backups"
             transactions = session / "transactions"

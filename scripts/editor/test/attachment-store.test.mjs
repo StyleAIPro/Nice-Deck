@@ -121,7 +121,7 @@ async function fixture(options = {}) {
 async function persistentFixture(randomUUID) {
   const temporary = await mkdtemp(join(tmpdir(), 'attachment-store-persistent-'));
   const project = await realpath(temporary);
-  const root = join(project, '.huawei-deck-editor');
+  const root = join(project, '.aico-ppt-editor');
   const deckName = 'deck.html';
   const deckBytes = Buffer.from('deck');
   const fingerprint = sha256(deckBytes);

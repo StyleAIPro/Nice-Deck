@@ -1,4 +1,4 @@
-"""Huawei Deck 离线补丁区块的唯一编解码实现。"""
+"""AICO-PPT 离线补丁区块的唯一编解码实现。"""
 
 from pathlib import Path
 import json
@@ -6,6 +6,7 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# 这些名称已经写入历史 Deck，属于不可重命名的文件格式 wire ID。
 BEGIN = "<!-- huawei-deck-editor:begin -->"
 END = "<!-- huawei-deck-editor:end -->"
 PATCH_SCRIPT_ID = "huawei-deck-editor-patches"

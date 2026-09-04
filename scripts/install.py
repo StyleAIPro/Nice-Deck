@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Huawei Deck 跨平台安装器。
+"""AICO-PPT 跨平台安装器。
 
 当前实现面向 Developer Link：把本仓库安全注册到一个或多个 Agent Skill
 目录，并组合 Editor Core 的依赖诊断/修复。安装器不会覆盖来源不明的目标，
@@ -34,6 +34,11 @@ REPO = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = 1
 PRODUCT_VERSION = "0.1.0-dev"
 HOST_TARGETS = {
+    "codex": Path(".agents/skills/aico-ppt"),
+    "claude-code": Path(".claude/skills/aico-ppt"),
+    "codex-legacy": Path(".codex/skills/aico-ppt"),
+}
+LEGACY_HOST_TARGETS = {
     "codex": Path(".agents/skills/huawei-deck"),
     "claude-code": Path(".claude/skills/huawei-deck"),
     "codex-legacy": Path(".codex/skills/huawei-deck"),
@@ -75,6 +80,20 @@ def default_state_file(*, platform=sys.platform, home: Path | None = None, env=N
     home = Path(home or Path.home()).resolve()
     env = env or os.environ
     if platform == "darwin":
+        root = home / "Library" / "Application Support" / "AICO-PPT"
+    elif platform == "win32":
+        local = env.get("LOCALAPPDATA")
+        root = Path(local) / "AICO-PPT" if local else home / "AppData" / "Local" / "AICO-PPT"
+    else:
+        state_root = env.get("XDG_STATE_HOME")
+        root = Path(state_root) / "aico-ppt" if state_root else home / ".local" / "state" / "aico-ppt"
+    return root / "install-state.json"
+
+
+def legacy_state_file(*, platform=sys.platform, home: Path | None = None, env=None):
+    home = Path(home or Path.home()).resolve()
+    env = env or os.environ
+    if platform == "darwin":
         root = home / "Library" / "Application Support" / "Huawei Deck"
     elif platform == "win32":
         local = env.get("LOCALAPPDATA")
@@ -96,6 +115,14 @@ def _same_target(target: Path, root: Path):
         return target.resolve(strict=True) == root.resolve(strict=True)
     except (OSError, RuntimeError):
         return False
+
+
+def _same_entry_path(left: Path, right: Path):
+    """比较目录项本身，不跟随最终 symlink；兼容 macOS /var 与 /private/var。"""
+    try:
+        return left.parent.resolve() / left.name == right.parent.resolve() / right.name
+    except (OSError, RuntimeError):
+        return left == right
 
 
 def _registration_method(target: Path, *, platform=sys.platform):
@@ -191,6 +218,9 @@ class InstallationManager:
         self.state_file = Path(state_file) if state_file else default_state_file(
             platform=platform, home=self.home,
         )
+        self.legacy_state_file = None if state_file else legacy_state_file(
+            platform=platform, home=self.home,
+        )
         if not (self.root / "SKILL.md").is_file():
             raise InstallError("INSTALL_ROOT_INVALID", f"安装根目录缺少 SKILL.md：{self.root}")
         unknown = [host for host in self.hosts if host not in HOST_TARGETS]
@@ -200,8 +230,18 @@ class InstallationManager:
     def target_for(self, host: str):
         return self.home / HOST_TARGETS[host]
 
-    def inspect(self):
+    def _record(self):
         state = _load_state(self.state_file)
+        if state is not None:
+            return state, self.state_file
+        if self.legacy_state_file and self.legacy_state_file != self.state_file:
+            legacy = _load_state(self.legacy_state_file)
+            if legacy is not None:
+                return legacy, self.legacy_state_file
+        return None, self.state_file
+
+    def inspect(self):
+        state, record_source = self._record()
         registrations = []
         recorded = {
             item.get("host"): item
@@ -239,18 +279,35 @@ class InstallationManager:
         manual_action_required = any(
             item["state"] in {"occupied", "adoption-required"} for item in registrations
         )
+        legacy_registrations = []
+        if record_source != self.state_file:
+            for item in (state or {}).get("registrations", []):
+                host = item.get("host")
+                target = Path(item.get("targetPath", ""))
+                expected = self.home / LEGACY_HOST_TARGETS.get(host, Path("__unsupported__"))
+                if (host in self.hosts and _same_entry_path(target, expected)
+                        and item.get("targetPath") in owned_paths
+                        and _same_target(target, self.root)):
+                    legacy_registrations.append({
+                        "host": host,
+                        "targetPath": str(target),
+                        "method": item.get("method")
+                            or _registration_method(target, platform=self.platform),
+                    })
         return {
             "schemaVersion": SCHEMA_VERSION,
             "channel": "developer",
             "productVersion": PRODUCT_VERSION,
             "installRoot": str(self.root),
             "stateFile": str(self.state_file),
+            "recordSource": str(record_source),
             "ready": ready,
             "state": "ready" if ready
                 else "manual-action-required" if manual_action_required
                 else "repairable",
             "registrations": registrations,
             "record": state,
+            "legacyRegistrations": legacy_registrations,
         }
 
     def plan(self, operation: str, *, adopt_existing=False):
@@ -289,6 +346,13 @@ class InstallationManager:
                         target=item["targetPath"], method=item["method"] or method,
                     ))
             actions.append(InstallAction("write-state"))
+            for item in snapshot.get("legacyRegistrations", []):
+                actions.append(InstallAction(
+                    "remove-legacy-registration", host=item["host"],
+                    target=item["targetPath"], method=item["method"],
+                ))
+            if snapshot.get("recordSource") != str(self.state_file):
+                actions.append(InstallAction("remove-legacy-state"))
         elif operation == "uninstall":
             record = snapshot["record"]
             if record:
@@ -317,7 +381,16 @@ class InstallationManager:
                     if item.get("host") not in requested
                     and item.get("targetPath") in owned_paths
                 ]
-                actions.append(InstallAction("write-state" if remaining else "remove-state"))
+                if remaining:
+                    actions.append(InstallAction("write-state"))
+                    if snapshot.get("recordSource") != str(self.state_file):
+                        actions.append(InstallAction("remove-legacy-state"))
+                else:
+                    actions.append(InstallAction(
+                        "remove-legacy-state"
+                        if snapshot.get("recordSource") != str(self.state_file)
+                        else "remove-state"
+                    ))
         else:
             raise InstallError("INSTALL_OPERATION_INVALID", f"未知安装动作：{operation}")
         return {
@@ -334,7 +407,11 @@ class InstallationManager:
         if dry_run:
             return {"status": "planned", "plan": plan, "snapshot": self.inspect()}
         before_state = self.state_file.read_bytes() if self.state_file.is_file() else None
-        before_record = _load_state(self.state_file)
+        before_legacy_state = (
+            self.legacy_state_file.read_bytes()
+            if self.legacy_state_file and self.legacy_state_file.is_file() else None
+        )
+        before_record, _ = self._record()
         owned_targets = set((before_record or {}).get("ownedPaths", []))
         created = []
         removed = []
@@ -366,6 +443,17 @@ class InstallationManager:
                     if _lexists(target):
                         if not _same_target(target, self.root):
                             raise InstallError("UNINSTALL_TARGET_CHANGED", f"注册目标已变化：{target}")
+                        removed.append((target, raw["method"]))
+                        _remove_registration(target, raw["method"])
+                    owned_targets.discard(str(target))
+                elif kind == "remove-legacy-registration":
+                    target = Path(raw["target"])
+                    if _lexists(target):
+                        if not _same_target(target, self.root):
+                            raise InstallError(
+                                "INSTALL_LEGACY_TARGET_CHANGED",
+                                f"旧 Skill 注册目标已经变化：{target}",
+                            )
                         removed.append((target, raw["method"]))
                         _remove_registration(target, raw["method"])
                     owned_targets.discard(str(target))
@@ -401,6 +489,9 @@ class InstallationManager:
                     _atomic_write_json(self.state_file, payload)
                 elif kind == "remove-state":
                     self.state_file.unlink(missing_ok=True)
+                elif kind == "remove-legacy-state":
+                    if self.legacy_state_file:
+                        self.legacy_state_file.unlink(missing_ok=True)
                 else:
                     raise InstallError("INSTALL_PLAN_INVALID", f"安装计划包含未知动作：{kind}")
         except Exception as error:
@@ -422,6 +513,12 @@ class InstallationManager:
             else:
                 self.state_file.parent.mkdir(parents=True, exist_ok=True)
                 self.state_file.write_bytes(before_state)
+            if self.legacy_state_file:
+                if before_legacy_state is None:
+                    self.legacy_state_file.unlink(missing_ok=True)
+                else:
+                    self.legacy_state_file.parent.mkdir(parents=True, exist_ok=True)
+                    self.legacy_state_file.write_bytes(before_legacy_state)
             if rollback_errors:
                 raise InstallError(
                     "INSTALL_ROLLBACK_FAILED",
@@ -438,7 +535,7 @@ class InstallationManager:
 
 def _load_doctor():
     path = REPO / "scripts" / "check_deps.py"
-    spec = importlib.util.spec_from_file_location("huawei_deck_check_deps", path)
+    spec = importlib.util.spec_from_file_location("aico_ppt_check_deps", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -460,27 +557,27 @@ def _parse_hosts(value):
 
 def _print_result(result):
     snapshot = result.get("snapshot", result)
-    print(f"Huawei Deck · {snapshot.get('state', result.get('status', ''))}")
+    print(f"AICO-PPT · {snapshot.get('state', result.get('status', ''))}")
     print(f"  安装根目录：{snapshot.get('installRoot')}")
     for item in snapshot.get("registrations", []):
         symbol = "✓" if item["state"] == "ready" else "!" if item["state"] == "occupied" else "○"
         print(f"  {symbol} {item['host']}: {item['targetPath']} ({item['state']})")
     environment = result.get("environment")
     if environment:
-        profile = environment["profiles"]["editor-core"]
-        print(f"  {'✓' if profile['ready'] else '!'} Editor Core: {profile['state']}")
+        profile = environment["profiles"]["dev-shell"]
+        print(f"  {'✓' if profile['ready'] else '!'} 独立 Dev Shell: {profile['state']}")
         for item in environment["checks"]:
             if not item["present"] and not item["optional"]:
                 print(f"      - {item['label']}: {item['detail']}")
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Huawei Deck 跨平台安装器")
+    parser = argparse.ArgumentParser(description="AICO-PPT 跨平台安装器")
     parser.add_argument("operation", choices=("inspect", "install", "repair", "uninstall"))
     parser.add_argument("--channel", choices=("developer",), default="developer")
     parser.add_argument("--hosts", action="append", default=[],
                         help="codex、claude-code、codex-legacy 或 all；可逗号分隔")
-    parser.add_argument("--skill-only", action="store_true", help="不检查或修复 Editor Core")
+    parser.add_argument("--skill-only", action="store_true", help="不检查或修复独立 Dev Shell")
     parser.add_argument("--dry-run", action="store_true", help="只展示计划，不写入环境")
     parser.add_argument(
         "--adopt-existing", action="store_true",
@@ -511,10 +608,10 @@ def main(argv=None):
             doctor = _load_doctor()
             if args.operation in {"install", "repair"} and not args.dry_run:
                 environment = doctor.repair_dependencies(
-                    ["editor-core"], capture_output=args.json,
+                    ["dev-shell"], capture_output=args.json,
                 )
             else:
-                environment = doctor.dependency_snapshot(["editor-core"])
+                environment = doctor.dependency_snapshot(["dev-shell"])
             result = {**result, "environment": environment}
 
         if args.json:

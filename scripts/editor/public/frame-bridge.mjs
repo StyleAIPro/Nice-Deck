@@ -220,10 +220,11 @@ function createCanvasMonitor(onPublish, signal, onObserved = () => {}) {
     maxTimer = undefined;
     const latest = capture();
     bindStage(latest.stage);
-    if (published && !sameReferences(published, latest)) onObserved(latest.canvases);
+    const referencesChanged = Boolean(published && !sameReferences(published, latest));
+    if (referencesChanged) onObserved(latest.canvases);
     candidate = latest;
     if (!latest.canvases.length || same(published, latest)) return;
-    if (onPublish(latest.canvases) === false) {
+    if (onPublish(latest.canvases, { referencesChanged }) === false) {
       quietTimer = setTimeout(publish, QUIET_MS);
       maxTimer ??= setTimeout(publish, MAX_WAIT_MS);
       return;
@@ -375,10 +376,10 @@ style.dataset.deckEditorUi = '';
 style.textContent = `
   [data-region-selection],[data-task-highlight]{position:fixed;z-index:2147483638;pointer-events:none;box-sizing:border-box}
   [data-region-selection]{border:2px solid #c7000b;background:rgba(199,0,11,.08);box-shadow:0 0 0 1px rgba(255,255,255,.85) inset}
-  [data-region-click-hint]{position:fixed;z-index:2147483639;display:flex;align-items:center;gap:4px;width:max-content;padding:7px 10px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(30,32,37,.82);color:rgba(255,255,255,.96);box-shadow:0 7px 20px rgba(0,0,0,.2);backdrop-filter:blur(10px);font:600 12px/1.2 "Huawei Deck UI","Noto Sans SC",sans-serif;white-space:nowrap;pointer-events:none;opacity:0;transform-origin:0 0;transition:opacity .12s ease}
+  [data-region-click-hint]{position:fixed;z-index:2147483639;display:flex;align-items:center;gap:4px;width:max-content;padding:7px 10px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(30,32,37,.82);color:rgba(255,255,255,.96);box-shadow:0 7px 20px rgba(0,0,0,.2);backdrop-filter:blur(10px);font:600 12px/1.2 "AICO-PPT UI","Noto Sans SC",sans-serif;white-space:nowrap;pointer-events:none;opacity:0;transform-origin:0 0;transition:opacity .12s ease}
   [data-region-click-hint][data-visible]{opacity:1}
   [data-region-click-hint] kbd{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 4px;border:1px solid rgba(255,255,255,.4);border-radius:5px;background:rgba(255,255,255,.13);color:#fff;font:700 11px/1 "JetBrains Mono",monospace;box-sizing:border-box}
-  [data-region-popover]{position:fixed;z-index:2147483640;width:336px;padding:16px;border:1px solid rgba(25,25,25,.16);border-radius:12px;background:#fff;color:#191919;box-shadow:0 14px 38px rgba(25,25,25,.24);box-sizing:border-box;font:14px/1.45 "Huawei Deck UI","Noto Sans SC",sans-serif;transform-origin:0 0}
+  [data-region-popover]{position:fixed;z-index:2147483640;width:336px;padding:16px;border:1px solid rgba(25,25,25,.16);border-radius:12px;background:#fff;color:#191919;box-shadow:0 14px 38px rgba(25,25,25,.24);box-sizing:border-box;font:14px/1.45 "AICO-PPT UI","Noto Sans SC",sans-serif;transform-origin:0 0}
   [data-region-popover] label{display:block;margin-bottom:8px;font-size:12px;font-weight:700;color:#5f6268}
   [data-region-popover] textarea{display:block;width:100%;min-height:88px;resize:vertical;padding:10px 11px;border:1px solid #c9cbd0;border-radius:8px;outline:none;color:#191919;background:#fff;font:inherit;font-size:14px;line-height:1.5;box-sizing:border-box}
   [data-region-popover] textarea:focus{border-color:#c7000b;box-shadow:0 0 0 3px rgba(199,0,11,.10)}
@@ -401,9 +402,9 @@ style.textContent = `
   [data-region-status][data-state="error"]{color:#b42318}
   [data-region-status][data-state="success"]{color:#16803b}
   [data-task-highlight]{border:3px dashed #e60012;background:rgba(230,0,18,.08);animation:deck-editor-pulse .45s ease-in-out 2 alternate}
-  [data-direct-status]{position:fixed;z-index:2147483641;left:50%;bottom:24px;max-width:520px;padding:10px 16px;border-radius:8px;background:#24262b;color:#fff;box-shadow:0 10px 26px rgba(0,0,0,.24);font:600 14px/1.45 "Huawei Deck UI","Noto Sans SC",sans-serif;transform:translateX(-50%);pointer-events:none}
+  [data-direct-status]{position:fixed;z-index:2147483641;left:50%;bottom:24px;max-width:520px;padding:10px 16px;border-radius:8px;background:#24262b;color:#fff;box-shadow:0 10px 26px rgba(0,0,0,.24);font:600 14px/1.45 "AICO-PPT UI","Noto Sans SC",sans-serif;transform:translateX(-50%);pointer-events:none}
   [data-direct-status][data-state="error"]{background:#8f1018}
-  [data-text-format-toolbar]{position:fixed;z-index:2147483642;display:flex;align-items:center;gap:5px;width:max-content;max-width:620px;padding:7px;border:1px solid rgba(25,25,25,.16);border-radius:10px;background:rgba(255,255,255,.98);box-shadow:0 10px 30px rgba(25,25,25,.24);box-sizing:border-box;transform-origin:0 0;font:600 12px/1 "Huawei Deck UI","Noto Sans SC",sans-serif}
+  [data-text-format-toolbar]{position:fixed;z-index:2147483642;display:flex;align-items:center;gap:5px;width:max-content;max-width:620px;padding:7px;border:1px solid rgba(25,25,25,.16);border-radius:10px;background:rgba(255,255,255,.98);box-shadow:0 10px 30px rgba(25,25,25,.24);box-sizing:border-box;transform-origin:0 0;font:600 12px/1 "AICO-PPT UI","Noto Sans SC",sans-serif}
   [data-text-format-toolbar] button:not(.pill-nav-control):not(.ui-color-trigger),[data-text-format-toolbar] select{height:28px;border:1px solid rgba(25,25,25,.13);border-radius:6px;background:#fff;color:#34363a;font:inherit;cursor:pointer}
   [data-text-format-toolbar] button:not(.pill-nav-control){min-width:28px;padding:0 7px}
   [data-text-format-toolbar] button:not(.pill-nav-control)[aria-pressed="true"],[data-text-format-toolbar] button:not(.pill-nav-control)[aria-pressed="mixed"]{border-color:rgba(199,0,11,.35);background:rgba(199,0,11,.09);color:#a10d15}
@@ -2115,7 +2116,7 @@ function onPointerDown(event) {
     beginResize(event);
     return;
   }
-  if (event.target.closest?.('[data-deck-editor-ui]')) return;
+  if (event.target.closest?.('[data-deck-editor-ui],[data-text-format-toolbar-owner]')) return;
   if (directEdit?.element?.contains(event.target)) return;
   if (directEdit) commitDirectEdit();
   if (currentMode === 'edit' && event.button === 0) {
@@ -2925,7 +2926,7 @@ if (parent !== window) {
   window.addEventListener('scroll', onViewportGeometryChange, true);
   window.addEventListener('resize', onViewportGeometryChange);
   window.addEventListener('pagehide', teardown);
-  canvasMonitor = createCanvasMonitor(nextCanvases => {
+  canvasMonitor = createCanvasMonitor((nextCanvases, { referencesChanged = false } = {}) => {
     if (!style.isConnected) document.head?.append(style);
     if (!pillStyles.isConnected) document.head?.append(pillStyles);
     document.documentElement.dataset.deckEditorMode = mode;
@@ -2949,6 +2950,7 @@ if (parent !== window) {
     parent.postMessage({
       type: 'deck-ready',
       frameInstanceId:FRAME_INSTANCE_ID,
+      canvasReferencesChanged:referencesChanged,
       pages: canvases.map((canvas, index) => ({
         index: index + 1,
         label: canvas.querySelector('section[data-label]')?.dataset.label ?? `第 ${index + 1} 页`,

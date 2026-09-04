@@ -9,7 +9,7 @@ SKILL_ROOT=$(CDPATH= cd -- "$APP_MACOS_DIR/../../.." && pwd)
 LAUNCHER="$SKILL_ROOT/scripts/deck-editor.py"
 
 if [ ! -f "$LAUNCHER" ]; then
-  /usr/bin/osascript - "Huawei Deck 编辑器无法启动" "应用必须保留在 huawei-deck skill 根目录中，不能单独移动。请把 Huawei Deck 编辑器.app 放回包含 scripts 文件夹的目录。" <<'APPLESCRIPT'
+  /usr/bin/osascript - "AICO-PPT 编辑器无法启动" "应用必须保留在 aico-ppt skill 根目录中，不能单独移动。请把 AICO-PPT 编辑器.app 放回包含 scripts 文件夹的目录。" <<'APPLESCRIPT'
 on run argv
   display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"好"} default button "好"
 end run
@@ -19,7 +19,7 @@ fi
 
 PYTHON_BIN=$(command -v python3 || true)
 if [ -z "$PYTHON_BIN" ]; then
-  /usr/bin/osascript - "Huawei Deck 编辑器无法启动" "找不到 Python 3。请先安装 Python 3，再重新双击应用。" <<'APPLESCRIPT'
+  /usr/bin/osascript - "AICO-PPT 编辑器无法启动" "找不到 Python 3。请先安装 Python 3，再重新双击应用。" <<'APPLESCRIPT'
 on run argv
   display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"好"} default button "好"
 end run
@@ -31,7 +31,7 @@ fi
 # Python 启动器使用原子实例登记表：重复双击会激活既有工作台；若浏览器标签
 # 已关闭，则先结束无页面的旧服务再启动新快照，避免两个入口互相争锁。
 umask 077
-APP_LOG_DIR="${TMPDIR:-/tmp}/huawei-deck-editor"
+APP_LOG_DIR="${TMPDIR:-/tmp}/aico-ppt-editor"
 /bin/mkdir -p "$APP_LOG_DIR"
 if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
   # LaunchServices 可能把脚本型 .app 放进 Rosetta 进程树。显式使用本机 arm64，

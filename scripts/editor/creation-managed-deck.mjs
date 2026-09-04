@@ -31,6 +31,10 @@ export class CreationManagedDeck {
     editorCloseGraceMs = 10_000,
     creationHandoff = null,
     workspaceHistoryProvider = null,
+    dshAgentBridge = false,
+    workId = null,
+    dshWorkItemProvider = null,
+    dshWorkItemCommand = null,
     onEditorClose = null,
     startEditor = options => startServer(options),
   } = {}) {
@@ -50,11 +54,19 @@ export class CreationManagedDeck {
       agentProjectRoot:projectRoot,
       agentProjectRootSource:'explicit',
       agentTerminalCwd:terminalCwd,
-      agentTerminalSession:terminal,
       autoStartAgentTerminal:false,
-      closeAgentTerminalOnShutdown:false,
+      ...(dshAgentBridge ? {} : {
+        agentTerminalSession:terminal,
+        closeAgentTerminalOnShutdown:false,
+      }),
       ...(creationHandoff ? { creationHandoff } : {}),
       ...(workspaceHistoryProvider ? { workspaceHistoryProvider } : {}),
+      ...(dshAgentBridge ? {
+        dshAgentBridge:true,
+        workId,
+        dshWorkItemProvider,
+        dshWorkItemCommand,
+      } : {}),
       ...(onEditorClose ? {
         onClose:() => onEditorClose({ sourceDeckPath, editor }),
       } : {}),

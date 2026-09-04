@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionStore, RevisionConflict } from '../session-store.mjs';
+import { EditTimeline } from '../edit-timeline.mjs';
 
 const PNG_DATA_URL = `data:image/png;base64,${Buffer.from([
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0,
@@ -36,7 +37,7 @@ function attachmentFor(taskId = TASK_ID) {
 async function injectedStore(prefix, sidecarIO, options = {}) {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const deck = join(root, 'deck.html');
-  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  const sessionDir = join(root, '.aico-ppt-editor', 'deck-session');
   await writeFile(deck, 'deck-v1');
   const store = await SessionStore.open({
     deckPath:deck,
@@ -53,21 +54,54 @@ test('跨页任务写入后可恢复且 revision 单调递增', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck-v1');
-  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
+  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.aico-ppt-editor') });
   const t1 = await store.createTask({ pageKey:'page-001-a', pageIndex:1, pageLabel:'A', rect:{x:1,y:2,w:3,h:4}, instruction:'改 A' }, 0);
   const t2 = await store.createTask({ pageKey:'page-002-b', pageIndex:2, pageLabel:'B', rect:{x:5,y:6,w:7,h:8}, instruction:'改 B' }, 1);
   assert.equal(t1.revision, 1); assert.equal(t2.revision, 2);
-  const reopened = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
+  const reopened = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.aico-ppt-editor') });
   assert.equal(reopened.state.tasks.length, 2);
   assert.deepEqual(reopened.state.tasks.map(task => task.attachments), [[], []]);
   await assert.rejects(() => reopened.createTask({ ...t1.task, id:undefined }, 0), RevisionConflict);
   assert.match(await readFile(reopened.sessionPath, 'utf8'), /改 B/);
 });
 
+test('旧版撤销记录重开后恢复为永久完成且不会重新进入 Agent 队列', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-session-completed-task-migration-'));
+  const deck = join(root, 'deck.html');
+  const rootDir = join(root, '.aico-ppt-editor');
+  await writeFile(deck, 'deck-v1');
+  const store = await SessionStore.open({ deckPath:deck, rootDir });
+  const created = await store.createTask(TASK_INPUT, 0);
+  const candidate = structuredClone(store.state);
+  const timeline = EditTimeline.open(candidate);
+  const group = timeline.appendActions(created.task.id, [{
+    id:'legacy-action', taskId:created.task.id, kind:'setText',
+    target:{ pageKey:TASK_INPUT.pageKey, path:'section:nth-of-type(1) h1' },
+    payload:{ text:'新标题' }, before:'旧标题', after:'新标题',
+  }]);
+  const task = candidate.tasks.find(item => item.id === created.task.id);
+  task.status = 'pending';
+  task.effectState = 'compensated';
+  task.entryIds = [group.id];
+  delete task.groupId;
+  candidate.revision = 2;
+  await store.persistState(candidate);
+
+  const reopened = await SessionStore.open({ deckPath:deck, rootDir });
+  const migrated = reopened.state.tasks[0];
+  assert.equal(migrated.status, 'completed');
+  assert.equal(migrated.effectState, 'undone');
+  assert.equal(migrated.groupId, group.id);
+  assert.equal(reopened.state.revision, 2);
+  const persisted = JSON.parse(await readFile(reopened.sessionPath, 'utf8'));
+  assert.equal(persisted.tasks[0].status, 'completed');
+  assert.equal(persisted.tasks[0].effectState, 'undone');
+});
+
 test('活动源码事务严格持久化并在重开后恢复', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-source-edit-'));
   const deck = join(root, 'deck.html');
-  const rootDir = join(root, '.huawei-deck-editor');
+  const rootDir = join(root, '.aico-ppt-editor');
   await writeFile(deck, 'deck-v1');
   const store = await SessionStore.open({ deckPath:deck, rootDir });
   const candidate = structuredClone(store.state);
@@ -90,7 +124,7 @@ test('活动源码事务严格持久化并在重开后恢复', async () => {
 test('Agent 执行批次成员与结算结果在重开后保持不变', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-agent-batch-'));
   const deck = join(root, 'deck.html');
-  const rootDir = join(root, '.huawei-deck-editor');
+  const rootDir = join(root, '.aico-ppt-editor');
   await writeFile(deck, 'deck-v1');
   const store = await SessionStore.open({ deckPath:deck, rootDir });
   const created = await store.createTask(TASK_INPUT, 0);
@@ -124,7 +158,7 @@ test('持久化源码事务拒绝未知字段和无效身份', async () => {
   await writeFile(deck, 'deck-v1');
   const base = await SessionStore.open({
     deckPath:deck,
-    rootDir:join(root, '.huawei-deck-editor'),
+    rootDir:join(root, '.aico-ppt-editor'),
   });
   const valid = {
     id:SOURCE_EDIT_ID,
@@ -153,7 +187,7 @@ test('待处理任务可改说明、删除并清理快照', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-task-edit-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck-v1');
-  const store = await SessionStore.open({ deckPath:deck, rootDir:join(root, '.huawei-deck-editor') });
+  const store = await SessionStore.open({ deckPath:deck, rootDir:join(root, '.aico-ppt-editor') });
   const created = await store.createTask({ ...TASK_INPUT, snapshot:PNG_DATA_URL }, 0);
   const updated = await store.updateTask(created.task.id, '  更新后的说明  ', 1);
   assert.equal(updated.task.instruction, '更新后的说明');
@@ -171,7 +205,7 @@ test('已固化完成任务可删除记录，仍关联撤销组的完成任务�
   await writeFile(deck, 'deck-v1');
   const store = await SessionStore.open({
     deckPath:deck,
-    rootDir:join(root, '.huawei-deck-editor'),
+    rootDir:join(root, '.aico-ppt-editor'),
   });
   const created = await store.createTask({ ...TASK_INPUT, snapshot:PNG_DATA_URL }, 0);
   const task = store.state.tasks.find(item => item.id === created.task.id);
@@ -195,7 +229,7 @@ test('合法 PNG 快照原子落盘且 session JSON 不保存 base64', async () 
   const root = await mkdtemp(join(tmpdir(), 'deck-session-snapshot-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck-v1');
-  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
+  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.aico-ppt-editor') });
   const result = await store.createTask({
     pageKey: 'page-001-a',
     pageIndex: 1,
@@ -219,7 +253,7 @@ test('非法、伪 PNG 和超限快照在改变状态前拒绝', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-invalid-snapshot-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck-v1');
-  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
+  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.aico-ppt-editor') });
   const base = {
     pageKey: 'page-001-a', pageIndex: 1, pageLabel: 'A',
     rect: { x: 1, y: 2, w: 30, h: 40 }, instruction: '改 A',
@@ -251,7 +285,7 @@ test('session 持久化失败会回滚 task/revision 并清理快照和临时文
   const root = await mkdtemp(join(tmpdir(), 'deck-session-persist-failure-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck-v1');
-  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
+  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.aico-ppt-editor') });
   store.sessionPath = join(root, 'missing-parent', 'session.json');
   await assert.rejects(() => store.createTask({
     pageKey: 'page-001-a', pageIndex: 1, pageLabel: 'A',
@@ -266,7 +300,7 @@ test('session 持久化失败会回滚 task/revision 并清理快照和临时文
 test('task 的 session 写已 committed 后保留候选内存并由重启收敛', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-committed-task-'));
   const deck = join(root, 'deck.html');
-  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  const sessionDir = join(root, '.aico-ppt-editor', 'deck-session');
   await writeFile(deck, 'deck-v1');
   let sessionWrites = 0;
   let store;
@@ -286,7 +320,7 @@ test('task 的 session 写已 committed 后保留候选内存并由重启收敛'
   };
   store = await SessionStore.open({
     deckPath:deck,
-    rootDir:join(root, '.huawei-deck-editor'),
+    rootDir:join(root, '.aico-ppt-editor'),
     sessionDir,
     sidecarIO,
   });
@@ -305,7 +339,7 @@ test('task 的 session 写已 committed 后保留候选内存并由重启收敛'
 
   const reopened = await SessionStore.open({
     deckPath:deck,
-    rootDir:join(root, '.huawei-deck-editor'),
+    rootDir:join(root, '.aico-ppt-editor'),
     sessionDir,
   });
   assert.equal(reopened.state.revision, 1);
@@ -328,7 +362,7 @@ test('SessionStore 的 session 与 snapshot 只通过可信 atomic I/O 层提交
   };
   const store = await SessionStore.open({
     deckPath:deck,
-    rootDir:join(root, '.huawei-deck-editor'),
+    rootDir:join(root, '.aico-ppt-editor'),
     sidecarIO,
   });
   assert.equal(writes.length, 1);
@@ -350,7 +384,7 @@ test('SessionStore 的 session 与 snapshot 只通过可信 atomic I/O 层提交
 test('snapshot rename 后目录 fsync 失败会补偿删除，且绝不提交 session 候选', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-snapshot-compensated-'));
   const deck = join(root, 'deck.html');
-  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  const sessionDir = join(root, '.aico-ppt-editor', 'deck-session');
   await writeFile(deck, 'deck-v1');
   let sessionWrites = 0;
   let snapshotDeletes = 0;
@@ -369,7 +403,7 @@ test('snapshot rename 后目录 fsync 失败会补偿删除，且绝不提交 se
   };
   const store = await SessionStore.open({
     deckPath:deck,
-    rootDir:join(root, '.huawei-deck-editor'),
+    rootDir:join(root, '.aico-ppt-editor'),
     sessionDir,
     sidecarIO,
   });
@@ -391,7 +425,7 @@ test('snapshot rename 后目录 fsync 失败会补偿删除，且绝不提交 se
 test('snapshot rename 后补偿删除失败返回独立恢复错误，且不声称 session 已提交', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-snapshot-recovery-'));
   const deck = join(root, 'deck.html');
-  const sessionDir = join(root, '.huawei-deck-editor', 'deck-session');
+  const sessionDir = join(root, '.aico-ppt-editor', 'deck-session');
   await writeFile(deck, 'deck-v1');
   let sessionWrites = 0;
   const sidecarIO = {
@@ -415,7 +449,7 @@ test('snapshot rename 后补偿删除失败返回独立恢复错误，且不声�
   };
   const store = await SessionStore.open({
     deckPath:deck,
-    rootDir:join(root, '.huawei-deck-editor'),
+    rootDir:join(root, '.aico-ppt-editor'),
     sessionDir,
     sidecarIO,
   });

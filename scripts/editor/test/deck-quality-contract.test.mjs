@@ -16,10 +16,10 @@ test('所有入口原样复用同一质量契约且 phase 不产生分支', () =
     );
   }
   const prompt = expected.join('\n');
-  assert.match(prompt, /Huawei Deck 单一作业规范/);
+  assert.match(prompt, /AICO-PPT 单一作业规范/);
   assert.match(prompt, /不得按“新建 \/ 初版制作 \/ 修改 \/ 区域任务”切换、删减或降级质量要求/);
   assert.match(prompt, /所有入口原样复用以下单一质量契约/);
-  assert.doesNotMatch(prompt, /当前属于 Huawei Deck .*流程/);
+  assert.doesNotMatch(prompt, /当前属于 AICO-PPT .*流程/);
 });
 
 test('统一质量规则同时覆盖已有外壳与目录结构修改', () => {

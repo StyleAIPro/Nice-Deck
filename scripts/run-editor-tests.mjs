@@ -14,12 +14,12 @@ if (!allowed.has(mode)) {
 }
 
 function run(command, args) {
-  const stateRoot = mkdtempSync(join(tmpdir(), 'huawei-deck-editor-test-state-'));
+  const stateRoot = mkdtempSync(join(tmpdir(), 'aico-ppt-editor-test-state-'));
   let result;
   try {
     result = spawnSync(command, args, {
       cwd:root,
-      env:{ ...process.env, HUAWEI_DECK_EDITOR_STATE_ROOT:stateRoot },
+      env:{ ...process.env, AICO_PPT_EDITOR_STATE_ROOT:stateRoot },
       stdio:'inherit',
       shell:false,
     });

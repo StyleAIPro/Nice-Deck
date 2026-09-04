@@ -128,8 +128,8 @@ test('新建 Deck 可直接校验用户选择的项目目录', async t => {
 });
 
 test('Windows 终端保留任意可信盘符路径，真实 UNC 仅用于 identity', async () => {
-  const canonical = String.raw`\\Mac\Home\zyq_workspace\huawei-deck`;
-  const mapped = String.raw`Y:\huawei-deck`;
+  const canonical = String.raw`\\Mac\Home\zyq_workspace\aico-ppt`;
+  const mapped = String.raw`Y:\aico-ppt`;
   const inspected = new Map([
     [canonical, { path:canonical, originalPath:canonical }],
     [mapped, { path:canonical, originalPath:mapped }],
@@ -144,7 +144,7 @@ test('Windows 终端保留任意可信盘符路径，真实 UNC 仅用于 identi
 });
 
 test('Windows 普通本地目录直接作为终端 cwd，不依赖 Parallels 盘符', async () => {
-  const local = String.raw`C:\work\huawei-deck`;
+  const local = String.raw`C:\work\aico-ppt`;
   assert.equal(await resolveAgentTerminalCwd({
     projectRoot:local,
     platform:'win32',
@@ -175,11 +175,11 @@ test('Windows 可从现有任意映射盘恢复 UNC 项目的终端 cwd', async 
 });
 
 test('Windows 映射盘指向 UNC 子目录时仍可恢复项目终端 cwd', async () => {
-  const canonical = String.raw`\\Mac\Home\zyq_workspace\huawei-deck`;
+  const canonical = String.raw`\\Mac\Home\zyq_workspace\aico-ppt`;
   const shareRoot = '\\\\Mac\\Home\\';
   const driveRoot = 'Y:\\';
   const driveCanonical = String.raw`\\Mac\Home\zyq_workspace`;
-  const mapped = String.raw`Y:\huawei-deck`;
+  const mapped = String.raw`Y:\aico-ppt`;
   const inspected = new Map([
     [canonical, {
       path:canonical, originalPath:canonical,

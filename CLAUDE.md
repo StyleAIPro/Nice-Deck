@@ -75,4 +75,4 @@ edit-bundle 的不变量（改该脚本时必须保持）：
 
 ## 本地试装
 
-Claude Code 的兼容注册位置是 `~/.claude/skills/huawei-deck`。开发时运行 `python3 scripts/install.py repair --hosts claude-code --skill-only` 建立受控软链接；Windows PowerShell 使用 `py -3 scripts\install.py repair --hosts claude-code --skill-only` 建立 junction。改动会即时同步。
+Claude Code 的兼容注册位置是 `~/.claude/skills/aico-ppt`。开发时运行 `python3 scripts/install.py repair --hosts claude-code --skill-only` 建立受控软链接；Windows PowerShell 使用 `py -3 scripts\install.py repair --hosts claude-code --skill-only` 建立 junction。改动会即时同步。

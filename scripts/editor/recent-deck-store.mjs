@@ -3,6 +3,10 @@ import { mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } f
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { isAgentProviderId } from './agent-provider-registry.mjs';
 import { resolveEditorStateRoot } from './editor-state-root.mjs';
+import {
+  isProjectStateDirectoryName,
+  resolveProjectStateRoot,
+} from './state-paths.mjs';
 
 const SCHEMA_VERSION = 1;
 const DEFAULT_LIMIT = 8;
@@ -104,7 +108,7 @@ export class RecentDeckStore {
   }
 
   async #sessionSummary(deckPath) {
-    const sidecarRoot = join(dirname(deckPath), '.huawei-deck-editor');
+    const sidecarRoot = resolveProjectStateRoot(dirname(deckPath));
     const directories = await readdir(sidecarRoot, { withFileTypes:true }).catch(() => []);
     let newest = null;
     for (const directory of directories) {
@@ -170,7 +174,7 @@ export class RecentDeckStore {
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const child = join(root, entry.name);
-      if (entry.name === '.huawei-deck-editor') {
+      if (isProjectStateDirectoryName(entry.name)) {
         const sessions = await readdir(child, { withFileTypes:true }).catch(() => []);
         for (const session of sessions) {
           if (!session.isDirectory() || session.isSymbolicLink()) continue;

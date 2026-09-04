@@ -605,7 +605,7 @@ export class AgentTerminalSession {
     }
     if (this.closed) throw terminalError('SERVICE_CLOSED', '编辑服务已关闭');
     const discoveryPrompt = conversation?.discoveryToken
-      ? `[Huawei Deck 会话标识：${conversation.discoveryToken}]\n${prompt}`
+      ? `[AICO-PPT 会话标识：${conversation.discoveryToken}]\n${prompt}`
       : prompt;
     const startupPromptSource = conversation?.initialPromptConsumed === true
         || (conversation?.resume === true && !hasExplicitPrompt)

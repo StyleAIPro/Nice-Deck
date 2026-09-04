@@ -380,18 +380,36 @@ test('任务 drawer 撤销已完成任务并同步权威任务与页面效果', 
   ), originalText);
   await page.waitForFunction(id => {
     const row = document.querySelector(`[data-task-row="${CSS.escape(id)}"]`);
-    return row?.querySelector('.task-status-pending') && !row.querySelector('[data-task-undo]');
+    return row?.querySelector('.task-status-completed')
+      && row.querySelector(`[data-task-redo="${CSS.escape(id)}"]`);
   }, taskId);
-  assert.equal(await page.locator('[data-task-completed-group]').count(), 0);
-  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '下一批 1');
-  assert.equal(await page.locator('[data-task-completed-count]').innerText(), '已完成 0');
-  assert.deepEqual(await page.locator('[data-page-badge]').allTextContents(), ['1']);
-  const state = await session(app);
-  const task = state.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(await page.locator('[data-task-completed-group]').count(), 1);
+  assert.equal(await page.locator('[data-task-pending-count]').innerText(), '下一批 0');
+  assert.equal(await page.locator('[data-task-completed-count]').innerText(), '已完成 1');
+  assert.equal(await page.locator('[data-page-badge]').count(), 0);
+  let state = await session(app);
+  let task = state.tasks.find(candidate => candidate.id === taskId);
   assert.equal(state.revision, 3);
-  assert.equal(task.status, 'pending');
-  assert.equal(task.groupId, undefined);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.groupId, applied.body.groupId);
+  assert.equal(task.effectState, 'undone');
   assert.equal(state.groups[0].active, false);
+
+  await page.locator(`[data-task-redo="${taskId}"]`).click();
+  await page.waitForFunction(expected => (
+    document.querySelector('#deck-frame').contentDocument.querySelector('h2').textContent === expected
+  ), '任务已完成标题');
+  await page.waitForFunction(id => {
+    const row = document.querySelector(`[data-task-row="${CSS.escape(id)}"]`);
+    return row?.querySelector('.task-status-completed')
+      && row.querySelector(`[data-task-undo="${CSS.escape(id)}"]`);
+  }, taskId);
+  state = await session(app);
+  task = state.tasks.find(candidate => candidate.id === taskId);
+  assert.equal(state.revision, 4);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.groupId, applied.body.groupId);
+  assert.equal(task.effectState, 'active');
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });

@@ -57,7 +57,7 @@ test('Creation 交接的旧 Deck 从上下文恢复原项目根，不采信漂�
   t.after(() => rm(root, { recursive:true, force:true }));
   const projectRoot = join(root, 'project');
   const deck = join(projectRoot, 'created.html');
-  const sessionDir = join(projectRoot, '.huawei-deck-editor', 'created-session');
+  const sessionDir = join(projectRoot, '.aico-ppt-editor', 'created-session');
   await mkdir(sessionDir, { recursive:true });
   await writeFile(deck, '<!doctype html><title>created</title>');
   await writeFile(join(sessionDir, 'session.json'), JSON.stringify({ deckPath:deck }));
@@ -86,7 +86,7 @@ test('首次使用时从旧编辑会话迁移最近 Deck', async t => {
   const root = await mkdtemp(join(tmpdir(), 'deck-recents-migrate-'));
   t.after(() => rm(root, { recursive:true, force:true }));
   const deck = join(root, 'project', 'legacy.html');
-  const sessionDir = join(root, 'project', '.huawei-deck-editor', 'legacy-session');
+  const sessionDir = join(root, 'project', '.aico-ppt-editor', 'legacy-session');
   await mkdir(sessionDir, { recursive:true });
   await writeFile(deck, '<!doctype html><title>legacy</title>');
   await writeFile(join(sessionDir, 'session.json'), JSON.stringify({ deckPath:deck }));
@@ -104,7 +104,7 @@ test('删除最近任务记录后自动发现不会把它重新加回，重新�
   const root = await mkdtemp(join(tmpdir(), 'deck-recents-dismiss-'));
   t.after(() => rm(root, { recursive:true, force:true }));
   const deck = join(root, 'project', 'dismiss.html');
-  const sessionDir = join(root, 'project', '.huawei-deck-editor', 'session-dismiss');
+  const sessionDir = join(root, 'project', '.aico-ppt-editor', 'session-dismiss');
   await mkdir(sessionDir, { recursive:true });
   await writeFile(deck, '<!doctype html><title>dismiss</title>');
   await writeFile(join(sessionDir, 'session.json'), JSON.stringify({ deckPath:deck }));

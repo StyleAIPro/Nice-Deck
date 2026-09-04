@@ -65,7 +65,17 @@ async function makeApp(t, options = {}) {
     agentThreadId: options.agentThreadId,
     agentProvider: options.agentProvider,
     agentRunAdapter: options.agentRunAdapter,
+    dshAgentBridge: options.dshAgentBridge,
+    ...(options.dshAgentBridge ? {
+      workId:options.workId ?? '11111111-1111-4111-8111-111111111111',
+      dshWorkItemProvider:options.dshWorkItemProvider ?? (async () => ({
+        workId:options.workId ?? '11111111-1111-4111-8111-111111111111',
+        dshBinding:{ activeSessionId:'dsh-test-session' },
+      })),
+      dshWorkItemCommand:options.dshWorkItemCommand ?? (async () => ({ workItem:null })),
+    } : {}),
     spawnAgentTerminal: options.spawnAgentTerminal,
+    createAgentTerminal: options.createAgentTerminal,
     createAgentTerminalConversation: options.createAgentTerminalConversation,
     resumeAgentTerminalConversation: options.resumeAgentTerminalConversation,
     agentRunTimeoutMs: options.agentRunTimeoutMs,
@@ -77,6 +87,33 @@ async function makeApp(t, options = {}) {
   t.after(() => app.close());
   return app;
 }
+
+test('DSH Editor Core 不创建 Agent PTY，也不暴露 xterm 页面资源', async t => {
+  let terminalCreations = 0;
+  const app = await makeApp(t, {
+    dshAgentBridge:true,
+    createAgentTerminal:async () => {
+      terminalCreations += 1;
+      throw new Error('DSH 不应创建 Agent Terminal');
+    },
+  });
+
+  assert.equal(terminalCreations, 0);
+  assert.equal(app.agentTerminal, undefined);
+  const editorResponse = await fetch(
+    `${app.url}/editor/?token=${encodeURIComponent(app.token)}`
+      + `&editorToken=${encodeURIComponent(app.editorToken)}`,
+  );
+  assert.equal(editorResponse.status, 200);
+  const html = await editorResponse.text();
+  assert.doesNotMatch(html, /xterm\.(?:js|css)/u);
+  assert.match(html, /DEV SHELL/u, 'DSH 复用同一页面模板，由运行模式隐藏开发标识');
+
+  const xtermResponse = await fetch(
+    `${new URL(app.url).origin}/editor/xterm.js?token=${encodeURIComponent(app.token)}`,
+  );
+  assert.equal(xtermResponse.status, 404);
+});
 
 test('显式退出接口关闭当前编辑服务', async t => {
   const app = await makeApp(t);
@@ -302,10 +339,10 @@ async function createTask(app, overrides = {}) {
   return response.json();
 }
 
-async function createAttachedTask(app, contents = 'trusted attachment') {
+async function createAttachedTask(app, contents = 'trusted attachment', overrides = {}) {
   const form = new FormData();
   form.append('task', new Blob([JSON.stringify({
-    ...taskInput, attachmentSources:['selected'],
+    ...taskInput, ...overrides, attachmentSources:['selected'],
   })], { type:'application/json' }), 'task.json');
   form.append('attachment', new Blob([Buffer.from(contents)]), 'reference.txt');
   const response = await fetch(`${app.url}/api/tasks?token=secret`, {
@@ -427,7 +464,7 @@ async function createPendingTransactionFixture({
   await writeFile(deckPath, diskBytes);
   const oldFingerprint = sha256(oldBytes);
   const candidateFingerprint = sha256(candidateBytes);
-  const sidecarRoot = join(root, '.huawei-deck-editor');
+  const sidecarRoot = join(root, '.aico-ppt-editor');
   const sessionDir = join(sidecarRoot, `deck-${oldFingerprint.slice(0, 8)}`);
   const backup = join(sessionDir, 'backups', `deck-${oldFingerprint}.html`);
   const transactionId = '123e4567-e89b-42d3-a456-426614174000';
@@ -484,7 +521,7 @@ async function createPendingTransactionFixture({
 }
 
 async function replaceSidecarIdentity(app, level) {
-  const sidecarRoot = join(app.deckPath, '..', '.huawei-deck-editor');
+  const sidecarRoot = join(app.deckPath, '..', '.aico-ppt-editor');
   const sessionName = app.sessionDir.split('/').at(-1);
   const target = level === 'root' ? sidecarRoot : app.sessionDir;
   await rename(target, `${target}.trusted-original`);
@@ -628,7 +665,7 @@ test('session lock 跨 helper 进程互斥，失败方零副作用且 close 后�
   });
   let contender;
   try {
-    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sidecarRoot = join(root, '.aico-ppt-editor');
     const treeBefore = await sidecarTree(sidecarRoot);
     const registryBefore = await readFile(join(sidecarRoot, 'sessions.json'));
     const sessionBefore = await readFile(join(first.sessionDir, 'session.json'));
@@ -695,7 +732,7 @@ test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，�
     const firstSessionDir = app.sessionDir;
     try {
       assert.match(firstSessionId, /^[0-9a-f-]{36}$/);
-      const registry = JSON.parse(await readFile(join(root, '.huawei-deck-editor', 'sessions.json')));
+      const registry = JSON.parse(await readFile(join(root, '.aico-ppt-editor', 'sessions.json')));
       assert.equal(registry.sessions[firstSessionId].sessionId, firstSessionId);
       assert.equal(registry.sessions[firstSessionId].sessionName, firstSessionDir.split('/').at(-1));
       assert.equal(
@@ -722,7 +759,7 @@ test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，�
     const sessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sessionName = `deck-${fingerprint.slice(0, 8)}`;
     const foreignDeckPath = 'Y:\\shared-project\\deck.html';
-    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sidecarRoot = join(root, '.aico-ppt-editor');
     const sessionDir = await makeCompleteSessionDirectory(sidecarRoot, sessionName);
     await writeFile(join(sessionDir, 'session.json'), JSON.stringify(emptySessionState(
       foreignDeckPath, fingerprint, { sessionId },
@@ -746,7 +783,7 @@ test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，�
       projectRootSource:'launch-cwd',
       now:() => '2026-08-09T12:00:00.000Z',
     });
-    persistedWorkspace.projectRoot = '\\\\Mac\\Home\\zyq_workspace\\huawei-deck';
+    persistedWorkspace.projectRoot = '\\\\Mac\\Home\\zyq_workspace\\aico-ppt';
     await writeFile(
       join(sessionDir, 'agent-workspace.json'),
       JSON.stringify(persistedWorkspace, null, 2),
@@ -774,7 +811,7 @@ test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，�
     const deckPath = join(root, 'deck.html');
     await writeFile(deckPath, 'legacy-deck');
     const fingerprint = sha256('legacy-deck');
-    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sidecarRoot = join(root, '.aico-ppt-editor');
     const sessionName = `deck-${fingerprint.slice(0, 8)}`;
     const sessionDir = await makeCompleteSessionDirectory(sidecarRoot, sessionName);
     await writeFile(
@@ -821,7 +858,7 @@ test('session registry 提供稳定身份，legacy 仅无 pending 时迁移，�
     const deckPath = join(root, 'deck.html');
     await writeFile(deckPath, 'unregistered');
     const fingerprint = sha256('unregistered');
-    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sidecarRoot = join(root, '.aico-ppt-editor');
     const sessionName = `deck-${fingerprint.slice(0, 8)}`;
     const sessionDir = await makeCompleteSessionDirectory(sidecarRoot, sessionName);
     await writeFile(join(sessionDir, 'session.json'), JSON.stringify(emptySessionState(
@@ -979,8 +1016,8 @@ test('默认 Codex 使用一个长期 bypass PTY，首次加载 Skill，后续�
   ]);
   const submittedPrompts = children[0].writes.filter(value => /本批任务 ID/.test(value));
   assert.equal(submittedPrompts.length, 2);
-  assert.match(submittedPrompts[0], /huawei-deck/);
-  assert.doesNotMatch(submittedPrompts[1], /\$huawei-deck/);
+  assert.match(submittedPrompts[0], /aico-ppt/);
+  assert.doesNotMatch(submittedPrompts[1], /\$aico-ppt/);
   assert.equal(app.agentTerminal.snapshot().state, 'running');
   assert.equal(app.agentWorkspace.snapshot().workspaceRevision, 1);
   assert.equal(
@@ -1073,7 +1110,7 @@ test('Codex 长步骤中的 steer 输入框不提前结算批次或开放重复�
           events.emit('data', `\r\n${'工具执行输出 '.repeat(420)}`);
           events.emit(
             'data',
-            '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/huawei-deck' + draftOutput,
+            '\u001b[23;1Hgpt-5.6-sol xhigh · /tmp/aico-ppt' + draftOutput,
           );
         });
       });
@@ -1292,7 +1329,7 @@ test('已保存 Codex ID 不存在时创建可恢复替代会话而不是启动�
   });
   await app.agentTerminal.start();
   assert.equal(resumedId, '019ff492-40fd-7383-b595-6d7440fe6172');
-  assert.match(initializationPrompt, /huawei-deck/);
+  assert.match(initializationPrompt, /aico-ppt/);
   assert.deepEqual(children[0].args, [
     'resume', '--dangerously-bypass-approvals-and-sandbox',
     '019ff492-40fd-7383-b595-6d7440fe6173',
@@ -1398,13 +1435,21 @@ test('任务附件输出拒绝 task 目录、文件、集合或 size 被替换',
 
 test('已耐久的 action、task-updated 与 group 仅在可信附件验证后输出', async t => {
   const app = await makeApp(t);
-  const created = await createAttachedTask(app);
-  const taskId = created.task.id;
-  const attachmentPath = created.task.attachments[0].path;
+  const completedTask = await createAttachedTask(app, 'completed task attachment');
+  const ambiguousTask = await createAttachedTask(
+    app, 'ambiguous task attachment', { expectedRevision:1 },
+  );
+  const taskId = completedTask.task.id;
+  const ambiguousTaskId = ambiguousTask.task.id;
   const outside = join(app.sessionDir, '..', 'outside-task-bearing-output.txt');
-  await rename(attachmentPath, `${attachmentPath}.trusted`);
   await writeFile(outside, 'outside task-bearing output');
-  await symlink(outside, attachmentPath);
+  for (const attachmentPath of [
+    completedTask.task.attachments[0].path,
+    ambiguousTask.task.attachments[0].path,
+  ]) {
+    await rename(attachmentPath, `${attachmentPath}.trusted`);
+    await symlink(outside, attachmentPath);
+  }
   const editor = await connect(app.editorWsUrl);
   t.after(() => editor.close());
   const requested = { ...action, taskId };
@@ -1412,7 +1457,7 @@ test('已耐久的 action、task-updated 与 group 仅在可信附件验证后�
   let commandPromise = nextMessage(editor);
   let responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ expectedRevision:1, taskId, actions:[requested] }),
+    body:JSON.stringify({ expectedRevision:2, taskId, actions:[requested] }),
   });
   let command = await commandPromise;
   await prepareAndCommit(editor, command);
@@ -1422,15 +1467,18 @@ test('已耐久的 action、task-updated 与 group 仅在可信附件验证后�
   assert.equal(body.code, 'UNSAFE_SIDECAR_IO');
   assert.equal(body.committed, true);
   assert.equal(body.commitScope, 'session');
-  assert.equal(body.revision, 2);
-  assert.equal(app.session.revision, 2);
-  assert.equal(app.session.tasks[0].status, 'completed');
+  assert.equal(body.revision, 3);
+  assert.equal(app.session.revision, 3);
+  assert.equal(
+    app.session.tasks.find(task => task.id === taskId)?.status,
+    'completed',
+  );
   const groupId = app.session.groups[0].id;
 
   commandPromise = nextMessage(editor);
   responsePromise = fetch(`${app.url}/api/groups/${groupId}/undo?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ expectedRevision:2 }),
+    body:JSON.stringify({ expectedRevision:3 }),
   });
   command = await commandPromise;
   await prepareAndCommit(editor, command);
@@ -1440,14 +1488,18 @@ test('已耐久的 action、task-updated 与 group 仅在可信附件验证后�
   assert.equal(body.code, 'UNSAFE_SIDECAR_IO');
   assert.equal(body.committed, true);
   assert.equal(body.commitScope, 'session');
-  assert.equal(body.revision, 3);
-  assert.equal(app.session.revision, 3);
+  assert.equal(body.revision, 4);
+  assert.equal(app.session.revision, 4);
   assert.equal(app.session.groups[0].active, false);
 
   commandPromise = nextMessage(editor);
   responsePromise = fetch(`${app.url}/api/actions?token=secret`, {
     method:'POST', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ expectedRevision:3, taskId, actions:[requested] }),
+    body:JSON.stringify({
+      expectedRevision:4,
+      taskId:ambiguousTaskId,
+      actions:[{ ...requested, taskId:ambiguousTaskId }],
+    }),
   });
   command = await commandPromise;
   editor.send(JSON.stringify({
@@ -1461,9 +1513,12 @@ test('已耐久的 action、task-updated 与 group 仅在可信附件验证后�
   assert.equal(body.code, 'UNSAFE_SIDECAR_IO');
   assert.equal(body.committed, true);
   assert.equal(body.commitScope, 'session');
-  assert.equal(body.revision, 4);
-  assert.equal(app.session.revision, 4);
-  assert.equal(app.session.tasks[0].status, 'needs-confirmation');
+  assert.equal(body.revision, 5);
+  assert.equal(app.session.revision, 5);
+  assert.equal(
+    app.session.tasks.find(task => task.id === ambiguousTaskId)?.status,
+    'needs-confirmation',
+  );
   assert.equal(await readFile(outside, 'utf8'), 'outside task-bearing output');
 });
 
@@ -1857,7 +1912,7 @@ test('sidecar root 或 session 祖先为 symlink 时 server 启动即拒绝且�
       await writeFile(deck, deckBytes);
       const outside = join(project, 'outside');
       await mkdir(outside);
-      const sidecarRoot = join(project, '.huawei-deck-editor');
+      const sidecarRoot = join(project, '.aico-ppt-editor');
       if (level === 'root') {
         await symlink(outside, sidecarRoot);
       } else {
@@ -2438,8 +2493,9 @@ test('undo/redo 的 session 写已 committed 后保留候选 journal 并冻结',
       assert.equal(state.revision, 2);
       assert.equal(state.groups[0].active, method === 'redo');
       assert.deepEqual(state.redo, method === 'undo' ? [groupId] : []);
-      assert.equal(state.tasks[0].status, method === 'undo' ? 'pending' : 'completed');
-      assert.equal(state.tasks[0].groupId, method === 'undo' ? undefined : groupId);
+      assert.equal(state.tasks[0].status, 'completed');
+      assert.equal(state.tasks[0].groupId, groupId);
+      assert.equal(state.tasks[0].effectState, method === 'undo' ? 'undone' : 'active');
       assert.equal(disk.revision, state.revision);
       assert.deepEqual(disk.groups, state.groups);
       assert.deepEqual(disk.tasks, state.tasks);
@@ -2974,8 +3030,9 @@ test('成功 action 原子完成任务且 undo/redo 同步任务生命周期', a
   assert.equal(response.status, 200);
   assert.equal(body.revision, 3);
   task = app.session.tasks.find(candidate => candidate.id === taskId);
-  assert.equal(task.status, 'pending');
-  assert.equal(task.groupId, undefined);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.groupId, groupId);
+  assert.equal(task.effectState, 'undone');
   assert.equal(app.session.groups[0].active, false);
 
   commandPromise = nextMessage(editor, message => message.type === 'apply-actions');
@@ -3105,8 +3162,9 @@ test('非末尾 Agent 任务撤销追加补偿条目，后续人工修改不回�
   assert.equal(response.status, 200, JSON.stringify(compensated));
   assert.equal(compensated.compensatedGroupId, agentResult.groupId);
   assert.notEqual(compensated.groupId, agentResult.groupId);
-  assert.equal(compensated.task.status, 'pending');
-  assert.equal(compensated.task.effectState, 'compensated');
+  assert.equal(compensated.task.status, 'completed');
+  assert.equal(compensated.task.groupId, agentResult.groupId);
+  assert.equal(compensated.task.effectState, 'undone');
   assert.deepEqual(compensated.task.entryIds, [
     agentResult.groupId, compensated.groupId,
   ]);
@@ -3128,6 +3186,8 @@ test('非末尾 Agent 任务撤销追加补偿条目，后续人工修改不回�
   assert.equal(response.status, 200, JSON.stringify(restored));
   assert.equal(restored.task.status, 'completed');
   assert.equal(restored.task.groupId, agentResult.groupId);
+  assert.equal(restored.task.effectState, 'active');
+  assert.equal(app.session.tasks.find(task => task.id === taskId)?.status, 'completed');
 });
 
 test('不存在的 taskId 在发送浏览器 tentative action 前拒绝', async t => {
@@ -3846,7 +3906,7 @@ test('启动拒绝 forged/stale transaction，除受控 working 目录外不改 
     const root = await mkdtemp(join(tmpdir(), 'deck-invalid-record-readonly-'));
     const deckPath = join(root, 'deck.html');
     await writeFile(deckPath, candidateBytes);
-    const sidecarRoot = join(root, '.huawei-deck-editor');
+    const sidecarRoot = join(root, '.aico-ppt-editor');
     const sessionDir = join(sidecarRoot, `deck-${sha256(oldBytes).slice(0, 8)}`);
     const transactions = join(sessionDir, 'transactions');
     const transaction = join(transactions, '123e4567-e89b-42d3-a456-426614174000.json');
@@ -4467,7 +4527,8 @@ test('源码事务删除已固化动作所在页面时剔除被取代补丁并�
   result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));
   assert.deepEqual(app.session.solidifiedActions, [solidifiedAction]);
-  assert.equal(app.session.tasks.find(task => task.id === taskId)?.status, 'pending');
+  assert.equal(app.session.tasks.find(task => task.id === taskId)?.status, 'completed');
+  assert.equal(app.session.tasks.find(task => task.id === taskId)?.effectState, 'undone');
   assert.match(await readFile(app.workingDeckPath, 'utf8'), new RegExp(deletedPageKey));
 
   response = await fetch(
@@ -4854,7 +4915,8 @@ test('Agent 结构任务绑定下一次工作副本修改，并随撤销重做�
   );
   result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));
-  assert.equal(result.task.status, 'pending');
+  assert.equal(result.task.status, 'completed');
+  assert.equal(result.task.effectState, 'undone');
 
   response = await fetch(
     `${app.url}/api/groups/${session.groups[0].id}/redo?token=secret`,
@@ -5136,7 +5198,8 @@ test('未固化删除任务目标页后可安全重开并撤销恢复', async t 
   );
   result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));
-  assert.equal(result.task.status, 'pending');
+  assert.equal(result.task.status, 'completed');
+  assert.equal(result.task.effectState, 'undone');
   assert.equal(result.task.targetMissing, undefined);
   assert.match(await readFile(reopened.workingDeckPath, 'utf8'), new RegExp(deletedPageKey));
 });

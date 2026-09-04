@@ -77,4 +77,4 @@ edit-bundle 的不变量（改该脚本时必须保持）：
 
 ## 本地试装
 
-Codex 的标准用户级注册位置是 `~/.agents/skills/huawei-deck`。开发时运行 `python3 scripts/install.py install --skill-only` 建立受控软链接；Windows PowerShell 使用 `py -3 scripts\install.py install --skill-only` 建立 junction。改动会即时同步。
+Codex 的标准用户级注册位置是 `~/.agents/skills/aico-ppt`。开发时运行 `python3 scripts/install.py install --skill-only` 建立受控软链接；Windows PowerShell 使用 `py -3 scripts\install.py install --skill-only` 建立 junction。改动会即时同步。

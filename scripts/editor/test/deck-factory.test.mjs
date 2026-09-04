@@ -131,7 +131,7 @@ test('共享页型可借入场景外壳，并拒绝缺理由或连续雷同的�
 test('DeckFactory 准备 staging、验证并以不覆盖方式发布', async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-factory-'));
   t.after(() => rm(projectRoot, { recursive:true, force:true }));
-  const draftDir = join(projectRoot, '.huawei-deck-editor', 'drafts', 'draft-1');
+  const draftDir = join(projectRoot, '.aico-ppt-editor', 'drafts', 'draft-1');
   await mkdir(join(draftDir, 'staging'), { recursive:true });
   const templatePath = join(projectRoot, 'template.html');
   await writeFile(templatePath, '<html>template</html>');

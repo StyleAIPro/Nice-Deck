@@ -7,13 +7,18 @@ import stat
 import tempfile
 import uuid
 
+try:
+    from product_paths import resolve_project_state_root
+except ModuleNotFoundError:
+    from scripts.editor.product_paths import resolve_project_state_root
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("eb", ROOT / "scripts/edit-bundle.py")
 eb = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(eb)
 PATCH_SPEC = importlib.util.spec_from_file_location(
-    "huawei_deck_patch_bundle", ROOT / "scripts/editor/patch_bundle.py"
+    "aico_ppt_patch_bundle", ROOT / "scripts/editor/patch_bundle.py"
 )
 patch_bundle = importlib.util.module_from_spec(PATCH_SPEC)
 PATCH_SPEC.loader.exec_module(patch_bundle)
@@ -77,7 +82,7 @@ def _ensure_sidecar_session(deck_path, session_dir, sidecar_identity=None):
     project_info = project_dir.lstat()
     if stat.S_ISLNK(project_info.st_mode) or not stat.S_ISDIR(project_info.st_mode):
         raise RuntimeError(f"Deck 项目目录必须是非符号链接的真实目录：{project_dir}")
-    sidecar_root = project_dir / ".huawei-deck-editor"
+    sidecar_root = resolve_project_state_root(project_dir)
     if session_dir.parent != sidecar_root:
         raise RuntimeError(f"session 必须直属 Deck 项目的 sidecar root：{session_dir}")
     if sidecar_identity is not None:
@@ -312,7 +317,7 @@ def write_patches(
 
         phase = "decode"
         # edit-bundle 仍是唯一 bundle 编辑器；它只接触可信 dirfd 读出的系统临时副本。
-        with tempfile.TemporaryDirectory(prefix="huawei-deck-editor-") as work_dir:
+        with tempfile.TemporaryDirectory(prefix="aico-ppt-editor-") as work_dir:
             work_path = Path(work_dir) / deck_name
             work_path.write_bytes(original_bytes)
             lines = eb.load(work_path)

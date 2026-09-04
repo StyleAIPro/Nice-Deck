@@ -558,7 +558,7 @@ def verify(path):
     return _verify_lines(load(path), verbose=True)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='安全编辑或验证 Huawei Deck bundle')
+    parser = argparse.ArgumentParser(description='安全编辑或验证 AICO-PPT bundle')
     parser.add_argument('deck', nargs='?')
     parser.add_argument('--ensure-page-ids', action='store_true', help='补齐持久 pageId 后写回')
     args = parser.parse_args()

@@ -5,28 +5,29 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { resolveEditorStateRoot } from './editor-state-root.mjs';
+import { withLegacyAicoPptEnvironment } from './environment-aliases.mjs';
 
 const execFileAsync = promisify(execFile);
 const EDITOR_DIR = resolve(fileURLToPath(import.meta.url), '..');
 const PROJECT_DIR = resolve(EDITOR_DIR, '../..');
 const PATH_ENVIRONMENT_KEYS = Object.freeze([
-  'HUAWEI_DECK_SOURCE_PATH',
-  'HUAWEI_DECK_WORKING_PATH',
-  'HUAWEI_DECK_CREATION_CONTEXT',
-  'HUAWEI_DECK_CREATION_MATERIALS',
-  'HUAWEI_DECK_CREATION_PLAN',
-  'HUAWEI_DECK_CREATION_CAPABILITY_FILE',
+  'AICO_PPT_SOURCE_PATH',
+  'AICO_PPT_WORKING_PATH',
+  'AICO_PPT_CREATION_CONTEXT',
+  'AICO_PPT_CREATION_MATERIALS',
+  'AICO_PPT_CREATION_PLAN',
+  'AICO_PPT_CREATION_CAPABILITY_FILE',
 ]);
 const VALUE_ENVIRONMENT_KEYS = Object.freeze([
-  'HUAWEI_DECK_EDITOR_URL',
-  'HUAWEI_DECK_EDITOR_TOKEN',
-  'HUAWEI_DECK_CREATION_URL',
+  'AICO_PPT_EDITOR_URL',
+  'AICO_PPT_EDITOR_TOKEN',
+  'AICO_PPT_CREATION_URL',
 ]);
 const WSL_PROBE_SCRIPT = [
-  'huawei_deck_codex="$(command -v codex)" || exit 127',
-  'huawei_deck_node="$(command -v node)" || exit 127',
-  'printf "HUAWEI_DECK_CODEX=%s\\nHUAWEI_DECK_NODE=%s\\nHUAWEI_DECK_HOME=%s\\n"'
-    + ' "$huawei_deck_codex" "$huawei_deck_node" "$HOME"',
+  'aico_ppt_codex="$(command -v codex)" || exit 127',
+  'aico_ppt_node="$(command -v node)" || exit 127',
+  'printf "AICO_PPT_CODEX=%s\\nAICO_PPT_NODE=%s\\nAICO_PPT_HOME=%s\\n"'
+    + ' "$aico_ppt_codex" "$aico_ppt_node" "$HOME"',
 ].join('; ');
 const WSL_RUNTIME_CACHE = new Map();
 const WSL_RUNNER_IDS = new WeakMap();
@@ -224,14 +225,14 @@ async function probeWslRuntime(settings, callWsl, cacheEntry = null) {
     ).slice(tag.length);
     return {
       codexExecutable:readTaggedPath(
-        'HUAWEI_DECK_CODEX=',
+        'AICO_PPT_CODEX=',
         `WSL ${settings.wslDistribution}/${settings.wslUser} 的登录环境中找不到 codex`,
       ),
       nodeExecutable:readTaggedPath(
-        'HUAWEI_DECK_NODE=',
+        'AICO_PPT_NODE=',
         `WSL ${settings.wslDistribution}/${settings.wslUser} 的登录环境中找不到 node`,
       ),
-      wslHome:readTaggedPath('HUAWEI_DECK_HOME=', '无法确定 WSL 用户 HOME'),
+      wslHome:readTaggedPath('AICO_PPT_HOME=', '无法确定 WSL 用户 HOME'),
     };
   };
   if (!cacheEntry) return execute();
@@ -316,19 +317,19 @@ export async function prepareAgentTerminalRuntime(provider, {
   if (!wslCwd || !wslProjectRoot || !wslEditorRoot) {
     throw runtimeError('WSL_PATH_MAPPING_FAILED', 'WSL Codex 缺少项目目录或 Editor 路径映射');
   }
-  const runtimeEnvironment = {
+  const runtimeEnvironment = withLegacyAicoPptEnvironment({
     ...environment,
-    HUAWEI_DECK_CODEX_RUNTIME:'wsl',
-    HUAWEI_DECK_WSL_DISTRO:normalized.wslDistribution,
-    HUAWEI_DECK_WSL_USER:normalized.wslUser,
-    HUAWEI_DECK_WSL_NODE:nodeExecutable,
-    HUAWEI_DECK_WSL_CODEX_HOME:posix.join(wslHome, '.codex'),
-    HUAWEI_DECK_WSL_CWD:wslCwd,
-    HUAWEI_DECK_WSL_SESSION_HELPER:posix.join(
+    AICO_PPT_CODEX_RUNTIME:'wsl',
+    AICO_PPT_WSL_DISTRO:normalized.wslDistribution,
+    AICO_PPT_WSL_USER:normalized.wslUser,
+    AICO_PPT_WSL_NODE:nodeExecutable,
+    AICO_PPT_WSL_CODEX_HOME:posix.join(wslHome, '.codex'),
+    AICO_PPT_WSL_CWD:wslCwd,
+    AICO_PPT_WSL_SESSION_HELPER:posix.join(
       wslEditorRoot,
       'scripts/editor/wsl-codex-session-helper.mjs',
     ),
-  };
+  });
   runtimeEnvironment.WSLENV = appendWslenv(runtimeEnvironment);
 
   return {
@@ -347,7 +348,7 @@ export async function prepareAgentTerminalRuntime(provider, {
         '--cd', wslCwd,
         // 实际 Codex 也必须进入该 WSL 用户的登录环境，才能继承其代理等配置。
         // CLI 与参数全部经位置参数传入，不拼接到 shell 命令字符串。
-        '--exec', 'bash', '-lic', 'exec "$@"', 'huawei-deck-codex',
+        '--exec', 'bash', '-lic', 'exec "$@"', 'aico-ppt-codex',
         codexExecutable,
         ...command.args,
       ],

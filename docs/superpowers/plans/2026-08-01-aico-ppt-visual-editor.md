@@ -1,4 +1,4 @@
-# Huawei Deck 后期可视化微调编辑器实现计划
+# AICO-PPT 后期可视化微调编辑器实现计划
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -54,7 +54,7 @@
 
 | 路径 | 修改内容 |
 | --- | --- |
-| `.gitignore` | 忽略 `.huawei-deck-editor/` 与 `.superpowers/` |
+| `.gitignore` | 忽略 `.aico-ppt-editor/` 与 `.superpowers/` |
 | `scripts/check_deps.py` | 检查并安装 `ws`、`html2canvas` |
 | `scripts/verify/measure_overflow.mjs` | 改用共用 Playwright 加载器 |
 | `scripts/verify/shot.mjs` | 改用共用 Playwright 加载器 |
@@ -126,7 +126,7 @@ class NodeModuleProbeTest(unittest.TestCase):
         self.assertTrue(check_deps.probe_node_module("node:path")[0])
 
     def test_missing_module_is_false(self):
-        self.assertFalse(check_deps.probe_node_module("huawei-deck-module-that-does-not-exist")[0])
+        self.assertFalse(check_deps.probe_node_module("aico-ppt-module-that-does-not-exist")[0])
 ```
 
 - [ ] **步骤 2：运行测试确认缺少探测函数**
@@ -143,7 +143,7 @@ python3 -m unittest scripts/editor/test/test_launcher.py -v
 
 ```json
 {
-  "name": "huawei-deck-skill",
+  "name": "aico-ppt-skill",
   "private": true,
   "type": "module",
   "scripts": {
@@ -191,7 +191,7 @@ dict(key="html2canvas", label="html2canvas", why="区域标记局部截图",
 - [ ] **步骤 5：加入本地工作目录忽略规则**
 
 ```gitignore
-.huawei-deck-editor/
+.aico-ppt-editor/
 .superpowers/
 ```
 
@@ -201,9 +201,9 @@ dict(key="html2canvas", label="html2canvas", why="区域标记局部截图",
 
 ```bash
 python3 -m unittest scripts/editor/test/test_launcher.py -v
-python3 scripts/check_deps.py --check-only > /tmp/huawei-deck-editor-deps.txt || test $? -eq 1
-rg '✓ ws' /tmp/huawei-deck-editor-deps.txt
-rg '✓ html2canvas' /tmp/huawei-deck-editor-deps.txt
+python3 scripts/check_deps.py --check-only > /tmp/aico-ppt-editor-deps.txt || test $? -eq 1
+rg '✓ ws' /tmp/aico-ppt-editor-deps.txt
+rg '✓ html2canvas' /tmp/aico-ppt-editor-deps.txt
 npm ls ws html2canvas
 ```
 
@@ -341,11 +341,11 @@ test('跨页任务写入后可恢复且 revision 单调递增', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-'));
   const deck = join(root, 'deck.html');
   await writeFile(deck, 'deck-v1');
-  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
+  const store = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.aico-ppt-editor') });
   const t1 = await store.createTask({ pageKey:'page-001-a', pageIndex:1, pageLabel:'A', rect:{x:1,y:2,w:3,h:4}, instruction:'改 A' }, 0);
   const t2 = await store.createTask({ pageKey:'page-002-b', pageIndex:2, pageLabel:'B', rect:{x:5,y:6,w:7,h:8}, instruction:'改 B' }, 1);
   assert.equal(t1.revision, 1); assert.equal(t2.revision, 2);
-  const reopened = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.huawei-deck-editor') });
+  const reopened = await SessionStore.open({ deckPath: deck, rootDir: join(root, '.aico-ppt-editor') });
   assert.equal(reopened.state.tasks.length, 2);
   await assert.rejects(() => reopened.createTask({ ...t1.task, id:undefined }, 0), RevisionConflict);
   assert.match(await readFile(reopened.sessionPath, 'utf8'), /改 B/);
@@ -374,7 +374,7 @@ export class RevisionConflict extends Error {}
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 
 export class SessionStore {
-  static async open({ deckPath, rootDir = join(dirname(deckPath), '.huawei-deck-editor') }) {
+  static async open({ deckPath, rootDir = join(dirname(deckPath), '.aico-ppt-editor') }) {
     const bytes = await readFile(deckPath);
     const deckFingerprint = sha256(bytes);
     const sessionDir = join(rootDir, `${parse(deckPath).name}-${deckFingerprint.slice(0, 8)}`);
@@ -988,7 +988,7 @@ def build_command(deck, host="127.0.0.1", port=0, no_open=False):
     return cmd
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="启动 Huawei Deck 后期微调编辑器")
+    parser = argparse.ArgumentParser(description="启动 AICO-PPT 后期微调编辑器")
     parser.add_argument("deck"); parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0); parser.add_argument("--no-open", action="store_true")
     args = parser.parse_args(argv)
@@ -1596,13 +1596,13 @@ python3 scripts/edit-bundle.py Deck-Projects/renzhi/renzhi-deck.html
 
 - [ ] **步骤 5：对试点副本执行视觉验证**
 
-实现 `--keep-temp` 测试参数，把副本固定到 `/tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html`，因此正式执行命令使用：
+实现 `--keep-temp` 测试参数，把副本固定到 `/tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html`，因此正式执行命令使用：
 
 ```bash
 node scripts/editor/test/renzhi-pilot.e2e.mjs --keep-temp
-node scripts/verify/measure_overflow.mjs /tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html --all
-node scripts/verify/shot.mjs /tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-kc-sol-agent.jpg
-node scripts/verify/steps.mjs /tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-kc-sol-agent-steps
+node scripts/verify/measure_overflow.mjs /tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html --all
+node scripts/verify/shot.mjs /tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-kc-sol-agent.jpg
+node scripts/verify/steps.mjs /tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-kc-sol-agent-steps
 ```
 
 预期：无新增 section overflow；截图文件存在且为 1920×1080；逐拍目录至少包含初始帧和末帧。
@@ -1638,7 +1638,7 @@ test('四份入口文档同步后期编辑命令与边界', async () => {
   for (const file of ['SKILL.md','README.md','references/editing-guide.md','docs/architecture.md']) {
     const text = await readFile(file, 'utf8');
     assert.match(text, /python3 scripts\/deck-editor\.py/);
-    assert.match(text, /\.huawei-deck-editor/);
+    assert.match(text, /\.aico-ppt-editor/);
     assert.match(text, /不增删页|不支持.*增删页|增删页.*不支持/);
   }
 });
@@ -1661,7 +1661,7 @@ node --test scripts/editor/test/docs-contract.test.mjs
 ```text
 启动：python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 编辑：直接改文字 / 移动 / 缩放，或跨页区域标记后交给外部 Agent
-会话：.huawei-deck-editor/，不进入交付 deck
+会话：.aico-ppt-editor/，不进入交付 deck
 保存：三重闸门通过后由 edit-bundle.py 原子写回
 第一版边界：不增删页、不调整页序、不重构复杂动画、不内置聊天
 验证：eb.verify + measure_overflow + shot + 修改动画页 steps
@@ -1699,12 +1699,12 @@ git commit -m "docs: 增加 Deck 后期可视化微调工作流"
 运行：
 
 ```bash
-python3 scripts/check_deps.py --check-only > /tmp/huawei-deck-editor-final-deps.txt || test $? -eq 1
-rg '✓ Node.js' /tmp/huawei-deck-editor-final-deps.txt
-rg '✓ playwright-core' /tmp/huawei-deck-editor-final-deps.txt
-rg '✓ Google Chrome' /tmp/huawei-deck-editor-final-deps.txt
-rg '✓ ws' /tmp/huawei-deck-editor-final-deps.txt
-rg '✓ html2canvas' /tmp/huawei-deck-editor-final-deps.txt
+python3 scripts/check_deps.py --check-only > /tmp/aico-ppt-editor-final-deps.txt || test $? -eq 1
+rg '✓ Node.js' /tmp/aico-ppt-editor-final-deps.txt
+rg '✓ playwright-core' /tmp/aico-ppt-editor-final-deps.txt
+rg '✓ Google Chrome' /tmp/aico-ppt-editor-final-deps.txt
+rg '✓ ws' /tmp/aico-ppt-editor-final-deps.txt
+rg '✓ html2canvas' /tmp/aico-ppt-editor-final-deps.txt
 ```
 
 预期：Node、playwright-core、ws、html2canvas 均显示 `✓`；Chrome 仍按现有体检行确认。其他非编辑器依赖的缺失单独记录，不作为本功能回归失败。
@@ -1725,10 +1725,10 @@ npm run test:editor
 
 ```bash
 node scripts/editor/test/renzhi-pilot.e2e.mjs --keep-temp
-python3 scripts/edit-bundle.py /tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html
-node scripts/verify/measure_overflow.mjs /tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html --all
-node scripts/verify/shot.mjs /tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-final.jpg
-node scripts/verify/steps.mjs /tmp/huawei-deck-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-final-steps
+python3 scripts/edit-bundle.py /tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html
+node scripts/verify/measure_overflow.mjs /tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html --all
+node scripts/verify/shot.mjs /tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-final.jpg
+node scripts/verify/steps.mjs /tmp/aico-ppt-editor-renzhi-pilot/renzhi-deck.html kc-sol-agent /tmp/renzhi-editor-final-steps
 ```
 
 预期：bundle 仍为 21/21/21；无新增 section overflow；最终截图为 1920×1080；动画逐拍截图生成成功。

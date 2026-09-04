@@ -13,17 +13,17 @@ import {
 } from './test-helpers.mjs';
 
 const KEEP_TEMP = process.argv.includes('--keep-temp');
-const FIXED_ROOT = '/tmp/huawei-deck-editor-renzhi-pilot';
+const FIXED_ROOT = '/tmp/aico-ppt-editor-renzhi-pilot';
 const PILOT_PAGE_INDEXES = [7, 8, 9, 12, 17];
 const EXPECTED_PAGE_COUNT = 21;
-const SOURCE_CANDIDATES = process.env.HUAWEI_DECK_RENZHI_FIXTURE
-  ? [resolve(process.env.HUAWEI_DECK_RENZHI_FIXTURE)]
+const SOURCE_CANDIDATES = process.env.AICO_PPT_RENZHI_FIXTURE
+  ? [resolve(process.env.AICO_PPT_RENZHI_FIXTURE)]
   : [resolve('Deck-Projects/renzhi/renzhi-deck.html'),
     resolve('../..', 'Deck-Projects/renzhi/renzhi-deck.html')];
 // 业务验收材料不随仓库发布；显式指定的路径错误仍须失败，不能静默跳过。
-const pilotSkip = !process.env.HUAWEI_DECK_RENZHI_FIXTURE
+const pilotSkip = !process.env.AICO_PPT_RENZHI_FIXTURE
   && !SOURCE_CANDIDATES.some(candidate => existsSync(candidate))
-  ? '未提供 renzhi 业务验收 Deck；可用 HUAWEI_DECK_RENZHI_FIXTURE 指定'
+  ? '未提供 renzhi 业务验收 Deck；可用 AICO_PPT_RENZHI_FIXTURE 指定'
   : false;
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -194,8 +194,8 @@ function assertBundleIsClean(template) {
   for (const forbidden of [
     'frame-bridge.mjs',
     'task-drawer.mjs',
-    '.huawei-deck-editor/',
-    '/tmp/huawei-deck-editor-renzhi-pilot',
+    '.aico-ppt-editor/',
+    '/tmp/aico-ppt-editor-renzhi-pilot',
     '试点页 7 修改',
     '试点页 8 修改',
     '试点页 9 修改',
@@ -216,7 +216,7 @@ test('renzhi 工作副本完成 21 页、跨页任务、检查点、固化与重
   const source = sourceNavigation(sourceBundle);
   const root = KEEP_TEMP
     ? FIXED_ROOT
-    : await mkdtemp(join(tmpdir(), 'huawei-deck-editor-renzhi-pilot-'));
+    : await mkdtemp(join(tmpdir(), 'aico-ppt-editor-renzhi-pilot-'));
   if (KEEP_TEMP) {
     await rm(root, { recursive:true, force:true });
     await mkdir(root, { recursive:true });
@@ -364,7 +364,7 @@ test('renzhi 封面文字连续格式、混合态、历史合并与重开恢复'
 }, async t => {
   const sourceDeck = await locateSourceDeck();
   const sourceBefore = await sha256File(sourceDeck);
-  const root = await mkdtemp(join(tmpdir(), 'huawei-deck-renzhi-format-'));
+  const root = await mkdtemp(join(tmpdir(), 'aico-ppt-renzhi-format-'));
   const deckPath = join(root, 'renzhi-deck.html');
   await copyFile(sourceDeck, deckPath);
   const app = await startServer({
@@ -578,7 +578,7 @@ test('renzhi 封面红框文字全选删除后保持空内容并可撤销', {
 }, async t => {
   const sourceDeck = await locateSourceDeck();
   const sourceBefore = await sha256File(sourceDeck);
-  const root = await mkdtemp(join(tmpdir(), 'huawei-deck-renzhi-empty-text-'));
+  const root = await mkdtemp(join(tmpdir(), 'aico-ppt-renzhi-empty-text-'));
   const deckPath = join(root, 'renzhi-deck.html');
   await copyFile(sourceDeck, deckPath);
   const app = await startServer({

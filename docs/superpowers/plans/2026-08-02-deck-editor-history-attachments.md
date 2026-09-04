@@ -15,13 +15,13 @@
 实现前完整阅读：
 
 - `docs/superpowers/specs/2026-08-02-deck-editor-history-attachments-design.md`
-- `docs/superpowers/specs/2026-08-01-huawei-deck-visual-editor-design.md`
+- `docs/superpowers/specs/2026-08-01-aico-ppt-visual-editor-design.md`
 - `references/editing-guide.md`
 
 执行目录必须是：
 
 ```text
-/Users/zhaoyinqi/zyq_workspace/huawei-deck/.worktrees/deck-visual-editor
+/Users/zhaoyinqi/zyq_workspace/aico-ppt/.worktrees/deck-visual-editor
 ```
 
 分支必须是：

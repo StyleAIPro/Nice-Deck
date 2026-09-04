@@ -28,7 +28,7 @@
   --radius-md: 18px;
   --shadow-panel: var(--glass-shadow);
   --motion: 200ms ease;
-  font-family: "Huawei Deck UI", "Noto Sans SC", sans-serif;
+  font-family: "AICO-PPT UI", "Noto Sans SC", sans-serif;
   font-synthesis: none;
 }
 
@@ -116,6 +116,14 @@ html[data-embedded="creation"] .canvas-column::after {
   display: none;
 }
 
+html[data-embedded="dsh"] .agent-terminal-panel {
+  display: none !important;
+}
+
+html[data-embedded="dsh"] .dev-shell-badge {
+  display: none !important;
+}
+
 .glass-filter-defs {
   position: absolute;
   pointer-events: none;
@@ -198,6 +206,7 @@ select {
 }
 
 .brand-block {
+  flex: none;
   min-width: 0;
   gap: 12px;
 }
@@ -229,10 +238,117 @@ p {
   letter-spacing: .01em;
 }
 
+.dev-shell-badge {
+  display: inline-block;
+  padding: 2px 5px;
+  border: 1px solid rgb(199 0 11 / 24%);
+  border-radius: 999px;
+  color: #9b111a;
+  background: rgb(199 0 11 / 5.5%);
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  line-height: 1;
+  vertical-align: 1px;
+}
+
 .topbar-actions {
+  flex: 1 1 0;
+  min-width: 0;
   gap: 16px;
   color: var(--ink-secondary);
   font-size: 12px;
+}
+
+.dsh-session-control {
+  min-width:0;
+  max-width:240px;
+  height:38px;
+  padding:3px 4px 3px 9px;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  border:1px solid rgb(20 22 28 / 9%);
+  border-radius:999px;
+  background:rgb(245 246 248 / 88%);
+}
+.dsh-session-control[hidden] { display:none; }
+.dsh-session-dot {
+  width:7px;
+  height:7px;
+  flex:0 0 7px;
+  border-radius:50%;
+  background:#a5a9af;
+}
+.dsh-session-control[data-state="active"] .dsh-session-dot { background:#169a67; }
+.dsh-session-control[data-state="detached"] .dsh-session-dot { background:#d88700; }
+.dsh-session-control[data-state="missing"] .dsh-session-dot { background:var(--brand-red); }
+.dsh-session-control select {
+  min-width:0;
+  max-width:185px;
+  height:30px;
+  flex:1 1 auto;
+  overflow:hidden;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:var(--ink-secondary);
+  font-size:10px;
+  text-overflow:ellipsis;
+}
+.dsh-session-control button {
+  width:30px;
+  height:30px;
+  flex:0 0 30px;
+  display:grid;
+  place-items:center;
+  border:0;
+  border-radius:50%;
+  background:#fff;
+  color:var(--brand-red);
+  font-size:18px;
+  line-height:1;
+  cursor:pointer;
+  box-shadow:0 1px 5px rgb(20 22 28 / 10%);
+}
+.dsh-session-control button:disabled { cursor:wait; opacity:.5; }
+
+.current-project-context {
+  min-width:0;
+  max-width:190px;
+  height:38px;
+  padding:0 11px;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  border:1px solid rgb(20 22 28 / 9%);
+  border-radius:999px;
+  background:rgb(245 246 248 / 88%);
+  color:var(--ink-secondary);
+}
+.current-project-context[hidden] { display:none; }
+.current-project-context svg {
+  width:15px;
+  height:15px;
+  flex:0 0 15px;
+  fill:none;
+  stroke:var(--brand-red);
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  stroke-width:1.7;
+}
+.current-project-context span {
+  min-width:0;
+  overflow:hidden;
+  font-size:10px;
+  font-weight:650;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.topbar-action-spacer {
+  min-width: 8px;
+  flex: 1 1 auto;
 }
 
 .workspace-navigation {
@@ -311,7 +427,7 @@ p {
 .workspace-switcher {
   position: absolute;
   top: calc(100% + 10px);
-  right: 0;
+  left: 0;
   width: min(430px, calc(100vw - 32px));
   max-height: calc(100vh - 78px);
   padding: 8px;
@@ -504,18 +620,6 @@ p {
 }
 @keyframes workspace-switcher-spin { to { transform: rotate(360deg); } }
 
-@media (max-width: 1180px) {
-  .workspace-navigation-button > span:last-child {
-    display: none;
-  }
-
-  .workspace-navigation-button {
-    width: 30px;
-    padding: 0;
-    justify-content: center;
-  }
-}
-
 .agent-status-anchor {
   position: relative;
 }
@@ -588,6 +692,156 @@ p {
   cursor: pointer;
   transition: background var(--motion), border-color var(--motion), color var(--motion),
     opacity var(--motion), transform 100ms ease;
+}
+
+.solidify-anchor {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+.solidify-reminder {
+  position: absolute;
+  z-index: 2147483643;
+  top: calc(100% + 12px);
+  right: -4px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 24px;
+  align-items: start;
+  gap: 10px;
+  width: min(292px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid rgb(255 255 255 / 76%);
+  border-radius: 14px;
+  background: rgb(250 250 251 / 94%);
+  box-shadow: 0 18px 48px rgb(31 35 45 / 22%), inset 0 1px 0 rgb(255 255 255 / 90%);
+  color: var(--ink);
+  backdrop-filter: blur(24px) saturate(1.24);
+  -webkit-backdrop-filter: blur(24px) saturate(1.24);
+  animation: solidify-reminder-in 180ms cubic-bezier(.2, .8, .2, 1) both;
+}
+
+.solidify-reminder[hidden] {
+  display: none;
+}
+
+.solidify-reminder::before {
+  position: absolute;
+  top: -6px;
+  right: 18px;
+  width: 10px;
+  height: 10px;
+  border-top: 1px solid rgb(255 255 255 / 76%);
+  border-left: 1px solid rgb(255 255 255 / 76%);
+  background: rgb(250 250 251 / 94%);
+  content: '';
+  transform: rotate(45deg);
+}
+
+.solidify-reminder-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgb(199 0 11 / 8%);
+  color: var(--brand-red);
+}
+
+.solidify-reminder-icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.solidify-reminder-copy {
+  min-width: 0;
+}
+
+.solidify-reminder-copy strong {
+  display: block;
+  margin-top: 1px;
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 17px;
+  text-wrap: pretty;
+}
+
+.solidify-reminder-copy p {
+  margin: 2px 0 7px;
+  color: var(--ink-secondary);
+  font-size: 10px;
+  line-height: 15px;
+  text-wrap: pretty;
+}
+
+.solidify-reminder-copy button {
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand-red-deep);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.solidify-reminder-copy button:hover:not(:disabled) {
+  color: var(--brand-red);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.solidify-reminder-copy button:focus-visible,
+.solidify-reminder-close:focus-visible {
+  outline: 2px solid rgb(199 0 11 / 42%);
+  outline-offset: 2px;
+}
+
+.solidify-reminder-copy button:disabled {
+  color: var(--ink-muted);
+  cursor: wait;
+}
+
+.solidify-reminder-close {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.solidify-reminder-close:hover {
+  background: rgb(31 35 41 / 6%);
+  color: var(--ink);
+}
+
+.solidify-reminder-close svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.6;
+}
+
+@keyframes solidify-reminder-in {
+  from { opacity: 0; transform: translateY(-5px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .solidify-reminder { animation: none; }
 }
 
 .solidify-dot {
@@ -1924,11 +2178,13 @@ p {
     var(--page-panel-width) minmax(480px, 1fr) var(--agent-terminal-width);
 }
 
-.editor-shell[data-agent-terminal-open="true"][data-inspector-state="expanded"] .workspace {
+.editor-shell[data-agent-terminal-open="true"][data-inspector-state="expanded"] .workspace,
+html[data-embedded="dsh"] .editor-shell[data-inspector-state="expanded"] .workspace {
   grid-template-rows: var(--inspector-dock-height) minmax(0, 1fr);
 }
 
-.editor-shell[data-agent-terminal-open="true"][data-inspector-state="collapsed"] .workspace {
+.editor-shell[data-agent-terminal-open="true"][data-inspector-state="collapsed"] .workspace,
+html[data-embedded="dsh"] .editor-shell[data-inspector-state="collapsed"] .workspace {
   grid-template-rows: 38px minmax(0, 1fr);
 }
 
@@ -2002,12 +2258,16 @@ p {
 }
 
 .editor-shell[data-agent-terminal-open="true"][data-inspector-state="expanded"] .page-panel,
-.editor-shell[data-agent-terminal-open="true"][data-inspector-state="collapsed"] .page-panel {
+.editor-shell[data-agent-terminal-open="true"][data-inspector-state="collapsed"] .page-panel,
+html[data-embedded="dsh"] .editor-shell[data-inspector-state="expanded"] .page-panel,
+html[data-embedded="dsh"] .editor-shell[data-inspector-state="collapsed"] .page-panel {
   grid-row: 1 / -1;
 }
 
 .editor-shell[data-agent-terminal-open="true"][data-inspector-state="expanded"] .canvas-column,
-.editor-shell[data-agent-terminal-open="true"][data-inspector-state="collapsed"] .canvas-column {
+.editor-shell[data-agent-terminal-open="true"][data-inspector-state="collapsed"] .canvas-column,
+html[data-embedded="dsh"] .editor-shell[data-inspector-state="expanded"] .canvas-column,
+html[data-embedded="dsh"] .editor-shell[data-inspector-state="collapsed"] .canvas-column {
   grid-column: 2;
   grid-row: 2;
 }
@@ -2484,6 +2744,7 @@ p {
   flex: none;
 }
 
+.canvas-tool-icon,
 .canvas-export-icon {
   width: 17px;
   height: 17px;
@@ -2559,6 +2820,7 @@ p {
 }
 
 .frame-viewport {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -3563,7 +3825,7 @@ p {
   text-align: center;
 }
 
-.task-undo {
+.task-history {
   min-width: 46px;
   grid-column: 2;
   grid-row: 1;
@@ -3927,7 +4189,7 @@ p {
 .agent-panel-footer,
 .agent-project-sessions,
 .task-attachments-toggle,
-.task-undo,
+.task-history,
 .task-row-actions,
 .task-edit,
 .task-attachments {
@@ -4070,7 +4332,7 @@ p {
 .agent-panel-disconnect,
 .task-edit,
 .task-delete,
-.task-undo,
+.task-history,
 .task-edit-cancel,
 .task-delete-cancel,
 .task-copy-attachment {
@@ -4090,7 +4352,7 @@ p {
 .agent-panel-disconnect:hover:not(:disabled),
 .task-edit:hover:not(:disabled),
 .task-delete:hover:not(:disabled),
-.task-undo:hover:not(:disabled),
+.task-history:hover:not(:disabled),
 .task-edit-cancel:hover:not(:disabled),
 .task-delete-cancel:hover:not(:disabled),
 .task-copy-attachment:hover:not(:disabled) {
@@ -4329,10 +4591,24 @@ p {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   overflow: hidden;
+  border: 0;
   border-radius: 50%;
   background: var(--pill-track);
   box-shadow: 0 4px 12px rgb(20 22 28 / 10%);
+  color: inherit;
+  cursor: pointer;
+  transition: box-shadow var(--motion), transform var(--motion);
+}
+
+.mode-emblem:focus-visible {
+  outline: 2px solid var(--brand-red);
+  outline-offset: 2px;
+}
+
+.mode-emblem:active {
+  transform: scale(.96);
 }
 
 .mode-emblem-icon {
@@ -4445,6 +4721,170 @@ p {
 .agent-status .pill-nav-label-stack {
   flex: 1 1 auto;
   overflow: hidden;
+}
+
+.topbar-control-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.dsh-only-control-icon {
+  display: none;
+}
+
+.topbar-tooltip {
+  position: fixed;
+  z-index: 2147483645;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 6px 9px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 7px;
+  background: rgb(31 34 39 / 96%);
+  box-shadow: 0 7px 20px rgb(20 22 28 / 20%);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  white-space: nowrap;
+}
+
+.topbar-tooltip[data-visible="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* DSH 右侧工作台把顶栏收敛为图标工具条，给画布保留稳定宽度。 */
+html[data-embedded="dsh"] .topbar {
+  gap: 8px;
+  padding-inline: 10px;
+}
+
+html[data-embedded="dsh"] .brand-block {
+  max-width: 220px;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+html[data-embedded="dsh"] .brand-block > div {
+  min-width: 0;
+}
+
+html[data-embedded="dsh"] .brand-block h1 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-embedded="dsh"] .topbar-actions {
+  flex: 1 1 0;
+  min-width: 0;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+html[data-embedded="dsh"] .dsh-session-control {
+  flex:0 1 220px;
+}
+
+html[data-embedded="dsh"] .current-project-context {
+  flex:0 1 170px;
+}
+
+/* pageKey、画布尺寸、缩放与 revision 都是内部状态；DSH 的窄工作台只保留
+   页面标题、模式与可操作按钮，避免只读文字挤压并覆盖相邻控件。 */
+html[data-embedded="dsh"] .canvas-context > [data-current-key],
+html[data-embedded="dsh"] .canvas-tools > .canvas-resolution,
+html[data-embedded="dsh"] .canvas-tools > .zoom-value,
+html[data-embedded="dsh"] .canvas-tools > .revision-value {
+  display: none;
+}
+
+html[data-embedded="dsh"] .canvas-tools {
+  gap: 0;
+}
+
+html[data-embedded="dsh"] .topbar-control-label {
+  display: none;
+}
+
+html[data-embedded="dsh"] .dsh-only-control-icon {
+  display: block;
+}
+
+html[data-embedded="dsh"] .workspace-navigation,
+html[data-embedded="dsh"] .history-controls {
+  height: 42px;
+  flex: none;
+  gap: 0;
+  padding: 3px;
+}
+
+html[data-embedded="dsh"] .guided-tour-trigger,
+html[data-embedded="dsh"] .workspace-navigation-button,
+html[data-embedded="dsh"] .history-button,
+html[data-embedded="dsh"] .solidify-button {
+  width: 36px;
+  min-width: 36px;
+  max-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+}
+
+html[data-embedded="dsh"] .exit-editor-button {
+  margin-left: 6px;
+}
+
+html[data-embedded="dsh"] .topbar-control-icon,
+html[data-embedded="dsh"] .exit-editor-icon {
+  width: 18px;
+  height: 18px;
+  flex-basis: 18px;
+  stroke-width: 1.8;
+}
+
+html[data-embedded="dsh"] .solidify-button .pill-nav-label-stack {
+  overflow: visible;
+}
+
+html[data-embedded="dsh"] .solidify-dot {
+  position: absolute;
+  z-index: 2;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topbar-tooltip { transition: none; }
+}
+
+@media (max-width: 620px) {
+  html[data-embedded="dsh"] .brand-block .topbar-divider,
+  html[data-embedded="dsh"] .brand-block > div {
+    display: none;
+  }
+
+  html[data-embedded="dsh"] .brand-block {
+    gap: 0;
+  }
+
+  html[data-embedded="dsh"] .brand-logo {
+    width: 82px;
+  }
 }
 
 .solidify-dot {

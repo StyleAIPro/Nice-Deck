@@ -59,7 +59,7 @@ test('Editor Server 接管同一个 AgentTerminalSession，不创建第二个 PT
   const deckPath = join(projectRoot, 'deck.html');
   await writeFile(deckPath, '<!doctype html><title>handoff</title>');
   const terminal = new HandoffTerminal(projectRoot);
-  const draftDir = join(projectRoot, '.huawei-deck-editor', 'drafts', 'handoff-draft');
+  const draftDir = join(projectRoot, '.aico-ppt-editor', 'drafts', 'handoff-draft');
   const creationConversationId = '019ff3bd-3f52-7f91-8ee6-61da2977a39f';
   const app = await startServer({
     deckPath,
@@ -85,10 +85,10 @@ test('Editor Server 接管同一个 AgentTerminalSession，不创建第二个 PT
   });
   assert.equal(app.agentTerminal, terminal);
   assert.equal(app.agentTerminal.snapshot().runtimeId, 'handoff-runtime');
-  assert.equal(terminal.environment.HUAWEI_DECK_EDITOR_URL, app.url);
-  assert.equal(terminal.environment.HUAWEI_DECK_EDITOR_TOKEN, app.token);
-  assert.equal(terminal.environment.HUAWEI_DECK_CREATION_CONTEXT, app.creationHandoff.path);
-  assert.equal(terminal.environment.HUAWEI_DECK_CREATION_MATERIALS, join(draftDir, 'materials'));
+  assert.equal(terminal.environment.AICO_PPT_EDITOR_URL, app.url);
+  assert.equal(terminal.environment.AICO_PPT_EDITOR_TOKEN, app.token);
+  assert.equal(terminal.environment.AICO_PPT_CREATION_CONTEXT, app.creationHandoff.path);
+  assert.equal(terminal.environment.AICO_PPT_CREATION_MATERIALS, join(draftDir, 'materials'));
   assert.match(terminal.prompts[0], /同一个任务，不是新的制作项目/);
   assert.match(terminal.prompts[0], /不要再次完整读取 SKILL\.md/);
   assert.match(terminal.prompts[0], new RegExp(app.url.replaceAll('.', '\\.')));
@@ -240,7 +240,7 @@ test('应用重启恢复已发布 Draft 时先启动终端，再按顺序发送 
   const projectRoot = await realpath(root);
   const deckPath = join(projectRoot, 'deck.html');
   await writeFile(deckPath, '<!doctype html><title>stopped handoff</title>');
-  const draftDir = join(projectRoot, '.huawei-deck-editor', 'drafts', 'stopped-draft');
+  const draftDir = join(projectRoot, '.aico-ppt-editor', 'drafts', 'stopped-draft');
   const children = [];
   const scheduledSubmits = [];
   const terminal = new AgentTerminalSession({

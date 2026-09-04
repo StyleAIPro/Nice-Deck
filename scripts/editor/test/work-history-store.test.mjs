@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -77,7 +77,7 @@ test('记录、继续和完成 Creation Draft 只更新索引指针，不混淆�
   await history.completeCreation({ projectRoot, draftId:'draft-recorded' });
   assert.deepEqual((await history.listCreation()), []);
   assert.equal(JSON.parse(await readFile(
-    join(projectRoot, '.huawei-deck-editor', 'drafts', 'draft-recorded', 'draft.json'),
+    join(projectRoot, '.aico-ppt-editor', 'drafts', 'draft-recorded', 'draft.json'),
     'utf8',
   )).brief.title, '可继续任务');
 });
@@ -91,7 +91,7 @@ test('首页不把陈旧的 Creation Draft 租约显示为另一窗口占用', a
     projectRoot, 'draft-stale', '陈旧占用', '2026-08-11T00:00:00.000Z',
   );
   const lockPath = join(
-    projectRoot, '.huawei-deck-editor', 'drafts', 'draft-stale', 'active.lock',
+    projectRoot, '.aico-ppt-editor', 'drafts', 'draft-stale', 'active.lock',
   );
   await draft.close();
   await writeFile(lockPath, `${JSON.stringify({
@@ -100,6 +100,34 @@ test('首页不把陈旧的 Creation Draft 租约显示为另一窗口占用', a
     startedAt:'2026-08-11T00:00:00.000Z',
     heartbeatAt:'2026-08-11T00:00:00.000Z',
   })}\n`);
+  const history = new WorkHistoryStore({
+    filePath:join(root, 'recent-work.json'),
+    discoveryRoots:[root],
+    recentDeckStore:{
+      async list() { return []; }, async record() {}, async resolve() { return null; },
+    },
+    now:() => new Date('2026-08-11T00:02:00.000Z'),
+    lockLeaseMs:30_000,
+  });
+  assert.equal((await history.listCreation())[0].locked, false);
+});
+
+test('首页不把异常中断留下的陈旧空锁显示为另一窗口占用', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-work-empty-lock-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const projectRoot = join(root, 'project');
+  await mkdir(projectRoot);
+  const draft = await createDraft(
+    projectRoot, 'draft-empty-lock', '异常中断', '2026-08-11T00:00:00.000Z',
+  );
+  const lockPath = join(
+    projectRoot, '.aico-ppt-editor', 'drafts', 'draft-empty-lock', 'active.lock',
+  );
+  await draft.close();
+  await writeFile(lockPath, '');
+  const lockTime = new Date('2026-08-11T00:00:00.000Z');
+  await utimes(lockPath, lockTime, lockTime);
+
   const history = new WorkHistoryStore({
     filePath:join(root, 'recent-work.json'),
     discoveryRoots:[root],
@@ -133,7 +161,7 @@ test('删除 Creation 任务记录只隐藏首页条目，不删除 Draft，并�
   await history.dismissCreation({ projectRoot, draftId:'draft-dismissed' });
   assert.deepEqual(await history.listCreation(), []);
   assert.equal(JSON.parse(await readFile(
-    join(projectRoot, '.huawei-deck-editor', 'drafts', 'draft-dismissed', 'draft.json'),
+    join(projectRoot, '.aico-ppt-editor', 'drafts', 'draft-dismissed', 'draft.json'),
     'utf8',
   )).brief.title, '暂时隐藏');
 

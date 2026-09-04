@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 *.tmp-applybg
 node_modules/
-/Huawei Deck 编辑器（Windows）.lnk
+/AICO-PPT 编辑器（Windows）.lnk
 
 # 本地开发工作区与工具运行态
 .worktrees/
@@ -13,6 +13,9 @@ node_modules/
 /Deck-Projects/
 /deck-Project/
 /outputs/
+**/.aico-ppt-editor/
+**/.aico-ppt-editor.archive-*/
+# 旧版 sidecar 仍需原位恢复，不允许误提交。
 **/.huawei-deck-editor/
 **/.huawei-deck-editor.archive-*/
 

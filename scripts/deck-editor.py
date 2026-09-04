@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Huawei Deck 可视化编辑器的统一启动入口。
+"""AICO-PPT 可视化编辑器的统一启动入口。
 
 命令行与桌面应用都只经过这里：传入 deck 路径时直接打开编辑器；没有路径时
 先打开一次性导入页，由用户在网页中点击后再唤起系统文件选择器。
@@ -23,13 +23,19 @@ import urllib.request
 import uuid
 from datetime import datetime
 
+try:
+    from editor.product_paths import resolve_user_state_root
+except ModuleNotFoundError:  # importlib 测试从仓库根加载脚本
+    from scripts.editor.product_paths import resolve_user_state_root
+
 
 ROOT = Path(__file__).resolve().parent.parent
 # Windows 映射盘（包括 Parallels 共享盘）必须保留原始盘符作为子进程 cwd；
 # ROOT 仍用于可信资源定位，不能因此放弃 realpath 语义。
 LAUNCH_ROOT = Path(__file__).absolute().parent.parent
 EDITOR_NODE_MODULES = (
-    "ws", "html2canvas", "busboy", "node-pty", "@xterm/xterm"
+    "ws", "html2canvas", "busboy", "three", "node-pty", "@xterm/xterm",
+    "@xterm/headless", "@xterm/addon-serialize",
 )
 AGENT_PROVIDERS = ("codex", "claude-code", "opencode")
 AGENT_COMMANDS = {
@@ -38,7 +44,7 @@ AGENT_COMMANDS = {
     "opencode": "opencode",
 }
 APP_INSTANCE_FILE = (
-    Path(tempfile.gettempdir()) / "huawei-deck-editor" / "app-instance.json"
+    Path(tempfile.gettempdir()) / "aico-ppt-editor" / "app-instance.json"
 )
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -79,10 +85,7 @@ def _normalize_agent_runtime_settings(value):
 def load_agent_runtime_settings(environment=None):
     """读取不随仓库提交的 Editor 本机 Agent runtime 配置。"""
     environment = os.environ if environment is None else environment
-    state_root = environment.get("HUAWEI_DECK_EDITOR_STATE_ROOT")
-    settings_path = (
-        Path(state_root).resolve() if state_root else Path.home() / ".huawei-deck-editor"
-    ) / "settings.json"
+    settings_path = resolve_user_state_root(environment) / "settings.json"
     if not settings_path.is_file():
         return {"codexRuntime": "native"}
     try:
@@ -263,7 +266,7 @@ def choose_deck():
               end try
             end run
             """,
-            "选择要继续修改的 Huawei Deck HTML",
+            "选择要继续修改的 AICO-PPT HTML",
         )
         if result.returncode != 0:
             raise LauncherError((result.stderr or "无法打开系统文件选择器").strip())
@@ -273,8 +276,8 @@ def choose_deck():
     try:
         selected = _choose_with_tk(
             "askopenfilename",
-            title="选择要继续修改的 Huawei Deck HTML",
-            filetypes=[("Huawei Deck HTML", "*.html *.htm"), ("所有文件", "*")],
+            title="选择要继续修改的 AICO-PPT HTML",
+            filetypes=[("AICO-PPT HTML", "*.html *.htm"), ("所有文件", "*")],
         )
         return Path(selected) if selected else None
     except Exception as error:
@@ -323,7 +326,7 @@ def show_native_error(message):
               display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"好"} default button "好"
             end run
             """,
-            "Huawei Deck 编辑器无法启动",
+            "AICO-PPT 编辑器无法启动",
             detail,
         )
         if result.returncode == 0:
@@ -333,26 +336,26 @@ def show_native_error(message):
             import ctypes
 
             ctypes.windll.user32.MessageBoxW(
-                0, detail, "Huawei Deck 编辑器无法启动", 0x10
+                0, detail, "AICO-PPT 编辑器无法启动", 0x10
             )
             return
         except Exception:
             pass
-    print(f"Huawei Deck 编辑器无法启动：{detail}", file=sys.stderr)
+    print(f"AICO-PPT 编辑器无法启动：{detail}", file=sys.stderr)
 
 
 def _load_check_deps():
     path = ROOT / "scripts/check_deps.py"
-    spec = importlib.util.spec_from_file_location("huawei_deck_check_deps", path)
+    spec = importlib.util.spec_from_file_location("aico_ppt_check_deps", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 def editor_dependency_status():
-    """返回 (是否就绪, 说明)，复用统一 Environment Profile。"""
+    """返回独立 Dev Shell 的 (是否就绪, 说明)。"""
     doctor = _load_check_deps()
-    snapshot = doctor.dependency_snapshot(["editor-core"])
+    snapshot = doctor.dependency_snapshot(["dev-shell"])
     launcher_keys = {"node", *EDITOR_NODE_MODULES}
     missing = [item for item in snapshot["checks"]
                if item["key"] in launcher_keys and not item["present"]]
@@ -364,7 +367,7 @@ def editor_dependency_status():
 
 
 def prepare_editor_runtime(auto_install=False):
-    """桌面模式通过统一 Environment Profile 补齐 Editor Core。"""
+    """桌面模式通过统一 Environment Profile 补齐独立 Dev Shell。"""
     ready, detail = editor_dependency_status()
     if ready:
         return
@@ -372,10 +375,10 @@ def prepare_editor_runtime(auto_install=False):
         raise LauncherError(detail + "。请先安装 Node.js 18 或更高版本。")
     if not auto_install:
         raise LauncherError(
-            detail + "。请运行 python3 scripts/check_deps.py --profile editor-core --repair。"
+            detail + "。请运行 python3 scripts/check_deps.py --profile dev-shell --repair。"
         )
     doctor = _load_check_deps()
-    result = doctor.repair_dependencies(["editor-core"], capture_output=True)
+    result = doctor.repair_dependencies(["dev-shell"], capture_output=True)
     ready, after_detail = editor_dependency_status()
     if not ready:
         failed = [action for action in result.get("actions", [])
@@ -422,7 +425,7 @@ def _detach_windows_app(argv, executable=None):
             close_fds=True,
         )
     except OSError as error:
-        show_native_error(f"Huawei Deck 编辑器后台启动失败：{error}")
+        show_native_error(f"AICO-PPT 编辑器后台启动失败：{error}")
         return 2
     return 0
 
@@ -494,7 +497,7 @@ def _instance_is_live(instance):
         direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with direct_opener.open(app_url, timeout=1.0) as response:
             preview = response.read(8192).decode("utf-8", errors="replace")
-            return response.status == 200 and "Huawei Deck" in preview
+            return response.status == 200 and "AICO-PPT" in preview
     except (OSError, ValueError):
         return False
 
@@ -616,7 +619,7 @@ _MACOS_BROWSER_ACTIVATION_SCRIPT = r'''
 on matchesWorkspaceTab(targetURL, candidateURL, candidateTitle, allowTitleFallback)
   if candidateURL is targetURL then return true
   if allowTitleFallback then
-    if candidateTitle is "Huawei Deck" then return true
+    if candidateTitle is "AICO-PPT" then return true
   end if
   return false
 end matchesWorkspaceTab
@@ -679,12 +682,12 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
-public static class HuaweiDeckWindow {
+public static class AicoPptWindow {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
 }
 '@
-$names = @('Huawei Deck')
+$names = @('AICO-PPT')
 $browsers = Get-Process chrome, msedge, firefox -ErrorAction SilentlyContinue
 foreach ($browser in $browsers) {
   if ($browser.MainWindowHandle -eq 0) { continue }
@@ -701,15 +704,15 @@ foreach ($browser in $browsers) {
         )
         $pattern.Select()
       } catch {}
-      [HuaweiDeckWindow]::ShowWindowAsync($browser.MainWindowHandle, 9) | Out-Null
-      [HuaweiDeckWindow]::SetForegroundWindow($browser.MainWindowHandle) | Out-Null
+      [AicoPptWindow]::ShowWindowAsync($browser.MainWindowHandle, 9) | Out-Null
+      [AicoPptWindow]::SetForegroundWindow($browser.MainWindowHandle) | Out-Null
       Write-Output 'activated'
       exit 0
     }
   }
-  if ($browser.MainWindowTitle -like '*Huawei Deck*') {
-    [HuaweiDeckWindow]::ShowWindowAsync($browser.MainWindowHandle, 9) | Out-Null
-    [HuaweiDeckWindow]::SetForegroundWindow($browser.MainWindowHandle) | Out-Null
+  if ($browser.MainWindowTitle -like '*AICO-PPT*') {
+    [AicoPptWindow]::ShowWindowAsync($browser.MainWindowHandle, 9) | Out-Null
+    [AicoPptWindow]::SetForegroundWindow($browser.MainWindowHandle) | Out-Null
     Write-Output 'activated'
     exit 0
   }
@@ -957,7 +960,7 @@ def run_editor(
 
 def main(argv=None):
     normalized_argv = normalize_argv(list(sys.argv[1:] if argv is None else argv))
-    parser = argparse.ArgumentParser(description="启动 Huawei Deck 后期微调编辑器")
+    parser = argparse.ArgumentParser(description="启动 AICO-PPT 后期微调编辑器")
     parser.add_argument("deck", nargs="?", help="要直接打开的 deck HTML；省略时打开网页导入入口")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
