@@ -1,5 +1,10 @@
 import importlib.util
+import contextlib
+import io
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,6 +20,76 @@ SPEC.loader.exec_module(installer)
 
 
 class InstallationManagerTest(unittest.TestCase):
+    def test_registered_skill_can_edit_and_verify_all_templates_without_harness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            manager = self.make_manager(ROOT, home)
+            manager.apply(manager.plan("install"))
+            target = home / ".agents/skills/aico-ppt"
+            code = r"""
+import importlib.util, re, sys
+spec = importlib.util.spec_from_file_location('eb', sys.argv[1])
+eb = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(eb)
+lines = eb.load(sys.argv[2])
+source = eb.get_template(lines)
+modified, count = re.subn(r'(<h2\b[^>]*>)[^<]*(</h2>)', r'\1独立 Skill 回归\2', source, count=1)
+assert count == 1
+eb.set_template(lines, modified)
+eb.save(sys.argv[2], lines)
+eb.verify(sys.argv[2])
+assert eb.get_template(eb.load(sys.argv[2])) == modified
+"""
+            for template in ("training-deck.html", "tech-share-deck.html", "work-report-deck.html"):
+                with self.subTest(template=template):
+                    original = target / "assets" / template
+                    before = original.read_bytes()
+                    output = home / template
+                    shutil.copyfile(original, output)
+                    result = subprocess.run([
+                        sys.executable, "-c", code, str(target / "scripts/edit-bundle.py"), str(output),
+                    ], cwd=home, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotEqual(output.read_bytes(), before)
+                    self.assertEqual(original.read_bytes(), before)
+
+    def test_default_cli_installs_and_repairs_skill_without_editor_or_agent_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            shared = ["--root", str(ROOT), "--home", str(home),
+                      "--state-file", str(home / "install-state.json"), "--json"]
+            with patch.object(installer, "_load_doctor", side_effect=AssertionError(
+                "独立 Skill 安装不得加载 Editor 或 Agent 依赖检查"
+            )):
+                for operation in ("install", "inspect", "repair"):
+                    with self.subTest(operation=operation), contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(installer.main([operation, *shared]), 0)
+                        self.assertNotIn("environment", json.loads(output.getvalue()))
+                target = home / ".agents/skills/aico-ppt"
+                self.assertEqual(target.resolve(), ROOT.resolve())
+                for relative in ("SKILL.md", "references/workflow.md", "scripts/edit-bundle.py",
+                                 "scripts/deck-editor.py", "assets/training-deck.html",
+                                 "assets/tech-share-deck.html", "assets/work-report-deck.html"):
+                    self.assertTrue((target / relative).is_file(), relative)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(installer.main(["install", "--skill-only", *shared]), 0)
+                    self.assertEqual(installer.main(["uninstall", *shared]), 0)
+                self.assertFalse(target.exists())
+                self.assertTrue((ROOT / "SKILL.md").is_file())
+
+    def test_dev_shell_dependency_check_requires_explicit_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.object(installer, "_load_doctor") as load_doctor:
+                doctor = load_doctor.return_value
+                doctor.repair_dependencies.return_value = {"ready":True}
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(installer.main([
+                        "install", "--dev-shell", "--json", "--root", str(ROOT),
+                        "--home", str(home), "--state-file", str(home / "state.json"),
+                    ]), 0)
+                doctor.repair_dependencies.assert_called_once_with(["dev-shell"], capture_output=True)
+
     def make_manager(self, root, home, *, hosts=("codex",)):
         return installer.InstallationManager(
             root=root,

@@ -7,6 +7,10 @@
 
 ## 1. 这是什么
 
+产品定位为独立 Skill 与 AICO-Harness 编辑器插件。所有用户可视化编辑入口统一位于 AICO-Harness（内部继续使用 DSH 插件协议）。独立 Skill 无需 Harness 或本机 Agent PTY；安装器默认只注册 Skill，创建、修改、验证和导出依赖按任务准备。维护者桌面启动器集中于 `tools/dev-shell/`，显式 `scripts/install.py install --dev-shell` 才准备调试依赖；Skill 交付第一版后不自动打开桌面应用。
+
+独立 Skill 使用 `python3 scripts/deck-editor.py <deck.html> --headless-workspace` 启动后台 Managed Workspace；该入口复用 Editor Core 的受控 frame、Mutation、验证和固化，不打开可见窗口或本机 Agent PTY。
+
 aico-ppt 是一个符合 `SKILL.md` 目录约定的 **Agent Skill**，不是普通应用代码库。它交付的能力是：从三套华为红品牌模板出发，做出 1920×1080、离线可拷走的**单文件 HTML 演示（网页 PPT）**，并可一键导出 PPTX。
 
 交付物四块：
@@ -323,7 +327,7 @@ flowchart LR
 
 可见 Editor 和无窗口 workspace 只在交互外壳上不同：前者让用户看画布并使用内嵌终端，后者由后台 Chrome 承载相同的 frame bridge。Mutation、revision、诊断、撤销 / 重做和固化没有第二套实现。
 
-统一工作台的启动 seam 是 `scripts/deck-editor.py`：macOS 的 `AICO-PPT 编辑器.app` 与 Windows 的 `AICO-PPT 编辑器.cmd` 都是薄桌面 adapter，Python 启动器是统一命令 adapter。macOS 用户双击 `AICO-PPT 编辑器.app`、Windows 用户双击 `AICO-PPT 编辑器.cmd` 后，先进入本地工作台启动页。首页以“新建 Deck / 修改 Deck（打开已有 Deck）”两张工作卡展示可继续任务；`work-history-store.mjs` 是启动页唯一的历史 Interface，只保存 `projectRoot + draftId` 或 `deckPath` 指针，权威状态仍在 Draft 和 Deck sidecar 中。点击历史项直接重新获取锁、恢复工作状态并以持久 conversation ID 启动同一 Agent 会话；卡片右下角小加号才进入新任务流程。Creation Draft 锁记录 token、PID 与心跳时间；窗口事件 WebSocket 全部断开且超过重连宽限期时，App Server 自动关闭并释放锁，崩溃遗留的过期租约可由新服务接管。新建 Deck 先确认 Agent 项目目录；打开已有 Deck 通过系统文件选择器添加一份 HTML。两条流程的路径候选都可反复更改；在创建 Draft 或打开 Editor 前，“返回”会同时废弃前端与服务端候选，回到 idle，因而可安全切换入口。只有创建 Draft、恢复任务或打开 Editor 才会锁定当前工作对象并结束启动态。命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。
+统一工作台的启动 seam 是 `scripts/deck-editor.py`：macOS 的 `tools/dev-shell/AICO-PPT Dev Shell.app` 与 Windows 的 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 都是薄桌面 adapter，Python 启动器是统一命令 adapter。macOS 用户双击 `tools/dev-shell/AICO-PPT Dev Shell.app`、Windows 用户双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 后，先进入本地工作台启动页。首页以“新建 Deck / 修改 Deck（打开已有 Deck）”两张工作卡展示可继续任务；`work-history-store.mjs` 是启动页唯一的历史 Interface，只保存 `projectRoot + draftId` 或 `deckPath` 指针，权威状态仍在 Draft 和 Deck sidecar 中。点击历史项直接重新获取锁、恢复工作状态并以持久 conversation ID 启动同一 Agent 会话；卡片右下角小加号才进入新任务流程。Creation Draft 锁记录 token、PID 与心跳时间；窗口事件 WebSocket 全部断开且超过重连宽限期时，App Server 自动关闭并释放锁，崩溃遗留的过期租约可由新服务接管。新建 Deck 先确认 Agent 项目目录；打开已有 Deck 通过系统文件选择器添加一份 HTML。两条流程的路径候选都可反复更改；在创建 Draft 或打开 Editor 前，“返回”会同时废弃前端与服务端候选，回到 idle，因而可安全切换入口。只有创建 Draft、恢复任务或打开 Editor 才会锁定当前工作对象并结束启动态。命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。
 
 平台图标仍属于薄 adapter：macOS 在 App bundle 的 `Info.plist` 登记内置 `.icns`；Windows `.cmd` 无法原生携带图标，因此首次启动调用 `scripts/create_windows_launcher_shortcut.ps1`，在仓库根目录生成引用 `.ico` 的本机 `.lnk`。`.lnk` 使用当前仓库绝对路径并被 Git 忽略，仓库迁移后通过删除旧快捷方式、再次运行 `.cmd` 重建，不改变统一 Python 启动 seam。
 
@@ -349,7 +353,7 @@ Windows `.cmd` 遵守同一短时派发契约：它用 `--detach-windows` 启动
 
 | 组件 | 职责 |
 |---|---|
-| `AICO-PPT 编辑器.app` / `AICO-PPT 编辑器.cmd` / `deck-editor.py` | macOS、Windows 桌面入口与统一命令入口；无路径进入一次性网页导入，有路径直接接收 deck |
+| `tools/dev-shell/AICO-PPT Dev Shell.app` / `tools/dev-shell/AICO-PPT Dev Shell.cmd` / `deck-editor.py` | macOS、Windows 桌面入口与统一命令入口；无路径进入一次性网页导入，有路径直接接收 deck |
 | `app-server.mjs` | loopback 导入页与 idle → choosing → selected 状态机；成功后关闭自身并启动既有编辑服务 |
 | `WorkCatalog` | `work-catalog.json` schema v3 的唯一读写边界；用稳定 `workId` / `deckId` 管理创建与编辑工作项、独立显示名称、隐藏记录、文件绑定以及 DSH Workspace / Session Link；提供 Session 反向索引、revision 冲突和 pending operation 恢复 |
 | `DeckBindingCoordinator` | 源文件身份、父目录 watcher、有界可信根搜索、自动 / 手动重新绑定和固化闸门的深模块；调用者只读取带 revision 的 binding snapshot，不自行组合路径、stat、hash 与 watcher |

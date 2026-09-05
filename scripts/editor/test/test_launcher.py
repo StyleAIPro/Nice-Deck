@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
-MAC_APP = ROOT / "AICO-PPT 编辑器.app"
+MAC_APP = ROOT / "tools/dev-shell/AICO-PPT Dev Shell.app"
 
 
 def load_module(name, path):
@@ -28,6 +28,15 @@ DECK = ROOT / "assets/training-deck.html"
 
 
 class LauncherTest(unittest.TestCase):
+    def test_dev_launchers_are_outside_product_root_and_resolve_same_skill(self):
+        self.assertEqual(list(ROOT.glob("*.app")), [])
+        self.assertEqual(list(ROOT.glob("*.cmd")), [])
+        executable = MAC_APP / "Contents/MacOS/AICOPPTEditor"
+        self.assertEqual((executable.parent / "../../../../..").resolve(), ROOT)
+        self.assertIn('$APP_MACOS_DIR/../../../../..', executable.read_text("utf-8"))
+        with (MAC_APP / "Contents/Info.plist").open("rb") as source:
+            self.assertEqual(plistlib.load(source)["CFBundleDisplayName"], "AICO-PPT Dev Shell")
+
     def test_macos_app_declares_the_bundled_icon(self):
         plist_path = MAC_APP / "Contents/Info.plist"
         with plist_path.open("rb") as handle:
@@ -704,7 +713,7 @@ class LauncherTest(unittest.TestCase):
                 launcher.prepare_editor_runtime(auto_install=True)
 
     def test_macos_app_bundle_points_to_unified_launcher(self):
-        app = ROOT / "AICO-PPT 编辑器.app"
+        app = ROOT / "tools/dev-shell/AICO-PPT Dev Shell.app"
         executable = app / "Contents/MacOS/AICOPPTEditor"
         with (app / "Contents/Info.plist").open("rb") as source:
             info = plistlib.load(source)

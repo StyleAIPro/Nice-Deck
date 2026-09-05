@@ -5,26 +5,28 @@
 ## 前置状态
 
 - AICO-PPT Skill 已注册；
-- Editor Core 已就绪；
-- Codex、Claude Code 或 OpenCode 至少一个已安装并登录。
+- 使用独立 Skill：在支持 Skill 和本地工具的 Agent 中加载 `aico-ppt`；
+- 使用可视化编辑：AICO-Harness 已安装 AICO-PPT 插件，Editor Core 已就绪。
 
 ## 操作步骤
 
-1. 双击 `AICO-PPT 编辑器.app`（macOS）或 `AICO-PPT 编辑器.cmd`（Windows）；Windows 首次运行后可改用同目录自动生成的带图标快捷方式。
+1. 在 AICO-Harness 左侧点击 `AICO-PPT`，打开右侧编辑工作台。
 2. 第一次使用先点击“安装与诊断”，确认“基础使用”没有阻塞项。
 3. 点击“开始使用”，再点击“创建示例副本”。
 4. 选择一个空目录；Editor 会复制一份示例 Deck，不修改内置模板。
-5. 确认 Agent 项目目录，选择已经登录的 Agent，然后打开编辑器。
-6. 在右侧终端输入：“把封面标题改成我的第一个 AICO-PPT”。
+5. 确认项目目录并打开编辑器，通过 Harness 左侧“新会话”的 AICO-PPT 项目选项创建关联会话。
+6. 在左侧关联会话输入：“把封面标题改成我的第一个 AICO-PPT”。
 7. 在画布中确认变化；需要永久写回时点击“固化修改”。
 
 ## 完成标志
 
 - 示例 Deck 能在中间画布显示；
-- Agent 终端处于空闲或等待输入；
+- 左侧显示该 Deck 的关联会话；
 - 修改后可撤销、重做和固化。
 
 ## 下一步
+
+无需窗口时，运行 `python3 scripts/install.py install`（Windows：`py -3 scripts\install.py install`），新开 Agent 任务并使用 `aico-ppt`。独立 Skill 可以制作、修改、验证和导出 Deck；完成后交付 HTML，不自动打开 Dev Shell。基础安装不要求 AICO-Harness 或额外 Agent 终端。
 
 - 从零制作：阅读“创建 Deck”；
 - 修改已有文件：阅读“修改现有 Deck”；

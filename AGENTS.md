@@ -12,7 +12,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ```bash
 # 安装与依赖体检（退出码：0 就绪 / 1 仍缺 / 2 工具或参数错误）
-python3 scripts/install.py inspect                              # Skill + Editor Core 状态
+python3 scripts/install.py inspect                              # 独立 Skill 注册状态
 python3 scripts/check_deps.py --profile editor-core --check-only # 动手前基础体检
 python3 scripts/check_deps.py --profile full --check-only       # 全能力体检
 py -3 scripts\check_deps.py --profile editor-core --check-only  # Windows PowerShell

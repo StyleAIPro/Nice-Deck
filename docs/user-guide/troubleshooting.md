@@ -23,9 +23,11 @@ python3 scripts/check_deps.py --profile editor-core --check-only
 python3 scripts/check_deps.py --profile editor-core --repair
 ```
 
-Node.js 或 Agent CLI 缺失时需要手工安装。Agent 已安装但未登录时，请先在普通终端完成登录。
+插件需要 Node.js 与 Editor Core 依赖。对话、模型与登录由 AICO-Harness 提供，无需另装本机 Agent CLI。独立 Skill 注册可以单独用 `python3 scripts/install.py inspect` 检查。
 
-### Windows Editor 使用 WSL Codex 时提示找不到 CLI
+### 维护者 Dev Shell 使用 WSL Codex 时提示找不到 CLI
+
+以下仅适用于 `tools/dev-shell/` 中的调试入口。
 
 本机配置位于 `%USERPROFILE%\.aico-ppt-editor\settings.json`。确认其中的
 `wslDistribution`、`wslUser` 与实际环境一致，再在 PowerShell 运行：
@@ -33,7 +35,7 @@ Node.js 或 Agent CLI 缺失时需要手工安装。Agent 已安装但未登录�
 ```powershell
 wsl.exe -d Ubuntu-26.04 -u root --exec bash -lic "command -v codex"
 wsl.exe -d Ubuntu-26.04 -u root --exec codex login status
-py -3 scripts\check_deps.py --profile editor-core --check-only
+py -3 scripts\check_deps.py --profile dev-shell --check-only
 ```
 
 诊断应显示 `Codex: WSL <发行版>/<用户> · <版本>`。修改配置或更新 Editor 后要彻底
@@ -55,7 +57,7 @@ python3 scripts/check_deps.py --profile pptx-export --check-only
 
 ### macOS 显示 Python 包“未就绪”，但终端可以导入
 
-Apple Silicon 上必须通过最新版 `AICO-PPT 编辑器.app` 启动。入口会显式使用 arm64，避免 LaunchServices 把脚本型 App 放进 Rosetta 进程树，导致 arm64 的 `python-pptx`、`pdfplumber` 或 `PyMuPDF` 被误判为不可用。更新入口后请彻底退出旧工作台再重新双击；诊断若仍发现架构冲突，会明确显示“已安装但架构不兼容”。
+Apple Silicon 上必须通过最新版 `tools/dev-shell/AICO-PPT Dev Shell.app` 启动。入口会显式使用 arm64，避免 LaunchServices 把脚本型 App 放进 Rosetta 进程树，导致 arm64 的 `python-pptx`、`pdfplumber` 或 `PyMuPDF` 被误判为不可用。更新入口后请彻底退出旧工作台再重新双击；诊断若仍发现架构冲突，会明确显示“已安装但架构不兼容”。
 
 ### LibreOffice 看似已安装但仍不可用
 

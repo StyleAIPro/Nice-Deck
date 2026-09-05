@@ -7,9 +7,11 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 这是什么
 
+AICO-PPT 是**可独立使用的 Skill + AICO-Harness 编辑器插件**。独立 Skill 不依赖 AICO-Harness；默认安装只注册 Skill，创建、修改、验证和导出按任务选择依赖。所有面向用户的可视化编辑入口统一放在 AICO-Harness。Skill 完成第一版后交付 HTML 和验证结果，不自动打开独立桌面编辑器；需要可视化微调时，从 AICO-Harness 的 AICO-PPT 插件进入。`tools/dev-shell/` 仅供维护者明确调试使用。
+
 一套**单文件 HTML 演示模板**（1920×1080，华为红品牌设计系统）：React / 字体 / 图片全部内联，拷走一个文件即真离线可用。打开默认滚动模式浏览，左上角侧边预览 glass 胶囊持续显示实时 `x/yy` 页码，右侧 6px 细滑块仅在滚动时显现、停止 800ms 后自动淡出；`Ctrl/Cmd + 滚轮` 或 `Ctrl/Cmd + +/-` 缩放幻灯片内容（刷新保留倍率）。非 100% 时顶部 glass bar 展开四角百分比复位控件；**仅放大到 110% 及以上时**再展开小手按钮，可锁定点击 / 拖动模式，按住空格则临时抓手，松开即恢复。**点右上角显示器图标进入放映模式**（自动全屏）——点击空白、空格、方向键或上下滚轮逐拍推进 / 回退，当前页拍完才翻页；滚轮按手势防抖，触控板惯性不会连续跳页。刷新自动回到上次页，粘贴 bilibili 视频链接可直接弹内嵌播放器。`assets/training-deck.html` 是 34 页**页型画廊**：24 页页型每页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」——画廊即文档；另有「05 · 完整示例」章 10 页取自真实课件，展示版式填入真内容后的成品。
 
-本仓库同时提供可选的 DSH 插件适配层，但适配层不会复制这份 Skill。DSH Host 直接把当前 `SKILL.md` 注册进全局 skill 目录并启动原 Editor Runtime，DSH Client 在原生对话右侧的通用 `workbench.persistent-view` 中嵌入它；页面栏、三种模式、属性、任务、历史、固化和导出仍由 Editor Core 拥有。每个 Deck 工作项通过稳定 `workId` 显式关联项目目录、DSH Workspace 和一个或多个 Session；全局“新会话”不关联 Deck，只有 Editor 内“为此 Deck 新建会话”等携带 `workId` 的入口才能建立关联。明确创建的任务 Session 首条可见指令必须以 `/aico-ppt` 开头；恢复、切换任务或切换 Session 不得发送任何“继续”Prompt。“交给 Agent”必须固定发送到工作项的活动 DSH Session，不能回退到临时选中的普通 Session，也不得在插件内再启动 Codex / Claude Code / OpenCode PTY。切换普通 Session 不得改变或重载 Editor；点击已关联 Session 才切换对应工作项，内部恢复路由不得短暂显示启动初始页。原独立 Editor 只是带 PTY 的 `dev-shell` 开发/排障壳，不是第二个正式产品。能力边界见 `integrations/dsh/README.md`。
+本仓库同时提供可选的 DSH 插件适配层，但适配层不会复制这份 Skill。DSH Host 直接把当前 `SKILL.md` 注册进全局 skill 目录并启动原 Editor Runtime，DSH Client 在原生对话右侧的通用 `workbench.persistent-view` 中嵌入它；页面栏、三种模式、属性、任务、历史、固化和导出仍由 Editor Core 拥有。每个 Deck 工作项通过稳定 `workId` 显式关联项目目录、DSH Workspace 和一个或多个 Session；Harness 左侧“新会话”中的 AICO-PPT 项目子菜单显式携带 `workId` 建立关联，普通新会话不关联 Deck；Editor 顶部选择器只展示和切换关联会话。明确创建的任务 Session 首条可见指令必须以 `/aico-ppt` 开头；恢复、切换任务或切换 Session 不得发送任何“继续”Prompt。“交给 Agent”必须固定发送到工作项的活动 DSH Session，不能回退到临时选中的普通 Session，也不得在插件内再启动 Codex / Claude Code / OpenCode PTY。切换普通 Session 不得改变或重载 Editor；点击已关联 Session 才切换对应工作项，内部恢复路由不得短暂显示启动初始页。原独立 Editor 只是带 PTY 的 `dev-shell` 开发/排障壳，不是第二个正式产品。能力边界见 `integrations/dsh/README.md`。
 
 ## 从零做一份 PPT？先走流程
 
@@ -50,7 +52,7 @@ description: Use when creating a new Huawei-red-brand 1920×1080 single-file HTM
 
 ## 先选择修改运行模式
 
-Skill 与窗口化 Editor 是两层能力。**没有 Editor 窗口也必须能创建和修改 Deck**。独立桌面入口提供画布、区域任务和内嵌 Agent 终端；DSH 插件复用同一 Editor Core，但使用 DSH 原生会话，严禁启动第二套 Agent 终端。每次准备修改一份已经存在的合法 bundle 时，按以下固定顺序路由，不能根据 Agent 品牌改变规则：
+Skill 与窗口化 Editor 是两层能力。**没有 Editor 窗口也必须能创建和修改 Deck**。AICO-Harness 插件提供可视化画布和区域任务，使用 Harness 原生会话；无窗口 Skill 复用同一 Editor Core，严禁启动第二套 Agent 终端。每次准备修改一份已经存在的合法 bundle 时，按以下固定顺序路由，不能根据 Agent 品牌改变规则：
 
 1. 环境中已有 `AICO_PPT_EDITOR_URL` 与 `AICO_PPT_EDITOR_TOKEN`：复用当前 Managed Workspace。已有元素的细节走 Editor CLI action；结构修改只改 `AICO_PPT_WORKING_PATH`。
 2. 没有活动 workspace，且本机具备 Node、Chrome 与依赖：启动**无窗口 Managed Workspace**。它在后台挂载同一受控 frame，不打开 Editor UI，也不启动内嵌 Agent；Mutation、revision、撤销 / 重做、诊断和固化与窗口模式完全相同。
@@ -104,9 +106,9 @@ node scripts/editor/cli.mjs status
 
 打开已有编辑历史后，首次撤销 / 重做快捷键即使早于权威会话加载完成，也会排队一次并在加载后立即执行，不要求先点击顶栏按钮。
 
-macOS 用户可直接双击 skill 根目录的 `AICO-PPT 编辑器.app`，Windows 用户可直接双击 `AICO-PPT 编辑器.cmd`，也可把一份 deck HTML 拖到 `.cmd` 上直接打开；两个入口共用 `scripts/deck-editor.py` 与同一套工作台实现。Windows `.cmd` 只做短时派发：标准 `python.exe` 隐藏接管后台生命周期后 CMD 立即退出，常驻 Python / Node 与文件选择器子进程都不创建任务栏控制台窗口。启动页以左右两张“新建 Deck / 修改 Deck”工作卡展示可继续任务，其中“修改 Deck”就是原“打开已有 Deck”入口；打开已有 Deck 使用系统文件选择器添加一份 HTML，Agent 项目目录与区域任务附件也全部调用 macOS / Windows 的系统原生选择器，不在网页内复刻文件管理器。点击历史任务直接恢复 Draft/工作副本、进度和任务专属 Agent 会话；每张卡右下角的小加号用于新建 Draft 或添加 HTML。桌面入口由原子实例登记表保证只有一套 App Server；macOS 重复双击时先按 URL 或“AICO-PPT”标题定位并激活已有 Chrome / Safari 标签页。Windows 以 App Server 的鉴权页面租约作为单页依据，有活动租约时只尽力激活 Chrome / Edge / Firefox 中的已有标签，激活失败也不重复开页；租约已经关闭时会结束宽限期内的旧服务并重新启动。若明确没有现存标签页，启动器会先结束无页面的旧服务，再启动加载当前固定资源快照的新 App Server；浏览器自动化权限不可用时则保守复用已有 URL，避免误关仍在工作的页面。Creation Draft 由 `projectRoot + draftId` 唯一定位，同一项目目录中的多份 Deck 不会混用过程文件；活动锁使用进程租约，页面关闭后的孤儿服务会在重连宽限期后回收，陈旧锁不再永久占用。进入编辑器前可返回首页重新选择，取消选择也可直接重试。从“新建 Deck”发布后，创建页中间画布已经嵌入最终 Deck 的标准 Editor Managed Workspace；点击“进入微调编辑器”只移交该运行时并切换页面外壳，不再另建 Editor。同一个 PTY 和 conversation ID 继续使用；最终 Deck 的 Editor session 还会持久化 `creation-context.json`，继承已确认 brief、大纲、页面规划、设计文稿和 Draft 素材目录，保证重开任务或点击“新会话”后仍能恢复制作依据。首次桌面启动会按锁定版本自动补齐 `ws`、`html2canvas`、`busboy`、`node-pty` 与 `@xterm/xterm`，但仍要求机器已安装 Node.js ≥18 与 Python 3。
+macOS 用户可直接在维护者调试时双击 `tools/dev-shell/AICO-PPT Dev Shell.app`，Windows 用户可直接双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd`，也可把一份 deck HTML 拖到 `.cmd` 上直接打开；两个入口共用 `scripts/deck-editor.py` 与同一套工作台实现。Windows `.cmd` 只做短时派发：标准 `python.exe` 隐藏接管后台生命周期后 CMD 立即退出，常驻 Python / Node 与文件选择器子进程都不创建任务栏控制台窗口。启动页以左右两张“新建 Deck / 修改 Deck”工作卡展示可继续任务，其中“修改 Deck”就是原“打开已有 Deck”入口；打开已有 Deck 使用系统文件选择器添加一份 HTML，Agent 项目目录与区域任务附件也全部调用 macOS / Windows 的系统原生选择器，不在网页内复刻文件管理器。点击历史任务直接恢复 Draft/工作副本、进度和任务专属 Agent 会话；每张卡右下角的小加号用于新建 Draft 或添加 HTML。桌面入口由原子实例登记表保证只有一套 App Server；macOS 重复双击时先按 URL 或“AICO-PPT”标题定位并激活已有 Chrome / Safari 标签页。Windows 以 App Server 的鉴权页面租约作为单页依据，有活动租约时只尽力激活 Chrome / Edge / Firefox 中的已有标签，激活失败也不重复开页；租约已经关闭时会结束宽限期内的旧服务并重新启动。若明确没有现存标签页，启动器会先结束无页面的旧服务，再启动加载当前固定资源快照的新 App Server；浏览器自动化权限不可用时则保守复用已有 URL，避免误关仍在工作的页面。Creation Draft 由 `projectRoot + draftId` 唯一定位，同一项目目录中的多份 Deck 不会混用过程文件；活动锁使用进程租约，页面关闭后的孤儿服务会在重连宽限期后回收，陈旧锁不再永久占用。进入编辑器前可返回首页重新选择，取消选择也可直接重试。从“新建 Deck”发布后，创建页中间画布已经嵌入最终 Deck 的标准 Editor Managed Workspace；点击“进入微调编辑器”只移交该运行时并切换页面外壳，不再另建 Editor。同一个 PTY 和 conversation ID 继续使用；最终 Deck 的 Editor session 还会持久化 `creation-context.json`，继承已确认 brief、大纲、页面规划、设计文稿和 Draft 素材目录，保证重开任务或点击“新会话”后仍能恢复制作依据。首次桌面启动会按锁定版本自动补齐 `ws`、`html2canvas`、`busboy`、`node-pty` 与 `@xterm/xterm`，但仍要求机器已安装 Node.js ≥18 与 Python 3。
 
-桌面图标保持同一品牌源：macOS `.app` 内置 `AICOPPTEditor.icns`；Windows `.cmd` 因格式本身不能携带图标，首次运行时会生成本机专用、带 `.ico` 的 `AICO-PPT 编辑器（Windows）.lnk`。该快捷方式被 Git 忽略；仓库移动后删除旧 `.lnk` 并再次运行 `.cmd` 即可按新绝对路径重建。
+桌面图标保持同一品牌源：macOS `.app` 内置 `AICOPPTEditor.icns`；Windows `.cmd` 因格式本身不能携带图标，首次运行时会生成本机专用、带 `.ico` 的 `AICO-PPT Dev Shell（Windows）.lnk`。该快捷方式被 Git 忽略；仓库移动后删除旧 `.lnk` 并再次运行 `.cmd` 即可按新绝对路径重建。
 
 启动页顶栏持续提供“开始使用”“帮助”“安装与诊断”：开始使用以可恢复清单引导用户复制示例副本，示例只写入用户选择的新目录，不修改内置模板；帮助中心直接读取 `docs/user-guide/` 的 Markdown；诊断页调用与 CLI 相同的 Profile 快照，分别显示 Skill、Editor Core、独立 `dev-shell`、质量验证、PPTX 导出和材料解析状态。`dev-shell` 或其他可选 Profile 缺失不能阻止 DSH Editor Core 使用。
 
@@ -122,7 +124,7 @@ Codex、Claude Code 与 OpenCode 的自动任务提交同时遵守 provider 输�
 
 Windows WSL Codex 会在启动器阶段预热，并在同一进程缓存 Codex / Node 命令、HOME 与路径映射；终端依次显示 WSL 准备、Codex 启动和历史重绘。恢复历史只写入服务端 headless xterm，浏览器在真实输入态与最终画面投影均完成后才解除遮罩，不得逐块渲染历史 ANSI。该路径使用随 `package-lock.json` 安装的 `@xterm/headless` 与 `@xterm/addon-serialize`，不要求 native Windows Codex。
 
-命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。它适合 Skill / Agent 在第一版 deck 生成并通过结构与溢出验证后直接带入文件，也适合 Windows / Linux：
+维护者调试命令保留：`python3 scripts/deck-editor.py <deck.html>`。以下可见窗口命令仅供明确调试使用；独立 Skill 正常制作使用前述无窗口流程：
 
 ```bash
 python3 scripts/check_deps.py
@@ -131,10 +133,10 @@ python3 scripts/deck-editor.py <deck.html>
 python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 ```
 
-在 macOS 上，Skill 完成第一版后应直接打开桌面应用并带入新 deck，让用户继续微调：
+仅当维护者明确调试 macOS Dev Shell 时，才使用以下命令：
 
 ```bash
-open -n "AICO-PPT 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
+open -n "tools/dev-shell/AICO-PPT Dev Shell.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
 ```
 
 导入 Deck 时会展示自动识别的项目根目录，用户确认后再进入编辑器；也可以在导入页改选目录。默认流程不再要求手动绑定：Editor 打开新任务时在后台为当前 Deck 启动 CLI 会话；Codex 必须通过持久化的 `codex exec --json` 完成首个初始化 turn，并以真实 `thread.started` ID 确认本地 session 可恢复后才写入 sidecar，不能把短生命周期 App Server 的内存 thread ID 交给 `codex resume`。启动页点击“继续任务”时，以该 conversation ID 恢复原 CLI 会话与工作副本；若 Codex 或 Claude Code 的可见 CLI 明确报告该会话 ID 不存在，PTY 会自动创建并持久化新的可恢复会话，同时保留当前工作副本和全部待办，其他启动错误不得误清绑定。首个 Prompt 对当前 `aico-ppt` Skill 只初始化一次，打开终端只是接入已经启动的 PTY。活动 provider、项目根目录与会话标识写入独立的 `agent-workspace.json`，使用 `workspaceRevision`；这些设置不增加 Deck revision，不进入撤销 / 重做或固化历史。旧 `CODEX_THREAD_ID` 与 `session.json.agentConnection` 只用于一次兼容迁移，不再是默认权威状态。
@@ -215,8 +217,8 @@ CLI 出现 `COMMAND_TIMEOUT` 时不得绕过 Action 直接修改真实 Deck，�
 | `assets/huawei-refs/` | 官方 PPT 提取素材库：封面 KV / logo / 图标 / 装饰组件 + 官方空白模板 pptx（内附 README 索引） |
 | `scripts/edit-bundle.py` | 安全编辑工具函数库（load / get·set_template / insert·delete·move_page / embed_image / verify） |
 | `INSTALL.md` | Skill、DSH Plugin 与独立 Dev Shell 的安装、修复与卸载指南 |
-| `AICO-PPT 编辑器.app` | macOS 独立 Dev Shell；开发、回归或排障时打开，也可接收 Skill 传入的 HTML |
-| `AICO-PPT 编辑器.cmd` | Windows 独立 Dev Shell；短时转交 `scripts/deck-editor.py --detach-windows --app` 后退出 |
+| `tools/dev-shell/AICO-PPT Dev Shell.app` | macOS 独立 Dev Shell；开发、回归或排障时打开，也可接收 Skill 传入的 HTML |
+| `tools/dev-shell/AICO-PPT Dev Shell.cmd` | Windows 独立 Dev Shell；短时转交 `scripts/deck-editor.py --detach-windows --app` 后退出 |
 | `scripts/create_windows_launcher_shortcut.ps1` | 为 Windows `.cmd` 生成带品牌图标的本机 `.lnk`；快捷方式本身不进入 Git |
 | `scripts/install.py` | 跨平台 Developer Link 安装器；安全注册、检查、修复和卸载 Skill |
 | `scripts/check_deps.py` | 按 `editor-core` / `dev-shell` / `verify` / `pptx-export` / `materials` Profile 诊断与修复依赖 |
@@ -253,7 +255,7 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 
 ## 性能与依赖
 
-- **Skill 注册**：Codex 的标准用户级位置是 `~/.agents/skills/aico-ppt`。只使用 Skill / DSH 时运行 `python3 scripts/install.py install --skill-only`（Windows：`py -3 scripts\install.py install --skill-only`）；不带 `--skill-only` 只用于同时准备独立 Dev Shell。已有冲突目标不会被覆盖，已有同源但无记录的链接也必须通过诊断页“接管此安装”或 `repair --adopt-existing` 明确确认后才登记所有权。完整说明见 `INSTALL.md`。
+- **Skill 注册**：Codex 的标准用户级位置是 `~/.agents/skills/aico-ppt`。只使用 Skill / DSH 时运行 `python3 scripts/install.py install --skill-only`（Windows：`py -3 scripts\install.py install --skill-only`）；默认不带参数也只注册 Skill；只有显式加 `--dev-shell` 才准备维护者调试依赖。已有冲突目标不会被覆盖，已有同源但无记录的链接也必须通过诊断页“接管此安装”或 `repair --adopt-existing` 明确确认后才登记所有权。完整说明见 `INSTALL.md`。
 - **按任务体检**：DSH Editor 动手前先跑 `python3 scripts/check_deps.py --profile editor-core --check-only`（Windows：`py -3 scripts\check_deps.py --profile editor-core --check-only`）；独立入口改用 `--profile dev-shell`。Profile 分为 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`materials` 与 `full`；加 `--repair` 才修复可自动安装项，`--json` 输出结构化结果。无 `--profile` 时为兼容旧命令仍按 `full` 自动修复。退出码：0 所选能力就绪 / 1 仍缺 / 2 工具或参数错误。
 - 预期性能：模板 12MB，headless Chrome 首开约 2.6s；PPTX 导出 34 页 → 55 张、约 47s。
 - 依赖：Editor Core 需 Node.js、`ws`、`html2canvas`、`busboy` 与 `three`；独立 `dev-shell` 才增加 `node-pty`、浏览器 / headless xterm 与一个本机 Agent CLI。质量验证需 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）；PPTX 导出另需 `python-pptx`。

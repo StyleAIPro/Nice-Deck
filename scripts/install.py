@@ -3,7 +3,7 @@
 """AICO-PPT 跨平台安装器。
 
 当前实现面向 Developer Link：把本仓库安全注册到一个或多个 Agent Skill
-目录，并组合 Editor Core 的依赖诊断/修复。安装器不会覆盖来源不明的目标，
+目录；默认只注册 Skill，--dev-shell 才检查或修复开发调试依赖。安装器不会覆盖来源不明的目标，
 卸载也只移除 install-state.json 中登记且仍指向本仓库的链接或 junction。
 
 用法：
@@ -577,7 +577,9 @@ def main(argv=None):
     parser.add_argument("--channel", choices=("developer",), default="developer")
     parser.add_argument("--hosts", action="append", default=[],
                         help="codex、claude-code、codex-legacy 或 all；可逗号分隔")
-    parser.add_argument("--skill-only", action="store_true", help="不检查或修复独立 Dev Shell")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--skill-only", action="store_true", help="只注册 Skill（默认行为，兼容旧命令）")
+    mode.add_argument("--dev-shell", action="store_true", help="额外检查或修复维护者调试壳依赖")
     parser.add_argument("--dry-run", action="store_true", help="只展示计划，不写入环境")
     parser.add_argument(
         "--adopt-existing", action="store_true",
@@ -604,7 +606,7 @@ def main(argv=None):
                 dry_run=args.dry_run,
             )
 
-        if not args.skill_only and args.operation != "uninstall":
+        if args.dev_shell and args.operation != "uninstall":
             doctor = _load_doctor()
             if args.operation in {"install", "repair"} and not args.dry_run:
                 environment = doctor.repair_dependencies(
@@ -620,7 +622,7 @@ def main(argv=None):
             _print_result(result)
         snapshot = result.get("snapshot", result)
         skill_ready = args.operation == "uninstall" or snapshot.get("ready", False)
-        editor_ready = args.skill_only or args.operation == "uninstall" \
+        editor_ready = not args.dev_shell or args.operation == "uninstall" \
             or result.get("environment", {}).get("ready", False)
         return 0 if skill_ready and editor_ready else 1
     except InstallError as error:

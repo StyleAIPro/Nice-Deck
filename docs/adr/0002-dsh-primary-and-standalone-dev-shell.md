@@ -41,4 +41,4 @@ Standalone Dev Shell（开发、回归、故障排查）
 
 ## 结果
 
-用户可以只安装 Skill；需要正式窗口交互时安装 DSH Plugin；只有维护者调试终端会话或 DSH 不可用时才启动独立 Dev Shell。仓库仍保留原启动器和 PTY 回归能力，但它们不再定义正式产品的交互逻辑。
+用户可以独立安装 Skill；所有面向用户的窗口编辑入口统一位于 AICO-Harness。维护者调试启动器收纳在 `tools/dev-shell/` 并明确命名为 Dev Shell，根目录不保留桌面入口，Windows 快捷方式也只生成在调试目录。默认 `scripts/install.py install` 只注册 Skill，`--skill-only` 兼容保留，只有显式 `--dev-shell` 才准备 PTY 与本机 Agent CLI。独立 Skill 通过无窗口 Managed Workspace 编辑、验证与固化，按用户要求交付 HTML，不自动打开 Dev Shell。

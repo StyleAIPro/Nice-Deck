@@ -4,6 +4,8 @@ deck 是一个「独立版」单文件 HTML：React 运行时、字体、全部�
 
 ## 0. 从零新建与后期可视化微调
 
+产品入口：独立 Skill 不依赖 AICO-Harness，完成第一版后交付 HTML 和验证结果，不自动打开桌面编辑器。可视化编辑统一从 AICO-Harness 的 AICO-PPT 插件进入；`tools/dev-shell/` 中的启动器和下文 PTY 说明仅适用于维护者调试。默认 `scripts/install.py install` 只注册 Skill，调试环境才加 `--dev-shell`。
+
 ### DSH 与桌面入口的会话边界
 
 DSH 插件和独立桌面入口共享本章的 Deck / Managed Workspace、frame bridge 与操作逻辑，但不共享对话宿主。DSH 是正式窗口壳；桌面入口是开发、回归和故障排查用的 `dev-shell`，保留自己的 Agent PTY。DSH 插件绝不能导入或实例化 Agent Terminal、加载 xterm、自动启动 `node-pty` 或连接 `/agent-terminal` WebSocket，而应在用户明确创建任务会话时，把带任务 ID、revision 和受控 CLI、且以 `/aico-ppt` 开头的 Skill 引用提示词发送到当前 DSH 会话；恢复、任务切换和 Session 切换不得再次发送提示词。跨任务恢复可以经过启动器内部路由，但过渡文档必须在首屏前隐藏启动初始页。`$aico-ppt` 只用于使用该语法的独立 Codex 流程。页面栏、三种模式、画布、属性、任务、撤销 / 重做、固化和导出属于 Editor；模型选择、聊天记录、审批、计划和执行状态属于 DSH。
@@ -42,7 +44,7 @@ node scripts/editor/cli.mjs status
 
 重复启动不会再打开第二个工作台页面；如果旧页面已经关闭，则先结束无页面的旧服务，再启动加载当前资源快照的新服务。
 
-macOS 可直接双击 skill 根目录中已内置图标的 `AICO-PPT 编辑器.app`。Windows 首次双击 `AICO-PPT 编辑器.cmd` 会在同目录生成带图标的 `AICO-PPT 编辑器（Windows）.lnk`，之后可直接使用快捷方式；也可以把一份 deck HTML 拖到 Windows `.cmd` 或快捷方式上直接打开。快捷方式仅保存当前机器的绝对路径并被 Git 忽略，移动仓库后删除旧 `.lnk`、再次运行 `.cmd` 即可重建。两个入口都转交同一个 `scripts/deck-editor.py --app`，不另建编辑或写回实现；Windows `.cmd` 增加 `--detach-windows`，只短时派发隐藏的标准 Python 进程，随后退出，不保留常驻控制台或 Python 任务栏窗口。Python 启动器用进程 ID、随机令牌和 loopback 健康检查维护原子实例登记表。macOS 重复启动时先按原 URL 或“AICO-PPT”标题定位并激活已有 Chrome / Safari 标签页。Windows 重复启动时先读取 App Server 的鉴权页面租约：有活动租约时尽力通过 UI Automation 激活 Chrome / Edge / Firefox，无法激活也绝不新开第二页；页面已经关闭时则结束宽限期内的旧 service，等待 owner 释放登记后重新启动。页面切换产生的瞬时退租会短暂复查，避免在工作台跳转 Editor 时误重启。明确确认标签已经关闭时，先向无页面的旧 service 发送退出信号并等待 owner 释放登记，再启动加载当前固定资源快照的新 App Server。陈旧登记只有在 owner 和 service 确实失效后才允许接管；新旧服务不会同时争抢同一 Deck 锁。健康检查不继承系统 HTTP 代理，避免把可用的 `127.0.0.1` 服务误判为失效并启动第二套服务。应用先打开本地工作台：新建 Deck 通过系统目录选择器确认 Agent 项目目录；打开已有 Deck 使用系统文件选择器添加一份 HTML。区域任务附件也直接调用 macOS / Windows 的系统原生选择器，网页只负责业务确认，不自行浏览本地文件系统。macOS 桌面入口不弹终端；Windows `.cmd` 最多短暂显示派发窗口，常驻 Python / Node、依赖安装与系统选择器子进程都以隐藏窗口运行。首次运行会按 `package-lock.json` 自动补齐 Node 模块。Node.js ≥18 和 Python 3 不会由应用安装，缺失时会显示原生错误对话框。
+macOS 可直接在维护者调试时双击 `tools/dev-shell/AICO-PPT Dev Shell.app`。Windows 首次双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 会在同目录生成带图标的 `AICO-PPT Dev Shell（Windows）.lnk`，之后可直接使用快捷方式；也可以把一份 deck HTML 拖到 Windows `.cmd` 或快捷方式上直接打开。快捷方式仅保存当前机器的绝对路径并被 Git 忽略，移动仓库后删除旧 `.lnk`、再次运行 `.cmd` 即可重建。两个入口都转交同一个 `scripts/deck-editor.py --app`，不另建编辑或写回实现；Windows `.cmd` 增加 `--detach-windows`，只短时派发隐藏的标准 Python 进程，随后退出，不保留常驻控制台或 Python 任务栏窗口。Python 启动器用进程 ID、随机令牌和 loopback 健康检查维护原子实例登记表。macOS 重复启动时先按原 URL 或“AICO-PPT”标题定位并激活已有 Chrome / Safari 标签页。Windows 重复启动时先读取 App Server 的鉴权页面租约：有活动租约时尽力通过 UI Automation 激活 Chrome / Edge / Firefox，无法激活也绝不新开第二页；页面已经关闭时则结束宽限期内的旧 service，等待 owner 释放登记后重新启动。页面切换产生的瞬时退租会短暂复查，避免在工作台跳转 Editor 时误重启。明确确认标签已经关闭时，先向无页面的旧 service 发送退出信号并等待 owner 释放登记，再启动加载当前固定资源快照的新 App Server。陈旧登记只有在 owner 和 service 确实失效后才允许接管；新旧服务不会同时争抢同一 Deck 锁。健康检查不继承系统 HTTP 代理，避免把可用的 `127.0.0.1` 服务误判为失效并启动第二套服务。应用先打开本地工作台：新建 Deck 通过系统目录选择器确认 Agent 项目目录；打开已有 Deck 使用系统文件选择器添加一份 HTML。区域任务附件也直接调用 macOS / Windows 的系统原生选择器，网页只负责业务确认，不自行浏览本地文件系统。macOS 桌面入口不弹终端；Windows `.cmd` 最多短暂显示派发窗口，常驻 Python / Node、依赖安装与系统选择器子进程都以隐藏窗口运行。首次运行会按 `package-lock.json` 自动补齐 Node 模块。Node.js ≥18 和 Python 3 不会由应用安装，缺失时会显示原生错误对话框。
 
 工作台顶栏的“开始使用 / 帮助 / 安装与诊断”在未选择 Deck 时也可用。“开始使用”保存一份本机清单，并把 `assets/training-deck.html` 复制到用户选择的新示例目录后再进入现有打开流程；它绝不修改模板原件。“帮助”从 `docs/user-guide/` 读取 Markdown。“安装与诊断”按 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`materials` 分组调用 `scripts/check_deps.py` 的结构化结果；本机 Agent CLI、PTY 或材料能力缺失只标记对应 Profile，不得把 DSH Editor Core 判为不可用。
 
@@ -52,7 +54,7 @@ Windows 本地项目可位于任意本地盘符；网络共享或 Parallels 共�
 
 Windows sidecar 的真实文件操作使用 extended-length path，但 identity、registry 和界面仍保存普通盘符 / UNC 形式；因此新建 Deck 的 Draft staging、临时工作副本和原子写入不会再受传统 260 字符路径限制。Editor 的所有 Node → Python 入口统一经 `scripts/editor/python-utf8.mjs` 设置 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8` 与 Windows `windowsHide`：sidecar、附件 writer、新建校验、工作副本 / 固化 adapter 的 stdin、stdout、stderr 都不继承 Windows 控制台 GBK/ACP，也不会额外创建控制台窗口。bundle 写回还会合并合法 surrogate pair，并把孤立 surrogate 重新转成 JSON `\uXXXX`，避免中文、emoji、浏览器 locator 或错误提示在 Windows / macOS 交换操作时损坏。桌面入口默认自动选择本机已安装的 Codex / Claude Code / OpenCode；只有 Claude Code 时直接选择 Claude。Codex 或 Claude Code 恢复持久会话时，若可见 CLI 明确报告会话 ID 不存在，Editor 自动创建并持久化替代会话，保留工作副本和待办；网络、登录或其他启动错误不会误清绑定。三种 CLI 的就绪检测都 fail-closed：Codex 0.148 的早期草稿框要等模型与工作目录完整状态栏，Claude Code 要等 Ink 画出的空 `❯` 输入行和光标，OpenCode 要等 `Ask anything` placeholder 与可见光标；启动 banner、长历史恢复和 PTY `running` 都不会误投任务。恢复旧会话时，首个真实输入框出现前必须持续显示恢复遮罩，同时阻断人工键盘输入与 Agent 任务提交；任务按钮保持禁用，服务端 `POST /api/agent-runs` 也以 `AGENT_TERMINAL_RESUMING` 拒绝绕过界面的请求。若 Codex 恢复时已经画出最终输入占位符和光标、却仍残留陈旧的 `model: loading`，终端只自动执行一次一行尺寸重绘并恢复原尺寸；重绘本身不算就绪，仍须等待后续真实模型状态通过同一输入态闸门。Codex 的普通更新通知继续保持遮罩直到真实输入框出现；只有同时要求按键继续的更新面板才投影为 `interactionRequired: {kind: "codex-update"}`，暂时收起遮罩并仅开放终端输入，Agent 任务仍保持阻断。Codex 恢复会话目录与当前项目根不一致时，目录选择页投影为 `interactionRequired: {kind: "working-directory-selection"}`；其他带明确高亮编号项、至少两个编号选项和操作提示的未知 CLI 选择页走 `terminal-selection` 兜底。两者都撤掉遮罩并开放原始键盘，但继续阻断初始化 Prompt 和 Agent 任务，直到正常输入框出现。Windows ConPTY 对三者都把正文按 UTF-8 字节拆成不超过 512 B 的 bracketed-paste 分块并逐块节流，完整写入、单独关闭 paste 后才延迟发送 Enter，Claude Code 额外保留较长的 Ink 渲染等待。Enter 之后只有 CLI 活动区重绘或处理中信号才是接收回执；1.5 秒无回执重试一次，再失败就明确提示手动提交，并在下一条任务前重新等待真实提示符。
 
-命令式入口完整保留：`python3 scripts/deck-editor.py <deck.html>`。Skill / Agent 完成第一版 deck 并通过基础结构与溢出验证后，直接用路径启动：
+维护者调试入口保留：`python3 scripts/deck-editor.py <deck.html>`。以下可见窗口命令仅用于明确调试；独立 Skill 制作使用前述无窗口 Managed Workspace：
 
 ```bash
 python3 scripts/check_deps.py --profile dev-shell --check-only
@@ -64,10 +66,10 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 
 不传 `deck` 或显式使用 `--choose` 都会打开一次性网页导入页，不会立即弹出文件选择器；`--host`、`--port`、`--no-open` 保持兼容。不要把测试内部的 `--keep-temp` 当作用户参数。默认监听 `127.0.0.1` 并自动打开浏览器。带路径的编辑服务终端会输出一行 JSON，其中的 `url` 与 `token` 供外部 Agent 连接。桌面模式在编辑器浏览器页关闭 10 秒后自动退出；带路径的命令式入口不改变原生命周期，仍由调用者用 `Ctrl+C` 结束。
 
-macOS 上 Skill 可以直接把第一版带进桌面入口：
+仅当维护者明确调试 macOS Dev Shell 时才使用：
 
 ```bash
-open -n "AICO-PPT 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
+open -n "tools/dev-shell/AICO-PPT Dev Shell.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
 ```
 
 添加 Deck 后，先在导入页核对可见的项目根目录；自动识别不合适时可改选，确认后才进入工作台。默认不需要绑定既有会话：Editor 打开时就在后台启动新的 Codex / Claude Code / OpenCode 会话，并在首个 Prompt 中把当前 `aico-ppt` Skill 加载一次；打开终端只是接入已经运行的 runtime。项目根与活动 provider 存放在独立 `agent-workspace.json`，由 `workspaceRevision` 管理；更改它们不增加 Deck revision，也不进入撤销 / 重做和固化队列。其他 Agent 仍可直接使用 Skill 与普通 action capability，只是不进入窗口化自动终端支持范围。

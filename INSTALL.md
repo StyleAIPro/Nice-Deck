@@ -1,12 +1,13 @@
 # AICO-PPT 安装指南
 
-AICO-PPT 包含三个清晰分层：
+AICO-PPT 的产品定位是独立 Skill 与 AICO-Harness 编辑器插件：
 
 - **Skill**：让 Codex、Claude Code 等 Agent 能发现 AICO-PPT 的工作流；
-- **DSH Plugin**：正式窗口壳，提供左侧 DSH 原生对话与右侧 Editor；
-- **独立 Dev Shell**：保留原 PTY 工作台，仅用于开发、回归和 DSH 不可用时排障。
+- **AICO-Harness Plugin**：所有用户可视化编辑入口位于 AICO-Harness，提供左侧原生对话与右侧 Editor。
 
-三者共用同一份 `SKILL.md`、Editor Core 和 Managed Workspace。DSH 不要求本机 Codex / Claude Code / OpenCode CLI，也不会加载 `node-pty`；导出和材料解析能力按需安装，不会阻塞 Editor Core。
+维护者调试用的 Dev Shell 收纳于 `tools/dev-shell/`，不属于用户安装入口。Skill 不依赖 AICO-Harness，可独立使用；默认安装不检查或修复本机 Agent PTY。
+
+插件与独立 Skill 共用同一份 `SKILL.md`，编辑路径复用 Editor Core 和 Managed Workspace。AICO-Harness 插件不要求本机 Codex / Claude Code / OpenCode CLI，也不会加载 `node-pty`；导出和材料解析能力按需安装，不会阻塞 Editor Core。
 
 ## 1. 准备仓库
 
@@ -18,7 +19,7 @@ AICO-PPT 包含三个清晰分层：
 - 使用 Editor Core 时需要 Node.js 18 或更高版本；
 - 只有独立 Dev Shell 才要求至少安装并登录 Codex、Claude Code 或 OpenCode 中的一个。
 
-## 2. 安装 DSH Plugin（推荐窗口入口）
+## 2. 安装 AICO-Harness 编辑器插件（唯一用户窗口入口）
 
 从仓库根目录执行：
 
@@ -26,9 +27,9 @@ AICO-PPT 包含三个清晰分层：
 dsh plugin --profile web add .
 ```
 
-随后重启 DSH `web` profile。左侧边栏底部会出现 `AICO-PPT`；点击后保持左侧会话，并在右侧打开 Editor。DSH 的模型、审批、计划与聊天是唯一 Agent 宿主，右侧不再创建第二套 PTY。
+随后重启 AICO-Harness 的 `web` profile（沿用 `dsh` CLI 和插件协议）。左侧边栏底部会出现 `AICO-PPT`；点击后保持左侧会话，并在右侧打开 Editor。插件依赖可用 `python3 scripts/check_deps.py --profile editor-core --repair` 准备，右侧不创建本机 Agent PTY。
 
-## 3. macOS 安装独立 Dev Shell
+## 3. macOS / Linux 安装独立 Skill
 
 在仓库根目录运行：
 
@@ -39,14 +40,14 @@ python3 scripts/install.py install
 默认行为：
 
 1. 把当前仓库注册到 `~/.agents/skills/aico-ppt`；
-2. 检查并修复 `dev-shell` Profile（Editor Core、PTY、xterm 与本机 Agent CLI）；
-3. 不安装 LibreOffice、PPTX 导出或材料解析能力。
+2. 不检查或安装 AICO-Harness、Agent CLI、PTY 或 xterm；
+3. 制作时按任务准备 `editor-core`、`verify`、`pptx-export` 或 `materials` 依赖。
 
-安装后重新打开 Codex 任务。仅在开发、回归或排障时双击根目录的 `AICO-PPT 编辑器.app`；页面顶栏会显示 `DEV SHELL`。
+安装后新开 Agent 任务使用 `aico-ppt`。制作、修改与验证可独立完成，无需启动 AICO-Harness 或 Dev Shell。需要可视化微调时，从 AICO-Harness 的 AICO-PPT 插件打开 Deck。
 
 若机器上已有旧版注册，安装器会先创建并验证 `~/.agents/skills/aico-ppt`，写入新的安装记录后，才删除由旧安装记录明确拥有的注册。来源不明的同名目录或链接一律不会被覆盖或删除。旧项目 sidecar 与旧本机状态目录继续原位兼容读取，避免 Draft、工作副本或会话绑定失联。
 
-## 4. Windows 安装独立 Dev Shell
+## 4. Windows 安装独立 Skill
 
 在仓库根目录打开 PowerShell：
 
@@ -54,7 +55,7 @@ python3 scripts/install.py install
 py -3 scripts\install.py install
 ```
 
-安装器会使用目录 junction 注册 Skill，不要求开启 Windows Developer Mode。仅在开发、回归或排障时双击 `AICO-PPT 编辑器.cmd`；它会在同目录生成带图标的 `AICO-PPT 编辑器（Windows）.lnk`，以后可直接使用该快捷方式。
+安装器会使用目录 junction 注册 Skill，不要求开启 Windows Developer Mode；默认只注册 Skill，不安装独立桌面入口或本机 Agent 终端。
 
 如果系统没有 `py`，可改用：
 
@@ -62,7 +63,9 @@ py -3 scripts\install.py install
 python scripts\install.py install
 ```
 
-### Windows Editor 使用安装在 WSL2 内的 Codex
+### 维护者专用：Dev Shell 使用 WSL2 Codex
+
+本小节仅用于维护者显式调试。先运行 `py -3 scripts\install.py install --dev-shell`；启动器位于 `tools/dev-shell/`，不用于普通 Skill 或 AICO-Harness 插件安装。
 
 如果 Editor 在 Windows 启动，而 Codex CLI 只安装在 WSL2，可在
 `%USERPROFILE%\.aico-ppt-editor\settings.json` 写入本机配置：
@@ -132,7 +135,7 @@ python3 scripts/install.py repair --hosts all
 
 ## 7. 检查和修复
 
-检查 Skill 与独立 Dev Shell：
+检查独立 Skill（维护者检查 Dev Shell 时显式加 `--dev-shell`）：
 
 ```bash
 python3 scripts/install.py inspect
@@ -204,13 +207,15 @@ Windows 把 `python3` 换成 `py -3`。Chrome、LibreOffice 和 Node.js 需要�
 
 本节不是正式 DSH 使用路径，只用于开发、回归与故障排查。
 
-macOS：双击 `AICO-PPT 编辑器.app`，或：
+先运行 `python3 scripts/install.py install --dev-shell`（Windows：`py -3 scripts\install.py install --dev-shell`）准备调试依赖；默认安装只注册 Skill。
+
+macOS：双击 `tools/dev-shell/AICO-PPT Dev Shell.app`，或：
 
 ```bash
 python3 scripts/deck-editor.py --app
 ```
 
-Windows：首次双击 `AICO-PPT 编辑器.cmd` 会生成带图标的 `AICO-PPT 编辑器（Windows）.lnk`；之后可双击快捷方式，也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上。快捷方式保存当前机器的绝对路径，移动仓库后删除旧 `.lnk` 并重新运行 `.cmd` 即可重建。
+Windows：首次双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 会生成带图标的 `AICO-PPT Dev Shell（Windows）.lnk`；之后可双击快捷方式，也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上。快捷方式保存当前机器的绝对路径，移动仓库后删除旧 `.lnk` 并重新运行 `.cmd` 即可重建。
 
 命令行直接打开一份 Deck：
 

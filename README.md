@@ -1,12 +1,14 @@
 # AICO-PPT
 
+产品定位：**独立 Skill + AICO-Harness 编辑器插件**。独立 Skill 可在没有 AICO-Harness 的环境正常创建、修改、验证和导出 Deck；所有用户可视化编辑入口统一位于 AICO-Harness。根目录不提供桌面启动器，维护者调试工具收纳于 [`tools/dev-shell/`](tools/dev-shell/README.md)。
+
 华为红品牌 **单文件 HTML 演示（网页 PPT）Agent Skill + DSH 可视化插件**。一套 1920×1080、离线可拷走的幻灯片系统：三套场景模板、点击 / 方向键放映、刷新续播，并可按需转成 PPTX。正式窗口入口是 DeepSeek Harness（DSH）中的“左侧对话 + 右侧 Editor”；原独立 Editor 仅作为开发、回归和故障排查用的 Dev Shell 保留。
 
 Skill 让 Codex、Claude Code 等 Agent 掌握 AICO-PPT 的工作流；Editor Core 提供新建、预览、区域任务、直接编辑、撤销和安全固化。没有任何窗口时，Skill 仍可独立创建和修改 Deck；需要窗口时优先安装 DSH Plugin。
 
 ## DSH 插件
 
-仓库根目录同时是一个可由 DSH 本地安装的 Host/Client 双面插件包，但 **Skill 仍只有根目录 `SKILL.md` 一份**。插件在左侧边栏底部注册 AICO-PPT 入口，并在 DSH 原生对话右侧打开可缩放、跨会话常驻的通用 workbench；右边直接运行原 App Server 与 Editor Runtime，不复制 Editor UI 或事务代码。DSH 版不会导入或创建 `node-pty` / xterm 终端。每个 Deck 工作项以稳定 `workId` 关联项目目录、一个 DSH Workspace 和一个或多个原生 Session；Editor 内“为此 Deck 新建会话”才显式建立关联，全局新会话保持普通会话。任务会话的首条可见指令以 `/aico-ppt` 开头；恢复、切换任务或切换会话不发送“继续”命令。“交给 Agent”固定发送到该工作项的活动 Session，而不是临时选中的普通 Session。切换普通会话不会改变任务或打开 Editor；点击已关联 Session 才打开或恢复 workbench、同步切换对应工作项，并在内部路由恢复期间隐藏启动初始页。`$aico-ppt` 只保留给使用该语法的独立 Codex 流程。
+仓库根目录同时是一个可由 DSH 本地安装的 Host/Client 双面插件包，但 **Skill 仍只有根目录 `SKILL.md` 一份**。插件在左侧边栏底部注册 AICO-PPT 入口，并在 DSH 原生对话右侧打开可缩放、跨会话常驻的通用 workbench；右边直接运行原 App Server 与 Editor Runtime，不复制 Editor UI 或事务代码。DSH 版不会导入或创建 `node-pty` / xterm 终端。每个 Deck 工作项以稳定 `workId` 关联项目目录、一个 DSH Workspace 和一个或多个原生 Session；Harness 左侧“新会话”中的 AICO-PPT 项目子菜单显式建立关联，普通新会话不关联 Deck；Editor 顶部选择器只展示和切换关联会话。任务会话的首条可见指令以 `/aico-ppt` 开头；恢复、切换任务或切换会话不发送“继续”命令。“交给 Agent”固定发送到该工作项的活动 Session，而不是临时选中的普通 Session。切换普通会话不会改变任务或打开 Editor；点击已关联 Session 才打开或恢复 workbench、同步切换对应工作项，并在内部路由恢复期间隐藏启动初始页。`$aico-ppt` 只保留给使用该语法的独立 Codex 流程。
 
 DSH 嵌入态完整复用原 Editor 的页面栏、预览 / 编辑 / 区域标记、直接文字和富文本、拖移 / 缩放 / 删除、顶部属性栏、右下悬浮任务 drawer、统一撤销 / 重做、Managed Workspace 固化与 PPTX 导出；窄工作台隐藏 pageKey、画布尺寸、缩放与 revision 等只读内部状态，只保留页面标题、模式和可操作按钮。DSH 只接管对话、模型、审批和计划；Editor 继续拥有 Deck、工作项、反馈任务、revision 与发布状态。新建 Deck 会先让用户选择项目目录，再创建独立任务会话；发布后同一 `workId` 原位从 Creation 转为 Editing，保留工作区和会话关系。边界和消息桥见 [`ADR-0001`](docs/adr/0001-dsh-plugin-skill-seam.md)、[`ADR-0002`](docs/adr/0002-dsh-primary-and-standalone-dev-shell.md)、[`ADR-0004`](docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md) 与 [`integrations/dsh/README.md`](integrations/dsh/README.md)。
 
@@ -39,7 +41,7 @@ dsh plugin --profile web add .
 
 ## 安装
 
-当前版本从完整仓库安装。只使用 Skill 或 DSH 时，运行跨平台安装器的 `--skill-only` 方式；独立 Dev Shell 的兼容安装才检查并修复本机 PTY 与 Agent CLI。不会因为缺少 LibreOffice 或 PPTX 导出工具而阻止基础启动。
+当前版本从完整仓库安装。跨平台安装器默认只注册 Skill，`--skill-only` 保持兼容；维护者显式加 `--dev-shell` 才检查并修复本机 PTY 与 Agent CLI。插件需要的 `editor-core`、验证和导出依赖各自按需准备。
 
 macOS / Linux：
 
@@ -57,7 +59,7 @@ py -3 scripts\install.py install --skill-only
 
 从旧版升级时，安装器先建立并验证 `aico-ppt` 注册，再原子更新安装记录，最后只删除自己拥有的旧注册。旧项目中的 Draft、工作副本和会话不会移动；运行时会继续原位读取旧 sidecar，新项目使用 `.aico-ppt-editor`。
 
-安装后新开 Agent 任务即可直接使用 Skill；需要正式窗口交互时再安装上面的 DSH Plugin。只有开发、回归或 DSH 不可用时，才运行不带 `--skill-only` 的安装命令并使用 `AICO-PPT 编辑器.app` / `.cmd` Dev Shell。完整说明见 [`INSTALL.md`](INSTALL.md)。
+安装后新开 Agent 任务即可直接使用 Skill；需要可视化编辑时从 AICO-Harness 中的 AICO-PPT 插件进入。维护者调试才运行 `python3 scripts/install.py install --dev-shell` 并使用 `tools/dev-shell/` 内的 Dev Shell。完整说明见 [`INSTALL.md`](INSTALL.md)。
 
 ## 依赖
 
@@ -85,8 +87,9 @@ playwright-core 加载顺序：`PLAYWRIGHT_CORE` 环境变量 → 裸 `import pl
 
 ```
 aico-ppt/
-├── AICO-PPT 编辑器.app  # macOS 独立 Dev Shell；仅供开发、回归和故障排查
-├── AICO-PPT 编辑器.cmd  # Windows 独立 Dev Shell；首次运行生成带图标的本机 .lnk
+├── tools/dev-shell/         # 维护者调试工具；不是产品入口
+│   ├── AICO-PPT Dev Shell.app  # macOS
+│   └── AICO-PPT Dev Shell.cmd  # Windows；快捷方式只生成于本目录
 ├── INSTALL.md               # macOS / Windows 安装、修复与卸载
 ├── SKILL.md                 # skill 入口：5 步快速上手 + 铁律 + 文件导航
 ├── cordis.patch.yml         # DSH bundle 安装层
@@ -153,7 +156,7 @@ Draft 位于 `<项目目录>/.aico-ppt-editor/drafts/<draft-id>/`，刷新页面
 
 结构、大纲和页序已经稳定后，可以在浏览器工作台做最后一轮细节修改。批量替换或结构性重构仍由 Agent 经 `scripts/edit-bundle.py` 完成；可视化编辑器专注于那些“手改一下更快”的收尾动作。
 
-macOS 上直接双击根目录中已带应用图标的 `AICO-PPT 编辑器.app`；Windows 首次双击 `AICO-PPT 编辑器.cmd` 会在同目录生成带图标的 `AICO-PPT 编辑器（Windows）.lnk`，之后可直接双击该快捷方式。两者启动同一套工作台；Windows 也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上直接打开。`.lnk` 只保存当前机器的绝对路径，因此不会进入 Git；移动仓库后删除旧快捷方式并再次运行 `.cmd` 即可重建。Windows `.cmd` 只负责启动一个隐藏的标准 Python 后台进程，随后立即退出，不会把 Python/控制台图标长期留在任务栏。打开已有 Deck 使用系统文件选择器添加一份 HTML；Agent 项目目录与区域任务附件也直接调用 macOS / Windows 的系统原生选择器，不在页面内复刻文件管理器。在进入编辑器前可返回首页废弃当前候选并重新选择，取消选择器后也可直接重试。新建 Deck 的项目目录同样可反复更改或返回首页，确认后才创建持久 Draft 并自动启动 Agent 终端。首次启动若只缺项目 Node 模块，会按 `package-lock.json` 自动安装；Node.js ≥18 与 Python 3 仍需预先安装。
+macOS 上直接双击根目录中已带应用图标的 `tools/dev-shell/AICO-PPT Dev Shell.app`；Windows 首次双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 会在同目录生成带图标的 `AICO-PPT Dev Shell（Windows）.lnk`，之后可直接双击该快捷方式。两者启动同一套工作台；Windows 也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上直接打开。`.lnk` 只保存当前机器的绝对路径，因此不会进入 Git；移动仓库后删除旧快捷方式并再次运行 `.cmd` 即可重建。Windows `.cmd` 只负责启动一个隐藏的标准 Python 后台进程，随后立即退出，不会把 Python/控制台图标长期留在任务栏。打开已有 Deck 使用系统文件选择器添加一份 HTML；Agent 项目目录与区域任务附件也直接调用 macOS / Windows 的系统原生选择器，不在页面内复刻文件管理器。在进入编辑器前可返回首页废弃当前候选并重新选择，取消选择器后也可直接重试。新建 Deck 的项目目录同样可反复更改或返回首页，确认后才创建持久 Draft 并自动启动 Agent 终端。首次启动若只缺项目 Node 模块，会按 `package-lock.json` 自动安装；Node.js ≥18 与 Python 3 仍需预先安装。
 
 Windows 的 Agent 终端会把可信目录 identity 与进程 cwd 分开处理：普通 `C:` / `D:` 本地目录直接启动，映射网络盘或 Parallels 共享盘保留用户当前的任意盘符，不把 `\\server\share` UNC realpath 直接交给 CMD。若项目只有 UNC 路径且没有可验证的盘符映射，启动会明确拒绝并提示先映射盘符，避免 Agent 静默退回 `C:\Windows`。sidecar 的受控读写在 Windows 内部使用 extended-length path，因此 Draft staging 与工作副本即使超过传统 260 字符限制也能原子保存；持久化和界面仍显示普通盘符 / UNC 路径。
 
@@ -165,7 +168,7 @@ Windows WSL Codex 会在启动器阶段预热；同一进程缓存 Codex / Node 
 
 启动页完成会话恢复和初始导航后才开放“新建 Deck / 修改 Deck”入口，避免首次点击被迟到响应覆盖。小文字的拖动与缩放手柄保持屏幕尺寸，但热区向外避让文字中心，缩小画布后仍可直接编辑。宽高调整与 CSS scale 分别保存历史基线，连续使用两者时都保留，并支持独立撤销 / 重做。
 
-命令式入口继续保留：`python3 scripts/deck-editor.py <deck.html>`。Skill / Agent 完成第一版 deck 并通过基础验证后可直接带路径启动，Windows / Linux 也使用这一入口：
+维护者调试命令继续保留：`python3 scripts/deck-editor.py <deck.html>`。以下可见窗口命令仅供明确调试使用；独立 Skill 制作使用 `--headless-workspace`，完成后交付 HTML 与验证结果：
 
 ```bash
 # 只检查 Editor 启动所需能力；不会被 LibreOffice 等可选工具阻塞
@@ -207,10 +210,10 @@ node scripts/editor/cli.mjs solidify
 
 无窗口模式不打开浏览器 UI、不启动内嵌 Agent，但仍使用受控 frame，因此 ActionMutation、SourceMutation、revision、撤销 / 重做、溢出诊断和固化语义与窗口模式完全一致。真实 Deck 在 `solidify` 前保持只读；用户要求仅预览时保留 workspace 与未固化历史。只有用户明确不要后台运行时或依赖不可用时才使用经典 `edit-bundle.py` 直改；该 fallback 没有 Mutation、跨轮撤销与固化，不能静默冒充受控模式。新建 Deck 仅在复制模板产生目标文件前不需要 workspace，合法 bundle 出现后第一版制作立即切入同一流程。
 
-macOS 上由 Skill 直接打开桌面应用并带入刚生成的文件：
+Skill 完成第一版后交付 HTML 和验证结果，不自动打开独立桌面编辑器。可视化微调从 AICO-Harness 的 AICO-PPT 插件进入；以下命令仅供维护者明确调试 macOS Dev Shell：
 
 ```bash
-open -n "AICO-PPT 编辑器.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
+open -n "tools/dev-shell/AICO-PPT Dev Shell.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
 ```
 
 添加 Deck 时，导入页会把自动识别的项目根目录显示出来供用户确认，也允许改选。进入工作台后无需手动绑定会话：Editor 打开新任务时会在后台创建 Codex / Claude Code / OpenCode CLI 会话。Codex 与 OpenCode 在首个可见 turn 后发现并保存真实会话 ID，Claude Code 使用显式 session ID；点击“继续任务”时恢复原会话与工作副本。首个 Prompt 对当前 `aico-ppt` Skill 只初始化一次，打开终端只是接入已经运行的 PTY。活动 provider、项目根目录和会话标识单独写入 sidecar 的 `agent-workspace.json` 和 `workspaceRevision`，不增加 Deck revision，也不污染撤销 / 重做与固化队列。

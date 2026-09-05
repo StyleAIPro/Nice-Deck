@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-WINDOWS_LAUNCHER = ROOT / "AICO-PPT 编辑器.cmd"
+WINDOWS_LAUNCHER = ROOT / "tools/dev-shell/AICO-PPT Dev Shell.cmd"
 WINDOWS_ICON = ROOT / "assets/launcher/aico-ppt-editor.ico"
 WINDOWS_SHORTCUT_SCRIPT = ROOT / "scripts/create_windows_launcher_shortcut.ps1"
 
@@ -22,7 +22,7 @@ class WindowsLauncherTest(unittest.TestCase):
     def test_windows_launcher_points_to_unified_python_entry(self):
         contents = WINDOWS_LAUNCHER.read_text(encoding="utf-8")
 
-        self.assertIn(r"%~dp0scripts\deck-editor.py", contents)
+        self.assertIn(r"%CD%\scripts\deck-editor.py", contents)
         self.assertIn("--app", contents)
         self.assertIn("--detach-windows", contents)
         self.assertIn("%*", contents)
@@ -30,7 +30,7 @@ class WindowsLauncherTest(unittest.TestCase):
         self.assertNotIn('start "AICO-PPT 编辑器"', contents)
         for executable in ("py.exe", "python.exe"):
             self.assertIn(executable, contents)
-        self.assertIn('pushd "%~dp0"', contents)
+        self.assertIn('pushd "%~dp0..\\.."', contents)
 
     def test_windows_launcher_installs_a_local_branded_shortcut(self):
         contents = WINDOWS_LAUNCHER.read_text(encoding="utf-8")
@@ -43,7 +43,9 @@ class WindowsLauncherTest(unittest.TestCase):
             "Windows PowerShell 5.1 需要 UTF-8 BOM 才能稳定解析中文路径",
         )
         self.assertIn("CreateShortcut", shortcut_script)
-        self.assertIn("AICO-PPT 编辑器.cmd", shortcut_script)
+        self.assertIn('Join-Path $repositoryRoot "tools/dev-shell"', shortcut_script)
+        self.assertIn('Join-Path $devShellRoot "AICO-PPT Dev Shell.cmd"', shortcut_script)
+        self.assertIn('Join-Path $devShellRoot "AICO-PPT Dev Shell（Windows）.lnk"', shortcut_script)
         self.assertIn("assets/launcher/aico-ppt-editor.ico", shortcut_script)
         self.assertIn("IconLocation", shortcut_script)
         self.assertEqual(WINDOWS_ICON.read_bytes()[:4], b"\x00\x00\x01\x00")
@@ -57,7 +59,7 @@ class WindowsLauncherTest(unittest.TestCase):
         ):
             with self.subTest(file=relative_path):
                 contents = (ROOT / relative_path).read_text(encoding="utf-8")
-                self.assertIn("AICO-PPT 编辑器.cmd", contents)
+                self.assertIn("tools/dev-shell/AICO-PPT Dev Shell.cmd", contents)
                 self.assertIn("Windows", contents)
 
 

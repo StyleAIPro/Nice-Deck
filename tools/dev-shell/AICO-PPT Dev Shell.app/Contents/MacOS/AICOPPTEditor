@@ -5,11 +5,11 @@ PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 export PATH
 
 APP_MACOS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SKILL_ROOT=$(CDPATH= cd -- "$APP_MACOS_DIR/../../.." && pwd)
+SKILL_ROOT=$(CDPATH= cd -- "$APP_MACOS_DIR/../../../../.." && pwd)
 LAUNCHER="$SKILL_ROOT/scripts/deck-editor.py"
 
 if [ ! -f "$LAUNCHER" ]; then
-  /usr/bin/osascript - "AICO-PPT 编辑器无法启动" "应用必须保留在 aico-ppt skill 根目录中，不能单独移动。请把 AICO-PPT 编辑器.app 放回包含 scripts 文件夹的目录。" <<'APPLESCRIPT'
+  /usr/bin/osascript - "AICO-PPT Dev Shell 无法启动" "调试应用必须保留在 AICO-PPT 仓库的 tools/dev-shell 目录中。正式编辑入口位于 AICO-Harness。" <<'APPLESCRIPT'
 on run argv
   display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"好"} default button "好"
 end run

@@ -28,12 +28,12 @@ test('四份入口文档共享后期微调、安全写回与结构编辑边界',
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
       '启动命令': /python3 scripts\/deck-editor\.py <deck\.html>/,
-      'macOS 双击入口': /双击[^。\n]{0,100}`AICO-PPT 编辑器\.app`/,
+      '维护者调试入口位于工具目录': /tools\/dev-shell\/AICO-PPT Dev Shell\.app/,
       '启动页提供双入口': /(?:启动页|本地工作台)[\s\S]{0,180}新建 Deck[\s\S]{0,180}打开已有 Deck/,
       '重复启动不打开第二个工作台页面': /重复(?:双击|启动|派发)[^。\n]{0,300}不会再打开第二个工作台页面/,
       '新建先确认项目目录': /新建 Deck[\s\S]{0,180}项目目录/,
       '打开已有 Deck 使用文件选择器': /打开已有 Deck[\s\S]{0,220}(?:系统文件选择器|添加一份 HTML|添加 Deck HTML)/,
-      '命令式入口保留': /命令式入口[^。\n]{0,80}(?:保留|保持)[\s\S]{0,180}python3 scripts\/deck-editor\.py <deck\.html>/,
+      '无窗口 Skill 保留编辑入口': /python3 scripts\/deck-editor\.py[^\n]*--headless-workspace/,
       'sidecar 托管工作副本': /(?:\.aico-ppt-editor\/[\s\S]{0,120})?(?:sidecar[^。\n]{0,120})?working\/deck\.html|sidecar[^。\n]{0,120}工作副本/i,
       'Skill 不依赖窗口化 Editor': /(?:没有 Editor 窗口也必须|窗口化 Editor[^。\n]{0,80}(?:可选增强|不是使用前提)|无窗口 Managed Workspace)/,
       '窗口 Agent Host 注册三个 provider': /Codex[\s\S]{0,140}Claude Code[\s\S]{0,140}OpenCode/,
@@ -279,7 +279,8 @@ test('四份入口文档共享未完成 badge、完成任务折叠和实时终�
 test('Skill、README 与架构文档各自承担入口、仓库和开发者职责', async () => {
   const documents = await loadDocuments();
   requireClaims('SKILL.md', documents['SKILL.md'], {
-    '初版生成后直接打开应用': /第一版[\s\S]{0,180}open -n "AICO-PPT 编辑器\.app" --args/,
+    '独立 Skill 不自动打开桌面编辑器': /第一版[^。\n]{0,100}不自动打开独立桌面编辑器/,
+    '可视化入口统一到 Harness': /可视化编辑入口统一放在 AICO-Harness/,
     '启动器文件导航': /`scripts\/deck-editor\.py`/,
     '编辑器目录文件导航': /`scripts\/editor\/`/,
     '批量重构仍由 Agent 完成': /(?:新建|批量重构)[\s\S]{0,180}Agent[\s\S]{0,120}edit-bundle/,
