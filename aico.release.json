@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "aico-ppt",
+  "name": "AICO-PPT",
+  "description": "制作、编辑和放映 HTML 演示文稿，并导出 PPTX。",
+  "package": "plugin",
+  "entry": "plugin/integrations/dsh/index.mjs",
+  "requires": {"desktopRenderer": 1},
+  "components": ["plugin", "python"],
+  "paths": {
+    "python": {"kind": "file", "path": "python/bin/python3"}
+  },
+  "targets": {
+    "win32-x64": {
+      "paths": {
+        "python": {"kind": "file", "path": "python/python.exe"}
+      }
+    }
+  }
+}
