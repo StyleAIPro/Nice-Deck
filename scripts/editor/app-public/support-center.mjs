@@ -344,7 +344,8 @@ export function createSupportCenter({
 
   const renderDiagnostics = snapshot => {
     const { environment, installation } = snapshot;
-    const registration = installation.registrations?.find(item => item.host === 'codex');
+    const desktop = installation.delivery === 'desktop';
+    const registration = installation.registrations?.find(item => item.host === (desktop ? 'dsh' : 'codex'));
     const skillState = registration?.state === 'ready' ? 'ready'
       : ['occupied', 'adoption-required'].includes(registration?.state)
         ? 'manual-action-required' : 'repairable';
@@ -365,18 +366,18 @@ export function createSupportCenter({
         description,
         detail:profile.ready ? '已就绪' : `未就绪：${problems.join('、') || '未知依赖'}`,
         state:profile.state,
-        repair:automatic.length ? { kind:'profile', profile:profileId } : null,
-        guidance,
+        repair:!desktop && automatic.length ? { kind:'profile', profile:profileId } : null,
+        guidance:desktop && !profile.ready ? ['运行环境随 AICO-PPT 插件提供，请在设置的插件页重新安装 AICO-PPT 插件。'] : guidance,
       });
     };
     ui.diagnostics.replaceChildren(
       makeGroup('基础使用', [
         makeRow({
           label:'AICO-PPT Skill',
-          description:'让 Codex 发现本仓库的工作流',
-          detail:registration ? `${registration.targetPath} · ${registration.state}` : '未找到注册信息',
+          description:desktop ? '已安装 PPT 插件工作流' : '让 Codex 发现本仓库的工作流',
+          detail:desktop ? '由 AICO-Harness 插件商店管理' : registration ? `${registration.targetPath} · ${registration.state}` : '未找到注册信息',
           state:skillState,
-          repair:adoptionRequired ? {
+          repair:desktop ? null : adoptionRequired ? {
             kind:'skill',
             adoptExisting:true,
             confirmation:'目标已经指向当前 AICO-PPT 仓库。确认由安装器接管该 Skill 注册，以便后续安全修复和卸载吗？',
@@ -384,7 +385,7 @@ export function createSupportCenter({
           actionLabel:adoptionRequired ? '接管此安装' : '修复并复检',
         }),
         profileRow('editor-core', '启动 DSH 中的画布、任务、历史与固化运行时'),
-        profileRow('dev-shell', '开发调试时启动本机 Agent PTY（正式 DSH 使用不需要）'),
+        ...(!desktop ? [profileRow('dev-shell', '开发调试时启动本机 Agent PTY（正式 DSH 使用不需要）')] : []),
       ]),
       makeGroup('质量验证', [profileRow('verify', '截图、溢出检测和动画逐拍检查')]),
       makeGroup('导出与材料', [
@@ -396,7 +397,7 @@ export function createSupportCenter({
     const agentInput = ui.onboardingChecks.find(input => input.dataset.onboardingStep === 'agent');
     const agentCheck = environment.checks.find(item => item.key === 'agent-cli');
     if (skillInput && skillState === 'ready') skillInput.checked = true;
-    if (agentInput && agentCheck?.present) agentInput.checked = true;
+    if (agentInput && (desktop || agentCheck?.present)) agentInput.checked = true;
     saveProgress();
   };
 

@@ -400,8 +400,10 @@ export function createLiquidEtherBackground(root, overrides = {}) {
   root.dataset.qualityProfile = isWindows ? 'windows-balanced' : 'full';
   const options = {
     colors:['#fffdfd', '#feecee', '#f9c5c9', '#ec7d85', '#c7000b'],
-    mouseForce:14,
-    cursorSize:66,
+    mouseForce:18,
+    // 按屏幕 CSS 像素定义笔触，避免窄面板降低渲染分辨率后反而变粗。
+    cursorSize:128,
+    velocityHalfLife:1.2,
     dt:0.014,
     useBFECC:true,
     poissonIterations:isWindows ? 12 : 24,
@@ -409,10 +411,10 @@ export function createLiquidEtherBackground(root, overrides = {}) {
       ? (isWindows ? 0.28 : 0.32)
       : (isWindows ? 0.34 : 0.42),
     maxPointerEntries:24,
-    autoSpeed:0.32,
-    autoIntensity:1.7,
+    autoSpeed:0.18,
+    autoIntensity:0.55,
     takeoverDuration:0.25,
-    autoResumeDelay:2200,
+    autoResumeDelay:5000,
     autoRampDuration:0.65,
     ...overrides,
   };

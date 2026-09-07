@@ -1,4 +1,4 @@
-import { loadChromium as loadDefaultChromium } from '../verify/load-playwright.mjs';
+import { loadChromium as loadDefaultChromium, chromiumLaunchOptions } from '../verify/load-playwright.mjs';
 
 async function settleWithin(promise, timeoutMs) {
   let timer;
@@ -29,7 +29,7 @@ export async function startHeadlessEditorRuntime({
     throw new TypeError('readyTimeoutMs 必须为正整数');
   }
   const chromium = await loadChromium();
-  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  const browser = await chromium.launch(chromiumLaunchOptions());
   let page;
   let closePromise;
   const close = () => {

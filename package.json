@@ -1,6 +1,6 @@
 {
   "name": "aico-ppt-skill",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "description": "AICO-PPT Agent Skill 与 DeepSeek Harness 可视化 Editor 插件",
   "private": true,
   "type": "module",

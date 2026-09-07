@@ -1706,6 +1706,7 @@ export async function startAppServer({
         state = 'creating-draft';
         try {
           const workspace = await createCreationWorkspace({
+            serviceUrl:serviceOrigin,
             projectRoot:creationCandidate.project.path,
             provider:body.provider,
             pythonExecutable,
@@ -1788,6 +1789,7 @@ export async function startAppServer({
           const project = await resolveCreationProject({ selectedPath:entry.projectRoot });
           await assertAgentProject(project);
           workspace = await openCreationWorkspace({
+            serviceUrl:serviceOrigin,
             projectRoot:entry.projectRoot,
             draftId:entry.draftId,
             pythonExecutable,

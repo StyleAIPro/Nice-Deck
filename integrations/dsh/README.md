@@ -1,12 +1,15 @@
 # DSH 插件集成
 
-这里是 AICO-PPT 在 DeepSeek Harness（DSH）中的适配层，不是第二份 Skill，也不是第二套 Editor。
+这里是 AICO-PPT 在 DeepSeek Harness（DSH）中的适配层，不是第二份 Skill，也不是第二套 Editor。普通用户安装 AICO-Harness 独立应用，再通过“设置 → 插件 → 插件商店”安装 AICO-PPT；正式步骤见[安装指南](../../INSTALL.md)。本文的 Web profile 与本地安装命令只用于开发调试。
 
 插件把 DSH 原生对话与原 AICO-PPT Editor 并排组合：左边始终是当前 DSH 会话，右边是可缩放的通用 workbench；AICO-PPT 使用跨 Session 常驻的 `workbench.persistent-view`。Editor 的页面栏、画布、属性栏、区域任务、时间线、固化和导出全部继续运行仓库内原有实现。
 
 | 文件 | 所属平面 | 责任 |
 |---|---|---|
-| `index.mjs` | Plugin Host | 注册根目录唯一 `SKILL.md`；启动原 `startAppServer({ embeddedMode: 'dsh' })`；向 Client 注入带随机令牌的入口 URL 和品牌资源 |
+| `index.mjs` | Plugin Host | 注册根目录唯一 `SKILL.md`；按 `aicoRuntime` 配置选择私有 Worker 或源码 Editor；向 Client 注入带随机令牌的入口 URL 和品牌资源 |
+| `runtime-env.mjs` | 私有运行时 | 校验插件目录内的 Python / 浏览器 / Office，构造独立环境；Node 复用 Host 的可执行文件 |
+| `runtime-host.mjs` / `runtime-worker.mjs` | Worker 生命周期 | 在独立环境中加载原 `startAppServer({ embeddedMode:'dsh' })`，报告实际 loopback URL，等待关闭并处理超时和崩溃 |
+| `runtime-run.mjs` | 模型脚本入口 | 读取本包 `.aico-runtime.json`，用同一私有环境运行 `python3` 或 `node`；保留当前工作目录、标准输入和解释器参数 |
 | `client.js` | Plugin Client | 在 `sidebar.footer.action` 注册 AICO-PPT 入口；在 `workbench.persistent-view` 注册 iframe 宿主；通过 `ctx.sessionStarts` 向 DSH 统一“新会话”入口发布一行 AICO-PPT 标签及其当前优先的确切 Deck 子菜单；提供 Workspace / Session 创建、打开、查询和精确发送命令 |
 | `../../scripts/editor/public/deck-task-coordinator.mjs` | Editor Client | 用 `workId` 协调 WorkCatalog 持久关系与 DSH 原生 Workspace / Session 副作用；处理预分配身份与 pending 恢复 |
 | `../../cordis.patch.yml` | Plugin Bundle | 安装时加入 Host/Client 插件行 |
@@ -37,16 +40,31 @@
 - Session 创建与打开命令同时携带不超过 DSH 80 字节上限的稳定中文标题；pending 恢复或旧 Link 激活只为尚未命名的 Session 补名，不覆盖用户或 DSH 已经持久化的标题。打开命令非阻塞预加载 Session history window，并立即切换 DSH 当前选择；标题补写和历史连接都不能阻塞 Editor 导航。
 - 属性栏在 DSH 嵌入态固定停靠于画布上方，避免占用画布横向空间；任务 drawer 保持原来的右下角悬浮位置。
 - Client 只嵌入原 App/Editor 页面，不复制 Editor DOM、业务状态或事务代码。
+- 会话提示词单独限制为非空白文本、最多 262144 个 UTF-16 代码单元，以容纳安装目录与页面规划；会话、路径及标题等字段仍保留原有限制。
 
-## 本地安装
+## 应用内插件运行时
 
-从本仓库根目录执行：
+AICO-Harness 桌面安装器只安装 Host。用户从设置中的插件目录安装 AICO-PPT 后，插件管理器负责下载与校验本包及 Python、浏览器、Office，准备成功后再注册现有 Web profile；卸载只移除插件注册与可回收发行文件，项目和用户数据保持原位。独立 Skill 与源码安装不要求桌面运行时描述文件。
+
+桌面管理器调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python, browser, office } } })`。`root` 是当前插件发行目录，三个工具路径均为存在的绝对文件路径；跟随软链接后的实际文件必须位于该目录内。描述对象只接受这些字段，不接受凭据或任意环境变量。管理器将同一个 `aicoRuntime` 对象写入插件包根目录的 `.aico-runtime.json`，供模型脚本包装器读取。Node 始终使用 `process.execPath`，不在 PPT 插件内安装第二份 Node。
+
+Host 在创建 Worker 时传入独立环境，Worker 收到环境后才导入 Editor 模块，并显式传入 `pythonExecutable`。私有 PATH 包含声明的工具、Host Node 和基本系统工具目录；继承的 Python / Node / Playwright 运行时覆盖与凭据变量被移除。`AICO_HOME`、`AICO_PPT_EDITOR_STATE_ROOT`、项目 sidecar 和工作副本仍由现有状态解析器管理，插件不修改全局 `process.env`。没有 `aicoRuntime` 时，`apply(ctx)` 沿用源码 Editor 行为。
+
+只有配置桌面运行时的 Skill 定义会在规范正文后追加包装器说明，磁盘上的 `SKILL.md` 不变。包装器允许 `python3` / `node` 的普通参数、`-m` / `-c` / `-e`、stdin 和项目脚本；它只选择环境，命令审批与沙箱仍归 Harness。调用保持原工作目录，文档中的 `scripts/` 相对路径须解析到本 Skill 根目录，输出继续指向用户项目。
+
+启动失败直接拒绝插件激活；启动后的 Worker 崩溃写入 Host 日志，并使后续页面注入报告失败。移除插件时先请求 `app.close()`，随后等待 Worker 退出；超过 15 秒仍未退出时，等待强制终止完成并报告关闭超时。启动超过 30 秒也会终止并拒绝激活。
+
+### 源码联调（仅开发）
+
+配套 Harness 网页启动器位于其 `tools/dev-web/`，默认使用 `~/.aico-harness-dev-web`，与正式 AICO 应用数据隔离。源码配套安装和启动命令统一见[开发调试说明](../../INSTALL.md#开发调试)。
+
+需要单独验证 DSH 的本地插件安装协议时，从本仓库根目录执行；为此次调试显式指定独立 `DSH_HOME`：
 
 ```bash
-dsh plugin --profile web add .
+DSH_HOME="$HOME/.aico-ppt-dsh-dev" dsh plugin --profile web add .
 ```
 
-安装后重新构建并重启 `web` profile。当前 `package.json` 保留 `private: true`，所以这是本地开发安装，不代表已经发布到公共 registry。
+这是不带桌面运行时配置的高级源码测试。安装后重新构建，并使用同一开发 `DSH_HOME` 重启 `web` profile；当前 `package.json` 保留 `private: true`，不代表已经发布到公共 registry。
 
 当前适配只支持浏览器与 Editor 都位于同一台机器的 loopback DSH Web；Editor 服务不会暴露到局域网。
 
@@ -60,3 +78,9 @@ node --test scripts/editor/test/dsh-embedded-renzhi.e2e.mjs
 ```
 
 第二条测试复制 `Deck-Projects/renzhi/renzhi-deck.html` 到临时目录，验证 21 页加载、三种模式、顶部属性栏、原任务 drawer、任务转交、历史、固化和导出，并确认源文件字节没有变化。
+
+`test:dsh-plugin` 同时验证源码回退、桌面 Skill 追加说明、实际 Worker HTTP 启停、私有环境诊断、异常退出、关闭超时、模型 Node 参数和 Python stdin。运行时描述与子进程夹具全部位于测试独占临时目录；测试不会写入用户插件描述文件。设计决策见 [ADR-0007](../../docs/adr/0007-plugin-private-runtime.md)。
+
+桌面文件与目录选择能力通过 Host 到 Worker 的私有启动参数传递，仅注入系统选择器回调；地址与认证令牌不进入 Worker 通用环境、模型脚本或运行时描述文件。启动时验证通道必须是带认证信息的本机 `/pick` 地址。真实 Worker 到 Electron 对话框桥的回归覆盖 HTML 选择和创建项目目录选择，同时保留无令牌及带浏览器 Origin 请求的拒绝检查。
+
+Creation CLI 每次通过 `--capability-file` 读取 Draft 的本机服务 URL 与凭据；恢复 Draft 时以 0600 权限更新同一路径的动态端口与凭据，无需把秘密写入会话提示或 Host 环境。

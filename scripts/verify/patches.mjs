@@ -3,7 +3,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { loadChromium } from './load-playwright.mjs';
+import { loadChromium, chromiumLaunchOptions } from './load-playwright.mjs';
 
 const [deckFile, mode] = process.argv.slice(2);
 if (!deckFile) {
@@ -45,7 +45,7 @@ try {
 let browser;
 let exitCode = 0;
 try {
-  browser = await chromium.launch({ channel:'chrome', headless:true });
+  browser = await chromium.launch(chromiumLaunchOptions());
   const page = await browser.newPage({
     viewport:{ width:1920, height:1080 }, deviceScaleFactor:1,
   });

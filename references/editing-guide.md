@@ -6,6 +6,8 @@ deck 是一个「独立版」单文件 HTML：React 运行时、字体、全部�
 
 产品入口：独立 Skill 不依赖 AICO-Harness，完成第一版后交付 HTML 和验证结果，不自动打开桌面编辑器。可视化编辑统一从 AICO-Harness 的 AICO-PPT 插件进入；`tools/dev-shell/` 中的启动器和下文 PTY 说明仅适用于维护者调试。默认 `scripts/install.py install` 只注册 Skill，调试环境才加 `--dev-shell`。
 
+完整应用通过 AICO-Harness 的配套安装器安装，使用独立 AICO 数据目录与系统分配端口；已有 DSH 和全局 Skill 无需卸载。安装和旧历史导入条件见 [安装指南](../INSTALL.md)。
+
 ### DSH 与桌面入口的会话边界
 
 DSH 插件和独立桌面入口共享本章的 Deck / Managed Workspace、frame bridge 与操作逻辑，但不共享对话宿主。DSH 是正式窗口壳；桌面入口是开发、回归和故障排查用的 `dev-shell`，保留自己的 Agent PTY。DSH 插件绝不能导入或实例化 Agent Terminal、加载 xterm、自动启动 `node-pty` 或连接 `/agent-terminal` WebSocket，而应在用户明确创建任务会话时，把带任务 ID、revision 和受控 CLI、且以 `/aico-ppt` 开头的 Skill 引用提示词发送到当前 DSH 会话；恢复、任务切换和 Session 切换不得再次发送提示词。跨任务恢复可以经过启动器内部路由，但过渡文档必须在首屏前隐藏启动初始页。`$aico-ppt` 只用于使用该语法的独立 Codex 流程。页面栏、三种模式、画布、属性、任务、撤销 / 重做、固化和导出属于 Editor；模型选择、聊天记录、审批、计划和执行状态属于 DSH。
@@ -461,3 +463,7 @@ macOS / Linux 仍可使用 `bash scripts/html2pptx/convert.sh ...`；该脚本�
 - iframe 一律 `loading="lazy"`；能重画成矢量 / HTML 的图别贴低清大截图。
 - **大改用 Python 切片，别开编辑器**——那两行 JSON 每行数 MB，多数编辑器会卡死或悄悄截断。
 - 参考基线：模板 12MB，headless Chrome 首开约 2.6 秒；桌面浏览器首次打开多等几秒属正常，不是卡死。用 `file://` 直开时控制台可能有 2 条 CORS 报错，良性，忽略即可。
+
+## 10. AICO 桌面运行环境
+
+桌面包已提供 Node、Python、Chromium 和 LibreOffice；Agent 沿用启动环境，不修改应用资源中的依赖。截图、验证和导出统一选择 `AICO_BROWSER_EXECUTABLE`，材料诊断优先选择 `AICO_SOFFICE_EXECUTABLE`。打开 Deck、选择目录由桌面原生对话框处理。独立 Skill 继续使用原有宿主环境。接口与诊断行为见 [ADR-0006](../docs/adr/0006-desktop-runtime-capabilities.md)。

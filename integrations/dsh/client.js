@@ -6,9 +6,6 @@ window.__ModuleLoader__.load({
     const React = require("react");
     const h = React.createElement;
     const brand = globalThis.__AICO_PPT_BRAND__;
-    const brandLogo = typeof brand?.logo === "string"
-      && /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u.test(brand.logo)
-      ? brand.logo : null;
     const optimisticSessionTitles = new Map();
     const sessionTitleWrites = new Map();
 
@@ -23,8 +20,7 @@ window.__ModuleLoader__.load({
 .hwd-sidebar-action:focus-visible{outline:2px solid color-mix(in srgb,#c7000b 42%,transparent);outline-offset:1px}
 .hwd-sidebar-action[data-wide=false]{width:36px;justify-content:center;padding:0}
 .hwd-sidebar-icon{display:grid;width:18px;height:18px;flex:0 0 18px;place-items:center;color:#c7000b}
-.hwd-sidebar-icon img{display:block;width:18px;height:18px;object-fit:contain}
-.hwd-sidebar-logo-error{display:grid;width:18px;height:18px;place-items:center;border:1px solid currentColor;border-radius:4px;font:700 12px/1 sans-serif}
+.hwd-sidebar-icon svg{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .hwd-sidebar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(prefers-reduced-motion:reduce){.hwd-sidebar-action{transition:none}}
 `;
@@ -167,7 +163,10 @@ window.__ModuleLoader__.load({
 
     function sendToSession(ctx, sessionId, prompt) {
       requireBridgeString(sessionId, "sessionId");
-      requireBridgeString(prompt, "prompt");
+      // 提示词含多个发行路径及页面规划，不适用标识符的 4096 字符限制。
+      if (typeof prompt !== "string" || prompt.length > 256 * 1024 || !prompt.trim()) {
+        throw new Error("prompt 无效");
+      }
       const binding = ctx.sessions.binding(sessionId);
       const conversation = binding?.ctx.get("conversation");
       if (!conversation || typeof conversation.send !== "function") {
@@ -600,12 +599,10 @@ window.__ModuleLoader__.load({
         onClick:props.toggleWorkbench,
       },
       h("span", { className:"hwd-sidebar-icon", "aria-hidden":"true" },
-        brandLogo
-          ? h("img", { src:brandLogo, alt:"", draggable:false })
-          : h("span", {
-            className:"hwd-sidebar-logo-error",
-            title:"AICO-PPT Logo 输入无效",
-          }, "!")),
+        h("svg", { viewBox:"0 0 24 24" },
+          h("rect", { x:"3.5", y:"4.5", width:"17", height:"15", rx:"2.5" }),
+          h("path", { d:"M7 15l3.2-3.2 2.4 2.4 2.4-2.4 2 2" }),
+          h("path", { d:"M8 8.5h8" }))),
       props.wide ? h("span", { className:"hwd-sidebar-label" }, "AICO-PPT") : null);
     }
 

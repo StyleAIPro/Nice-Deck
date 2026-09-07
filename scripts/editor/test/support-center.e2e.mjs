@@ -30,6 +30,28 @@ function environmentSnapshot() {
   };
 }
 
+test('桌面诊断说明 PPT 插件归插件商店管理，缺失环境通过重新安装插件恢复', async t => {
+  const app = await startAppServer({
+    token:'support-plugin-copy-secret',
+    inspectInstallation:async () => ({ delivery:'desktop', registrations:[{host:'dsh',state:'ready'}] }),
+    inspectEnvironment:async () => ({ ...environmentSnapshot(), delivery:'desktop' }),
+  });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(2000);
+  await page.goto(app.appUrl);
+  await page.waitForFunction(() => document.documentElement.dataset.appReady === 'true');
+  await page.getByRole('button', {name:'安装与诊断',exact:true}).click();
+  await page.getByText('已安装 PPT 插件工作流', {exact:true}).waitFor();
+  await page.getByText('由 AICO-Harness 插件商店管理', {exact:true}).waitFor();
+  const materials = page.locator('.diagnostic-row', {hasText:'外部材料解析'});
+  await materials.getByRole('button', {name:'查看安装方法'}).click();
+  await page.getByText('运行环境随 AICO-PPT 插件提供，请在设置的插件页重新安装 AICO-PPT 插件。', {exact:true}).waitFor();
+});
+
 
 test('开始使用、帮助、诊断与示例副本形成完整首页路径', async t => {
   const sampleParent = await mkdtemp(join(tmpdir(), 'aico-ppt-onboarding-e2e-'));

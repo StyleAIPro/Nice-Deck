@@ -16,7 +16,7 @@
 
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { loadChromium } from './load-playwright.mjs';
+import { loadChromium, chromiumLaunchOptions } from './load-playwright.mjs';
 
 const TRUNC = 36; // 元素文本摘要统一截断长度
 
@@ -30,7 +30,7 @@ try { chromium = await loadChromium(); }
 catch (error) { console.error(error.message); process.exit(2); }
 let browser, exitCode = 0;
 try {
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  browser = await chromium.launch(chromiumLaunchOptions());
   const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
   await page.goto(pathToFileURL(deckFile).href, { waitUntil: 'load', timeout: 180000 }); // 单文件 deck 很大，放宽超时
   await page.waitForFunction(() => document.querySelectorAll('.stage .slide-canvas').length > 0, { timeout: 60000 });

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { access } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultPythonExecutable, pythonUtf8SpawnOptions } from './python-utf8.mjs';
@@ -53,25 +54,37 @@ export function runJsonProcess(command, args, {
 }
 
 
-export function inspectEnvironment({
+export async function inspectEnvironment({
   pythonExecutable = defaultPythonExecutable(),
   profiles = ['full'],
   repair = false,
   runProcess = runJsonProcess,
+  delivery = process.env.AICO_RUNTIME_KIND,
 } = {}) {
+  if (delivery === 'desktop') {
+    if (repair) throw new Error('桌面版运行环境随插件提供，请在设置的插件页重新安装 AICO-PPT 插件。');
+    profiles = profiles.includes('full') ? ['editor-core', 'verify', 'pptx-export', 'materials'] : profiles;
+  }
   const args = [join(PROJECT_ROOT, 'scripts/check_deps.py')];
   for (const profile of profiles) args.push('--profile', profile);
   args.push(repair ? '--repair' : '--check-only', '--json');
-  return runProcess(pythonExecutable, args, { cwd:PROJECT_ROOT });
+  const result = await runProcess(pythonExecutable, args, { cwd:PROJECT_ROOT });
+  return delivery === 'desktop' ? { ...result, delivery:'desktop' } : result;
 }
 
 
-export function inspectInstallation({
+export async function inspectInstallation({
   pythonExecutable = defaultPythonExecutable(),
   repair = false,
   adoptExisting = false,
   runProcess = runJsonProcess,
+  delivery = process.env.AICO_RUNTIME_KIND,
 } = {}) {
+  if (delivery === 'desktop') {
+    if (repair) throw new Error('桌面版 Skill 随插件更新，请在设置的插件页重新安装 AICO-PPT 插件。');
+    await access(join(PROJECT_ROOT, 'SKILL.md'));
+    return { delivery:'desktop', registrations:[{ host:'dsh', state:'ready', targetPath:PROJECT_ROOT }] };
+  }
   const args = [
     join(PROJECT_ROOT, 'scripts/install.py'),
     repair ? 'repair' : 'inspect',

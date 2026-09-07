@@ -28,6 +28,15 @@ function diagnostic(error) {
   };
 }
 
+function quoteCreationArgument(value) {
+  const escaped = String(value).replaceAll("'", process.platform === 'win32' ? "''" : "'\\''");
+  return `'${escaped}'`;
+}
+
+function creationCapabilityArgument(capabilityPath) {
+  return capabilityPath ? ` --capability-file ${quoteCreationArgument(capabilityPath)}` : '';
+}
+
 export function buildCreationInitializationPrompt({ projectRoot, capabilityPath } = {}) {
   return [
     '/aico-ppt',
@@ -38,17 +47,17 @@ export function buildCreationInitializationPrompt({ projectRoot, capabilityPath 
     '当前页面在 Deck 出现前只有对话工作区；请通过自然对话逐步问清主题与标题、听众、场景与时长、期望行动、现有素材、品牌和交付格式。',
     '不要要求用户去页面填写表单或点击阶段按钮。对话负责探索，受控 CLI 和里程碑文件负责持久化共识。',
     '每当用户在对话中确认一层共识，就读取最新 revision，并用受控 CLI 更新、确认对应内容，例如：',
-    `node "${CREATION_CLI}" creation status`,
-    `node "${CREATION_CLI}" creation templates`,
-    `node "${CREATION_CLI}" creation update-brief --json /absolute/path/brief.json`,
-    `node "${CREATION_CLI}" creation confirm-brief --expected-revision <最新 revision>`,
+    `node ${quoteCreationArgument(CREATION_CLI)} creation status${creationCapabilityArgument(capabilityPath)}`,
+    `node ${quoteCreationArgument(CREATION_CLI)} creation templates${creationCapabilityArgument(capabilityPath)}`,
+    `node ${quoteCreationArgument(CREATION_CLI)} creation update-brief${creationCapabilityArgument(capabilityPath)} --json /absolute/path/brief.json`,
+    `node ${quoteCreationArgument(CREATION_CLI)} creation confirm-brief${creationCapabilityArgument(capabilityPath)} --expected-revision <最新 revision>`,
     '传给 --json 的文件是命令 payload：update-brief 使用 {"patch":{...}}；propose-outline 使用 {"outline":{"sections":[...]}}；propose-page-plan 使用 {"pagePlan":{"pages":[...]}}。',
     '在确认需求前必须先用 creation templates 读取完整页型目录；availablePageTypes 同时包含当前场景原生页与经过兼容性审核的共享页，并给出 visualFamily、density、rhythmRole、useWhen 和来源模板。把场景外壳选择写入 brief.recommendedTemplateId 后才能规划页面。',
     '用 propose-outline / confirm-outline、propose-page-plan / confirm-page-plan 依次沉淀大纲与页面规划；用户在对话中的明确同意就是确认依据。',
     'pageTypeId 必须来自所选模板目录；封面 cover 排第一、目录 toc 排第二、感谢页 thanks 排最后，三者必须各有且只有一页。',
     '页面不会提供前三步的结构化编辑器或确认按钮。完成页面规划后，由你执行 set-output，再执行 start-generation。',
     'set-output payload 形如 {"output":{"fileName":"主题.html","templateId":"training|tech-share|work-report","includePlan":true,"trialPptx":false,"autoOpenEditor":true}}。独立 Deck 一出现，页面会自动显示 Deck 画布。',
-    `当前 Draft capability 文件：${capabilityPath}`,
+    `当前 Draft capability 文件：${capabilityPath}。每次 creation CLI 命令均须加 --capability-file 参数；文件由服务维护，恢复后仍读取同一路径，不要读取、打印或复制其中凭据。`,
     `不要修改内置模板，也不要直接覆盖最终输出文件。独立 Deck 出现后，系统会给出 Editor 托管工作副本；结构制作只编辑该工作副本，并且必须通过 ${EDIT_BUNDLE}。`,
   ].join('\n');
 }
@@ -67,8 +76,8 @@ export function buildCreationResumePrompt({ snapshot, capabilityPath } = {}) {
     `当前阶段：${snapshot?.phase ?? 'brief'}；revision：${snapshot?.revision ?? 0}。`,
     `已完成里程碑：${completed.length ? completed.join('、') : '暂无'}。`,
     '你正在恢复同一个 Agent 会话和同一份 Draft。先读取最新状态与已有过程文件，再从未完成的位置继续；不要重复询问已经明确的信息。',
-    `node "${CREATION_CLI}" creation status`,
-    `当前 Draft capability 文件：${capabilityPath}`,
+    `node ${quoteCreationArgument(CREATION_CLI)} creation status${creationCapabilityArgument(capabilityPath)}`,
+    `当前 Draft capability 文件：${capabilityPath}。每次 creation CLI 命令均须加 --capability-file 参数；文件由服务维护，恢复后仍读取同一路径，不要读取、打印或复制其中凭据。`,
     `后续仍必须通过受控 creation CLI 更新 Draft；生成阶段的结构制作必须通过 ${EDIT_BUNDLE} 修改 Editor 托管工作副本。`,
   ];
   if (managed) {
@@ -105,7 +114,7 @@ function fallbackMilestones(snapshot) {
   };
 }
 
-export function buildGenerationPrompt(snapshot, { template = null } = {}) {
+export function buildGenerationPrompt(snapshot, { template = null, capabilityPath = null } = {}) {
   const managed = snapshot.managedDeck ?? null;
   const deckPath = managed?.workingDeckPath
     ?? snapshot.generation.stagingDeckPath ?? snapshot.generation.stagingDeck;
@@ -143,8 +152,8 @@ export function buildGenerationPrompt(snapshot, { template = null } = {}) {
   }
   instructions.push(
     '完成后先自行检查，再执行：',
-    `node "${CREATION_CLI}" creation status`,
-    `node "${CREATION_CLI}" creation generation-ready --expected-revision <最新 revision>`,
+    `node ${quoteCreationArgument(CREATION_CLI)} creation status${creationCapabilityArgument(capabilityPath)}`,
+    `node ${quoteCreationArgument(CREATION_CLI)} creation generation-ready${creationCapabilityArgument(capabilityPath)} --expected-revision <最新 revision>`,
     '服务会先固化 Managed Workspace，再独立执行 bundle verify、全页 overflow 检查和不覆盖发布。终端中的自然语言“完成”不算回执。',
   );
   return instructions.join('\n');
@@ -159,11 +168,12 @@ export class DeckCreationWorkspace {
     pythonExecutable = 'python3',
     commandRunner,
     capabilityToken = randomUUID(),
+    serviceUrl,
     openManagedDeck = null,
   } = {}) {
     return DeckCreationWorkspace.#open({
       create:true, projectRoot, provider, draftId, catalog, pythonExecutable,
-      commandRunner, capabilityToken, openManagedDeck,
+      commandRunner, capabilityToken, serviceUrl, openManagedDeck,
     });
   }
 
@@ -174,11 +184,12 @@ export class DeckCreationWorkspace {
     pythonExecutable = 'python3',
     commandRunner,
     capabilityToken = randomUUID(),
+    serviceUrl,
     openManagedDeck = null,
   } = {}) {
     return DeckCreationWorkspace.#open({
       create:false, projectRoot, draftId, catalog, pythonExecutable,
-      commandRunner, capabilityToken, openManagedDeck,
+      commandRunner, capabilityToken, serviceUrl, openManagedDeck,
     });
   }
 
@@ -191,6 +202,7 @@ export class DeckCreationWorkspace {
     pythonExecutable,
     commandRunner,
     capabilityToken,
+    serviceUrl,
     openManagedDeck,
   }) {
     const adapter = await (create
@@ -216,6 +228,7 @@ export class DeckCreationWorkspace {
       });
       await writeFile(capabilityPath, `${JSON.stringify({
         version:1, scope:'creation-draft', token:capabilityToken,
+        ...(serviceUrl ? { url:serviceUrl } : {}),
       })}\n`, { encoding:'utf8', mode:0o600, flag:'wx' });
       return new DeckCreationWorkspace({
         store, factory, catalog:templateCatalog, capabilityToken, capabilityPath,
@@ -378,7 +391,7 @@ export class DeckCreationWorkspace {
       const managed = await this.#ensureManagedDeck();
       const view = this.snapshot();
       const template = this.catalog?.resolve?.(view.output?.templateId);
-      const prompt = buildGenerationPrompt(view, { template });
+      const prompt = buildGenerationPrompt(view, { template, capabilityPath:this.capabilityPath });
       await this.store.updateGeneration({
         agentTask:managed
           ? '通过 Editor Managed Workspace 制作初版 Deck'

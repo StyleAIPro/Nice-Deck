@@ -126,7 +126,7 @@ async function editorCredentials(options) {
   return { ...options, url, token, baseUrl:normalizedBaseUrl(url) };
 }
 
-async function requestJson({ baseUrl, token }, pathname, { method = 'GET', body } = {}) {
+async function requestJson({ baseUrl, token, redirect }, pathname, { method = 'GET', body } = {}) {
   const endpoint = new URL(pathname, `${baseUrl.href.replace(/\/$/, '')}/`);
   const headers = { authorization: `Bearer ${token}` };
   if (body !== undefined) headers['content-type'] = 'application/json';
@@ -134,6 +134,7 @@ async function requestJson({ baseUrl, token }, pathname, { method = 'GET', body 
   try {
     response = await fetch(endpoint, {
       method,
+      redirect,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -217,25 +218,36 @@ function parseCreationArguments(argv) {
     }
     index += 1;
   }
-  if (!result.url) throw new CliError('缺少创建工作区 URL；请设置 AICO_PPT_CREATION_URL 或 --url');
-  try { result.baseUrl = new URL(result.url); }
-  catch { throw new CliError(`无效创建工作区 URL: ${result.url}`); }
-  if (!['http:', 'https:'].includes(result.baseUrl.protocol)) {
-    throw new CliError('创建工作区 URL 必须使用 http 或 https');
-  }
   return result;
 }
 
 async function creationCredentials(options) {
-  if (options.token) return options;
-  if (!options.capabilityFile) {
-    throw new CliError('缺少创建 Draft capability；请设置 AICO_PPT_CREATION_CAPABILITY_FILE 或 --token');
+  let { url, token } = options;
+  let fromCapability = false;
+  if ((!url || !token) && options.capabilityFile) {
+    const capability = await readJsonFile(options.capabilityFile, ' capability 文件');
+    if (capability.version !== 1 || capability.scope !== 'creation-draft'
+      || typeof capability.token !== 'string' || !capability.token) {
+      throw new CliError('capability 文件不是当前 Creation Draft 的有效凭据');
+    }
+    url ||= capability.url;
+    token ||= capability.token;
+    fromCapability = true;
   }
-  const capability = await readJsonFile(options.capabilityFile, ' capability 文件');
-  if (capability.scope !== 'creation-draft' || typeof capability.token !== 'string' || !capability.token) {
-    throw new CliError('capability 文件不是当前 Creation Draft 的有效凭据');
+  if (!url) throw new CliError('缺少创建工作区 URL；请设置 AICO_PPT_CREATION_URL、--url 或 --capability-file');
+  let baseUrl;
+  try { baseUrl = new URL(url); }
+  catch { throw new CliError('无效创建工作区 URL'); }
+  if (!['http:', 'https:'].includes(baseUrl.protocol)) {
+    throw new CliError('创建工作区 URL 必须使用 http 或 https');
   }
-  return { ...options, token:capability.token };
+  // 文件中的凭据只能交给本机服务，显式 URL 覆盖也不能改变这个边界。
+  if (fromCapability && (!['127.0.0.1', 'localhost', '[::1]'].includes(baseUrl.hostname)
+    || baseUrl.username || baseUrl.password)) {
+    throw new CliError('Creation capability URL 必须指向本机 loopback 服务');
+  }
+  if (!token) throw new CliError('缺少创建 Draft capability；请设置 AICO_PPT_CREATION_CAPABILITY_FILE、--capability-file 或 --token');
+  return { ...options, baseUrl, token, redirect:'error' };
 }
 
 async function executeCreation(argv) {

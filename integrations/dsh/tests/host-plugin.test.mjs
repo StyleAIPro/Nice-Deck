@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { apply, inject, name } from '../index.mjs'
+import { runtimeFixture } from './runtime-fixture.mjs'
 
 test('Host 插件从仓库根目录注册唯一的 aico-ppt Skill', async (t) => {
   let createProvider
@@ -48,6 +49,31 @@ test('Host 插件从仓库根目录注册唯一的 aico-ppt Skill', async (t) =>
   assert.match(definition.description, /Huawei-red-brand/)
   assert.match(definition.content, /^# AICO-PPT/u)
   assert.doesNotMatch(definition.content, /^---/u)
+  assert.doesNotMatch(definition.content, /integrations\/dsh\/runtime-run\.mjs/u)
+})
+
+test('配置私有运行时时保留同一 Skill 并追加模型脚本入口，清理等待 Editor 停止', async t => {
+  const runtime = await runtimeFixture(t)
+  let createProvider
+  let indexListener
+  let closeRuntime
+  await apply({
+    skills:{ registerProvider(factory) { createProvider = factory } },
+    on(event, listener) { indexListener = listener },
+    effect(effect) { closeRuntime = effect() },
+    logger:{ error(error) { assert.fail(String(error)) } },
+  }, { aicoRuntime:runtime })
+  t.after(() => closeRuntime?.())
+  const definition = await createProvider().get({ name:'aico-ppt' })
+  assert.match(definition.content, /integrations\/dsh\/runtime-run\.mjs/)
+  assert.match(definition.content, /python3.*scripts\/check_deps\.py/)
+  const rows = []
+  indexListener(rows)
+  const response = await fetch(rows[0].value.appUrl)
+  assert.equal(response.status, 200)
+  await response.arrayBuffer()
+  await closeRuntime()
+  await assert.rejects(fetch(rows[0].value.appUrl))
 })
 
 test('Host 插件拒绝读取其他 Skill 候选', async (t) => {

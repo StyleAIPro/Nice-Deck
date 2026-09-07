@@ -15,6 +15,21 @@ SPEC.loader.exec_module(doctor)
 
 
 class CheckDepsTest(unittest.TestCase):
+    def test_desktop_browser_selection_does_not_fall_back_to_host_chrome(self):
+        with tempfile.TemporaryDirectory() as directory:
+            browser = Path(directory) / "AICO Browser"
+            browser.touch()
+            with mock.patch.dict(os.environ, {"AICO_BROWSER_EXECUTABLE": str(browser)}):
+                self.assertEqual(doctor.probe_chrome(), (True, f"AICO 内置浏览器：{browser}"))
+                browser.unlink()
+                self.assertFalse(doctor.probe_chrome()[0])
+
+    def test_desktop_office_path_takes_precedence_over_system_installation(self):
+        with mock.patch.dict(os.environ, {"AICO_SOFFICE_EXECUTABLE": "/AICO App/soffice"}), \
+                mock.patch.object(doctor, "run", return_value=mock.Mock(returncode=0)) as run:
+            self.assertEqual(doctor.probe_soffice(), (True, "/AICO App/soffice"))
+            run.assert_called_once_with(["/AICO App/soffice", "--version"], capture_output=True, text=True)
+
     def test_profiles_keep_editor_core_independent_from_dev_shell_and_material_tools(self):
         editor_profiles, editor_checks = doctor.checks_for_profiles(["editor-core"])
         dev_profiles, dev_checks = doctor.checks_for_profiles(["dev-shell"])

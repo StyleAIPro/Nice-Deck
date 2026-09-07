@@ -134,16 +134,23 @@ test('生产 node-pty 可以真实创建子进程且不遗留测试句柄', () =
     const file = windows ? (process.env.ComSpec || 'cmd.exe') : '/bin/echo';
     const args = windows ? ['/d','/s','/c','echo pty-ready'] : ['pty-ready'];
     let output = '';
+    let exitCode;
     const child = pty.spawn(file, args, {
       name:'xterm-256color', cols:80, rows:24, cwd:process.cwd(), env:process.env,
     });
-    const timeout = setTimeout(() => process.exit(2), 3000);
-    child.onData(data => { output += data; });
-    child.onExit(({ exitCode }) => {
+    const timeout = setTimeout(() => {
+      process.stderr.write(JSON.stringify({ exitCode, output }));
+      process.exit(2);
+    }, 3000);
+    // 并发测试中退出通知可能先于最后一段输出；两项证据都到达再完成。
+    function finish() {
+      if (exitCode === undefined || !output.includes('pty-ready')) return;
       clearTimeout(timeout);
       process.stdout.write(output);
-      process.exit(exitCode === 0 && output.includes('pty-ready') ? 0 : 1);
-    });
+      process.exit(exitCode === 0 ? 0 : 1);
+    }
+    child.onData(data => { output += data; finish(); });
+    child.onExit(event => { exitCode = event.exitCode; finish(); });
   `;
   const result = spawnSync(process.execPath, ['-e', script], {
     cwd:process.cwd(), encoding:'utf8', timeout:5_000,

@@ -13,6 +13,8 @@ AICO-PPT 是**可独立使用的 Skill + AICO-Harness 编辑器插件**。独立
 
 本仓库同时提供可选的 DSH 插件适配层，但适配层不会复制这份 Skill。DSH Host 直接把当前 `SKILL.md` 注册进全局 skill 目录并启动原 Editor Runtime，DSH Client 在原生对话右侧的通用 `workbench.persistent-view` 中嵌入它；页面栏、三种模式、属性、任务、历史、固化和导出仍由 Editor Core 拥有。每个 Deck 工作项通过稳定 `workId` 显式关联项目目录、DSH Workspace 和一个或多个 Session；Harness 左侧“新会话”中的 AICO-PPT 项目子菜单显式携带 `workId` 建立关联，普通新会话不关联 Deck；Editor 顶部选择器只展示和切换关联会话。明确创建的任务 Session 首条可见指令必须以 `/aico-ppt` 开头；恢复、切换任务或切换 Session 不得发送任何“继续”Prompt。“交给 Agent”必须固定发送到工作项的活动 DSH Session，不能回退到临时选中的普通 Session，也不得在插件内再启动 Codex / Claude Code / OpenCode PTY。切换普通 Session 不得改变或重载 Editor；点击已关联 Session 才切换对应工作项，内部恢复路由不得短暂显示启动初始页。原独立 Editor 只是带 PTY 的 `dev-shell` 开发/排障壳，不是第二个正式产品。能力边界见 `integrations/dsh/README.md`。
 
+在 AICO 桌面包内（`AICO_RUNTIME_KIND=desktop`），Node、Python、Chromium 和文档转换工具由应用提供。沿用注入的 `PYTHON` 与 PATH，不在应用资源目录运行 npm/pip 安装或修复；包内能力缺失时提示重新安装完整 AICO 包。具体接口见 `docs/adr/0006-desktop-runtime-capabilities.md`。
+
 ## 从零做一份 PPT？先走流程
 
 用户要**从零做一份新 PPT** 时——授课、汇报、学习材料都算——不要直接开搭页：先走 `references/workflow.md` 的七阶段协作流程（主题讨论 → 大纲规划 → 选择模板 → 初版制定 → 讨论修改 → 终版制作 → 讨论修改），其中三个「讨论」阶段是硬闸门；流程开头的**场景适配表**定授课 / 汇报 / 自读的基调差异（骨架、页数、页型、动画量）。DSH 正式壳先让用户选择项目目录，再在为该 Creation Work Item 明确创建的活动 Session 中完成讨论，右侧只呈现 Editor。独立 Dev Shell 才把前四阶段投影为“需求已收敛 → 大纲已形成 → 页面已规划 → Deck 已出现”四个**只读里程碑**：左侧节点不可点击，前三段没有中间表单、章节卡片、页面卡片或确认按钮，用户只在右侧真实 PTY 中自然对话。`draft.json` 是完整状态的权威记录，`brief.json`、`outline.json`、`page-plan.json` 与 `deck-ready.json` 是供界面和恢复流程读取的耐久回执；里程碑只能由这些文件与 Draft 状态派生，终端自然语言输出不能直接改进度。模板与文件名确定、合法 staging Deck 首次出现后，创建页才展开中间画布，并立即接入与后期编辑器相同的 Managed Workspace；Agent 只修改托管工作副本，ActionMutation / SourceMutation、revision、自动刷新与固化共用一套实现。新建中的批量重构仍由 Agent 经 `scripts/edit-bundle.py` 完成；`generation-ready` 会先把初版历史固化回 staging，再独立验证并不覆盖发布，随后立即为最终 Deck 建立标准 Managed Workspace。创建页和“进入微调编辑器”后的修改页复用这个最终运行时，按钮只切换页面外壳；独立 Dev Shell 的精细调整延续同一 PTY，DSH 模式则延续同一 `workId` 的活动 Session，详见 `references/editing-guide.md`。
@@ -255,7 +257,8 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 
 ## 性能与依赖
 
-- **Skill 注册**：Codex 的标准用户级位置是 `~/.agents/skills/aico-ppt`。只使用 Skill / DSH 时运行 `python3 scripts/install.py install --skill-only`（Windows：`py -3 scripts\install.py install --skill-only`）；默认不带参数也只注册 Skill；只有显式加 `--dev-shell` 才准备维护者调试依赖。已有冲突目标不会被覆盖，已有同源但无记录的链接也必须通过诊断页“接管此安装”或 `repair --adopt-existing` 明确确认后才登记所有权。完整说明见 `INSTALL.md`。
+- **完整应用安装**：在本仓库运行 `node ../AICO-Harness/scripts/aico.mjs install --ppt .`，准备 Node.js 22.19 或 24+、npm 和 Python 3.9+。AICO 使用独立入口、`~/.aico-harness` 数据目录与系统分配端口；插件直接注册本包规范 Skill，不修改全局 Skill 链接。旧历史通过显式 `aico import-ppt --from` 导入，来源与项目 sidecar 不搬动；安装与迁移条件见 [安装指南](INSTALL.md)。
+- **Skill 注册**：Codex 的标准用户级位置是 `~/.agents/skills/aico-ppt`。独立使用 Skill 时运行 `python3 scripts/install.py install --skill-only`（Windows：`py -3 scripts\install.py install --skill-only`）；默认不带参数也只注册 Skill；只有显式加 `--dev-shell` 才准备维护者调试依赖。已有冲突目标不会被覆盖，已有同源但无记录的链接也必须通过诊断页“接管此安装”或 `repair --adopt-existing` 明确确认后才登记所有权。完整说明见 `INSTALL.md`。
 - **按任务体检**：DSH Editor 动手前先跑 `python3 scripts/check_deps.py --profile editor-core --check-only`（Windows：`py -3 scripts\check_deps.py --profile editor-core --check-only`）；独立入口改用 `--profile dev-shell`。Profile 分为 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`materials` 与 `full`；加 `--repair` 才修复可自动安装项，`--json` 输出结构化结果。无 `--profile` 时为兼容旧命令仍按 `full` 自动修复。退出码：0 所选能力就绪 / 1 仍缺 / 2 工具或参数错误。
 - 预期性能：模板 12MB，headless Chrome 首开约 2.6s；PPTX 导出 34 页 → 55 张、约 47s。
 - 依赖：Editor Core 需 Node.js、`ws`、`html2canvas`、`busboy` 与 `three`；独立 `dev-shell` 才增加 `node-pty`、浏览器 / headless xterm 与一个本机 Agent CLI。质量验证需 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）；PPTX 导出另需 `python-pptx`。

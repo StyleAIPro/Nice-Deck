@@ -98,6 +98,10 @@ test('新建与生成 Prompt 共享 Skill、模板固定页和质量契约', () 
     capabilityPath:'/tmp/capability.json',
   });
   assert.match(resume, /^\/aico-ppt\n\n/u);
+  for (const prompt of [initialization, resume]) {
+    assert.match(prompt, /creation status --capability-file '\/tmp\/capability.json'/);
+    assert.match(prompt, /每次 creation CLI 命令均须加 --capability-file/);
+  }
   const generation = buildGenerationPrompt({
     outline:{ sections:[{ chapterId:'one', title:'第一章', objective:'讲清楚' }] },
     pagePlan:{ pages:[{ pageTypeId:'cover', label:'封面' }] },
@@ -106,7 +110,7 @@ test('新建与生成 Prompt 共享 Skill、模板固定页和质量契约', () 
       stagingTocContract:'staging/deck.toc-contract.json',
       stagingPagePlanContract:'staging/deck.page-plan-contract.json',
     },
-  }, { template:{
+  }, { capabilityPath:'/tmp/capability.json', template:{
     templateId:'tech-share', name:'技术分享', pageCount:37,
     pageTypes:[{ pageTypeId:'cover', sourcePage:1, sourceLabel:'封面' }],
   } });
@@ -114,6 +118,7 @@ test('新建与生成 Prompt 共享 Skill、模板固定页和质量契约', () 
   assert.match(generation, /deck_factory\.py import-page/);
   assert.match(generation, /连续三页同一视觉家族/);
   assert.match(generation, /huawei-style\.md/);
+  assert.match(generation, /creation generation-ready --capability-file '\/tmp\/capability.json'/);
   assert.match(generation, /页数、顺序、页型或身份任一不一致都会被发布闸门拒绝/);
   assert.match(generation, /目录页执行自适应契约/);
   assert.match(generation, /不得直接复用模板 tocBuilders/);

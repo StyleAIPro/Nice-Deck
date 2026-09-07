@@ -1,10 +1,12 @@
 # AICO-PPT
 
-产品定位：**独立 Skill + AICO-Harness 编辑器插件**。独立 Skill 可在没有 AICO-Harness 的环境正常创建、修改、验证和导出 Deck；所有用户可视化编辑入口统一位于 AICO-Harness。根目录不提供桌面启动器，维护者调试工具收纳于 [`tools/dev-shell/`](tools/dev-shell/README.md)。
+正式用户入口是 **AICO 独立软件**：安装 AICO-Harness 应用，在“设置 → 插件 → 插件商店”安装 AICO-PPT，再配置模型服务并进入 PPT 工作台。普通用户无需下载源码或启动网页版；安装包与插件来源以发布者实际提供的地址为准，详见[安装指南](INSTALL.md)。
 
-华为红品牌 **单文件 HTML 演示（网页 PPT）Agent Skill + DSH 可视化插件**。一套 1920×1080、离线可拷走的幻灯片系统：三套场景模板、点击 / 方向键放映、刷新续播，并可按需转成 PPTX。正式窗口入口是 DeepSeek Harness（DSH）中的“左侧对话 + 右侧 Editor”；原独立 Editor 仅作为开发、回归和故障排查用的 Dev Shell 保留。
+产品定位：**独立 Skill + AICO-Harness 编辑器插件**。独立 Skill 可在没有 AICO-Harness 的环境正常创建、修改、验证和导出 Deck；所有用户可视化编辑入口统一位于 AICO-Harness 应用。源码配套安装、Harness 网页启动器和独立 Editor 均仅用于开发、回归与故障排查，见[开发调试说明](INSTALL.md#开发调试)。
 
-Skill 让 Codex、Claude Code 等 Agent 掌握 AICO-PPT 的工作流；Editor Core 提供新建、预览、区域任务、直接编辑、撤销和安全固化。没有任何窗口时，Skill 仍可独立创建和修改 Deck；需要窗口时优先安装 DSH Plugin。
+华为红品牌 **单文件 HTML 演示（网页 PPT）Agent Skill + DSH 可视化插件**。一套 1920×1080、离线可拷走的幻灯片系统：三套场景模板、点击 / 方向键放映、刷新续播，并可按需转成 PPTX。正式窗口入口是 AICO-Harness（内部沿用 DSH 协议）中的“左侧对话 + 右侧 Editor”；原独立 Editor 仅作为开发、回归和故障排查用的 Dev Shell 保留。
+
+Skill 让 Codex、Claude Code 等 Agent 掌握 AICO-PPT 的工作流；Editor Core 提供新建、预览、区域任务、直接编辑、撤销和安全固化。没有任何窗口时，Skill 仍可独立创建和修改 Deck；需要可视化编辑时，打开 AICO 应用并使用插件商店安装的 AICO-PPT。
 
 ## DSH 插件
 
@@ -12,13 +14,7 @@ Skill 让 Codex、Claude Code 等 Agent 掌握 AICO-PPT 的工作流；Editor Co
 
 DSH 嵌入态完整复用原 Editor 的页面栏、预览 / 编辑 / 区域标记、直接文字和富文本、拖移 / 缩放 / 删除、顶部属性栏、右下悬浮任务 drawer、统一撤销 / 重做、Managed Workspace 固化与 PPTX 导出；窄工作台隐藏 pageKey、画布尺寸、缩放与 revision 等只读内部状态，只保留页面标题、模式和可操作按钮。DSH 只接管对话、模型、审批和计划；Editor 继续拥有 Deck、工作项、反馈任务、revision 与发布状态。新建 Deck 会先让用户选择项目目录，再创建独立任务会话；发布后同一 `workId` 原位从 Creation 转为 Editing，保留工作区和会话关系。边界和消息桥见 [`ADR-0001`](docs/adr/0001-dsh-plugin-skill-seam.md)、[`ADR-0002`](docs/adr/0002-dsh-primary-and-standalone-dev-shell.md)、[`ADR-0004`](docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md) 与 [`integrations/dsh/README.md`](integrations/dsh/README.md)。
 
-本地开发安装：
-
-```bash
-dsh plugin --profile web add .
-```
-
-安装后重启 `web` profile；插件专项测试运行 `npm run test:dsh-plugin`。
+正式安装通过 AICO 应用的插件商店完成。维护者需要联调源码时，使用[开发调试说明](INSTALL.md#开发调试)中的 Harness 网页入口或高级源码配套安装；它们不属于普通用户安装流程。插件专项测试运行 `npm run test:dsh-plugin`。
 
 ## 效果预览
 
@@ -39,9 +35,9 @@ dsh plugin --profile web add .
 - 按源码 / 配置展开异构模型与系统架构，自绘 SVG 同时校验文字边界、箭头方向和连线端点
 - 旧 Deck 可原地升级：公共外壳 hash 对比、历史模板三方合并、自动备份和逐页视觉审计
 
-## 安装
+## 独立 Skill 安装（按需）
 
-当前版本从完整仓库安装。跨平台安装器默认只注册 Skill，`--skill-only` 保持兼容；维护者显式加 `--dev-shell` 才检查并修复本机 PTY 与 Agent CLI。插件需要的 `editor-core`、验证和导出依赖各自按需准备。
+独立 Skill 从完整仓库安装。跨平台安装器默认只注册 Skill，`--skill-only` 保持兼容；维护者显式加 `--dev-shell` 才检查并修复本机 PTY 与 Agent CLI。插件需要的 `editor-core`、验证和导出依赖各自按需准备。
 
 macOS / Linux：
 
@@ -61,7 +57,9 @@ py -3 scripts\install.py install --skill-only
 
 安装后新开 Agent 任务即可直接使用 Skill；需要可视化编辑时从 AICO-Harness 中的 AICO-PPT 插件进入。维护者调试才运行 `python3 scripts/install.py install --dev-shell` 并使用 `tools/dev-shell/` 内的 Dev Shell。完整说明见 [`INSTALL.md`](INSTALL.md)。
 
-## 依赖
+## 独立 Skill 与开发依赖
+
+以下用于独立 Skill 与源码开发。应用内安装的 PPT 插件使用插件商店准备的私有运行时；普通用户在应用内查看诊断，无需执行这些本机依赖命令。
 
 > **按任务体检**：使用 `--profile editor-core|dev-shell|verify|pptx-export|materials|full` 选择能力；`--check-only` 只报告，`--repair` 修复可自动安装项，`--json` 提供结构化结果。退出码 0 就绪 / 1 仍缺 / 2 工具或参数错误。
 
@@ -136,9 +134,9 @@ aico-ppt/
 
 见 `SKILL.md`。一句话：复制 `assets/training-deck.html` → 照 `references/template-pages.md` 挑页改占位 → 增删页用 `scripts/edit-bundle.py`（自动记账）→ 跑 `scripts/verify/` 验证 → 用 `scripts/html2pptx/convert.py` 出 PPTX。
 
-## 独立 Dev Shell（兼容入口）
+## 独立 Dev Shell（仅开发调试）
 
-以下说明只适用于开发、回归和 DSH 不可用时的独立壳；正式窗口化使用以 DSH 左侧原生会话 + 右侧 Editor 为准。独立页面顶栏会显示 `DEV SHELL`，避免与 DSH 产品入口混淆。
+以下说明只适用于维护者开发、回归与故障排查；正式窗口化使用以 AICO 独立应用中的左侧原生会话 + 右侧 Editor 为准。Harness 网页联调入口位于相邻仓库的 `tools/dev-web/`，与本仓库的独立 Editor 调试壳不同，详见[开发调试说明](INSTALL.md#开发调试)。独立页面顶栏会显示 `DEV SHELL`，避免与 DSH 产品入口混淆。
 
 重复双击不会再打开第二个工作台页面；如果旧页面已经关闭，则先结束无页面的旧服务，再启动加载当前资源快照的新服务。
 
@@ -162,7 +160,7 @@ Windows 的 Agent 终端会把可信目录 identity 与进程 cwd 分开处理�
 
 Editor 的全部 Node → Python 子进程通过 `scripts/editor/python-utf8.mjs` 固定 `PYTHONUTF8=1` 与 `PYTHONIOENCODING=utf-8`，并在 Windows 设置 `windowsHide`。会话 JSON、工作副本、附件、新建校验、固化结果与中文错误输出都不继承 Windows 控制台的 GBK/ACP，也不会因辅助进程额外弹出任务栏窗口；Windows 与 macOS 轮流操作同一项目时，仍以 UTF-8 作为唯一进程协议编码。
 
-桌面入口默认使用 `auto` provider：按当前系统实际可执行命令依次识别 Codex、Claude Code、OpenCode，只安装 Claude Code 的 Windows 环境会直接启动 `claude --dangerously-skip-permissions`，不会先尝试 Codex，也不会在 provider 缺失时静默切换。Windows 也可通过 `%USERPROFILE%\.aico-ppt-editor\settings.json` 把 Codex runtime 固定到指定 WSL2 发行版和用户；Editor 会用登录 `PATH` 定位 CLI、用 `wslpath` 转换项目与任务路径，并在 WSL 用户自己的 `~/.codex` 内发现和恢复会话，完整配置见 [`INSTALL.md`](INSTALL.md#windows-editor-使用安装在-wsl2-内的-codex)。这项本机配置不改变原生 Windows、macOS 或其他 provider。Codex 或 Claude Code 恢复持久会话时，只有可见 CLI 明确报告会话 ID 不存在，才自动创建并持久化替代会话；工作副本与待办原样保留，登录、网络或其他启动失败不会误清旧绑定。三种 CLI 都使用各自的真实输入态闸门：Codex 0.148 初始化期间提前出现的草稿输入框不能触发任务，必须等模型与工作目录完整状态栏；Claude Code 必须画出 Ink 的空 `❯` 输入行和光标；OpenCode 必须画出 `Ask anything` placeholder 与可见光标。恢复旧会话时，首个真实输入框出现前必须持续显示恢复遮罩，同时阻断人工键盘输入与 Agent 任务提交；任务按钮保持禁用，服务端 `POST /api/agent-runs` 也以 `AGENT_TERMINAL_RESUMING` 拒绝绕过界面的请求。若 Codex 恢复时已经画出最终输入占位符和光标、却仍残留陈旧的 `model: loading`，终端只自动执行一次一行尺寸重绘并恢复原尺寸；重绘本身不算就绪，仍须等待后续真实模型状态通过同一输入态闸门。Codex 的普通更新通知继续保持遮罩直到真实输入框出现；只有同时要求按键继续的更新面板才投影为 `interactionRequired: {kind: "codex-update"}`，暂时收起遮罩并仅开放终端输入，Agent 任务仍保持阻断。Codex 恢复会话目录与当前项目根不一致时，目录选择页投影为 `interactionRequired: {kind: "working-directory-selection"}`；其他带明确高亮编号项、至少两个编号选项和操作提示的未知 CLI 选择页走 `terminal-selection` 兜底。两者都撤掉遮罩并开放原始键盘，但继续阻断初始化 Prompt 和 Agent 任务，直到正常输入框出现。Windows ConPTY 对三者都把正文按 UTF-8 字节拆成不超过 512 B 的 bracketed-paste 分块并逐块节流，完整写入且单独关闭 paste 后才延迟发送 Enter，Claude Code 额外保留较长渲染等待。Enter 发出后只有收到 CLI 活动区重绘或处理中信号才算提交；1.5 秒无回执重试一次，再失败就明确提示手动提交。每次成功提交后重新等待下一个输入提示符。
+桌面入口默认使用 `auto` provider：按当前系统实际可执行命令依次识别 Codex、Claude Code、OpenCode，只安装 Claude Code 的 Windows 环境会直接启动 `claude --dangerously-skip-permissions`，不会先尝试 Codex，也不会在 provider 缺失时静默切换。Windows 也可通过 `%USERPROFILE%\.aico-ppt-editor\settings.json` 把 Codex runtime 固定到指定 WSL2 发行版和用户；Editor 会用登录 `PATH` 定位 CLI、用 `wslpath` 转换项目与任务路径，并在 WSL 用户自己的 `~/.codex` 内发现和恢复会话，完整配置见 [`INSTALL.md`](INSTALL.md#维护者专用dev-shell-使用-wsl2-codex)。这项本机配置不改变原生 Windows、macOS 或其他 provider。Codex 或 Claude Code 恢复持久会话时，只有可见 CLI 明确报告会话 ID 不存在，才自动创建并持久化替代会话；工作副本与待办原样保留，登录、网络或其他启动失败不会误清旧绑定。三种 CLI 都使用各自的真实输入态闸门：Codex 0.148 初始化期间提前出现的草稿输入框不能触发任务，必须等模型与工作目录完整状态栏；Claude Code 必须画出 Ink 的空 `❯` 输入行和光标；OpenCode 必须画出 `Ask anything` placeholder 与可见光标。恢复旧会话时，首个真实输入框出现前必须持续显示恢复遮罩，同时阻断人工键盘输入与 Agent 任务提交；任务按钮保持禁用，服务端 `POST /api/agent-runs` 也以 `AGENT_TERMINAL_RESUMING` 拒绝绕过界面的请求。若 Codex 恢复时已经画出最终输入占位符和光标、却仍残留陈旧的 `model: loading`，终端只自动执行一次一行尺寸重绘并恢复原尺寸；重绘本身不算就绪，仍须等待后续真实模型状态通过同一输入态闸门。Codex 的普通更新通知继续保持遮罩直到真实输入框出现；只有同时要求按键继续的更新面板才投影为 `interactionRequired: {kind: "codex-update"}`，暂时收起遮罩并仅开放终端输入，Agent 任务仍保持阻断。Codex 恢复会话目录与当前项目根不一致时，目录选择页投影为 `interactionRequired: {kind: "working-directory-selection"}`；其他带明确高亮编号项、至少两个编号选项和操作提示的未知 CLI 选择页走 `terminal-selection` 兜底。两者都撤掉遮罩并开放原始键盘，但继续阻断初始化 Prompt 和 Agent 任务，直到正常输入框出现。Windows ConPTY 对三者都把正文按 UTF-8 字节拆成不超过 512 B 的 bracketed-paste 分块并逐块节流，完整写入且单独关闭 paste 后才延迟发送 Enter，Claude Code 额外保留较长渲染等待。Enter 发出后只有收到 CLI 活动区重绘或处理中信号才算提交；1.5 秒无回执重试一次，再失败就明确提示手动提交。每次成功提交后重新等待下一个输入提示符。
 
 Windows WSL Codex 会在启动器阶段预热；同一进程缓存 Codex / Node 命令、HOME 和路径映射，终端按“WSL 准备 / Codex 启动 / 历史重绘”显示真实阶段。恢复历史由服务端 headless xterm 解析，浏览器不再逐块接收和渲染历史 ANSI，只在输入态闸门成立后一次性接收最终终端画面；投影完成前 `resumePending`、键盘和 Agent 任务仍保持锁定。
 

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { buildCreationInitializationPrompt } from '../../../scripts/editor/deck-creation-workspace.mjs'
 
 const CLIENT_URL = new URL('../client.js', import.meta.url)
 
@@ -196,10 +198,10 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
   assert.equal(workbench.options.id, 'aico-ppt')
   assert.equal(typeof workbench.component, 'function')
   const launcherTree = launcher.component({ ...launcher.options.inject(), wide:true })
-  assert.equal(launcherTree.children[0].children[0].type, 'img')
+  assert.equal(launcherTree.children[0].children[0].type, 'svg')
   assert.equal(
-    launcherTree.children[0].children[0].props.src,
-    'data:image/png;base64,dGVzdC1sb2dv',
+    launcherTree.children[0].children[0].props.viewBox,
+    '0 0 24 24',
   )
   assert.equal(sessionStartContribution.id, 'aico-ppt')
   assert.equal(sessionStartContribution.label, 'AICO-PPT')
@@ -271,6 +273,40 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
     sessionId:'session-1', prompt:'指定会话',
   })
   assert.deepEqual(sent.at(-1), ['session-1', '指定会话'])
+  // 发行目录带有内容哈希，提示词中的多个 Skill / CLI 路径会同时变长。
+  const sourceRoot = fileURLToPath(new URL('../../../', import.meta.url)).replace(/\/$/, '')
+  const installedRoot = '/Users/test/.aico-harness/plugin-store/artifacts/aico-ppt/runtime/' + 'a'.repeat(64) + '/plugin'
+  const creationPrompt = buildCreationInitializationPrompt({
+    projectRoot:'/Users/test/Documents/AICO/新建项目',
+    capabilityPath:'/Users/test/Documents/AICO/新建项目/.aico/creation-capability.json',
+  }).replaceAll(sourceRoot, installedRoot)
+  assert.ok(creationPrompt.length > 4096, '实际发行路径下的创建提示词必须覆盖旧限制')
+  await face.executeDshCommand('send-to-session', {
+    sessionId:'session-1', prompt:creationPrompt,
+  })
+  assert.deepEqual(sent.at(-1), ['session-1', creationPrompt])
+  const maximumPrompt = '文'.repeat(256 * 1024)
+  await face.executeDshCommand('send-to-session', { sessionId:'session-1', prompt:maximumPrompt })
+  assert.deepEqual(sent.at(-1), ['session-1', maximumPrompt])
+  const sentBeforeInvalid = sent.length
+  for (const prompt of [undefined, null, 123, '', ' \n\t', maximumPrompt + '文']) {
+    await assert.rejects(
+      face.executeDshCommand('send-to-session', { sessionId:'session-1', prompt }),
+      /prompt 无效/,
+    )
+  }
+  assert.equal(sent.length, sentBeforeInvalid, '无效提示词不能交给会话')
+  await assert.rejects(face.executeDshCommand('send-to-session', {
+    sessionId:'s'.repeat(4097), prompt:'正常提示词',
+  }), /sessionId 无效/)
+  await assert.rejects(face.executeDshCommand('ensure-workspace', {
+    path:'p'.repeat(4097),
+  }), /path 无效/)
+  await assert.rejects(face.executeDshCommand('open-session', {
+    sessionId:'session-1', title:'题'.repeat(4097),
+  }), /title 无效/)
+
+
   assert.equal((await face.executeDshCommand('current-session')).sessionId, 'session-1')
   blockSessionOpen = true
   void face.executeDshCommand('open-session', { sessionId:'session-2' })
@@ -855,7 +891,7 @@ test('package manifest 同时声明 Host bundle 与 Client 依赖', async () => 
   const patch = await readFile(new URL('../../../cordis.patch.yml', import.meta.url), 'utf8')
 
   assert.equal(manifest.main, 'integrations/dsh/index.mjs')
-  assert.equal(manifest.version, '0.1.0')
+  assert.match(manifest.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/)
   assert.equal(manifest.exports['./client'], './integrations/dsh/client.js')
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
   assert.equal(manifest.dsh.client.platform, 'web')

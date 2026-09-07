@@ -7,7 +7,11 @@
 
 ## 1. 这是什么
 
-产品定位为独立 Skill 与 AICO-Harness 编辑器插件。所有用户可视化编辑入口统一位于 AICO-Harness（内部继续使用 DSH 插件协议）。独立 Skill 无需 Harness 或本机 Agent PTY；安装器默认只注册 Skill，创建、修改、验证和导出依赖按任务准备。维护者桌面启动器集中于 `tools/dev-shell/`，显式 `scripts/install.py install --dev-shell` 才准备调试依赖；Skill 交付第一版后不自动打开桌面应用。
+产品定位为独立 Skill 与 AICO-Harness 编辑器插件。所有用户可视化编辑入口统一位于 AICO-Harness（内部继续使用 DSH 插件协议）。独立 Skill 无需 Harness 或本机 Agent PTY；PPT 自身安装器默认只注册 Skill，创建、修改、验证和导出依赖按任务准备。维护者桌面启动器集中于 `tools/dev-shell/`，显式 `scripts/install.py install --dev-shell` 才准备调试依赖；Skill 交付第一版后不自动打开桌面应用。
+
+配套发行和启动隔离由 AICO-Harness 的 `scripts/aico.mjs` 负责，继续通过 DSH Web profile 加载本包。AICO 全局状态位于 `~/.aico-harness/ppt`，独立 Skill 的默认状态解析不变；项目 sidecar 继续原位复用。`scripts/editor/import-history.mjs` 只在停止目标运行时后，将受支持索引原子导入空目标，清空旧 DSH 关联；它不接管安装器、全局 Skill 注册、凭据或项目文件。接口决策见 [ADR-0005](adr/0005-aico-installation-and-history-import.md)。
+
+AICO 桌面包通过环境接口提供私有运行时和原生文件选择，PPT 不依赖 Electron，也不拥有安装器或进程监督。诊断显示内置能力，浏览器启动参数在验证、导出和 headless Editor 之间共用。详见 [ADR-0006](adr/0006-desktop-runtime-capabilities.md)。
 
 独立 Skill 使用 `python3 scripts/deck-editor.py <deck.html> --headless-workspace` 启动后台 Managed Workspace；该入口复用 Editor Core 的受控 frame、Mutation、验证和固化，不打开可见窗口或本机 Agent PTY。
 

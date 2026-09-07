@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer as createHttpServer } from 'node:http';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+
+import { startAppServer } from '../app-server.mjs';
+import { createRecentDeckStore } from '../recent-deck-store.mjs';
+import { createWorkHistoryStore } from '../work-history-store.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const SERVER = join(ROOT, 'scripts/editor/server.mjs');
@@ -196,6 +200,91 @@ test('creation CLI 从受控 capability 文件读取凭据并提交统一 Creati
   assert.equal(received[1].url, '/api/creation-draft/templates');
   assert.equal(received[2].body.type, 'update-brief');
   assert.equal(received[2].body.expectedRevision, 4);
+  const explicit = await spawnCliWithEnv([
+    'creation', 'status', '--url', environment.AICO_PPT_CREATION_URL, '--token', 'creation-secret',
+  ], {}).result;
+  assert.equal(parseJsonOutput(explicit).revision, 4);
+
+});
+
+test('DSH 创建 CLI 仅凭文件连接真实 Draft，并在恢复后使用新端口与凭据', async t => {
+  const root = await mkdtemp(join(tmpdir(), "creation-capability-$`' 空格-"));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const recentDeckStore = createRecentDeckStore({ filePath:join(root, 'recent.json') });
+  const workHistoryStore = createWorkHistoryStore({
+    filePath:join(root, 'history.json'), discoveryRoots:[root], recentDeckStore,
+  });
+  const start = () => startAppServer({
+    embeddedMode:'dsh', recentDeckStore, workHistoryStore,
+    pickAgentProjectDirectory:async () => root,
+  });
+  let app = await start();
+  t.after(() => app.close());
+  const post = async (path, body = {}) => {
+    const response = await fetch(app.url + path + '?token=' + encodeURIComponent(app.token), {
+      method:'POST', headers:{ origin:app.url, 'content-type':'application/json' },
+      body:JSON.stringify(body),
+    });
+    assert.equal(response.ok, true);
+    return response.json();
+  };
+  const selected = await post('/api/choose-creation-project');
+  const created = await post('/api/creation-drafts', {
+    candidateNonce:selected.candidateNonce, selectionRevision:selected.selectionRevision, provider:'codex',
+  });
+  const capabilityPath = join(root, '.aico-ppt-editor', 'drafts', created.draft.draftId, 'agent-capability.json');
+  const cleanEnvironment = Object.fromEntries(Object.keys(process.env)
+    .filter(key => /^(AICO_PPT|HUAWEI_DECK)_CREATION_/.test(key)).map(key => [key, undefined]));
+  const invoke = () => spawnCliWithEnv(['creation', 'status', '--capability-file', capabilityPath], cleanEnvironment).result;
+  const initial = parseJsonOutput(await invoke());
+  assert.equal(initial.draftId, created.draft.draftId);
+  const statusCommand = created.dshPrompt.split('\n').find(line => line.startsWith('node ') && line.includes(' creation status'));
+  assert.ok(statusCommand);
+  const shellProcess = process.platform === 'win32'
+    ? spawn('powershell.exe', ['-NoProfile', '-Command', statusCommand], { env:{ ...process.env, ...cleanEnvironment }, stdio:['ignore', 'pipe', 'pipe'] })
+    : spawn('/bin/sh', ['-c', statusCommand], { env:{ ...process.env, ...cleanEnvironment }, stdio:['ignore', 'pipe', 'pipe'] });
+  assert.equal(parseJsonOutput(await collectProcess(shellProcess)).draftId, created.draft.draftId);
+
+  const before = JSON.parse(await readFile(capabilityPath, 'utf8'));
+  assert.equal(before.url, app.url);
+  assert.equal(created.dshPrompt.includes('--capability-file'), true);
+  assert.equal(created.dshPrompt.includes(before.token), false);
+  await app.close();
+  app = await start();
+  assert.notEqual(app.url, before.url);
+  const resumed = await post('/api/resume-creation-draft', { projectRoot:root, draftId:created.draft.draftId });
+  const after = JSON.parse(await readFile(capabilityPath, 'utf8'));
+  assert.equal(after.url, app.url);
+  assert.notEqual(after.token, before.token);
+  if (process.platform !== 'win32') assert.equal((await stat(capabilityPath)).mode & 0o777, 0o600);
+  assert.equal(resumed.dshPrompt.includes('--capability-file'), true);
+  const result = await invoke();
+  assert.equal(parseJsonOutput(result).draftId, created.draft.draftId);
+  assert.equal((result.stdout + result.stderr).includes(after.token), false);
+  await writeFile(capabilityPath, JSON.stringify({ ...after, url:'https://example.com' }));
+  const rejected = await invoke();
+  assert.notEqual(rejected.code, 0);
+  assert.match(rejected.stderr, /loopback/);
+  assert.equal((rejected.stdout + rejected.stderr).includes(after.token), false);
+  await writeFile(capabilityPath, JSON.stringify(after));
+  const override = await spawnCliWithEnv([
+    'creation', 'status', '--capability-file', capabilityPath, '--url', 'https://example.com',
+  ], cleanEnvironment).result;
+  assert.notEqual(override.code, 0);
+  assert.match(override.stderr, /loopback/);
+  const redirectServer = createHttpServer((request, response) => {
+    response.writeHead(302, { location:app.url + '/api/creation-draft' });
+    response.end();
+  });
+  await new Promise(resolvePromise => redirectServer.listen(0, '127.0.0.1', resolvePromise));
+  t.after(() => new Promise(resolvePromise => redirectServer.close(resolvePromise)));
+  await writeFile(capabilityPath, JSON.stringify({
+    ...after, url:`http://127.0.0.1:${redirectServer.address().port}`,
+  }));
+  const redirected = await invoke();
+  assert.notEqual(redirected.code, 0, '携带凭据的 CLI 不得跟随重定向');
+  assert.equal((redirected.stdout + redirected.stderr).includes(after.token), false);
+
 });
 
 test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/solidify/redo', async t => {

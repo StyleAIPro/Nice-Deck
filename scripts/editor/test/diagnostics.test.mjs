@@ -1,7 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compareDiagnostics } from '../bridge-service.mjs';
-import { inspectInstallation } from '../environment-doctor.mjs';
+import { inspectInstallation, inspectEnvironment } from '../environment-doctor.mjs';
+
+test('桌面诊断识别内置 Skill，并跳过独立 Dev Shell 和宿主注册', async () => {
+  const installation = await inspectInstallation({ delivery:'desktop', runProcess:() => { throw new Error('不应检查宿主安装'); } });
+  assert.equal(installation.registrations[0].host, 'dsh');
+  assert.equal(installation.registrations[0].state, 'ready');
+  const result = await inspectEnvironment({ delivery:'desktop', runProcess:async (_python, args) => {
+    assert.equal(args.includes('full'), false);
+    assert.equal(args.includes('dev-shell'), false);
+    assert.equal(args.includes('pptx-export'), true);
+    return { ready:true };
+  } });
+  assert.equal(result.delivery, 'desktop');
+  await assert.rejects(inspectEnvironment({ delivery:'desktop', repair:true }), /重新安装/);
+  await assert.rejects(inspectInstallation({ delivery:'desktop', repair:true }), /重新安装/);
+});
 
 const locator = { pageKey:'page-001-a', path:'0/1', tag:'div', fingerprint:'old' };
 

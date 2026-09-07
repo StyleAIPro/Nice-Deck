@@ -213,6 +213,9 @@ def probe_playwright():
     return False, "三级查找均未命中"
 
 def probe_chrome():
+    bundled = os.environ.get("AICO_BROWSER_EXECUTABLE")
+    if bundled is not None:
+        return Path(bundled).is_file(), f"AICO 内置浏览器：{bundled}"
     if sys.platform == "darwin":
         for p in ("/Applications/Google Chrome.app",
                   str(Path.home() / "Applications/Google Chrome.app")):
@@ -235,7 +238,7 @@ def probe_chrome():
     return False, "未找到 Google Chrome"
 
 def probe_soffice():
-    found = shutil.which("soffice")
+    found = os.environ.get("AICO_SOFFICE_EXECUTABLE") or shutil.which("soffice")
     if found:
         # which 可能命中指向已卸载应用的残留 shim/symlink，必须真实执行一次。
         version = run([found, "--version"], capture_output=True, text=True)

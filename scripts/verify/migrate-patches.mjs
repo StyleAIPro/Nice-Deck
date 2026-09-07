@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { loadChromium } from './load-playwright.mjs';
+import { loadChromium, chromiumLaunchOptions } from './load-playwright.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -41,7 +41,7 @@ try {
 let browser;
 let exitCode = 0;
 try {
-  browser = await chromium.launch({ channel:'chrome', headless:true });
+  browser = await chromium.launch(chromiumLaunchOptions());
   const page = await browser.newPage({ viewport:{ width:1920, height:1080 } });
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));

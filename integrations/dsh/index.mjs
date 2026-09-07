@@ -1,13 +1,13 @@
 /**
  * AICO-PPT 的 DSH Host 入口。
  *
- * 这个模块只负责把仓库中规范的 SKILL.md 暴露给 DSH skill 注册表。
- * 可视化 Editor 属于浏览器 Client 入口，不在 Host 内启动第二套 Agent。
+ * 注册规范 Skill，并按显式桌面配置选择独立 Worker 或源码 Editor。
+ * 可视化入口复用原 Editor，不在 Host 内启动第二套 Agent。
  */
 
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { startAppServer } from '../../scripts/editor/app-server.mjs'
+import { startRuntimeWorker } from './runtime-host.mjs'
 
 const PROVIDER_NAME = 'aico-ppt-plugin'
 const PACKAGE_ROOT_URL = new URL('../../', import.meta.url)
@@ -57,38 +57,50 @@ function parseSkillDocument(source) {
   }
 }
 
-const provider = {
-  name: PROVIDER_NAME,
-  async list() {
-    const skill = await readCanonicalSkill()
-    return [{
-      name: skill.name,
-      description: skill.description,
-      invocation: INVOCATION,
-      provider: PROVIDER_NAME,
-      source: 'bundled',
-      resourceBase: { kind: 'directory', path: PACKAGE_ROOT },
-      rank: BUNDLED_SKILL_RANK,
-      locator: SKILL_PATH,
-      path: SKILL_PATH,
-      metadata: skill.metadata,
-    }]
-  },
-  async get(candidate) {
-    if (candidate?.name !== 'aico-ppt') return undefined
-    const skill = await readCanonicalSkill()
-    return {
-      name: skill.name,
-      description: skill.description,
-      invocation: INVOCATION,
-      provider: PROVIDER_NAME,
-      source: 'bundled',
-      resourceBase: { kind: 'directory', path: PACKAGE_ROOT },
-      path: SKILL_PATH,
-      metadata: skill.metadata,
-      content: skill.content,
-    }
-  },
+function runtimeInstructions() {
+  const wrapper = fileURLToPath(new URL('./runtime-run.mjs', import.meta.url))
+  const quote = process.platform === 'win32'
+    ? value => `'${value.replaceAll("'", "''")}'`
+    : value => `'${value.replaceAll("'", "'\\''")}'`
+  const command = `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(wrapper)}`
+  const script = path => quote(fileURLToPath(new URL('../../' + path, import.meta.url)))
+  return `\n\n## 当前桌面插件的脚本运行入口\n\n本次 Skill 使用插件自带的 Python、浏览器和 Office。执行本文或 references 中的 Python / Node 脚本时，统一使用以下包装器；不要依赖系统 Python 或修改 Host 环境。包装器读取本包的 .aico-runtime.json，Node 复用 Host 提供的可执行文件。它保留当前工作目录、标准输入、-m / -c / -e 和项目脚本参数；原 Python heredoc 在命令后保留 - 与重定向即可。\n\n\`\`\`${process.platform === 'win32' ? 'powershell' : 'sh'}\n${command} python3 ${script('scripts/check_deps.py')} --profile editor-core --check-only\n${command} node ${script('scripts/verify/shot.mjs')} <Deck绝对路径> <页label> <截图绝对路径>\n\`\`\`\n\n文档中的相对 scripts/ 路径应解析到本 Skill 根目录；项目和 Deck 参数继续指向用户项目，数据目录沿用当前 AICO_HOME / AICO_PPT_EDITOR_STATE_ROOT。不要写入插件发行目录。\n`
+}
+
+function createProvider(runtimeConfigured) {
+  return {
+    name: PROVIDER_NAME,
+    async list() {
+      const skill = await readCanonicalSkill()
+      return [{
+        name: skill.name,
+        description: skill.description,
+        invocation: INVOCATION,
+        provider: PROVIDER_NAME,
+        source: 'bundled',
+        resourceBase: { kind: 'directory', path: PACKAGE_ROOT },
+        rank: BUNDLED_SKILL_RANK,
+        locator: SKILL_PATH,
+        path: SKILL_PATH,
+        metadata: skill.metadata,
+      }]
+    },
+    async get(candidate) {
+      if (candidate?.name !== 'aico-ppt') return undefined
+      const skill = await readCanonicalSkill()
+      return {
+        name: skill.name,
+        description: skill.description,
+        invocation: INVOCATION,
+        provider: PROVIDER_NAME,
+        source: 'bundled',
+        resourceBase: { kind: 'directory', path: PACKAGE_ROOT },
+        path: SKILL_PATH,
+        metadata: skill.metadata,
+        content: skill.content + (runtimeConfigured ? runtimeInstructions() : ''),
+      }
+    },
+  }
 }
 
 /** Cordis 插件名。 */
@@ -98,21 +110,34 @@ export const name = 'aico-ppt'
 export const inject = ['skills', 'webServer']
 
 /** 注册唯一 Skill，启动本地 Editor 运行时，并把入口作为只读 Client 启动输入。 */
-export async function apply(ctx) {
+export async function apply(ctx, config = {}) {
   const logo = `data:image/png;base64,${(await readFile(BRAND_LOGO_URL)).toString('base64')}`
-  const editor = await startAppServer({
-    host:'127.0.0.1',
-    port:0,
-    openBrowser:false,
-    embeddedMode:'dsh',
-  })
-  ctx.skills.registerProvider(() => provider)
-  ctx.on('webserver/index-inject', (table) => {
-    table.push({
-      kind:'global',
-      name:'__AICO_PPT_BRAND__',
-      value:{ logo, appUrl:editor.appUrl },
+  const runtimeConfigured = config.aicoRuntime !== undefined
+  const editor = runtimeConfigured
+    ? await startRuntimeWorker(config.aicoRuntime)
+    : await (await import('../../scripts/editor/app-server.mjs')).startAppServer({
+      host:'127.0.0.1', port:0, openBrowser:false, embeddedMode:'dsh',
     })
+  let runtimeFailure
+  if (editor.done) void editor.done.catch(error => {
+    runtimeFailure = error
+    if (ctx.logger?.error) ctx.logger.error(error)
+    else console.error(error)
   })
-  ctx.effect?.(() => () => editor.close(), 'aico-ppt: DSH Editor 运行时')
+  try {
+    ctx.effect?.(() => () => editor.close(), 'aico-ppt: DSH Editor 运行时')
+    const provider = createProvider(runtimeConfigured)
+    ctx.skills.registerProvider(() => provider)
+    ctx.on('webserver/index-inject', (table) => {
+      if (runtimeFailure) throw runtimeFailure
+      table.push({
+        kind:'global',
+        name:'__AICO_PPT_BRAND__',
+        value:{ logo, appUrl:editor.appUrl },
+      })
+    })
+  } catch (error) {
+    await editor.close()
+    throw error
+  }
 }

@@ -34,6 +34,7 @@ const ADVECTION_FRAGMENT = `
 precision highp float;
 uniform sampler2D velocity;
 uniform float dt;
+uniform float velocityRetention;
 uniform bool useBFECC;
 uniform vec2 bufferSize;
 varying vec2 vUv;
@@ -44,7 +45,7 @@ void main() {
   vec2 previousPosition = vUv - currentVelocity * dt * ratio;
 
   if (!useBFECC) {
-    gl_FragColor = vec4(texture2D(velocity, previousPosition).xy, 0.0, 1.0);
+    gl_FragColor = vec4(texture2D(velocity, previousPosition).xy * velocityRetention, 0.0, 1.0);
     return;
   }
 
@@ -54,7 +55,7 @@ void main() {
   vec2 correctedPosition = vUv - error * 0.5;
   vec2 correctedVelocity = texture2D(velocity, correctedPosition).xy;
   vec2 correctedPreviousPosition = correctedPosition - correctedVelocity * dt * ratio;
-  gl_FragColor = vec4(texture2D(velocity, correctedPreviousPosition).xy, 0.0, 1.0);
+  gl_FragColor = vec4(texture2D(velocity, correctedPreviousPosition).xy * velocityRetention, 0.0, 1.0);
 }
 `;
 
@@ -278,6 +279,7 @@ export class LiquidEtherEngine {
         boundarySpace:{ value:this.boundarySpace },
         velocity:{ value:this.velocityA.texture },
         dt:{ value:this.options.dt },
+        velocityRetention:{ value:1 },
         useBFECC:{ value:this.options.useBFECC },
         bufferSize:{ value:this.bufferSize },
       },
@@ -295,7 +297,10 @@ export class LiquidEtherEngine {
       depthTest:false,
       uniforms:{
         center:{ value:new THREE.Vector2() },
-        scale:{ value:new THREE.Vector2(this.options.cursorSize, this.options.cursorSize) },
+        scale:{ value:new THREE.Vector2(
+          this.options.cursorSize * this.bufferWidth / this.width,
+          this.options.cursorSize * this.bufferHeight / this.height,
+        ) },
         pixelSize:{ value:this.pixelSize },
         force:{ value:new THREE.Vector2() },
       },
@@ -476,14 +481,13 @@ export class LiquidEtherEngine {
       delta.y * this.height * 0.5,
     );
     if (distanceInPixels < 0.01) return 0;
-    const brushRadiusInPixels = this.options.cursorSize / this.options.resolution;
-    const spacing = Math.max(8, brushRadiusInPixels * 0.2);
+    const spacing = Math.max(8, this.options.cursorSize * 0.2);
     const steps = THREE.MathUtils.clamp(Math.ceil(distanceInPixels / spacing), 1, 32);
     const force = delta.multiplyScalar(
       (this.options.mouseForce * 0.5 * intensity) / steps,
     );
-    const cursorX = this.options.cursorSize * this.pixelSize.x;
-    const cursorY = this.options.cursorSize * this.pixelSize.y;
+    const cursorX = this.options.cursorSize / this.width;
+    const cursorY = this.options.cursorSize / this.height;
 
     for (let stepIndex = 1; stepIndex <= steps; stepIndex += 1) {
       const center = from.clone().lerp(to, stepIndex / steps);
@@ -514,9 +518,14 @@ export class LiquidEtherEngine {
 
   render(now = performance.now()) {
     if (this.destroyed) return this.maxPointerSplatsObserved;
-    const elapsedSeconds = Math.min((now - this.lastFrameTime) / 1000, 0.05);
+    const frameSeconds = Math.max(0, (now - this.lastFrameTime) / 1000);
+    const elapsedSeconds = Math.min(frameSeconds, 0.05);
     this.lastFrameTime = now;
     this.updatePointerPath(now, elapsedSeconds);
+    // 按经过时间衰减，两次移动之间让旧笔迹自然消散，不随帧率累积铺满屏幕。
+    this.advection.material.uniforms.velocityRetention.value = Math.pow(
+      0.5, frameSeconds / this.options.velocityHalfLife,
+    );
     this.advection.render();
     this.injectPointerPath();
     this.divergence.render();

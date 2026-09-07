@@ -17,7 +17,22 @@ function pickPathWithSystemPicker({
   resultLabel,
   signal,
   spawnProcess = spawn,
+  environment = process.env,
+  fetchRequest = fetch,
 } = {}) {
+  if (environment.AICO_DESKTOP_DIALOG_URL) {
+    return (async () => {
+      const response = await fetchRequest(environment.AICO_DESKTOP_DIALOG_URL, {
+        method:'POST', signal, redirect:'error',
+        headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${environment.AICO_DESKTOP_DIALOG_TOKEN}` },
+        body:JSON.stringify({ kind:pickerFlag === '--pick-only' ? 'deck' : 'directory' }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw pickerError(result.error || '原生文件选择器不可用');
+      if (result.path !== null && (typeof result.path !== 'string' || !result.path)) throw pickerError('原生文件选择器返回路径无效');
+      return result.path;
+    })();
+  }
   return new Promise((resolvePromise, reject) => {
     if (signal?.aborted) {
       reject(pickerError('文件选择器已取消', 'PICK_ABORTED'));
