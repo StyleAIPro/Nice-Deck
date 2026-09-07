@@ -63,8 +63,7 @@ try {
     exitCode = 1;
   } else {
     if (idxs.length > 1) console.warn(`警告: data-label="${label}" 有 ${idxs.length} 个同名页，只处理第一个`);
-    const handle = await page.evaluateHandle(i => document.querySelectorAll('.stage .slide-canvas')[i], idxs[0]);
-    const el = handle.asElement();
+    const el = (await page.$$('.stage .slide-canvas'))[idxs[0]];
 
     const info = await el.evaluate(node => {
       node.setAttribute('data-steps-target', ''); // 模拟放映的 CSS 只作用于本页

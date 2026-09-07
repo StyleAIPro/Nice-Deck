@@ -16,6 +16,8 @@ DSH 嵌入态完整复用原 Editor 的页面栏、预览 / 编辑 / 区域标�
 
 正式安装通过 AICO 应用的插件商店完成。维护者需要联调源码时，使用[开发调试说明](INSTALL.md#开发调试)中的 Harness 网页入口或高级源码配套安装；它们不属于普通用户安装流程。插件专项测试运行 `npm run test:dsh-plugin`。
 
+正式桌面发布包仅保留制作与编辑所需资源；展示媒体、独立 Dev Shell 依赖、多余 Three.js 文件及可重新生成的 Python 缓存由发布工具裁剪。源码仓库中的演示和 Dev Shell 继续完整保留，开发依赖仍可按需安装，详见[安装指南](INSTALL.md#普通用户安装-aico-应用与-ppt-插件)。
+
 ## 效果预览
 
 ![deck 交互演示：液态玻璃工具条 · 侧边预览 · 记笔记 · 放映/滚动切换](docs/showcase/deck-demo.gif)
@@ -59,17 +61,18 @@ py -3 scripts\install.py install --skill-only
 
 ## 独立 Skill 与开发依赖
 
-以下用于独立 Skill 与源码开发。应用内安装的 PPT 插件使用插件商店准备的私有运行时；普通用户在应用内查看诊断，无需执行这些本机依赖命令。
+以下用于独立 Skill 与源码开发。应用内安装的 PPT 插件只包含插件包与私有 Python，截图和验证复用兼容 AICO Host 的 Electron；普通用户在应用内查看诊断，无需执行这些本机依赖命令。
 
-> **按任务体检**：使用 `--profile editor-core|dev-shell|verify|pptx-export|materials|full` 选择能力；`--check-only` 只报告，`--repair` 修复可自动安装项，`--json` 提供结构化结果。退出码 0 就绪 / 1 仍缺 / 2 工具或参数错误。
+> **按任务体检**：使用 `--profile editor-core|dev-shell|verify|pptx-export|pptx-read|materials|full` 选择能力；`--check-only` 只报告，`--repair` 修复可自动安装项，`--json` 提供结构化结果。退出码 0 就绪 / 1 仍缺 / 2 工具或参数错误。
 
 | Profile | 用途 | 主要依赖 |
 |---|---|---|
 | `editor-core` | 启动 DSH Editor Runtime | Node ≥ 18、`ws`、`html2canvas`、`busboy`、`three`；不要求本机 Agent CLI |
 | `dev-shell` | 独立开发 / 调试壳 | `editor-core` + `node-pty` + xterm + 一个本机 Agent CLI |
 | `verify` | 截图、溢出、逐拍验证 | Chrome、playwright-core |
-| `pptx-export` | HTML → PPTX | `verify` 能力、python-pptx |
-| `materials` | 读取 PDF/PPTX 参考材料 | PDF Skill、PyMuPDF、LibreOffice 等 |
+| `pptx-export` | HTML → PPTX | `verify` 能力、随包标准库组装器；Pillow 用于可选 HTML 附件图标 |
+| `pptx-read` | 按页读取 PPTX 内容与内嵌原图 | 随包提取工具，仅 Python 标准库 |
+| `materials` | 读取和处理 PDF 参考材料 | 随包适配 PDF Skill、PyMuPDF；pypdf 用于 AcroForm 填写 |
 
 例如准备独立 Dev Shell：
 
@@ -78,8 +81,16 @@ python3 scripts/check_deps.py --profile dev-shell --repair
 ```
 
 playwright-core 加载顺序：`PLAYWRIGHT_CORE` 环境变量 → 裸 `import playwright-core` → 内置回退路径。缺依赖时脚本会打印可操作的中文提示。
->
-> 解析外部参考材料指从 pptx/pdf 素材提取版式与图片（`assets/huawei-refs/` 即由此产出）：pptx 先经 `soffice --headless --convert-to pdf` 转 PDF，再用 PyMuPDF 渲染逐页图 / 抽内嵌图；pptx 内嵌媒体可直接用 Python `zipfile` 解包 `ppt/media/`。PDF 的进阶处理（合并 / 拆分 / 表格提取 / 表单）参考仓库内置的 pdf skill：`.agents/skills/pdf/`（`npx skills add https://github.com/anthropics/skills --skill pdf` 安装）。
+
+读取参考 PPTX 无需安装额外依赖：
+
+```bash
+python3 scripts/extract-pptx.py 参考.pptx 输出目录
+```
+
+工具输出 `slides.json`、`slides.md` 和 `media/`，按页保存标题、正文、备注、表格和原始内嵌图片。AI 直接读取这些内容与原图，图片保留所在页关联；未提取的图表、SmartArt 等对象会逐页标出限制。此流程不生成 PPTX 版式预览，也不转换 PDF 或使用 LibreOffice。具体字段见 [配图工作流](references/artwork.md#21-从-pptx-提取内容与原图)。
+
+PDF 材料继续用 PyMuPDF 渲染逐页图 / 抽图；合并、拆分、表格提取与表单操作参考仓库内置 PDF Skill `.agents/skills/pdf/`。
 
 ## 目录
 
@@ -112,6 +123,7 @@ aico-ppt/
 │   ├── deck-editor.py       # 新建 / 打开 / 后期微调共用启动器
 │   ├── install.py           # 跨平台 Skill 安装、检查、修复与卸载
 │   ├── check_deps.py        # 按能力 Profile 诊断和修复依赖
+│   ├── extract-pptx.py      # 标准库按页提取参考 PPTX 内容与内嵌原图
 │   ├── editor/              # Draft、DeckFactory、真实 PTY、浏览器工作台与安全写回
 │   ├── apply_bg.py          # 品牌图替换
 │   ├── upgrade_deck.py      # 历史三方合并、公共外壳重组、manifest 合并与审计
@@ -169,7 +181,7 @@ Windows WSL Codex 会在启动器阶段预热；同一进程缓存 Codex / Node 
 维护者调试命令继续保留：`python3 scripts/deck-editor.py <deck.html>`。以下可见窗口命令仅供明确调试使用；独立 Skill 制作使用 `--headless-workspace`，完成后交付 HTML 与验证结果：
 
 ```bash
-# 只检查 Editor 启动所需能力；不会被 LibreOffice 等可选工具阻塞
+# 只检查 Editor 启动所需能力；PDF 等可选能力独立诊断
 python3 scripts/check_deps.py --profile editor-core --check-only
 
 # 通用启动命令；默认回环地址 127.0.0.1，并自动打开浏览器工作台

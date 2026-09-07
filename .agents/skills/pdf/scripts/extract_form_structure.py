@@ -1,115 +1,46 @@
-"""
-Extract form structure from a non-fillable PDF.
-
-This script analyzes the PDF to find:
-- Text labels with their exact coordinates
-- Horizontal lines (row boundaries)
-- Checkboxes (small rectangles)
-
-Output: A JSON file with the form structure that can be used to generate
-accurate field coordinates for filling.
-
-Usage: python extract_form_structure.py <input.pdf> <output.json>
-"""
-
+"""提取 PDF 文字、表格、横线和方框；坐标均为显示页面左上角起的点数。"""
 import json
 import sys
-import pdfplumber
+import pymupdf
+from pdf_utils import open_pdf
 
 
 def extract_form_structure(pdf_path):
-    structure = {
-        "pages": [],
-        "labels": [],
-        "lines": [],
-        "checkboxes": [],
-        "row_boundaries": []
-    }
-
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages, 1):
-            structure["pages"].append({
-                "page_number": page_num,
-                "width": float(page.width),
-                "height": float(page.height)
-            })
-
-            words = page.extract_words()
-            for word in words:
-                structure["labels"].append({
-                    "page": page_num,
-                    "text": word["text"],
-                    "x0": round(float(word["x0"]), 1),
-                    "top": round(float(word["top"]), 1),
-                    "x1": round(float(word["x1"]), 1),
-                    "bottom": round(float(word["bottom"]), 1)
-                })
-
-            for line in page.lines:
-                if abs(float(line["x1"]) - float(line["x0"])) > page.width * 0.5:
-                    structure["lines"].append({
-                        "page": page_num,
-                        "y": round(float(line["top"]), 1),
-                        "x0": round(float(line["x0"]), 1),
-                        "x1": round(float(line["x1"]), 1)
-                    })
-
-            for rect in page.rects:
-                width = float(rect["x1"]) - float(rect["x0"])
-                height = float(rect["bottom"]) - float(rect["top"])
-                if 5 <= width <= 15 and 5 <= height <= 15 and abs(width - height) < 2:
-                    structure["checkboxes"].append({
-                        "page": page_num,
-                        "x0": round(float(rect["x0"]), 1),
-                        "top": round(float(rect["top"]), 1),
-                        "x1": round(float(rect["x1"]), 1),
-                        "bottom": round(float(rect["bottom"]), 1),
-                        "center_x": round((float(rect["x0"]) + float(rect["x1"])) / 2, 1),
-                        "center_y": round((float(rect["top"]) + float(rect["bottom"])) / 2, 1)
-                    })
-
-    lines_by_page = {}
-    for line in structure["lines"]:
-        page = line["page"]
-        if page not in lines_by_page:
-            lines_by_page[page] = []
-        lines_by_page[page].append(line["y"])
-
-    for page, y_coords in lines_by_page.items():
-        y_coords = sorted(set(y_coords))
-        for i in range(len(y_coords) - 1):
-            structure["row_boundaries"].append({
-                "page": page,
-                "row_top": y_coords[i],
-                "row_bottom": y_coords[i + 1],
-                "row_height": round(y_coords[i + 1] - y_coords[i], 1)
-            })
-
-    return structure
-
-
-def main():
-    if len(sys.argv) != 3:
-        print("Usage: extract_form_structure.py <input.pdf> <output.json>")
-        sys.exit(1)
-
-    pdf_path = sys.argv[1]
-    output_path = sys.argv[2]
-
-    print(f"Extracting structure from {pdf_path}...")
-    structure = extract_form_structure(pdf_path)
-
-    with open(output_path, "w") as f:
-        json.dump(structure, f, indent=2)
-
-    print(f"Found:")
-    print(f"  - {len(structure['pages'])} pages")
-    print(f"  - {len(structure['labels'])} text labels")
-    print(f"  - {len(structure['lines'])} horizontal lines")
-    print(f"  - {len(structure['checkboxes'])} checkboxes")
-    print(f"  - {len(structure['row_boundaries'])} row boundaries")
-    print(f"Saved to {output_path}")
+    result = {"pages": [], "labels": [], "lines": [], "checkboxes": [], "row_boundaries": [], "tables": []}
+    with open_pdf(pdf_path) as doc:
+        for number, page in enumerate(doc, 1):
+            result["pages"].append({"page_number": number, "width": page.rect.width, "height": page.rect.height})
+            rotation = page.rotation_matrix
+            for word in page.get_text("words", sort=True):
+                rect = pymupdf.Rect(word[:4]) * rotation
+                result["labels"].append({"page": number, "text": word[4], "x0": round(rect.x0, 1), "top": round(rect.y0, 1), "x1": round(rect.x1, 1), "bottom": round(rect.y1, 1)})
+            lines, boxes = set(), set()
+            for drawing in page.get_drawings():
+                for item in drawing["items"]:
+                    if item[0] == "l":
+                        start, end = item[1] * rotation, item[2] * rotation
+                        if abs(start.y - end.y) < 0.5 and abs(end.x - start.x) > page.rect.width * 0.5:
+                            lines.add((round(start.y, 1), round(min(start.x, end.x), 1), round(max(start.x, end.x), 1)))
+                    elif item[0] == "re":
+                        rect = item[1] * rotation
+                        if 5 <= rect.width <= 15 and 5 <= rect.height <= 15 and abs(rect.width - rect.height) < 2:
+                            boxes.add(tuple(round(value, 1) for value in rect))
+            for y, left, right in sorted(lines):
+                result["lines"].append({"page": number, "y": y, "x0": left, "x1": right})
+            for left, top, right, bottom in sorted(boxes):
+                result["checkboxes"].append({"page": number, "x0": left, "top": top, "x1": right, "bottom": bottom, "center_x": round((left + right) / 2, 1), "center_y": round((top + bottom) / 2, 1)})
+            ys = sorted({line[0] for line in lines})
+            result["row_boundaries"].extend({"page": number, "row_top": top, "row_bottom": bottom, "row_height": round(bottom - top, 1)} for top, bottom in zip(ys, ys[1:]))
+            for table in page.find_tables().tables:
+                # find_tables 已按页面旋转返回显示坐标，不能像 words 那样再旋转一次。
+                result["tables"].append({"page": number, "bbox": list(table.bbox), "rows": table.extract()})
+    return result
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 3:
+        raise SystemExit("用法：extract_form_structure.py <input.pdf> <output.json>")
+    result = extract_form_structure(sys.argv[1])
+    with open(sys.argv[2], "w", encoding="utf-8") as stream:
+        json.dump(result, stream, ensure_ascii=False, indent=2)
+    print(f"已提取 {len(result['pages'])} 页、{len(result['labels'])} 个文字片段、{len(result['tables'])} 个表格：{sys.argv[2]}")

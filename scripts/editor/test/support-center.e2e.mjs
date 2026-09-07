@@ -11,7 +11,7 @@ function environmentSnapshot() {
   const checks = [
     { key:'node', label:'Node.js', profiles:['editor-core', 'verify', 'pptx-export'], present:true, optional:false },
     { key:'agent-cli', label:'Agent CLI', profiles:['dev-shell'], present:true, optional:false },
-    { key:'soffice', label:'LibreOffice(soffice)', profiles:['materials'], present:false, optional:false },
+    { key:'pymupdf', label:'PyMuPDF', profiles:['materials'], present:false, optional:false },
   ];
   return {
     schemaVersion:1,
@@ -22,9 +22,10 @@ function environmentSnapshot() {
       'dev-shell':{ id:'dev-shell', label:'独立 Dev Shell', ready:true, state:'ready', missing:[] },
       verify:{ id:'verify', label:'质量验证', ready:true, state:'ready', missing:[] },
       'pptx-export':{ id:'pptx-export', label:'PPTX 导出', ready:true, state:'ready', missing:[] },
+      'pptx-read':{ id:'pptx-read', label:'PPTX 内容读取', ready:true, state:'ready', missing:[] },
       materials:{
-        id:'materials', label:'外部材料解析', ready:false,
-        state:'manual-action-required', missing:['soffice'],
+        id:'materials', label:'PDF 材料解析', ready:false,
+        state:'repairable', missing:['pymupdf'],
       },
     },
   };
@@ -47,7 +48,10 @@ test('桌面诊断说明 PPT 插件归插件商店管理，缺失环境通过重
   await page.getByRole('button', {name:'安装与诊断',exact:true}).click();
   await page.getByText('已安装 PPT 插件工作流', {exact:true}).waitFor();
   await page.getByText('由 AICO-Harness 插件商店管理', {exact:true}).waitFor();
-  const materials = page.locator('.diagnostic-row', {hasText:'外部材料解析'});
+  const pptx = page.locator('.diagnostic-row', {hasText:'PPTX 内容读取'});
+  assert.equal(await pptx.getAttribute('data-state'), 'ready');
+  assert.equal(await pptx.getByRole('button').count(), 0);
+  const materials = page.locator('.diagnostic-row', {hasText:'PDF 材料解析'});
   await materials.getByRole('button', {name:'查看安装方法'}).click();
   await page.getByText('运行环境随 AICO-PPT 插件提供，请在设置的插件页重新安装 AICO-PPT 插件。', {exact:true}).waitFor();
 });
@@ -110,7 +114,7 @@ test('开始使用、帮助、诊断与示例副本形成完整首页路径', as
   await page.locator('[data-help-article] h1').filter({ hasText:'3 分钟开始使用' }).waitFor();
 
   await page.locator('[data-support-tab="diagnostics"]').click();
-  await page.getByText('未就绪：LibreOffice(soffice)').waitFor();
+  await page.getByText('未就绪：PyMuPDF').waitFor();
   assert.equal(
     await page.locator('.diagnostic-row', { hasText:'Editor Core' }).getAttribute('data-state'),
     'ready',
@@ -152,23 +156,21 @@ test('修复操作立即显示进度，复检后明确区分已修复和手动�
         remediation:repaired ? null : { kind:'automatic', command:['python3', '-m', 'pip', 'install', 'python-pptx'] },
       },
       {
-        key:'soffice', label:'LibreOffice(soffice)', profiles:['materials'],
-        present:false, optional:false, state:'manual-action-required', detail:'未找到 soffice',
-        remediation:{ kind:'manual', command:null, hint:'安装 LibreOffice' },
+        key:'chrome', label:'Google Chrome', profiles:['verify'],
+        present:false, optional:false, state:'manual-action-required', detail:'未找到 Google Chrome',
+        remediation:{ kind:'manual', command:null, hint:'安装 Google Chrome' },
       },
     ],
     profiles:{
       'editor-core':{ id:'editor-core', label:'Editor Core', ready:true, state:'ready', missing:[] },
       'dev-shell':{ id:'dev-shell', label:'独立 Dev Shell', ready:true, state:'ready', missing:[] },
-      verify:{ id:'verify', label:'质量验证', ready:true, state:'ready', missing:[] },
+      verify:{ id:'verify', label:'质量验证', ready:false, state:'manual-action-required', missing:['chrome'] },
       'pptx-export':{
         id:'pptx-export', label:'PPTX 导出', ready:repaired,
         state:repaired ? 'ready' : 'repairable', missing:repaired ? [] : ['python-pptx'],
       },
-      materials:{
-        id:'materials', label:'外部材料解析', ready:false,
-        state:'manual-action-required', missing:['soffice'],
-      },
+      'pptx-read':{ id:'pptx-read', label:'PPTX 内容读取', ready:true, state:'ready', missing:[] },
+      materials:{ id:'materials', label:'PDF 材料解析', ready:true, state:'ready', missing:[] },
     },
   });
   const app = await startAppServer({
@@ -204,9 +206,9 @@ test('修复操作立即显示进度，复检后明确区分已修复和手动�
   await page.getByText('PPTX 导出已修复并通过复检。').waitFor();
   assert.equal(await exportRow.getAttribute('data-state'), 'ready');
 
-  const materialsRow = page.locator('.diagnostic-row', { hasText:'外部材料解析' });
-  await materialsRow.getByRole('button', { name:'查看安装方法' }).click();
-  await page.getByText(/LibreOffice\(soffice\)：安装 LibreOffice/).waitFor();
+  const verifyRow = page.locator('.diagnostic-row', { hasText:'质量验证' });
+  await verifyRow.getByRole('button', { name:'查看安装方法' }).click();
+  await page.getByText(/Google Chrome：安装 Google Chrome/).waitFor();
 });
 
 

@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 export async function runtimeFixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'aico-ppt-runtime-')));
   t.after(() => rm(root, { recursive:true, force:true }));
-  const paths = { python:join(root, 'python', 'python3'), browser:join(root, 'browser', 'chrome'), office:join(root, 'office', 'soffice') };
+  const paths = { python:join(root, 'python', 'python3') };
   for (const path of Object.values(paths)) {
     await mkdir(dirname(path), { recursive:true });
     await writeFile(path, '', { mode:0o755 });

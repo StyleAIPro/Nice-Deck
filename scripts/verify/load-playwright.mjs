@@ -1,5 +1,8 @@
-/** 桌面版显式指定内置 Chromium；独立 Skill 保留本机 Chrome 默认值。 */
+import { connectDesktopRenderer } from './desktop-renderer.mjs';
+
+/** 桌面版复用宿主渲染服务；独立 Skill 保留本机 Chrome 默认值。 */
 export function chromiumLaunchOptions(environment = process.env) {
+  if (environment.AICO_RUNTIME_KIND === 'desktop') return {};
   const executablePath = environment.AICO_BROWSER_EXECUTABLE;
   if (executablePath === undefined) return { channel:'chrome', headless:true };
   if (!executablePath.trim()) throw new Error('AICO 内置浏览器路径不能为空');
@@ -7,6 +10,7 @@ export function chromiumLaunchOptions(environment = process.env) {
 }
 
 export async function loadChromium() {
+  if (process.env.AICO_RUNTIME_KIND === 'desktop') return { launch:() => connectDesktopRenderer() };
   const candidates = [process.env.PLAYWRIGHT_CORE, 'playwright-core',
     '/opt/homebrew/lib/node_modules/openclaw/node_modules/playwright-core/index.js'].filter(Boolean);
   for (const candidate of candidates) {

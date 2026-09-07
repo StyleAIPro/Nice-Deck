@@ -38,10 +38,11 @@ function runCli(app, args) {
 }
 
 test('无窗口 Skill 修改实时进入统一历史，只有 solidify 才发布真实 Deck', async t => {
-  const app = await startFixtureServer({ bundle:true, preserveRoot:true });
+  const app = await startFixtureServer({ bundle:true, preserveRoot:true, dshAgentBridge:process.env.AICO_RUNTIME_KIND === 'desktop' });
   t.after(async () => { await app.close(); await app.cleanup(); });
   const editorUrl = `${app.url}/editor/?token=${encodeURIComponent(app.token)}`
-    + `&editorToken=${encodeURIComponent(app.editorToken)}`;
+    + `&editorToken=${encodeURIComponent(app.editorToken)}`
+    + (process.env.AICO_RUNTIME_KIND === 'desktop' ? `&embedded=dsh&parentOrigin=${encodeURIComponent(new URL(app.url).origin)}` : '');
   const runtime = await startHeadlessEditorRuntime({ editorUrl });
   t.after(() => runtime.close());
   await app.waitUntilReady({ timeoutMs:20_000 });
@@ -50,8 +51,8 @@ test('无窗口 Skill 修改实时进入统一历史，只有 solidify 才发布
   const replaced = await runCli(app, ['replace-text', '第一页标题', '无窗口新标题']);
   assert.equal(replaced.revision, 1);
   assert.equal((await runCli(app, ['status'])).groups.length, 1);
-  assert.equal(await runtime.page.locator('#deck-frame').contentFrame()
-    .getByText('无窗口新标题').count(), 1);
+  assert.equal(await runtime.page.evaluate(() => [...document.querySelector('#deck-frame').contentDocument.querySelectorAll('h2')]
+    .filter(node => node.textContent === '无窗口新标题').length), 1);
   assert.equal(await readFile(app.deckPath, 'utf8'), sourceBefore);
 
   const verified = await runCli(app, ['verify']);

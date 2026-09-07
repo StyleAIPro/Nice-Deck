@@ -48,7 +48,7 @@ node scripts/editor/cli.mjs status
 
 macOS 可直接在维护者调试时双击 `tools/dev-shell/AICO-PPT Dev Shell.app`。Windows 首次双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 会在同目录生成带图标的 `AICO-PPT Dev Shell（Windows）.lnk`，之后可直接使用快捷方式；也可以把一份 deck HTML 拖到 Windows `.cmd` 或快捷方式上直接打开。快捷方式仅保存当前机器的绝对路径并被 Git 忽略，移动仓库后删除旧 `.lnk`、再次运行 `.cmd` 即可重建。两个入口都转交同一个 `scripts/deck-editor.py --app`，不另建编辑或写回实现；Windows `.cmd` 增加 `--detach-windows`，只短时派发隐藏的标准 Python 进程，随后退出，不保留常驻控制台或 Python 任务栏窗口。Python 启动器用进程 ID、随机令牌和 loopback 健康检查维护原子实例登记表。macOS 重复启动时先按原 URL 或“AICO-PPT”标题定位并激活已有 Chrome / Safari 标签页。Windows 重复启动时先读取 App Server 的鉴权页面租约：有活动租约时尽力通过 UI Automation 激活 Chrome / Edge / Firefox，无法激活也绝不新开第二页；页面已经关闭时则结束宽限期内的旧 service，等待 owner 释放登记后重新启动。页面切换产生的瞬时退租会短暂复查，避免在工作台跳转 Editor 时误重启。明确确认标签已经关闭时，先向无页面的旧 service 发送退出信号并等待 owner 释放登记，再启动加载当前固定资源快照的新 App Server。陈旧登记只有在 owner 和 service 确实失效后才允许接管；新旧服务不会同时争抢同一 Deck 锁。健康检查不继承系统 HTTP 代理，避免把可用的 `127.0.0.1` 服务误判为失效并启动第二套服务。应用先打开本地工作台：新建 Deck 通过系统目录选择器确认 Agent 项目目录；打开已有 Deck 使用系统文件选择器添加一份 HTML。区域任务附件也直接调用 macOS / Windows 的系统原生选择器，网页只负责业务确认，不自行浏览本地文件系统。macOS 桌面入口不弹终端；Windows `.cmd` 最多短暂显示派发窗口，常驻 Python / Node、依赖安装与系统选择器子进程都以隐藏窗口运行。首次运行会按 `package-lock.json` 自动补齐 Node 模块。Node.js ≥18 和 Python 3 不会由应用安装，缺失时会显示原生错误对话框。
 
-工作台顶栏的“开始使用 / 帮助 / 安装与诊断”在未选择 Deck 时也可用。“开始使用”保存一份本机清单，并把 `assets/training-deck.html` 复制到用户选择的新示例目录后再进入现有打开流程；它绝不修改模板原件。“帮助”从 `docs/user-guide/` 读取 Markdown。“安装与诊断”按 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`materials` 分组调用 `scripts/check_deps.py` 的结构化结果；本机 Agent CLI、PTY 或材料能力缺失只标记对应 Profile，不得把 DSH Editor Core 判为不可用。
+工作台顶栏的“开始使用 / 帮助 / 安装与诊断”在未选择 Deck 时也可用。“开始使用”保存一份本机清单，并把 `assets/training-deck.html` 复制到用户选择的新示例目录后再进入现有打开流程；它绝不修改模板原件。“帮助”从 `docs/user-guide/` 读取 Markdown。“安装与诊断”按 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`pptx-read`、`materials` 分组调用 `scripts/check_deps.py` 的结构化结果；本机 Agent CLI、PTY 或材料能力缺失只标记对应 Profile，不得把 DSH Editor Core 判为不可用。
 
 页面租约由一次 HTTP 登记和一条持续 WebSocket 连接组成。正常关页发送 `pagehide` beacon；浏览器崩溃、强制退出或 beacon 丢失时，连接关闭会在 5 秒重连宽限后触发 App Server 的统一 `close()`，连同所有后台 Editor、Agent PTY、writer 与 sidecar helper 一并回收。HTTP 登记后 15 秒未完成 WebSocket 握手也会回收，覆盖浏览器在页面脚本加载前崩溃的窗口。工作台跳转 Editor 时新页面使用相同租约身份重新连接，关闭计时随即取消。
 
@@ -383,7 +383,7 @@ node scripts/verify/steps.mjs my-deck.html 版式·流程条 /tmp/steps     # 3)
 - **退出码契约（三个脚本一致）**：`0` = 通过 / 成功；`1` = 检出问题（存在溢出 / label 不存在）；`2` = 工具或参数错误（浏览器起不来、参数缺失）。可以直接接进 CI / 脚本判断。
 - `measure_overflow` 不传 label 等价 `--all`；报告分两层——section 级溢出（Y/X 像素，>0 即失败）和内层 `overflow:hidden` 裁切（只报告不判失败，逐条截图目检）。
 - 已知基线：模板出厂时「版式·左图右文」页自带 3 处 nested clip（图占位框裁切自身的提示文字，+38px）——属预期表现，不是问题，换成真图后自然消失。
-- 依赖：Node ≥ 18、本机安装 Google Chrome、playwright-core。**playwright-core 按三级顺序查找**：环境变量 `PLAYWRIGHT_CORE`（指向其 index.js）→ 裸 `import('playwright-core')`（在 skill 根目录 `npm i playwright-core` 即可满足）→ openclaw 全局安装的内置路径。都找不到时脚本会以退出码 2 报错并给出提示。
+- 依赖：桌面版沿用注入的运行时包装器与 `AICO_HOME`，使用 Host 的 Node 和 Electron 渲染服务；服务不可用时启动或升级兼容 Host。独立 Skill 才需要 Node ≥ 18、本机 Google Chrome 和 playwright-core，后者按环境变量 `PLAYWRIGHT_CORE`（指向其 index.js）→ 裸 `import('playwright-core')`（在 Skill 根目录 `npm i playwright-core` 即可满足）→ openclaw 全局安装的内置路径依次查找。都找不到时脚本会以退出码 2 报错并给出提示。
 - 首次加载等待较长是正常的（脚本内置了等待 React mount 的 settle 时间）。
 - `measure_overflow` 无法可靠发现 SVG `<text>` 越界、箭头悬空、连线方向错误和线条穿框。改过架构图时必须另跑 `shot`，以原尺寸或放大截图逐项目检文字边界与连线端点。
 
@@ -452,10 +452,10 @@ py -3 scripts\html2pptx\convert.py .\my-deck.html --embed-html
 
 macOS / Linux 仍可使用 `bash scripts/html2pptx/convert.sh ...`；该脚本只转交 `convert.py`，不维护第二套转换逻辑。
 
-- 原理：headless Chrome 逐页截图（自动隐藏导航条等 UI 外壳、`.build` 全显），python-pptx 组装成 16:9、每页一张满屏图。工具不解析打包结构——渲染什么截什么，改完课件**直接重跑**即可。
+- 原理：浏览器逐页截图（桌面复用 Electron，独立 Skill 使用 headless Chrome；自动隐藏导航条等 UI 外壳、`.build` 全显），标准库 ZIP/XML 组装器按序生成精确 16:9 页面，每页一张满屏原图，共用截图只保存一份。工具不解析打包结构——渲染什么截什么，改完课件**直接重跑**即可。
 - **layer 页自动展开**：带 `[data-layer-btn]` 的页会逐标签各截一张、按顺序全部进 PPTX（一页 N 个标签 → N 张）；一页有多个 layer 组时逐组展开、其余组停在首标签，全默认态只截一张不重复（共 ΣN − (组数 − 1) 张）。所以模板 34 页导出为 **55 张**（`动画·layer切换` 4 张、`动画·混合链` 5 张、`动画·多组切换` 2 组共 5 张、`SFT vs LoRA` 6 张、`找问题·六层级` 6 张）。实测约 47 秒、22MB。
 - 已知限制：靠 React 内部 state 切换的自制交互页无法程序化展开，只能截到默认状态（模板自带页没有这种页；自己加页时若做了这类交互，导出前心里有数）。
-- 依赖：Node + Chrome + playwright-core（同第 6 节三级查找）、`python3 -m pip install python-pptx`。
+- 依赖：桌面使用 Host 的 Node 和 Electron 及插件私有 Python；独立 Skill 使用 Node + Chrome + playwright-core（同第 6 节三级查找）及 Python。组装器不依赖 python-pptx；可选 `--embed-html` 图标需要 Pillow。
 
 ## 9. 性能守则
 
@@ -466,4 +466,4 @@ macOS / Linux 仍可使用 `bash scripts/html2pptx/convert.sh ...`；该脚本�
 
 ## 10. AICO 桌面运行环境
 
-桌面包已提供 Node、Python、Chromium 和 LibreOffice；Agent 沿用启动环境，不修改应用资源中的依赖。截图、验证和导出统一选择 `AICO_BROWSER_EXECUTABLE`，材料诊断优先选择 `AICO_SOFFICE_EXECUTABLE`。打开 Deck、选择目录由桌面原生对话框处理。独立 Skill 继续使用原有宿主环境。接口与诊断行为见 [ADR-0006](../docs/adr/0006-desktop-runtime-capabilities.md)。
+桌面 Host 提供 Node 和 Electron 渲染能力，PPT 插件提供私有 Python；Agent 沿用启动环境，不修改应用资源中的依赖。截图、验证和导出通过运行时包装器及私有 `AICO_HOME/desktop-renderer.json` 连接隐藏沙箱页面，Host 不可用时报告启动或升级要求。参考 PPTX 用 `scripts/extract-pptx.py` 按页提取内容和内嵌原图供 AI 直接阅读，仅用标准库；`pptx-read` 与 PDF 的 `materials` 分开诊断。打开 Deck、选择目录由桌面原生对话框处理。独立 Skill 继续使用原有宿主环境。接口与诊断行为见 [ADR-0006](../docs/adr/0006-desktop-runtime-capabilities.md)。

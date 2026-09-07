@@ -20,7 +20,7 @@ python3 scripts/install.py repair --adopt-existing
 
 ## 应用内 PPT 无法启动
 
-先在 AICO 的“设置 → 插件 → 插件商店”确认 AICO-PPT 已安装且激活，再查看插件的“安装与诊断”。私有 Python、浏览器或 Office 缺失时，从插件商店重试或重新安装；不在应用资源目录运行 npm/pip。对话、模型与登录由 AICO-Harness 提供。安装过程见[安装指南](../../INSTALL.md)。
+先在 AICO 的“设置 → 插件 → 插件商店”确认 AICO-PPT 已安装且激活，再查看插件的“安装与诊断”。私有 Python 或浏览器缺失时，从插件商店重试或重新安装；不在应用资源目录运行 npm/pip。对话、模型与登录由 AICO-Harness 提供。安装过程见[安装指南](../../INSTALL.md)。
 
 ### 独立 Skill / 源码开发：Editor Core 无法启动
 
@@ -61,19 +61,17 @@ python3 scripts/check_deps.py --profile verify --check-only
 python3 scripts/check_deps.py --profile pptx-export --check-only
 ```
 
-缺少 LibreOffice 只影响外部 PPTX 材料转换，不阻塞 Editor、验证或 HTML → PPTX 导出。
+PPTX 内容读取只用标准库和随包提取工具，PDF 工具缺失不影响读取 PPTX。
 
 ### 开发调试：macOS 显示 Python 包“未就绪”，但终端可以导入
 
-Apple Silicon 上必须通过最新版 `tools/dev-shell/AICO-PPT Dev Shell.app` 启动。入口会显式使用 arm64，避免 LaunchServices 把脚本型 App 放进 Rosetta 进程树，导致 arm64 的 `python-pptx`、`pdfplumber` 或 `PyMuPDF` 被误判为不可用。更新入口后请彻底退出旧工作台再重新双击；诊断若仍发现架构冲突，会明确显示“已安装但架构不兼容”。
+Apple Silicon 上必须通过最新版 `tools/dev-shell/AICO-PPT Dev Shell.app` 启动。入口会显式使用 arm64，避免 LaunchServices 把脚本型 App 放进 Rosetta 进程树，导致 arm64 的 `PyMuPDF` 或 `Pillow` 原生扩展被误判为不可用。更新入口后请彻底退出旧工作台再重新双击；诊断若仍发现架构冲突，会明确显示“已安装但架构不兼容”。
 
-### 独立 Skill / 源码开发：LibreOffice 看似已安装但仍不可用
+### 读取参考 PPTX
 
-`which soffice` 能找到命令，不代表应用仍完整存在。诊断会实际执行 `soffice --version`；若 Homebrew 链接仍在而 `/Applications/LibreOffice.app` 已被移除，会显示“找到但无法启动”。此时重新安装 LibreOffice，而不是反复修复 Python 包：
+独立 Skill 可运行 `python3 scripts/extract-pptx.py 参考.pptx 输出目录`。AI 直接读取输出的 `slides.md` / `slides.json` 与 `media/` 原图；标题、正文、备注、表格和图片都按页关联。图表、SmartArt 等未提取对象会逐页标出限制，不生成版式预览，也不需要安装 Office。
 
-```bash
-brew reinstall --cask libreoffice
-```
+若 `pptx-read` 诊断报告工具缺失，恢复完整 Skill 文件；桌面版从插件商店重新安装 AICO-PPT。PDF 材料继续单独使用 `materials` Profile。
 
 ## 任务显示“待确认”
 

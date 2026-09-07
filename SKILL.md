@@ -13,7 +13,7 @@ AICO-PPT 是**可独立使用的 Skill + AICO-Harness 编辑器插件**。独立
 
 本仓库同时提供可选的 DSH 插件适配层，但适配层不会复制这份 Skill。DSH Host 直接把当前 `SKILL.md` 注册进全局 skill 目录并启动原 Editor Runtime，DSH Client 在原生对话右侧的通用 `workbench.persistent-view` 中嵌入它；页面栏、三种模式、属性、任务、历史、固化和导出仍由 Editor Core 拥有。每个 Deck 工作项通过稳定 `workId` 显式关联项目目录、DSH Workspace 和一个或多个 Session；Harness 左侧“新会话”中的 AICO-PPT 项目子菜单显式携带 `workId` 建立关联，普通新会话不关联 Deck；Editor 顶部选择器只展示和切换关联会话。明确创建的任务 Session 首条可见指令必须以 `/aico-ppt` 开头；恢复、切换任务或切换 Session 不得发送任何“继续”Prompt。“交给 Agent”必须固定发送到工作项的活动 DSH Session，不能回退到临时选中的普通 Session，也不得在插件内再启动 Codex / Claude Code / OpenCode PTY。切换普通 Session 不得改变或重载 Editor；点击已关联 Session 才切换对应工作项，内部恢复路由不得短暂显示启动初始页。原独立 Editor 只是带 PTY 的 `dev-shell` 开发/排障壳，不是第二个正式产品。能力边界见 `integrations/dsh/README.md`。
 
-在 AICO 桌面包内（`AICO_RUNTIME_KIND=desktop`），Node、Python、Chromium 和文档转换工具由应用提供。沿用注入的 `PYTHON` 与 PATH，不在应用资源目录运行 npm/pip 安装或修复；包内能力缺失时提示重新安装完整 AICO 包。具体接口见 `docs/adr/0006-desktop-runtime-capabilities.md`。
+在 AICO 桌面包内（`AICO_RUNTIME_KIND=desktop`），Host 提供 Node 与 Electron 渲染服务，插件携带私有 Python 及 PyMuPDF、pypdf、Pillow。新版插件发布使用 `apiVersion: 2`，要求 Host 支持 `desktopRenderer: 1`。沿用注入的 `PYTHON`、PATH、`AICO_HOME` 与运行时包装器，不在应用资源目录运行 npm/pip 安装或修复；渲染服务不可用时启动或升级兼容的 AICO Host，插件文件缺失时从商店重装插件。具体接口见 `docs/adr/0006-desktop-runtime-capabilities.md`。
 
 ## 从零做一份 PPT？先走流程
 
@@ -223,7 +223,8 @@ CLI 出现 `COMMAND_TIMEOUT` 时不得绕过 Action 直接修改真实 Deck，�
 | `tools/dev-shell/AICO-PPT Dev Shell.cmd` | Windows 独立 Dev Shell；短时转交 `scripts/deck-editor.py --detach-windows --app` 后退出 |
 | `scripts/create_windows_launcher_shortcut.ps1` | 为 Windows `.cmd` 生成带品牌图标的本机 `.lnk`；快捷方式本身不进入 Git |
 | `scripts/install.py` | 跨平台 Developer Link 安装器；安全注册、检查、修复和卸载 Skill |
-| `scripts/check_deps.py` | 按 `editor-core` / `dev-shell` / `verify` / `pptx-export` / `materials` Profile 诊断与修复依赖 |
+| `scripts/extract-pptx.py` | 用标准库按页提取 PPTX 标题、正文、备注、表格与内嵌原图，输出内容文件供 AI 直接阅读 |
+| `scripts/check_deps.py` | 按 `editor-core` / `dev-shell` / `verify` / `pptx-export` / `pptx-read` / `materials` Profile 诊断与修复依赖 |
 | `scripts/deck-editor.py` | 桌面与命令式入口共用的启动模块（默认只监听 127.0.0.1，并自动打开浏览器工作台） |
 | `scripts/editor/` | CreationDraft、DeckFactory、真实 PTY、浏览器 parent/frame、sidecar、动作日志与安全写回实现 |
 | `scripts/apply_bg.py` | 品牌图一键替换（默认预览模式，`--yes` 落盘） |
@@ -257,9 +258,10 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 
 ## 性能与依赖
 
-- **完整应用安装**：在本仓库运行 `node ../AICO-Harness/scripts/aico.mjs install --ppt .`，准备 Node.js 22.19 或 24+、npm 和 Python 3.9+。AICO 使用独立入口、`~/.aico-harness` 数据目录与系统分配端口；插件直接注册本包规范 Skill，不修改全局 Skill 链接。旧历史通过显式 `aico import-ppt --from` 导入，来源与项目 sidecar 不搬动；安装与迁移条件见 [安装指南](INSTALL.md)。
+- **桌面应用安装**：安装兼容的 AICO Host，再从内置商店安装 AICO-PPT；插件下载只包含插件与私有 Python 两个组件，截图和验证复用 Host 的 Electron。源码配对安装和旧历史迁移属于开发调试入口，条件与命令见 [安装指南](INSTALL.md)。
 - **Skill 注册**：Codex 的标准用户级位置是 `~/.agents/skills/aico-ppt`。独立使用 Skill 时运行 `python3 scripts/install.py install --skill-only`（Windows：`py -3 scripts\install.py install --skill-only`）；默认不带参数也只注册 Skill；只有显式加 `--dev-shell` 才准备维护者调试依赖。已有冲突目标不会被覆盖，已有同源但无记录的链接也必须通过诊断页“接管此安装”或 `repair --adopt-existing` 明确确认后才登记所有权。完整说明见 `INSTALL.md`。
-- **按任务体检**：DSH Editor 动手前先跑 `python3 scripts/check_deps.py --profile editor-core --check-only`（Windows：`py -3 scripts\check_deps.py --profile editor-core --check-only`）；独立入口改用 `--profile dev-shell`。Profile 分为 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`materials` 与 `full`；加 `--repair` 才修复可自动安装项，`--json` 输出结构化结果。无 `--profile` 时为兼容旧命令仍按 `full` 自动修复。退出码：0 所选能力就绪 / 1 仍缺 / 2 工具或参数错误。
-- 预期性能：模板 12MB，headless Chrome 首开约 2.6s；PPTX 导出 34 页 → 55 张、约 47s。
-- 依赖：Editor Core 需 Node.js、`ws`、`html2canvas`、`busboy` 与 `three`；独立 `dev-shell` 才增加 `node-pty`、浏览器 / headless xterm 与一个本机 Agent CLI。质量验证需 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）；PPTX 导出另需 `python-pptx`。
-- 解析外部参考材料（用户给的 pptx / pdf 素材 → 逐页图目检、提取封面与配图）：pptx 先 `soffice --headless --convert-to pdf` 再用 PyMuPDF（`pip install pymupdf`）渲染逐页图；pptx 内嵌媒体用 `zipfile` 解包 `ppt/media/`；PDF 的合并 / 拆分 / 表格与表单处理按 `.agents/skills/pdf/` 的方法执行（pypdf / pdfplumber）。
+- **按任务体检**：桌面运行时沿用注入的 Python 包装器，按当前任务选择 Profile 并使用 `--check-only`。独立 Skill 在源码目录运行 `python3 scripts/check_deps.py --profile verify --check-only`（Windows：`py -3 scripts\check_deps.py --profile verify --check-only`），按需要将 `verify` 换成 `editor-core`、`pptx-export`、`pptx-read` 或 `materials`；`dev-shell` 仅供维护者调试壳，`full` 检查全部能力。独立 Skill 加 `--repair` 可修复可自动安装项，`--json` 输出结构化结果；无 `--profile` 的旧命令仍按 `full` 自动修复，桌面运行时不使用该入口。退出码：0 所选能力就绪 / 1 仍缺 / 2 工具或参数错误。
+- 性能以当前渲染引擎和 Deck 实测为准；layer 标签展开会增加导出页数，导出用时同时受页面数量、截图倍率及图片大小影响。
+- 依赖：Editor Core 需 Node.js、`ws`、`html2canvas`、`busboy` 与 `three`；独立 `dev-shell` 才增加 `node-pty`、浏览器 / headless xterm 与一个本机 Agent CLI。桌面质量验证复用 Host 的 Electron 渲染服务，正式插件只携带私有 Python；独立 Skill 使用 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）。PPTX 截图组装只用 Python 标准库，`--embed-html` 的附件图标另用 Pillow。桌面脚本沿用 `AICO_HOME` 与运行时包装器，能力不可用时启动或升级 AICO，不安装第二份浏览器。
+- **读取参考 PPTX**：运行 `python3 scripts/extract-pptx.py 参考.pptx 输出目录`（Windows 将 `python3` 换成 `py -3`），只用 Python 标准库，`pptx-read` Profile 只检查随包提取工具。输出 `slides.json`、`slides.md` 和 `media/`：按页提取标题、正文、备注、表格与内嵌原图，图片保留页关联。AI 直接阅读内容文件和需要的原图；结合原文件理解内容，不生成版式预览、不转 PDF、不安装 Office。图表、SmartArt 等未提取对象会逐页提示限制，不能把提取结果当作原文件全部内容。字段和操作见 [artwork.md](references/artwork.md#21-从-pptx-提取内容与原图)。
+- **读取 PDF 材料**：`materials` Profile 只检查 PyMuPDF 与 pypdf。文字、表格、原图、合并 / 拆分、渲染和普通批注用 PyMuPDF；AcroForm 字段填写用 pypdf，以保留中文字体外观。按随包 `.agents/skills/pdf/` 的适配方法执行，不用上游重装覆盖本地适配。PDF 工具缺失不影响 PPTX 内容读取。

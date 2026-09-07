@@ -129,3 +129,12 @@ _Avoid_：DSH 当前会话、最近会话
 **普通 DSH 会话（Unlinked DSH Session）**：
 没有工作项会话关联的 DSH 会话；切换到它不会改变任何工作项，但会收起当前 AICO-PPT Workbench，避免普通会话与隐藏的 Deck 上下文混用。
 _Avoid_：空闲任务会话、默认 Deck 会话
+
+## 参考材料读取
+
+**PPTX 参考内容（PPTX Reference Content）**：
+通过标准库工具 `scripts/extract-pptx.py` 提取的逐页标题、正文、备注、表格与内嵌原图，保留页序和图片关联，输出 `slides.json`、`slides.md` 与 `media/`。AI 直接读取内容文件、原图与原文件理解参考材料。图表、SmartArt 等未提取对象用逐页 `warnings` 说明；这些文件不代表完整的幻灯片视觉效果。
+_Avoid_：PPTX 渲染、版式预览、转 PDF
+
+**材料能力 Profile（Material Capability Profile）**：
+`pptx-read` 只检查随包提取工具，不安装第三方依赖；`materials` 只检查 PyMuPDF 与 pypdf，后者负责 AcroForm 字段填写。PPTX 读取与截图打包只用标准库，附件图标使用 Pillow。桌面运行时只声明私有 Python，截图和验证复用 Host 的 Electron；独立 Skill 保留 Playwright 与本机 Chrome。

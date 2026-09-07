@@ -26,9 +26,29 @@
 
 > 页序 | data-label | 页型 | 核心观点 | 排版逻辑 | **配图（类型 + 一句规格）** | 拍数
 
-## 2. 终版落地 A：从素材 PDF 抽原图（PyMuPDF）
+## 2. 终版落地 A：从参考材料提取内容与原图
 
-依赖 `pymupdf`（`python3 -m pip install pymupdf`）。若素材是 pptx，先 `soffice --headless --convert-to pdf` 转成 PDF 再走本节流程（内嵌媒体也可直接用 `zipfile` 解包 `ppt/media/` 拿原图）；PDF 的合并 / 拆分 / 文本表格提取 / 表单等进阶操作，参考仓库内置 pdf skill `.agents/skills/pdf/` 的方法与脚本。三步循环，每张图都要**目检**：
+### 2.1 从 PPTX 提取内容与原图
+
+运行随包工具，只需要 Python 标准库：
+
+```bash
+python3 scripts/extract-pptx.py 参考.pptx 输出目录
+```
+
+Windows 将 `python3` 换成 `py -3`。输出目录包含：
+
+- `slides.json`：`slides` 按实际页序排列。每页 `number` 从 1 开始，`title` 是显式标题（没有则为空，不猜标题），`text` 为按文本框 / 段落顺序拼接的正文，`notes` 为备注，`tables` 为表格，`images` 为内嵌图片。
+- 正文包含关联版式和母版上的固定文字，排除占位符的编辑提示；按对象顺序读取，不推断页面上的视觉阅读顺序。兼容性备用内容只读取一个文字分支。
+- 表格保存 `rows` 二维单元格文字与 `mergedCells` 合并范围；图片保存 `path` 与所在页关联，原始文件落在 `media/`。
+- `slides.md`：同一内容的逐页阅读稿，含原图链接。AI 直接读取文字、表格、备注，按需查看原图，并结合原文件理解内容。
+- 每页 `warnings`：标出图表、SmartArt 等未提取对象或其他限制；有提示时不能把提取结果当作原文件的完整内容。
+
+此工具只提取内容，不生成 PPTX 版式预览，不转 PDF，也不安装 Office。组合形状不会合成为一张图片，原图也不包含幻灯片上的裁剪、遮挡等最终外观；AI 按原图本身判断能否复用。选择图片后仍需目检，再用 `embed_image()` 内联进新 Deck。PDF 工具不可用不影响本流程。
+
+### 2.2 从 PDF 抽原图（PyMuPDF）
+
+依赖 `pymupdf`（`python3 -m pip install pymupdf`）。PDF 的合并 / 拆分 / 文本表格提取 / 表单等进阶操作，参考仓库内置 PDF Skill `.agents/skills/pdf/` 的方法与脚本。三步循环，每张图都要**目检**：
 
 ```python
 import fitz

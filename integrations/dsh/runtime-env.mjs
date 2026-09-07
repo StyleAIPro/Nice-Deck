@@ -26,11 +26,11 @@ async function absolutePath(path, label) {
 /** 校验发布目录内的工具文件，并构造供 Worker 与脚本包装器共同使用的环境。 */
 export async function resolveRuntime(runtime, inherited = process.env) {
   fields(runtime, ['root', 'paths'], 'aicoRuntime');
-  fields(runtime.paths, ['python', 'browser', 'office'], 'aicoRuntime.paths');
+  fields(runtime.paths, ['python'], 'aicoRuntime.paths');
   const root = await absolutePath(runtime.root, '运行时根目录');
   if (!(await stat(root)).isDirectory()) throw new Error('运行时根目录必须是目录');
   const paths = {};
-  for (const name of ['python', 'browser', 'office']) {
+  for (const name of ['python']) {
     const path = await absolutePath(runtime.paths[name], name);
     if (!within(root, path)) throw new Error(`${name} 必须位于插件运行时目录内`);
     if (!(await stat(path)).isFile()) throw new Error(`${name} 必须是普通文件`);
@@ -51,7 +51,6 @@ export async function resolveRuntime(runtime, inherited = process.env) {
   environment.PATH = [...new Set([dirname(process.execPath), ...Object.values(paths).map(dirname), ...systemPaths])].join(delimiter);
   Object.assign(environment, {
     PYTHON:paths.python, PYTHONUTF8:'1', PYTHONIOENCODING:'utf-8', PYTHONNOUSERSITE:'1', PYTHONDONTWRITEBYTECODE:'1',
-    AICO_BROWSER_EXECUTABLE:paths.browser, AICO_SOFFICE_EXECUTABLE:paths.office,
     AICO_RUNTIME_KIND:'desktop',
   });
   return { root, paths, environment };

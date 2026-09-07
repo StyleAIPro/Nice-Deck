@@ -1,107 +1,57 @@
+"""为普通 PDF 添加透明背景文字批注，保留已有表单与原文件。"""
 import json
 import sys
-
-from pypdf import PdfReader, PdfWriter
-from pypdf.annotations import FreeText
-
-
+from html import escape
+import pymupdf
+from pdf_utils import open_pdf, save_pdf
 
 
-def transform_from_image_coords(bbox, image_width, image_height, pdf_width, pdf_height):
-    x_scale = pdf_width / image_width
-    y_scale = pdf_height / image_height
-
-    left = bbox[0] * x_scale
-    right = bbox[2] * x_scale
-
-    top = pdf_height - (bbox[1] * y_scale)
-    bottom = pdf_height - (bbox[3] * y_scale)
-
-    return left, bottom, right, top
-
-
-def transform_from_pdf_coords(bbox, pdf_height):
-    left = bbox[0]
-    right = bbox[2]
-
-    pypdf_top = pdf_height - bbox[1]      
-    pypdf_bottom = pdf_height - bbox[3]   
-
-    return left, pypdf_bottom, right, pypdf_top
+def entry_rect(field, page_info, page):
+    rect = pymupdf.Rect(field["entry_bounding_box"])
+    if "pdf_width" not in page_info:
+        width, height = page_info["image_width"], page_info["image_height"]
+        if width <= 0 or height <= 0:
+            raise ValueError("参考图片尺寸必须为正数")
+        rect = rect * pymupdf.Matrix(page.rect.width / width, page.rect.height / height)
+    if rect.is_empty or not page.rect.contains(rect):
+        raise ValueError("填写区域为空或超出页面")
+    return rect * page.derotation_matrix
 
 
 def fill_pdf_form(input_pdf_path, fields_json_path, output_pdf_path):
-    
-    with open(fields_json_path, "r") as f:
-        fields_data = json.load(f)
-    
-    reader = PdfReader(input_pdf_path)
-    writer = PdfWriter()
-    
-    writer.append(reader)
-    
-    pdf_dimensions = {}
-    for i, page in enumerate(reader.pages):
-        mediabox = page.mediabox
-        pdf_dimensions[i + 1] = [mediabox.width, mediabox.height]
-    
-    annotations = []
-    for field in fields_data["form_fields"]:
-        page_num = field["page_number"]
-
-        page_info = next(p for p in fields_data["pages"] if p["page_number"] == page_num)
-        pdf_width, pdf_height = pdf_dimensions[page_num]
-
-        if "pdf_width" in page_info:
-            transformed_entry_box = transform_from_pdf_coords(
-                field["entry_bounding_box"],
-                float(pdf_height)
-            )
-        else:
-            image_width = page_info["image_width"]
-            image_height = page_info["image_height"]
-            transformed_entry_box = transform_from_image_coords(
-                field["entry_bounding_box"],
-                image_width, image_height,
-                float(pdf_width), float(pdf_height)
-            )
-        
-        if "entry_text" not in field or "text" not in field["entry_text"]:
-            continue
-        entry_text = field["entry_text"]
-        text = entry_text["text"]
-        if not text:
-            continue
-        
-        font_name = entry_text.get("font", "Arial")
-        font_size = str(entry_text.get("font_size", 14)) + "pt"
-        font_color = entry_text.get("font_color", "000000")
-
-        annotation = FreeText(
-            text=text,
-            rect=transformed_entry_box,
-            font=font_name,
-            font_size=font_size,
-            font_color=font_color,
-            border_color=None,
-            background_color=None,
-        )
-        annotations.append(annotation)
-        writer.add_annotation(page_number=page_num - 1, annotation=annotation)
-        
-    with open(output_pdf_path, "wb") as output:
-        writer.write(output)
-    
-    print(f"Successfully filled PDF form and saved to {output_pdf_path}")
-    print(f"Added {len(annotations)} text annotations")
+    with open(fields_json_path, encoding="utf-8") as stream:
+        data = json.load(stream)
+    pages = {item["page_number"]: item for item in data["pages"]}
+    count = 0
+    with open_pdf(input_pdf_path) as doc:
+        for field in data["form_fields"]:
+            text = field.get("entry_text", {}).get("text")
+            if not text:
+                continue
+            page_number = field["page_number"]
+            if not isinstance(page_number, int) or not 1 <= page_number <= len(doc):
+                raise ValueError("填写页码超出 PDF 范围")
+            page = doc[page_number - 1]
+            rect = entry_rect(field, pages[page_number], page)
+            entry = field["entry_text"]
+            color = entry.get("font_color", "000000").lstrip("#")
+            if len(color) != 6:
+                raise ValueError("font_color 必须是六位 RGB 十六进制颜色")
+            rgb = tuple(int(color[index:index + 2], 16) / 255 for index in (0, 2, 4))
+            # richtext 使用 MuPDF 内置字体回退，避免中文在基本西文字体下漏字。
+            family = {"Courier New": "monospace", "Times New Roman": "serif"}.get(entry.get("font"), "sans-serif")
+            size = float(entry.get("font_size", 14))
+            if size <= 0:
+                raise ValueError("font_size 必须为正数")
+            style = f"font-family:{family};font-size:{size}pt;color:#{color};"
+            annotation = page.add_freetext_annot(rect, escape(str(text)).replace("\n", "<br>"), richtext=True, style=style, text_color=rgb, border_width=0, rotate=page.rotation)
+            annotation.set_info(content=str(text))
+            count += 1
+        save_pdf(doc, input_pdf_path, output_pdf_path)
+    print(f"已添加 {count} 个文字批注：{output_pdf_path}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        print("Usage: fill_pdf_form_with_annotations.py [input pdf] [fields.json] [output pdf]")
-        sys.exit(1)
-    input_pdf = sys.argv[1]
-    fields_json = sys.argv[2]
-    output_pdf = sys.argv[3]
-    
-    fill_pdf_form(input_pdf, fields_json, output_pdf)
+        raise SystemExit("用法：fill_pdf_form_with_annotations.py <input.pdf> <fields.json> <output.pdf>")
+    fill_pdf_form(*sys.argv[1:])
