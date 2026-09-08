@@ -63,7 +63,7 @@ export async function inspectEnvironment({
 } = {}) {
   if (delivery === 'desktop') {
     if (repair) throw new Error('桌面版运行环境随插件提供，请在设置的插件页重新安装 AICO-PPT 插件。');
-    profiles = profiles.includes('full') ? ['editor-core', 'verify', 'pptx-export', 'materials'] : profiles;
+    profiles = profiles.includes('full') ? ['editor-core', 'verify', 'pptx-export', 'pptx-read', 'materials'] : profiles;
   }
   const args = [join(PROJECT_ROOT, 'scripts/check_deps.py')];
   for (const profile of profiles) args.push('--profile', profile);

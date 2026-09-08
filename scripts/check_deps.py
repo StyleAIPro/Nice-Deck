@@ -3,8 +3,8 @@
 """依赖体检 doctor —— 按任务 Profile 检查和修复 AICO-PPT 依赖。
 
 覆盖：
-  · 外部依赖 skill：pdf（vendored 于 .agents/skills/pdf/）及其 Python 库 pypdf / pdfplumber
-  · 本 skill 运行时：Node ≥ 18、playwright-core（三级查找）、python-pptx、pymupdf、Chrome、soffice(LibreOffice)
+  · PDF 材料：PyMuPDF 负责读取/表格/抽图/页面操作，pypdf 仅用于保留字体填写 AcroForm
+  · 本 skill 运行时：Node ≥ 18、标准库 PPTX 打包/提取；桌面渲染服务或独立 Chrome
   · Editor Core：ws、html2canvas、busboy、three
   · 独立 Dev Shell：node-pty、@xterm/xterm、@xterm/headless、@xterm/addon-serialize、Agent CLI
 
@@ -13,7 +13,8 @@ Profile：
   dev-shell    独立开发/调试壳所需的 Editor Core、PTY、xterm 和 Agent CLI
   verify       浏览器截图、溢出检查和逐拍验证
   pptx-export  HTML → PPTX 导出
-  materials    PDF/PPTX 外部材料读取与转换
+  pptx-read    PPTX 逐页内容与内嵌原图提取（仅标准库）
+  materials    PDF 外部材料读取与处理
   full         上述全部能力（兼容旧版默认行为）
 
 行为（默认）：为兼容旧命令，仍检查并修复 full；新文档应显式传 --profile。
@@ -119,11 +120,6 @@ def load_agent_runtime_settings(environment=None):
 
 # ---- 各依赖的探测函数：返回 (present: bool, detail: str) ----
 
-def probe_pdf_skill():
-    d = REPO / ".agents" / "skills" / "pdf"
-    have = (d / "SKILL.md").is_file() and (d / "scripts").is_dir()
-    return have, str(d.relative_to(REPO)) if have else "未找到 .agents/skills/pdf/"
-
 def probe_pymod(mod):
     def _p():
         cp = run([sys.executable, "-c", f"import {mod}"],
@@ -153,6 +149,15 @@ def probe_node_module(mod):
 
 def probe_nodemod(mod):
     return lambda: probe_node_module(mod)
+
+def probe_three_browser_files():
+    """检查 Editor 实际加载的浏览器文件，兼容不带 CommonJS 入口的精简包。"""
+    files = ("three.module.min.js", "three.core.min.js")
+    build = REPO / "node_modules" / "three" / "build"
+    missing = [name for name in files if not (build / name).is_file()]
+    if missing:
+        return False, "缺少 Three.js 浏览器文件：" + "、".join(missing)
+    return True, "node_modules/three/build/：" + "、".join(files)
 
 def probe_node_pty():
     """不仅检查模块存在，还真实创建一次 PTY，捕获 macOS spawn-helper 权限问题。"""
@@ -237,27 +242,24 @@ def probe_chrome():
             return True, w
     return False, "未找到 Google Chrome"
 
-def probe_soffice():
-    found = os.environ.get("AICO_SOFFICE_EXECUTABLE") or shutil.which("soffice")
-    if found:
-        # which 可能命中指向已卸载应用的残留 shim/symlink，必须真实执行一次。
-        version = run([found, "--version"], capture_output=True, text=True)
-        if version.returncode == 0:
-            return True, found
-        failure = (version.stderr or version.stdout or "无法启动").strip().splitlines()[-1]
-        return False, f"找到 {found}，但无法启动：{failure[:500]}"
-    if sys.platform == "darwin":
-        candidate = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
-        if candidate.is_file():
-            return True, str(candidate)
-    if sys.platform == "win32":
-        for root in filter(None, (
-            os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"),
-        )):
-            candidate = Path(root) / "LibreOffice" / "program" / "soffice.exe"
-            if candidate.is_file():
-                return True, str(candidate)
-    return False, "未找到 soffice"
+def probe_pptx_extractor():
+    extractor = REPO / "scripts" / "extract-pptx.py"
+    present = extractor.is_file()
+    return present, "scripts/extract-pptx.py（仅 Python 标准库）" if present else "未找到 scripts/extract-pptx.py"
+
+def probe_pptx_builder():
+    base = REPO / "scripts" / "html2pptx"
+    files = (base / "build_pptx.py", *(base / "template" / name for name in ("slideMaster.xml", "slideLayout.xml", "theme.xml")))
+    missing = [str(path.relative_to(REPO)) for path in files if not path.is_file()]
+    return not missing, "缺少 " + "、".join(missing) if missing else "标准库截图 PPTX 打包器与 XML 模板"
+
+def probe_desktop_renderer():
+    """实际连接当前宿主并验证隔离页面；能力文件存在不等于服务可用。"""
+    try:
+        cp = run(["node", str(REPO / "scripts" / "verify" / "desktop-renderer.mjs"), "--check"], capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return False, "桌面渲染服务检查超时，请重启 AICO 桌面版"
+    return cp.returncode == 0, (cp.stdout if cp.returncode == 0 else cp.stderr or "桌面渲染服务不可用").strip()
 
 
 def _windows_cli_directories():
@@ -383,16 +385,8 @@ def pip(*pkgs):
     return [sys.executable, "-m", "pip", "install", *pkgs]
 
 CHECKS = [
-    dict(key="pdf-skill", label="pdf 依赖 skill", why="PDF 合并/拆分/表格/表单",
-         probe=probe_pdf_skill,
-         install=["npx", "--yes", "skills", "add",
-                  "https://github.com/anthropics/skills", "--skill", "pdf"],
-         install_cwd=str(REPO),
-         hint="npx skills add https://github.com/anthropics/skills --skill pdf"),
-    dict(key="pypdf", label="pypdf", why="pdf skill：PDF 读写",
+    dict(key="pypdf", label="pypdf", why="AcroForm 表单填写：保留原有字体与交互",
          probe=probe_pymod("pypdf"), install=pip("pypdf")),
-    dict(key="pdfplumber", label="pdfplumber", why="pdf skill：文本/表格提取",
-         probe=probe_pymod("pdfplumber"), install=pip("pdfplumber")),
     dict(key="node", label="Node.js", why="verify 三件套 / html2pptx",
          probe=probe_node, install=None,
          hint="安装 Node ≥ 18（nodejs.org 或 brew install node）"),
@@ -413,7 +407,7 @@ CHECKS = [
          probe=probe_nodemod("@xterm/addon-serialize"),
          install=["npm", "i", "--no-save", "@xterm/addon-serialize@0.13.0"], install_cwd=str(REPO)),
     dict(key="three", label="three", why="启动页红白流体交互背景",
-         probe=probe_nodemod("three"), install=["npm", "i", "three@0.185.1"], install_cwd=str(REPO)),
+         probe=probe_three_browser_files, install=["npm", "i", "three@0.185.1"], install_cwd=str(REPO)),
     dict(key="agent-cli", label="Agent CLI", why="可视化编辑器 Agent 终端",
          probe=probe_agent_cli, install=None,
          hint="安装并登录 Codex、Claude Code 或 OpenCode（任意一个即可）"),
@@ -424,25 +418,28 @@ CHECKS = [
     dict(key="chrome", label="Google Chrome", why="playwright channel:chrome",
          probe=probe_chrome, install=None,
          hint="安装 Google Chrome（google.com/chrome）"),
-    dict(key="python-pptx", label="python-pptx", why="HTML → PPTX 导出",
-         probe=probe_pymod("pptx"), install=pip("python-pptx")),
-    dict(key="pymupdf", label="pymupdf", why="解析 pptx/pdf 参考素材",
-         probe=probe_pymod("fitz"), install=pip("pymupdf")),
-    dict(key="soffice", label="LibreOffice(soffice)", why="pptx → pdf 转换",
-         probe=probe_soffice, install=None,
-         hint="安装 LibreOffice（libreoffice.org 或 brew install --cask libreoffice）"),
-    dict(key="reportlab", label="reportlab", why="pdf skill：生成 PDF（可选）",
-         probe=probe_pymod("reportlab"), install=pip("reportlab"), optional=True),
+    dict(key="desktop-renderer", label="桌面渲染服务", why="复用 AICO Electron 截图与验证",
+         probe=probe_desktop_renderer, install=None, hint="启动或升级 AICO 桌面版，无需另装浏览器"),
+    dict(key="pptx-builder", label="PPTX 打包工具", why="将逐页截图打包为 PPTX（标准库）",
+         probe=probe_pptx_builder, install=None, hint="恢复完整 AICO-PPT 文件或重新安装插件"),
+    dict(key="pillow", label="Pillow", why="PPTX 中内嵌 HTML 附件的图标",
+         probe=probe_pymod("PIL"), install=pip("pillow")),
+    dict(key="pymupdf", label="pymupdf", why="PDF 文本/表格/原图/合并拆分/批注与渲染",
+         probe=probe_pymod("pymupdf"), install=pip("pymupdf")),
+    dict(key="pptx-extractor", label="PPTX 内容提取工具", why="按页提取标题、正文、备注、表格及内嵌原图",
+         probe=probe_pptx_extractor, install=None,
+         hint="恢复完整 AICO-PPT Skill 文件；桌面版请重新安装 AICO-PPT 插件，无需另装第三方依赖"),
 ]
 
 
-PROFILE_ORDER = ("editor-core", "dev-shell", "verify", "pptx-export", "materials")
+PROFILE_ORDER = ("editor-core", "dev-shell", "verify", "pptx-export", "pptx-read", "materials")
 PROFILE_LABELS = {
     "editor-core": "Editor Core",
     "dev-shell": "独立 Dev Shell",
     "verify": "质量验证",
     "pptx-export": "PPTX 导出",
-    "materials": "外部材料解析",
+    "pptx-read": "PPTX 内容读取",
+    "materials": "PDF 材料解析",
     "full": "全部能力",
 }
 PROFILE_MEMBERS = {
@@ -453,10 +450,11 @@ PROFILE_MEMBERS = {
         "node", "ws", "html2canvas", "busboy", "three", "node-pty",
         "@xterm/xterm", "@xterm/headless", "@xterm/addon-serialize", "agent-cli",
     },
-    "verify": {"node", "playwright-core", "chrome"},
-    "pptx-export": {"node", "playwright-core", "chrome", "python-pptx"},
+    "verify": {"node", "playwright-core", "chrome", "desktop-renderer"},
+    "pptx-export": {"node", "playwright-core", "chrome", "desktop-renderer", "pptx-builder", "pillow"},
+    "pptx-read": {"pptx-extractor"},
     "materials": {
-        "pdf-skill", "pypdf", "pdfplumber", "pymupdf", "soffice", "reportlab",
+        "pymupdf", "pypdf",
     },
 }
 
@@ -481,9 +479,10 @@ def normalize_profiles(profile_names):
 
 def checks_for_profiles(profile_names):
     selected_profiles = normalize_profiles(profile_names)
+    excluded = {"playwright-core", "chrome"} if os.environ.get("AICO_RUNTIME_KIND") == "desktop" else {"desktop-renderer"}
     selected = [
         check for check in CHECKS
-        if any(profile in check["profiles"] for profile in selected_profiles)
+        if check["key"] not in excluded and any(profile in check["profiles"] for profile in selected_profiles)
     ]
     return selected_profiles, selected
 

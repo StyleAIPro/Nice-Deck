@@ -1,5 +1,9 @@
 # 验证与导出
 
+桌面版从 Editor 直接验证和导出，截图复用 AICO Host 的 Electron，PPTX 由插件私有 Python 组装。新版插件要求 Host 支持 `apiVersion: 2` 发布与 `desktopRenderer: 1`；渲染服务缺失时启动或升级 Host，插件文件缺失时从商店重装插件。桌面脚本应沿用注入的运行时包装器与 `AICO_HOME`。
+
+下面的依赖安装命令仅适用于独立 Skill 或源码开发环境；独立 Skill 使用 Playwright 与本机 Chrome。桌面版诊断使用相同 Profile 的 `--check-only`，不在应用资源目录执行 `--repair`。
+
 ## 启用质量验证
 
 ```bash
@@ -26,7 +30,7 @@ node scripts/verify/steps.mjs my-deck.html <页label> /tmp/steps
 
 ## 导出 PPTX
 
-先启用导出能力：
+独立 Skill 先启用导出能力：
 
 ```bash
 python3 scripts/check_deps.py --profile pptx-export --repair
@@ -34,7 +38,7 @@ python3 scripts/check_deps.py --profile pptx-export --repair
 
 在 Editor 中，可点击画布工具栏右侧、画布尺寸之前的导出图标直接下载 PPTX。导出使用当前工作副本快照，包含屏幕上正在预览但尚未固化的修改；导出本身不会固化修改，也不会清空撤销记录。
 
-再执行：
+命令行导出：
 
 ```bash
 python3 scripts/html2pptx/convert.py my-deck.html my-deck.pptx

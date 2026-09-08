@@ -4,9 +4,11 @@
 
 正式用户入口只有 AICO 独立软件。先安装 AICO-Harness 应用：Windows 使用 `.exe` 安装器，macOS 将 DMG 中的 AICO 拖入“应用程序”，之后从应用图标启动。应用先安装 Harness，PPT 与所需运行时由插件商店按需安装。实际可下载平台以发布者提供并验证过的安装包为准；公开下载源、签名和 notarization 尚待发布者完成。
 
-首次打开后，在“设置 → 插件 → 插件商店”选择 AICO-PPT 并安装。没有可用来源时，填写发布者提供的 HTTPS 目录地址；该目录应包含 `catalog.json` 和目录记录引用的归档文件。管理器启动时刷新已配置来源，网络不可用时保留缓存目录。安装会下载并校验 PPT 包及其 Python、浏览器和 Office 组件，可取消并重试。激活后页面自动刷新一次以载入插件界面，Host 会话继续运行。在“设置 → 模型”配置模型服务或完成所选服务的登录后，从侧边栏进入 AICO-PPT。此流程无需执行下方源码命令，也无需安装 Codex、系统 Chrome 或 Office。
+首次打开后，在“设置 → 插件 → 插件商店”选择 AICO-PPT 并安装。没有可用来源时，填写发布者提供的 HTTPS 目录地址；该目录应包含 `catalog.json` 和目录记录引用的归档文件。管理器启动时刷新已配置来源，网络不可用时保留缓存目录。安装会下载并校验 PPT 包及其 Python 组件，截图与验证复用 AICO 的 Electron，可取消并重试。新发布要求兼容的桌面渲染能力；旧 Host 需先升级 AICO。激活后页面自动刷新一次以载入插件界面，Host 会话继续运行。在“设置 → 模型”配置模型服务或完成所选服务的登录后，从侧边栏进入 AICO-PPT。此流程无需执行下方源码命令，也无需安装 Codex 或系统 Chrome。
 
-桌面版的“安装与诊断”显示插件私有能力；缺少资源时报告安装故障，不在应用资源目录运行 npm/pip 修复。移除插件会撤销注册并保留准备产物、项目及用户数据，可从保留的产物重新安装。更新 Host 前关闭 AICO，再安装替换包，`~/.aico-harness` 数据和 Deck 项目文件保留。已安装原生 DSH 或独立 AICO-PPT Skill 的用户可保留原安装。Harness 网页启动器已收纳到源码仓库的 `tools/dev-web/`，只供维护者调试；普通用户无需运行它。私有描述、Worker 与脚本包装器见 [ADR-0007](docs/adr/0007-plugin-private-runtime.md)，工具与原生对话框接口见 [ADR-0006](docs/adr/0006-desktop-runtime-capabilities.md)。
+正式插件归档不包含 `docs/showcase/` 展示媒体与独立 Dev Shell 的 PTY / xterm 依赖。Three.js 保留编辑器加载的两个浏览器文件、包信息与许可证；Python 的文档依赖仅为 PyMuPDF、pypdf 和 Pillow，并清除可重新生成的 `__pycache__`，保留源码及独立字节码。PPTX 截图打包和参考内容提取只用标准库；Pillow 用于可选 HTML 附件图标。这些裁剪仅作用于发布准备目录；完整源码中的模板、演示和 Dev Shell 保留，开发调试依赖继续按下文准备。已安装版本的磁盘占用以实际更新后的产物为准。
+
+桌面版的“安装与诊断”显示插件私有能力；缺少资源时报告安装故障，不在应用资源目录运行 npm/pip 修复。移除插件会撤销注册并保留项目及用户数据。桌面冷启动按当前版本、上一版本及会话租约保留产物，并回收能够确认归属的旧产物；旧的仅含 identity 标记的安装保持原位，不自动回收。已验证组件可从缓存复用。更新 Host 前关闭 AICO，再安装替换包，`~/.aico-harness` 数据和 Deck 项目文件保留。已安装原生 DSH 或独立 AICO-PPT Skill 的用户可保留原安装。Harness 网页启动器已收纳到源码仓库的 `tools/dev-web/`，只供维护者调试；普通用户无需运行它。私有描述、Worker 与脚本包装器见 [ADR-0007](docs/adr/0007-plugin-private-runtime.md)，工具与原生对话框接口见 [ADR-0006](docs/adr/0006-desktop-runtime-capabilities.md)。
 
 ## 独立 Skill 安装（按需）
 
@@ -41,7 +43,7 @@ python3 scripts/install.py install
 
 1. 把当前仓库注册到 `~/.agents/skills/aico-ppt`；
 2. 不检查或安装 AICO-Harness、Agent CLI、PTY 或 xterm；
-3. 制作时按任务准备 `editor-core`、`verify`、`pptx-export` 或 `materials` 依赖。
+3. 制作时按任务准备 `editor-core`、`verify`、`pptx-export`、`pptx-read` 或 `materials` 依赖。
 
 安装后新开 Agent 任务使用 `aico-ppt`。制作、修改与验证可独立完成，无需启动 AICO-Harness 或 Dev Shell。需要可视化微调时，从 AICO-Harness 的 AICO-PPT 插件打开 Deck。
 
@@ -163,13 +165,22 @@ PPTX 导出：
 python3 scripts/check_deps.py --profile pptx-export --repair
 ```
 
-PDF/PPTX 外部材料解析：
+PPTX 参考内容读取只用标准库，无需修复第三方依赖：
+
+```bash
+python3 scripts/check_deps.py --profile pptx-read --check-only
+python3 scripts/extract-pptx.py 参考.pptx 输出目录
+```
+
+输出 `slides.json`、`slides.md` 和 `media/`，供 AI 按页直接阅读文字、备注、表格和原始图片。工具不渲染 PPTX，也不转换 PDF；不支持的对象会标出限制，详见 [配图工作流](references/artwork.md#21-从-pptx-提取内容与原图)。
+
+PDF 外部材料解析只需随包适配的 PDF Skill、PyMuPDF 与 pypdf；文字、表格、原图、渲染、批注和页面操作使用 PyMuPDF，pypdf 仅用于 AcroForm 填写：
 
 ```bash
 python3 scripts/check_deps.py --profile materials --repair
 ```
 
-Windows 把 `python3` 换成 `py -3`。Chrome、LibreOffice 和 Node.js 需要用户按诊断提示手工安装；Agent CLI 只属于 `dev-shell` Profile。
+Windows 把 `python3` 换成 `py -3`。Chrome 和 Node.js 需要用户按诊断提示手工安装；Agent CLI 只属于 `dev-shell` Profile。
 
 ### 卸载独立 Skill
 
@@ -182,7 +193,7 @@ python3 scripts/install.py uninstall
 - 当前仓库；
 - 用户创建的 Deck；
 - `.aico-ppt-editor` 中的工作副本和会话；
-- Python、Node.js、Chrome、LibreOffice 或 Agent CLI。
+- Python、Node.js、Chrome 或 Agent CLI。
 
 如果注册目标在安装后被改到别处，卸载会返回 `UNINSTALL_TARGET_CHANGED` 并拒绝删除。
 
@@ -300,13 +311,13 @@ Codex、Node、HOME 与 Windows→WSL 路径映射。任务终端依次显示“
 
 ### Editor 能打开，但验证或导出不可用
 
-AICO 应用用户先查看插件内“安装与诊断”，缺少私有资源时从插件商店重新安装或重试，不在应用资源目录运行 npm/pip。独立 Skill 或源码开发者才按本机依赖检查结果修复 `verify`、`pptx-export` 等能力。
+AICO 应用用户先查看插件内“安装与诊断”：渲染服务不可用时启动或升级支持 `desktopRenderer: 1` 的 Host，缺少插件私有资源时从插件商店重新安装或重试，不在应用资源目录运行 npm/pip。独立 Skill 或源码开发者才按本机依赖检查结果修复 `verify`、`pptx-export` 等能力。
 
 ### 开发调试：macOS 已安装 Python 包，Editor 却显示未就绪
 
 本仓库最新版 `tools/dev-shell/AICO-PPT Dev Shell.app` 会在 Apple Silicon 上显式使用 arm64，避免 Rosetta Python 无法载入 arm64 扩展。更新后请彻底退出旧工作台并重新双击；“安装与诊断”会把真正的架构冲突显示为“已安装但架构不兼容”，不会再笼统写成缺少。
 
-如果只剩 LibreOffice，先执行 `soffice --version`。Homebrew 链接存在但 `/Applications/LibreOffice.app` 不存在属于残留安装，可运行 `brew reinstall --cask libreoffice` 修复。
+PPTX 读取不依赖 LibreOffice 或 PDF 库；`pptx-read` 若提示提取工具缺失，应恢复完整 Skill 文件，桌面版从插件商店重新安装 AICO-PPT。
 
 ### 开发调试：macOS 阻止打开 Dev Shell `.app`
 

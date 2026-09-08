@@ -7,7 +7,7 @@
 | 文件 | 所属平面 | 责任 |
 |---|---|---|
 | `index.mjs` | Plugin Host | 注册根目录唯一 `SKILL.md`；按 `aicoRuntime` 配置选择私有 Worker 或源码 Editor；向 Client 注入带随机令牌的入口 URL 和品牌资源 |
-| `runtime-env.mjs` | 私有运行时 | 校验插件目录内的 Python / 浏览器 / Office，构造独立环境；Node 复用 Host 的可执行文件 |
+| `runtime-env.mjs` | 私有运行时 | 校验插件目录内的 Python，构造独立环境；Node 与 Electron 渲染复用 Host |
 | `runtime-host.mjs` / `runtime-worker.mjs` | Worker 生命周期 | 在独立环境中加载原 `startAppServer({ embeddedMode:'dsh' })`，报告实际 loopback URL，等待关闭并处理超时和崩溃 |
 | `runtime-run.mjs` | 模型脚本入口 | 读取本包 `.aico-runtime.json`，用同一私有环境运行 `python3` 或 `node`；保留当前工作目录、标准输入和解释器参数 |
 | `client.js` | Plugin Client | 在 `sidebar.footer.action` 注册 AICO-PPT 入口；在 `workbench.persistent-view` 注册 iframe 宿主；通过 `ctx.sessionStarts` 向 DSH 统一“新会话”入口发布一行 AICO-PPT 标签及其当前优先的确切 Deck 子菜单；提供 Workspace / Session 创建、打开、查询和精确发送命令 |
@@ -44,9 +44,9 @@
 
 ## 应用内插件运行时
 
-AICO-Harness 桌面安装器只安装 Host。用户从设置中的插件目录安装 AICO-PPT 后，插件管理器负责下载与校验本包及 Python、浏览器、Office，准备成功后再注册现有 Web profile；卸载只移除插件注册与可回收发行文件，项目和用户数据保持原位。独立 Skill 与源码安装不要求桌面运行时描述文件。
+AICO-Harness 桌面安装器只安装 Host。用户从设置中的插件目录安装 AICO-PPT 后，插件管理器负责下载与校验本包及 Python，桌面渲染复用 Host 的 Electron，准备成功后再注册现有 Web profile；卸载只移除插件注册与可回收发行文件，项目和用户数据保持原位。独立 Skill 与源码安装不要求桌面运行时描述文件。
 
-桌面管理器调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python, browser, office } } })`。`root` 是当前插件发行目录，三个工具路径均为存在的绝对文件路径；跟随软链接后的实际文件必须位于该目录内。描述对象只接受这些字段，不接受凭据或任意环境变量。管理器将同一个 `aicoRuntime` 对象写入插件包根目录的 `.aico-runtime.json`，供模型脚本包装器读取。Node 始终使用 `process.execPath`，不在 PPT 插件内安装第二份 Node。
+桌面管理器调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python } } })`。`root` 是当前插件发行目录，Python 路径为存在的绝对文件路径；跟随软链接后的实际文件必须位于该目录内。描述对象只接受这些字段，不接受凭据或任意环境变量。管理器将同一个 `aicoRuntime` 对象写入插件包根目录的 `.aico-runtime.json`，供模型脚本包装器读取。Node 始终使用 `process.execPath`，不在 PPT 插件内安装第二份 Node。PPTX 参考材料由标准库工具 `scripts/extract-pptx.py` 按页提取内容与原图；运行时不接受 `office` 或 `browser` 字段，也不设置相应工具路径。新发布声明 `apiVersion: 2` 和 `requires: {desktopRenderer: 1}`；桌面脚本通过 `AICO_HOME/desktop-renderer.json` 连接 Host 的私有渲染服务，Host 不可用时不回退本机浏览器。继承的 `AICO_SOFFICE_EXECUTABLE` 仍被过滤，避免旧环境污染。
 
 Host 在创建 Worker 时传入独立环境，Worker 收到环境后才导入 Editor 模块，并显式传入 `pythonExecutable`。私有 PATH 包含声明的工具、Host Node 和基本系统工具目录；继承的 Python / Node / Playwright 运行时覆盖与凭据变量被移除。`AICO_HOME`、`AICO_PPT_EDITOR_STATE_ROOT`、项目 sidecar 和工作副本仍由现有状态解析器管理，插件不修改全局 `process.env`。没有 `aicoRuntime` 时，`apply(ctx)` 沿用源码 Editor 行为。
 

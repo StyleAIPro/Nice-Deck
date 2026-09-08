@@ -11,6 +11,8 @@ test('桌面诊断识别内置 Skill，并跳过独立 Dev Shell 和宿主注册
     assert.equal(args.includes('full'), false);
     assert.equal(args.includes('dev-shell'), false);
     assert.equal(args.includes('pptx-export'), true);
+    assert.equal(args.includes('pptx-read'), true);
+    assert.equal(args.includes('materials'), true);
     return { ready:true };
   } });
   assert.equal(result.delivery, 'desktop');

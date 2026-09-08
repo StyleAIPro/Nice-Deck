@@ -21,6 +21,8 @@ FATSECT    = 0xFFFFFFFD
 DIFSECT    = 0xFFFFFFFC
 NOSTREAM   = 0xFFFFFFFF
 SECTOR     = 512
+MINI_SECTOR = 64
+MINI_CUTOFF = 4096
 
 
 def _ole10native(data: bytes, label: str) -> bytes:
@@ -75,16 +77,20 @@ def _dir_entry(name: str, obj_type: int, start_sector: int, size: int,
 def build_ole_package(data: bytes, label: str) -> bytes:
     """把 data（文件字节）封装为完整 CFBF OLE Package，返回 .bin 字节。"""
     stream = _ole10native(data, label)
+    # MS-CFB：小于 4096 字节的流由 mini FAT 索引；根目录指向承载它的普通扇区链。
+    small = len(stream) < MINI_CUTOFF
+    mini_count = (len(stream) + MINI_SECTOR - 1) // MINI_SECTOR if small else 0
+    M = 1 if small else 0  # 单个小流最多 64 个 mini sector，一个 mini FAT 扇区足够。
     data_sectors = (len(stream) + SECTOR - 1) // SECTOR
 
     # 布局：先估算 DIFAT/FAT 数量（存在相互依赖，迭代到稳定）
     D = 0
     while True:
-        # 1(dir) + D(difat) + F(fat) + data_sectors
+        # 1(dir) + D(difat) + F(fat) + M(minifat) + data_sectors
         # F 需覆盖全部扇区
         F = 1
         while True:
-            total = 1 + D + F + data_sectors
+            total = 1 + D + F + M + data_sectors
             need_F = (total + 127) // 128
             if need_F <= F:
                 break
@@ -97,9 +103,10 @@ def build_ole_package(data: bytes, label: str) -> bytes:
     dir_sector    = 0
     difat_sectors = list(range(1, 1 + D))
     fat_sectors   = list(range(1 + D, 1 + D + F))
-    first_data    = 1 + D + F
+    mini_fat_sector = 1 + D + F if small else ENDOFCHAIN
+    first_data    = 1 + D + F + M
     data_sec_ids  = list(range(first_data, first_data + data_sectors))
-    total_sectors = 1 + D + F + data_sectors
+    total_sectors = 1 + D + F + M + data_sectors
 
     # ---- FAT 内容 ----
     fat = [FREESECT] * (F * 128)
@@ -108,6 +115,8 @@ def build_ole_package(data: bytes, label: str) -> bytes:
         fat[s] = DIFSECT
     for s in fat_sectors:
         fat[s] = FATSECT
+    if small:
+        fat[mini_fat_sector] = ENDOFCHAIN
     for i, s in enumerate(data_sec_ids):
         fat[s] = data_sec_ids[i + 1] if i + 1 < len(data_sec_ids) else ENDOFCHAIN
 
@@ -123,8 +132,9 @@ def build_ole_package(data: bytes, label: str) -> bytes:
         difat_sector_data.append(chunk + [nxt])
 
     # ---- 目录 ----
-    root   = _dir_entry("Root Entry", 5, ENDOFCHAIN, 0, child=1, clsid=PACKAGE_CLSID)
-    stream_entry = _dir_entry("\x01Ole10Native", 2, data_sec_ids[0], len(stream))
+    root = _dir_entry("Root Entry", 5, first_data if small else ENDOFCHAIN,
+                      mini_count * MINI_SECTOR, child=1, clsid=PACKAGE_CLSID)
+    stream_entry = _dir_entry("\x01Ole10Native", 2, 0 if small else data_sec_ids[0], len(stream))
     empty  = _dir_entry("", 0, 0, 0)
     dir_bytes = root + stream_entry + empty + empty
     dir_bytes += b"\x00" * (SECTOR - len(dir_bytes))
@@ -142,9 +152,9 @@ def build_ole_package(data: bytes, label: str) -> bytes:
     h += struct.pack("<I", F)                         # num FAT sectors
     h += struct.pack("<I", dir_sector)               # first dir sector
     h += struct.pack("<I", 0)                         # transaction sig
-    h += struct.pack("<I", 0x00001000)               # mini stream cutoff
-    h += struct.pack("<I", ENDOFCHAIN)               # first miniFAT sector
-    h += struct.pack("<I", 0)                         # num miniFAT sectors
+    h += struct.pack("<I", MINI_CUTOFF)               # mini stream cutoff
+    h += struct.pack("<I", mini_fat_sector)           # first miniFAT sector
+    h += struct.pack("<I", M)                         # num miniFAT sectors
     h += struct.pack("<I", difat_sectors[0] if D else ENDOFCHAIN)  # first DIFAT
     h += struct.pack("<I", D)                         # num DIFAT sectors
     h += b"".join(struct.pack("<I", v) for v in header_difat)
@@ -158,6 +168,10 @@ def build_ole_package(data: bytes, label: str) -> bytes:
         out += b"".join(struct.pack("<I", v) for v in chunk)
     fat_bytes = b"".join(struct.pack("<I", v) for v in fat)
     out += fat_bytes                                  # fat sectors
+    if small:
+        mini_fat = list(range(1, mini_count)) + [ENDOFCHAIN]
+        mini_fat += [FREESECT] * (SECTOR // 4 - mini_count)
+        out += b"".join(struct.pack("<I", value) for value in mini_fat)
     padded = stream + b"\x00" * (data_sectors * SECTOR - len(stream))
     out += padded                                     # data sectors
     assert len(out) == (1 + total_sectors) * SECTOR, (len(out), (1 + total_sectors) * SECTOR)

@@ -23,12 +23,12 @@ test('模型 Node 脚本复用 Host Node、调用方目录与私有环境，参�
   const { runtime, project, entry } = await wrapperFixture(t);
   const code = 'console.log(JSON.stringify({node:process.execPath,cwd:process.cwd(),args:process.argv.slice(1),python:process.env.PYTHON,browser:process.env.AICO_BROWSER_EXECUTABLE,office:process.env.AICO_SOFFICE_EXECUTABLE,kind:process.env.AICO_RUNTIME_KIND,secret:process.env.AICO_PLUGIN_BRIDGE_TOKEN}))';
   const result = spawnSync(process.execPath, [entry, 'node', '-e', code, 'value & untouched'], {
-    cwd:project, encoding:'utf8', env:{ ...process.env, PYTHON:'/other/python', AICO_PLUGIN_BRIDGE_TOKEN:'do-not-copy' },
+    cwd:project, encoding:'utf8', env:{ ...process.env, PYTHON:'/other/python', AICO_SOFFICE_EXECUTABLE:'/old/soffice', AICO_PLUGIN_BRIDGE_TOKEN:'do-not-copy' },
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
     node:process.execPath, cwd:project, args:['value & untouched'], python:runtime.paths.python,
-    browser:runtime.paths.browser, office:runtime.paths.office, kind:'desktop',
+    kind:'desktop',
   });
   const rejected = spawnSync(process.execPath, [entry, 'sh', '-c', 'exit 0'], { encoding:'utf8' });
   assert.equal(rejected.status, 2);

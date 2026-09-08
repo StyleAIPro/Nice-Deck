@@ -1222,7 +1222,7 @@ export async function startAppServer({
           return;
         }
         if (body.kind === 'profile'
-          && ['editor-core', 'dev-shell', 'verify', 'pptx-export', 'materials'].includes(body.profile)) {
+          && ['editor-core', 'dev-shell', 'verify', 'pptx-export', 'pptx-read', 'materials'].includes(body.profile)) {
           sendJson(response, 200, {
             kind:'profile', profile:body.profile,
             result:await inspectEnvironment({ profiles:[body.profile], repair:true }),

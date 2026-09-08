@@ -11,7 +11,7 @@
 
 配套发行和启动隔离由 AICO-Harness 的 `scripts/aico.mjs` 负责，继续通过 DSH Web profile 加载本包。AICO 全局状态位于 `~/.aico-harness/ppt`，独立 Skill 的默认状态解析不变；项目 sidecar 继续原位复用。`scripts/editor/import-history.mjs` 只在停止目标运行时后，将受支持索引原子导入空目标，清空旧 DSH 关联；它不接管安装器、全局 Skill 注册、凭据或项目文件。接口决策见 [ADR-0005](adr/0005-aico-installation-and-history-import.md)。
 
-AICO 桌面包通过环境接口提供私有运行时和原生文件选择，PPT 不依赖 Electron，也不拥有安装器或进程监督。诊断显示内置能力，浏览器启动参数在验证、导出和 headless Editor 之间共用。详见 [ADR-0006](adr/0006-desktop-runtime-capabilities.md)。
+AICO 桌面包通过环境接口提供私有运行时和原生文件选择，PPT 不依赖 Electron，也不拥有安装器或进程监督。诊断显示内置能力，桌面验证、导出和 headless Editor 共用 Host 的 Electron 渲染服务；独立 Skill 继续使用 Playwright 与本机 Chrome。详见 [ADR-0006](adr/0006-desktop-runtime-capabilities.md)。
 
 独立 Skill 使用 `python3 scripts/deck-editor.py <deck.html> --headless-workspace` 启动后台 Managed Workspace；该入口复用 Editor Core 的受控 frame、Mutation、验证和固化，不打开可见窗口或本机 Agent PTY。
 
@@ -71,7 +71,7 @@ aico-ppt 是一个符合 `SKILL.md` 目录约定的 **Agent Skill**，不是普�
 3. **统一退出码契约**：所有可执行脚本一致——`0` 通过 / `1` 检出业务问题 / `2` 工具或参数错误，可直接接 CI。
 4. **页面身份分层**。Managed Editor 使用持久且全局唯一的 `data-page-id` 作为稳定页面身份，页序、标题或 `data-label` 变化不影响既有 action；shot / steps / measure_overflow / edit-bundle 仍以 `data-label` 作为工具侧页名，因此这些传统脚本要求 label 唯一，多数在同名时只取第一个（见 `editing-guide.md` §4）。
 5. **危险操作先预览、写盘要原子、落盘后复核**。`apply_bg.py` 默认只打印摘要（`--yes` 才落盘），写盘走「临时文件 + `os.replace`」，之后从盘上重读复核（旧 key 零残留、引用数一致）再跑 `eb.verify`。
-6. **缺依赖时给出可操作提示**。playwright-core 三级查找（`PLAYWRIGHT_CORE` 环境变量 → 直接 import → openclaw 内置路径），四处实现（三个 verify 脚本 + shoot.mjs）顺序一致，check_deps.py 的探测也用同一顺序；缺依赖时打印**具体的中文安装命令**，而不是原始报错堆栈。
+6. **依运行环境诊断**。桌面版通过私有能力文件连接 Electron 渲染服务，缺失时提示启动或升级 Host；独立 Skill 通过公共加载器按 `PLAYWRIGHT_CORE` 环境变量 → 直接 import → openclaw 内置路径查找 playwright-core，缺少时提供中文安装提示。check_deps.py 使用同一分流，不在桌面资源中自动安装依赖。
 7. **全中文**。文档、注释、报错信息均为中文，新增内容保持中文。
 
 ---
@@ -117,7 +117,7 @@ flowchart LR
 flowchart TD
     P["初版：每个图位放类型化占位块 data-todo=fig<br/>类型四选一（原图 / 自绘·流程 / 自绘·架构 / 表格）+ 来源 + 内容规格"]
     P --> G["终版：grep data-todo 清点，逐个落地"]
-    G --> A["A 抽原图<br/>pptx 先 soffice 转 pdf → PyMuPDF 整页渲染找图<br/>→ zoom 3 裁切 → Read 目检 → embed_image"]
+    G --> A["A 抽原图<br/>PPTX：标准库按页提取内容 + 原图<br/>PDF：PyMuPDF 渲染 / 裁切<br/>→ Read 目检 → embed_image"]
     G --> B["B 自绘<br/>div + flex 拼节点 / 箭头<br/>三种拓扑（直线 / 分支 / 泳道），三色上色"]
     G --> C["C 制表<br/>分组表骨架<br/>单元格按图元字号（15–17px）"]
     A --> Z["data-todo 计数归零"]
@@ -144,8 +144,8 @@ flowchart TD
 flowchart LR
     IN["my-deck.html"] --> SH
     subgraph CV ["convert.py（跨平台入口；convert.sh 为 POSIX 包装）"]
-        SH["shoot.mjs<br/>headless Chrome 逐页截图<br/>layer 逐标签展开"] --> IMG["slide-NNN.jpg<br/>+ manifest.json"]
-        IMG --> BP["build_pptx.py<br/>python-pptx 组装 16:9<br/>每页一张满屏图"]
+        SH["shoot.mjs<br/>Electron / Chrome 逐页截图<br/>layer 逐标签展开"] --> IMG["slide-NNN.jpg<br/>+ manifest.json"]
+        IMG --> BP["build_pptx.py<br/>标准库 ZIP/XML 组装 16:9<br/>每页一张满屏原图"]
         OLE["ole_package.py<br/>原 HTML 封装为 OLE Package"] -.->|"EMBED_HTML=1 时嵌入第 1 页"| BP
     end
     BP --> OUT["my-deck.pptx"]
@@ -159,7 +159,7 @@ flowchart LR
 
 ### 3.7 环境体检
 
-动手前，DSH Editor Core 运行 macOS / Linux 的 `python3 scripts/check_deps.py --profile editor-core --check-only` 或 Windows 的 `py -3 scripts\check_deps.py --profile editor-core --check-only`；独立桌面入口改用 `--profile dev-shell`。`EnvironmentManager` 的外部 Interface 投影为 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`materials` 和兼容用的 `full`：`editor-core` 只包含画布、任务、历史和固化所需模块，`dev-shell` 才加入 `node-pty`、xterm 与 Agent CLI。每个依赖只在相关 Profile 内决定退出码，本机 Agent CLI 或 LibreOffice 缺失不能把 DSH Editor Core 判为失败。`--repair` 修复 pip/npm/npx 项并复检；`--json` 是 Editor 诊断页与自动化共用的结构化 Interface。
+动手前，DSH Editor Core 运行 macOS / Linux 的 `python3 scripts/check_deps.py --profile editor-core --check-only` 或 Windows 的 `py -3 scripts\check_deps.py --profile editor-core --check-only`；独立桌面入口改用 `--profile dev-shell`。`EnvironmentManager` 的外部 Interface 投影为 `editor-core`、`dev-shell`、`verify`、`pptx-export`、`pptx-read`、`materials` 和兼容用的 `full`：`editor-core` 只包含画布、任务、历史和固化所需模块，`dev-shell` 才加入 `node-pty`、xterm 与 Agent CLI。`pptx-read` 只检查随包的标准库提取工具，`materials` 保留 PDF 依赖；PPTX 不渲染、不转 PDF。每个依赖只在相关 Profile 内决定退出码，本机 Agent CLI 或 PDF 工具缺失不能把 DSH Editor Core 或 PPTX 内容读取判为失败。`--repair` 修复 pip/npm/npx 项并复检；`--json` 是 Editor 诊断页与自动化共用的结构化 Interface。
 
 ### 3.8 后期可视化微调工作流
 
@@ -263,9 +263,13 @@ assert '\n' not in raw and '</' not in raw and json.loads(raw) == s
 
 ```mermaid
 flowchart TD
-    L["loadChromium()<br/>三级查找 playwright-core：<br/>PLAYWRIGHT_CORE 环境变量 → import → openclaw 内置路径"]
-    L -->|"都找不到"| X(["exit 2 + 中文安装提示"])
-    L --> LA["launch Chrome<br/>channel:'chrome' + headless，1920×1080 viewport"]
+    L["loadChromium()"] --> D{"桌面运行环境？"}
+    D -->|"是"| E["Host 的私有 Electron 渲染服务<br/>独立隐藏沙箱页面"]
+    D -->|"否"| P["三级查找 playwright-core：<br/>PLAYWRIGHT_CORE → import → openclaw 内置路径"]
+    E -->|"不可用"| X(["exit 2 + 启动/升级 Host 提示"])
+    P -->|"都找不到"| Y(["exit 2 + 中文安装提示"])
+    P --> LA["launch Chrome<br/>channel:'chrome' + headless，1920×1080 viewport"]
+    E --> LO
     LA --> LO["load & settle<br/>goto(file://) 180s 超时 → waitForFunction(.slide-canvas 出现)<br/>→ 定时 settle（React mount / 字体 / 图片）"]
     LO --> CSS["注入 CSS<br/>隐藏 UI 外壳（玻璃条 / 侧栏 / 提示 / 笔记 / loading overlay）<br/>+ 强制 content-visibility:visible<br/>+ logo 左移 8px（fixed right:22px 超出 canvas 元素框，element.screenshot 会裁右缘）"]
     CSS --> LOC["定位目标页<br/>按 data-label 找 .slide-canvas<br/>（CSS.escape 防特殊字符；同名只取第一个并警告）"]
@@ -296,18 +300,18 @@ flowchart TD
     U --> EB
     EB -->|"字符串读写"| DECK["assets / my-deck.html<br/>（bundle：manifest + template）"]
 
-    subgraph BROWSER ["验证 / 截图层（Node ≥ 18 + 本机 Chrome + playwright-core 三级查找）"]
+    subgraph BROWSER ["验证 / 截图层（桌面 Electron；独立 Skill 为 Chrome + Playwright）"]
         VER["verify/measure_overflow.mjs<br/>verify/shot.mjs · verify/steps.mjs"]
         SH["html2pptx/shoot.mjs"]
     end
     VER -->|"headless 渲染"| DECK
     SH -->|"headless 渲染"| DECK
     SH --> IMG["截图目录 + manifest.json"]
-    IMG --> BP["html2pptx/build_pptx.py<br/>（python-pptx；EMBED_HTML 时 + PIL / ole_package.py）"]
+    IMG --> BP["html2pptx/build_pptx.py<br/>（标准库 ZIP/XML；EMBED_HTML 时 + PIL / ole_package.py）"]
 
     CD["check_deps.py"] -.->|"探测 / 自动安装"| BROWSER
-    CD -.->|"探测 / 自动安装"| EXT["外部素材解析<br/>soffice（pptx→pdf）+ PyMuPDF（渲染 / 抽图）<br/>+ .agents/skills/pdf/（进阶 PDF）"]
-    CD -.->|"探测"| PPTXDEP["python-pptx"]
+    CD -.->|"探测 / 自动安装"| EXT["参考材料读取<br/>PPTX：extract-pptx.py（标准库，按页内容 / 原图）<br/>PDF：PyMuPDF + .agents/skills/pdf/"]
+    CD -.->|"探测"| PPTXDEP["Pillow（仅 HTML 附件图标）"]
     PPTXDEP -.-> BP
 ```
 

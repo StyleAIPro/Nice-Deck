@@ -60,8 +60,7 @@ try {
     exitCode = 1;
   } else {
     if (idxs.length > 1) console.warn(`警告: data-label="${label}" 有 ${idxs.length} 个同名页，只截第一个`);
-    const handle = await page.evaluateHandle(i => document.querySelectorAll('.stage .slide-canvas')[i], idxs[0]);
-    const el = handle.asElement();
+    const el = (await page.$$('.stage .slide-canvas'))[idxs[0]];
     // 原位截图：scrollIntoView 后 element screenshot（不要 position:fixed 钉页，canvas 祖先有 transform）
     await el.scrollIntoViewIfNeeded();
     await page.waitForTimeout(600); // 滚动/懒渲染稳定

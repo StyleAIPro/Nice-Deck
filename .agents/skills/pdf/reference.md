@@ -1,612 +1,69 @@
-# PDF Processing Advanced Reference
+# PDF 处理参考
 
-This document contains advanced PDF processing features, detailed examples, and additional libraries not covered in the main skill instructions.
+本地依赖以 [SKILL.md](SKILL.md) 为准；原始来源和许可证保持不变。以下示例只使用 PyMuPDF 与 Python 标准库。AcroForm 填写使用现有 [表单脚本](forms.md)，避免重新实现字体和控件外观。
 
-## pypdfium2 Library (Apache/BSD License)
+## 文字与表格
 
-### Overview
-pypdfium2 is a Python binding for PDFium (Chromium's PDF library). It's excellent for fast PDF rendering, image generation, and serves as a PyMuPDF replacement.
+`page.get_text("text", sort=True)` 按阅读位置提取文字；多栏、旋转文字和复杂排版仍需结合原页核对。`page.get_text("words")` 返回文字与位置，位置是未旋转页面左上角坐标；显示坐标可乘 `page.rotation_matrix`。表格用 `page.find_tables().tables` 后立即调用 `table.extract()`；表格对象依赖原页面存活，不要跨页面缓存。
 
-### Render PDF to Images
+默认表格检测优先识别线框。无边框表格可尝试 `page.find_tables(strategy="text")`，但须对照原页确认行列关系；扫描表格需先读图或 OCR。不能把未检测到表格当作没有表格。`extract_form_structure.py` 提供标准 JSON，不依赖 DataFrame 或其他表格框架。
+
+## 内嵌原图、蒙版与裁切
+
+`page.get_images(full=True)` 给出图像 xref 与透明蒙版 xref；`doc.extract_image(xref)` 返回原始编码的图像，适合按页关联保存。相同 xref 可跨页复用，保存时可以去重，但必须保留每页关联。此列表不代表完整页面外观：矢量图不是位图，有些资源可能未实际显示。
+
+需要合成透明蒙版时：
+
 ```python
-import pypdfium2 as pdfium
-from PIL import Image
+import pymupdf
 
-# Load PDF
-pdf = pdfium.PdfDocument("document.pdf")
-
-# Render page to image
-page = pdf[0]  # First page
-bitmap = page.render(
-    scale=2.0,  # Higher resolution
-    rotation=0  # No rotation
-)
-
-# Convert to PIL Image
-img = bitmap.to_pil()
-img.save("page_1.png", "PNG")
-
-# Process multiple pages
-for i, page in enumerate(pdf):
-    bitmap = page.render(scale=1.5)
-    img = bitmap.to_pil()
-    img.save(f"page_{i+1}.jpg", "JPEG", quality=90)
+with pymupdf.open("参考.pdf") as doc:
+    for number, page in enumerate(doc, 1):
+        for xref, smask, *_ in page.get_images(full=True):
+            if smask:
+                base = pymupdf.Pixmap(doc, xref)
+                mask = pymupdf.Pixmap(doc, smask)
+                pymupdf.Pixmap(base, mask).save(f"page-{number}-image-{xref}.png")
 ```
 
-### Extract Text with pypdfium2
+`page.get_text("dict")["blocks"]` 中 `type == 1` 的块还可提供内联图像的 `image`、`ext` 和 `bbox`。矢量图或一组混排图形需要裁切时，用 `page.get_pixmap(clip=pymupdf.Rect(...), matrix=pymupdf.Matrix(2, 2))`；这是页面局部栅格化，应标注为裁切图，不声称是原始内嵌图像。
+
+## 页面生成、旋转、合并与拆分
+
 ```python
-import pypdfium2 as pdfium
+import pymupdf
 
-pdf = pdfium.PdfDocument("document.pdf")
-for i, page in enumerate(pdf):
-    text = page.get_text()
-    print(f"Page {i+1} text length: {len(text)} chars")
+with pymupdf.open() as doc:
+    page = doc.new_page(width=595, height=842)
+    page.insert_htmlbox(pymupdf.Rect(50, 50, 545, 200), "<h1>材料摘要</h1><p>中文文字与简单表格</p>")
+    doc.save("摘要.pdf", garbage=3, deflate=True)
+
+with pymupdf.open("参考.pdf") as doc:
+    doc[0].set_rotation((doc[0].rotation + 90) % 360)
+    doc.save("旋转后.pdf", garbage=3, deflate=True)
 ```
 
-## JavaScript Libraries
+需要添加水印或印章时，按明确范围使用 `insert_text`、`insert_htmlbox` 或 `insert_image`，输出另取文件名并渲染复检。合并拆分代码见 SKILL.md；复制时保留 `widgets=True`，跨文档同名字段不要随意共享。交互表单、书签、附件和内部跳转分别验证，不能只核对页数。
 
-### pdf-lib (MIT License)
+## 加密与权限
 
-pdf-lib is a powerful JavaScript library for creating and modifying PDF documents in any JavaScript environment.
+读取需要口令的 PDF 时，用 `doc.authenticate(已提供的口令)`，返回失败则停止。材料脚本默认接收未加密或已解密副本，不尝试破解口令。使用 PyMuPDF 的 `save(..., encryption=..., owner_pw=..., user_pw=..., permissions=...)` 可另存受保护文件；不要改写已签名文档，也不要在日志打印口令。具体参数以 [Document API](https://pymupdf.readthedocs.io/en/latest/document.html) 为准。
 
-#### Load and Manipulate Existing PDF
-```javascript
-import { PDFDocument } from 'pdf-lib';
-import fs from 'fs';
+## OCR 的可选边界
 
-async function manipulatePDF() {
-    // Load existing PDF
-    const existingPdfBytes = fs.readFileSync('input.pdf');
-    const pdfDoc = await PDFDocument.load(existingPdfBytes);
+PyMuPDF 的 OCR 接口仍依赖另外提供的 Tesseract 引擎与语言数据；精简运行时不自带这些组件，也不自动安装。普通读取、渲染和表单处理不需要 OCR。已有 OCR 环境时可使用：
 
-    // Get page count
-    const pageCount = pdfDoc.getPageCount();
-    console.log(`Document has ${pageCount} pages`);
-
-    // Add new page
-    const newPage = pdfDoc.addPage([600, 400]);
-    newPage.drawText('Added by pdf-lib', {
-        x: 100,
-        y: 300,
-        size: 16
-    });
-
-    // Save modified PDF
-    const pdfBytes = await pdfDoc.save();
-    fs.writeFileSync('modified.pdf', pdfBytes);
-}
-```
-
-#### Create Complex PDFs from Scratch
-```javascript
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
-import fs from 'fs';
-
-async function createPDF() {
-    const pdfDoc = await PDFDocument.create();
-
-    // Add fonts
-    const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
-    // Add page
-    const page = pdfDoc.addPage([595, 842]); // A4 size
-    const { width, height } = page.getSize();
-
-    // Add text with styling
-    page.drawText('Invoice #12345', {
-        x: 50,
-        y: height - 50,
-        size: 18,
-        font: helveticaBold,
-        color: rgb(0.2, 0.2, 0.8)
-    });
-
-    // Add rectangle (header background)
-    page.drawRectangle({
-        x: 40,
-        y: height - 100,
-        width: width - 80,
-        height: 30,
-        color: rgb(0.9, 0.9, 0.9)
-    });
-
-    // Add table-like content
-    const items = [
-        ['Item', 'Qty', 'Price', 'Total'],
-        ['Widget', '2', '$50', '$100'],
-        ['Gadget', '1', '$75', '$75']
-    ];
-
-    let yPos = height - 150;
-    items.forEach(row => {
-        let xPos = 50;
-        row.forEach(cell => {
-            page.drawText(cell, {
-                x: xPos,
-                y: yPos,
-                size: 12,
-                font: helveticaFont
-            });
-            xPos += 120;
-        });
-        yPos -= 25;
-    });
-
-    const pdfBytes = await pdfDoc.save();
-    fs.writeFileSync('created.pdf', pdfBytes);
-}
-```
-
-#### Advanced Merge and Split Operations
-```javascript
-import { PDFDocument } from 'pdf-lib';
-import fs from 'fs';
-
-async function mergePDFs() {
-    // Create new document
-    const mergedPdf = await PDFDocument.create();
-
-    // Load source PDFs
-    const pdf1Bytes = fs.readFileSync('doc1.pdf');
-    const pdf2Bytes = fs.readFileSync('doc2.pdf');
-
-    const pdf1 = await PDFDocument.load(pdf1Bytes);
-    const pdf2 = await PDFDocument.load(pdf2Bytes);
-
-    // Copy pages from first PDF
-    const pdf1Pages = await mergedPdf.copyPages(pdf1, pdf1.getPageIndices());
-    pdf1Pages.forEach(page => mergedPdf.addPage(page));
-
-    // Copy specific pages from second PDF (pages 0, 2, 4)
-    const pdf2Pages = await mergedPdf.copyPages(pdf2, [0, 2, 4]);
-    pdf2Pages.forEach(page => mergedPdf.addPage(page));
-
-    const mergedPdfBytes = await mergedPdf.save();
-    fs.writeFileSync('merged.pdf', mergedPdfBytes);
-}
-```
-
-### pdfjs-dist (Apache License)
-
-PDF.js is Mozilla's JavaScript library for rendering PDFs in the browser.
-
-#### Basic PDF Loading and Rendering
-```javascript
-import * as pdfjsLib from 'pdfjs-dist';
-
-// Configure worker (important for performance)
-pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.js';
-
-async function renderPDF() {
-    // Load PDF
-    const loadingTask = pdfjsLib.getDocument('document.pdf');
-    const pdf = await loadingTask.promise;
-
-    console.log(`Loaded PDF with ${pdf.numPages} pages`);
-
-    // Get first page
-    const page = await pdf.getPage(1);
-    const viewport = page.getViewport({ scale: 1.5 });
-
-    // Render to canvas
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d');
-    canvas.height = viewport.height;
-    canvas.width = viewport.width;
-
-    const renderContext = {
-        canvasContext: context,
-        viewport: viewport
-    };
-
-    await page.render(renderContext).promise;
-    document.body.appendChild(canvas);
-}
-```
-
-#### Extract Text with Coordinates
-```javascript
-import * as pdfjsLib from 'pdfjs-dist';
-
-async function extractText() {
-    const loadingTask = pdfjsLib.getDocument('document.pdf');
-    const pdf = await loadingTask.promise;
-
-    let fullText = '';
-
-    // Extract text from all pages
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-
-        const pageText = textContent.items
-            .map(item => item.str)
-            .join(' ');
-
-        fullText += `\n--- Page ${i} ---\n${pageText}`;
-
-        // Get text with coordinates for advanced processing
-        const textWithCoords = textContent.items.map(item => ({
-            text: item.str,
-            x: item.transform[4],
-            y: item.transform[5],
-            width: item.width,
-            height: item.height
-        }));
-    }
-
-    console.log(fullText);
-    return fullText;
-}
-```
-
-#### Extract Annotations and Forms
-```javascript
-import * as pdfjsLib from 'pdfjs-dist';
-
-async function extractAnnotations() {
-    const loadingTask = pdfjsLib.getDocument('annotated.pdf');
-    const pdf = await loadingTask.promise;
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const annotations = await page.getAnnotations();
-
-        annotations.forEach(annotation => {
-            console.log(`Annotation type: ${annotation.subtype}`);
-            console.log(`Content: ${annotation.contents}`);
-            console.log(`Coordinates: ${JSON.stringify(annotation.rect)}`);
-        });
-    }
-}
-```
-
-## Advanced Command-Line Operations
-
-### poppler-utils Advanced Features
-
-#### Extract Text with Bounding Box Coordinates
-```bash
-# Extract text with bounding box coordinates (essential for structured data)
-pdftotext -bbox-layout document.pdf output.xml
-
-# The XML output contains precise coordinates for each text element
-```
-
-#### Advanced Image Conversion
-```bash
-# Convert to PNG images with specific resolution
-pdftoppm -png -r 300 document.pdf output_prefix
-
-# Convert specific page range with high resolution
-pdftoppm -png -r 600 -f 1 -l 3 document.pdf high_res_pages
-
-# Convert to JPEG with quality setting
-pdftoppm -jpeg -jpegopt quality=85 -r 200 document.pdf jpeg_output
-```
-
-#### Extract Embedded Images
-```bash
-# Extract all embedded images with metadata
-pdfimages -j -p document.pdf page_images
-
-# List image info without extracting
-pdfimages -list document.pdf
-
-# Extract images in their original format
-pdfimages -all document.pdf images/img
-```
-
-### qpdf Advanced Features
-
-#### Complex Page Manipulation
-```bash
-# Split PDF into groups of pages
-qpdf --split-pages=3 input.pdf output_group_%02d.pdf
-
-# Extract specific pages with complex ranges
-qpdf input.pdf --pages input.pdf 1,3-5,8,10-end -- extracted.pdf
-
-# Merge specific pages from multiple PDFs
-qpdf --empty --pages doc1.pdf 1-3 doc2.pdf 5-7 doc3.pdf 2,4 -- combined.pdf
-```
-
-#### PDF Optimization and Repair
-```bash
-# Optimize PDF for web (linearize for streaming)
-qpdf --linearize input.pdf optimized.pdf
-
-# Remove unused objects and compress
-qpdf --optimize-level=all input.pdf compressed.pdf
-
-# Attempt to repair corrupted PDF structure
-qpdf --check input.pdf
-qpdf --fix-qdf damaged.pdf repaired.pdf
-
-# Show detailed PDF structure for debugging
-qpdf --show-all-pages input.pdf > structure.txt
-```
-
-#### Advanced Encryption
-```bash
-# Add password protection with specific permissions
-qpdf --encrypt user_pass owner_pass 256 --print=none --modify=none -- input.pdf encrypted.pdf
-
-# Check encryption status
-qpdf --show-encryption encrypted.pdf
-
-# Remove password protection (requires password)
-qpdf --password=secret123 --decrypt encrypted.pdf decrypted.pdf
-```
-
-## Advanced Python Techniques
-
-### pdfplumber Advanced Features
-
-#### Extract Text with Precise Coordinates
 ```python
-import pdfplumber
-
-with pdfplumber.open("document.pdf") as pdf:
-    page = pdf.pages[0]
-    
-    # Extract all text with coordinates
-    chars = page.chars
-    for char in chars[:10]:  # First 10 characters
-        print(f"Char: '{char['text']}' at x:{char['x0']:.1f} y:{char['y0']:.1f}")
-    
-    # Extract text by bounding box (left, top, right, bottom)
-    bbox_text = page.within_bbox((100, 100, 400, 200)).extract_text()
+textpage = page.get_textpage_ocr(language="chi_sim+eng", dpi=150, full=True)
+text = page.get_text("text", textpage=textpage)
 ```
 
-#### Advanced Table Extraction with Custom Settings
-```python
-import pdfplumber
-import pandas as pd
+没有 OCR 时直接让 AI 阅读逐页图，并明确哪些文本来自图像判断。OCR 结果可能漏字、错字和打乱表格，应对照图像核查。
 
-with pdfplumber.open("complex_table.pdf") as pdf:
-    page = pdf.pages[0]
-    
-    # Extract tables with custom settings for complex layouts
-    table_settings = {
-        "vertical_strategy": "lines",
-        "horizontal_strategy": "lines",
-        "snap_tolerance": 3,
-        "intersection_tolerance": 15
-    }
-    tables = page.extract_tables(table_settings)
-    
-    # Visual debugging for table extraction
-    img = page.to_image(resolution=150)
-    img.save("debug_layout.png")
-```
+## 官方 API 与回归
 
-### reportlab Advanced Features
+- [PyMuPDF 页面 API](https://pymupdf.readthedocs.io/en/latest/page.html)：文字、表格、图片、富文本批注。
+- [PyMuPDF Widget API](https://pymupdf.readthedocs.io/en/latest/widget.html)：字段读取、坐标与控件类型。
+- [pypdf 表单文档](https://pypdf.readthedocs.io/en/stable/user/forms.html)：保留字段树、默认字体与外观。
 
-#### Create Professional Reports with Tables
-```python
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
-
-# Sample data
-data = [
-    ['Product', 'Q1', 'Q2', 'Q3', 'Q4'],
-    ['Widgets', '120', '135', '142', '158'],
-    ['Gadgets', '85', '92', '98', '105']
-]
-
-# Create PDF with table
-doc = SimpleDocTemplate("report.pdf")
-elements = []
-
-# Add title
-styles = getSampleStyleSheet()
-title = Paragraph("Quarterly Sales Report", styles['Title'])
-elements.append(title)
-
-# Add table with advanced styling
-table = Table(data)
-table.setStyle(TableStyle([
-    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-    ('FONTSIZE', (0, 0), (-1, 0), 14),
-    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-    ('GRID', (0, 0), (-1, -1), 1, colors.black)
-]))
-elements.append(table)
-
-doc.build(elements)
-```
-
-## Complex Workflows
-
-### Extract Figures/Images from PDF
-
-#### Method 1: Using pdfimages (fastest)
-```bash
-# Extract all images with original quality
-pdfimages -all document.pdf images/img
-```
-
-#### Method 2: Using pypdfium2 + Image Processing
-```python
-import pypdfium2 as pdfium
-from PIL import Image
-import numpy as np
-
-def extract_figures(pdf_path, output_dir):
-    pdf = pdfium.PdfDocument(pdf_path)
-    
-    for page_num, page in enumerate(pdf):
-        # Render high-resolution page
-        bitmap = page.render(scale=3.0)
-        img = bitmap.to_pil()
-        
-        # Convert to numpy for processing
-        img_array = np.array(img)
-        
-        # Simple figure detection (non-white regions)
-        mask = np.any(img_array != [255, 255, 255], axis=2)
-        
-        # Find contours and extract bounding boxes
-        # (This is simplified - real implementation would need more sophisticated detection)
-        
-        # Save detected figures
-        # ... implementation depends on specific needs
-```
-
-### Batch PDF Processing with Error Handling
-```python
-import os
-import glob
-from pypdf import PdfReader, PdfWriter
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-def batch_process_pdfs(input_dir, operation='merge'):
-    pdf_files = glob.glob(os.path.join(input_dir, "*.pdf"))
-    
-    if operation == 'merge':
-        writer = PdfWriter()
-        for pdf_file in pdf_files:
-            try:
-                reader = PdfReader(pdf_file)
-                for page in reader.pages:
-                    writer.add_page(page)
-                logger.info(f"Processed: {pdf_file}")
-            except Exception as e:
-                logger.error(f"Failed to process {pdf_file}: {e}")
-                continue
-        
-        with open("batch_merged.pdf", "wb") as output:
-            writer.write(output)
-    
-    elif operation == 'extract_text':
-        for pdf_file in pdf_files:
-            try:
-                reader = PdfReader(pdf_file)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text()
-                
-                output_file = pdf_file.replace('.pdf', '.txt')
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(text)
-                logger.info(f"Extracted text from: {pdf_file}")
-                
-            except Exception as e:
-                logger.error(f"Failed to extract text from {pdf_file}: {e}")
-                continue
-```
-
-### Advanced PDF Cropping
-```python
-from pypdf import PdfWriter, PdfReader
-
-reader = PdfReader("input.pdf")
-writer = PdfWriter()
-
-# Crop page (left, bottom, right, top in points)
-page = reader.pages[0]
-page.mediabox.left = 50
-page.mediabox.bottom = 50
-page.mediabox.right = 550
-page.mediabox.top = 750
-
-writer.add_page(page)
-with open("cropped.pdf", "wb") as output:
-    writer.write(output)
-```
-
-## Performance Optimization Tips
-
-### 1. For Large PDFs
-- Use streaming approaches instead of loading entire PDF in memory
-- Use `qpdf --split-pages` for splitting large files
-- Process pages individually with pypdfium2
-
-### 2. For Text Extraction
-- `pdftotext -bbox-layout` is fastest for plain text extraction
-- Use pdfplumber for structured data and tables
-- Avoid `pypdf.extract_text()` for very large documents
-
-### 3. For Image Extraction
-- `pdfimages` is much faster than rendering pages
-- Use low resolution for previews, high resolution for final output
-
-### 4. For Form Filling
-- pdf-lib maintains form structure better than most alternatives
-- Pre-validate form fields before processing
-
-### 5. Memory Management
-```python
-# Process PDFs in chunks
-def process_large_pdf(pdf_path, chunk_size=10):
-    reader = PdfReader(pdf_path)
-    total_pages = len(reader.pages)
-    
-    for start_idx in range(0, total_pages, chunk_size):
-        end_idx = min(start_idx + chunk_size, total_pages)
-        writer = PdfWriter()
-        
-        for i in range(start_idx, end_idx):
-            writer.add_page(reader.pages[i])
-        
-        # Process chunk
-        with open(f"chunk_{start_idx//chunk_size}.pdf", "wb") as output:
-            writer.write(output)
-```
-
-## Troubleshooting Common Issues
-
-### Encrypted PDFs
-```python
-# Handle password-protected PDFs
-from pypdf import PdfReader
-
-try:
-    reader = PdfReader("encrypted.pdf")
-    if reader.is_encrypted:
-        reader.decrypt("password")
-except Exception as e:
-    print(f"Failed to decrypt: {e}")
-```
-
-### Corrupted PDFs
-```bash
-# Use qpdf to repair
-qpdf --check corrupted.pdf
-qpdf --replace-input corrupted.pdf
-```
-
-### Text Extraction Issues
-```python
-# Fallback to OCR for scanned PDFs
-import pytesseract
-from pdf2image import convert_from_path
-
-def extract_text_with_ocr(pdf_path):
-    images = convert_from_path(pdf_path)
-    text = ""
-    for i, image in enumerate(images):
-        text += pytesseract.image_to_string(image)
-    return text
-```
-
-## License Information
-
-- **pypdf**: BSD License
-- **pdfplumber**: MIT License
-- **pypdfium2**: Apache/BSD License
-- **reportlab**: BSD License
-- **poppler-utils**: GPL-2 License
-- **qpdf**: Apache License
-- **pdf-lib**: MIT License
-- **pdfjs-dist**: Apache License
+仓库回归测试 `python3 -m unittest scripts/editor/test/test_pdf_materials.py` 创建真实 PDF，普通脚本在只开放 PyMuPDF 的 `python -S` 子进程中运行；AcroForm 填写仅额外开放 pypdf。测试不安装软件，不依赖系统 PDF 渲染程序。

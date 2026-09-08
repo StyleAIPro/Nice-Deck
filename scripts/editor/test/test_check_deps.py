@@ -15,6 +15,72 @@ SPEC.loader.exec_module(doctor)
 
 
 class CheckDepsTest(unittest.TestCase):
+    def test_desktop_verify_uses_renderer_without_browser_or_playwright(self):
+        with mock.patch.dict(os.environ, {"AICO_RUNTIME_KIND": "desktop"}):
+            _, checks = doctor.checks_for_profiles(["pptx-export"])
+        self.assertEqual({check["key"] for check in checks}, {"node", "desktop-renderer", "pptx-builder", "pillow"})
+        with mock.patch.dict(os.environ, {"AICO_RUNTIME_KIND": "standalone"}):
+            _, checks = doctor.checks_for_profiles(["pptx-export"])
+        self.assertEqual({check["key"] for check in checks}, {"node", "playwright-core", "chrome", "pptx-builder", "pillow"})
+
+    def test_desktop_renderer_probe_reports_disconnected_host(self):
+        failure = doctor.subprocess.CompletedProcess(["node"], 1, "", "桌面渲染服务不可用")
+        with mock.patch.object(doctor, "run", return_value=failure):
+            self.assertEqual(doctor.probe_desktop_renderer(), (False, "桌面渲染服务不可用"))
+
+    def test_pdf_materials_keep_pypdf_only_for_forms_and_do_not_reinstall_upstream_skill(self):
+        _, checks = doctor.checks_for_profiles(["materials"])
+        self.assertEqual({check["key"] for check in checks}, {"pymupdf", "pypdf"})
+        self.assertFalse({"pdfplumber", "reportlab", "pdf-skill"} & {check["key"] for check in doctor.CHECKS})
+        self.assertEqual(next(check for check in checks if check["key"] == "pymupdf")["install"], doctor.pip("pymupdf"))
+        self.assertIn("表单", next(check for check in checks if check["key"] == "pypdf")["why"])
+
+    def test_three_browser_files_satisfy_editor_without_commonjs_entry(self):
+        _, checks = doctor.checks_for_profiles(["editor-core"])
+        three = next(check for check in checks if check["key"] == "three")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "node_modules" / "three" / "build"
+            build.mkdir(parents=True)
+            for name in ("three.module.min.js", "three.core.min.js"):
+                (build / name).write_text("// 浏览器运行时", encoding="utf-8")
+            with mock.patch.object(doctor, "REPO", root), \
+                    mock.patch.object(doctor, "run") as run:
+                ready, detail = doctor.do_probe(three)
+            self.assertTrue(ready)
+            self.assertIn("three.module.min.js", detail)
+            self.assertIn("three.core.min.js", detail)
+            run.assert_not_called()
+
+    def test_three_requires_both_browser_files_even_when_commonjs_resolves(self):
+        _, checks = doctor.checks_for_profiles(["editor-core"])
+        three = next(check for check in checks if check["key"] == "three")
+        names = ("three.module.min.js", "three.core.min.js")
+        for missing_name in names:
+            with self.subTest(missing=missing_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                build = root / "node_modules" / "three" / "build"
+                build.mkdir(parents=True)
+                for name in names:
+                    if name != missing_name:
+                        (build / name).touch()
+                (build / "three.cjs").touch()
+                success = doctor.subprocess.CompletedProcess(["node"], 0, "", "")
+                with mock.patch.object(doctor, "REPO", root), \
+                        mock.patch.object(doctor, "run", return_value=success):
+                    ready, detail = doctor.do_probe(three)
+                self.assertFalse(ready)
+                self.assertIn(missing_name, detail)
+
+    def test_other_node_modules_still_use_node_resolution(self):
+        success = doctor.subprocess.CompletedProcess(["node"], 0, "", "")
+        with mock.patch.object(doctor, "run", return_value=success) as run:
+            self.assertTrue(doctor.probe_node_module("ws")[0])
+        run.assert_called_once_with(
+            ["node", "-e", "require.resolve('ws')"],
+            cwd=str(doctor.REPO), capture_output=True, text=True,
+        )
+
     def test_desktop_browser_selection_does_not_fall_back_to_host_chrome(self):
         with tempfile.TemporaryDirectory() as directory:
             browser = Path(directory) / "AICO Browser"
@@ -24,11 +90,22 @@ class CheckDepsTest(unittest.TestCase):
                 browser.unlink()
                 self.assertFalse(doctor.probe_chrome()[0])
 
-    def test_desktop_office_path_takes_precedence_over_system_installation(self):
-        with mock.patch.dict(os.environ, {"AICO_SOFFICE_EXECUTABLE": "/AICO App/soffice"}), \
-                mock.patch.object(doctor, "run", return_value=mock.Mock(returncode=0)) as run:
-            self.assertEqual(doctor.probe_soffice(), (True, "/AICO App/soffice"))
-            run.assert_called_once_with(["/AICO App/soffice", "--version"], capture_output=True, text=True)
+    def test_pptx_read_uses_only_bundled_extractor_and_no_package_installs(self):
+        profiles, checks = doctor.checks_for_profiles(["pptx-read"])
+        self.assertEqual(profiles, ("pptx-read",))
+        self.assertEqual([check["key"] for check in checks], ["pptx-extractor"])
+        self.assertIsNone(checks[0].get("install"))
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(doctor, "REPO", Path(directory)), \
+                mock.patch.object(doctor, "run") as run:
+            missing = doctor.repair_dependencies(["pptx-read"])
+            self.assertFalse(missing["ready"])
+            self.assertEqual(missing["profiles"]["pptx-read"]["state"], "manual-action-required")
+            extractor = Path(directory) / "scripts" / "extract-pptx.py"
+            extractor.parent.mkdir()
+            extractor.write_text("# 仅使用标准库", encoding="utf-8")
+            self.assertTrue(doctor.dependency_snapshot(["pptx-read"])["ready"])
+            run.assert_not_called()
 
     def test_profiles_keep_editor_core_independent_from_dev_shell_and_material_tools(self):
         editor_profiles, editor_checks = doctor.checks_for_profiles(["editor-core"])
@@ -46,39 +123,24 @@ class CheckDepsTest(unittest.TestCase):
         self.assertIn("agent-cli", {check["key"] for check in dev_checks})
         self.assertIn("html2canvas", {check["key"] for check in dev_checks})
         self.assertEqual(material_profiles, ("materials",))
-        self.assertIn("soffice", {check["key"] for check in material_checks})
+        self.assertNotIn("soffice", {check["key"] for check in doctor.CHECKS})
+        self.assertIn("pymupdf", {check["key"] for check in material_checks})
+        self.assertNotIn("pptx-extractor", {check["key"] for check in material_checks})
         self.assertNotIn("node-pty", {check["key"] for check in material_checks})
 
-    def test_snapshot_marks_missing_manual_dependency_without_failing_other_profile(self):
-        probes = {
-            "node": (True, "v20"),
-            "ws": (True, "ok"),
-            "html2canvas": (True, "ok"),
-            "busboy": (True, "ok"),
-            "node-pty": (True, "ok"),
-            "@xterm/xterm": (True, "ok"),
-            "@xterm/headless": (True, "ok"),
-            "@xterm/addon-serialize": (True, "ok"),
-            "three": (True, "ok"),
-            "agent-cli": (True, "ok"),
-            "soffice": (False, "未找到 soffice"),
-        }
-
+    def test_missing_pdf_tools_do_not_block_pptx_read_or_editor(self):
         def fake_probe(check):
-            return probes.get(check["key"], (True, "ok"))
+            return (False, "未安装 PDF 依赖") if check["key"] == "pymupdf" else (True, "ok")
 
         with mock.patch.object(doctor, "do_probe", side_effect=fake_probe):
             editor = doctor.dependency_snapshot(["editor-core"])
-            dev_shell = doctor.dependency_snapshot(["dev-shell"])
+            pptx_read = doctor.dependency_snapshot(["pptx-read"])
             materials = doctor.dependency_snapshot(["materials"])
 
         self.assertTrue(editor["ready"])
-        self.assertTrue(dev_shell["ready"])
+        self.assertTrue(pptx_read["ready"])
         self.assertFalse(materials["ready"])
-        self.assertEqual(
-            materials["profiles"]["materials"]["state"],
-            "manual-action-required",
-        )
+        self.assertEqual(materials["profiles"]["materials"]["state"], "repairable")
 
     def test_missing_agent_cli_does_not_block_editor_core_but_blocks_dev_shell(self):
         def fake_probe(check):
@@ -97,21 +159,17 @@ class CheckDepsTest(unittest.TestCase):
             "manual-action-required",
         )
 
-    def test_windows_standard_install_locations_find_chrome_and_soffice(self):
+    def test_windows_standard_install_locations_find_chrome(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             chrome = root / "Google" / "Chrome" / "Application" / "chrome.exe"
-            soffice = root / "LibreOffice" / "program" / "soffice.exe"
             chrome.parent.mkdir(parents=True)
-            soffice.parent.mkdir(parents=True)
             chrome.touch()
-            soffice.touch()
             environment = {"PROGRAMFILES": directory, "PROGRAMFILES(X86)": "", "LOCALAPPDATA": ""}
             with mock.patch.object(doctor.sys, "platform", "win32"), \
                     mock.patch.dict(os.environ, environment, clear=False), \
                     mock.patch.object(doctor.shutil, "which", return_value=None):
                 self.assertEqual(doctor.probe_chrome(), (True, str(chrome)))
-                self.assertEqual(doctor.probe_soffice(), (True, str(soffice)))
 
     def test_windows_any_supported_agent_satisfies_editor_dependency(self):
         def which(name):
@@ -202,18 +260,6 @@ class CheckDepsTest(unittest.TestCase):
         self.assertFalse(ready)
         self.assertEqual(detail, "已安装但架构不兼容（扩展 arm64，Editor Python x86_64）")
 
-    def test_soffice_stale_shim_is_reported_as_broken_installation(self):
-        failure = doctor.subprocess.CompletedProcess(
-            ["/opt/homebrew/bin/soffice", "--version"],
-            127,
-            "",
-            "/Applications/LibreOffice.app/Contents/MacOS/soffice: No such file or directory",
-        )
-        with mock.patch.object(doctor.shutil, "which", return_value="/opt/homebrew/bin/soffice"), \
-                mock.patch.object(doctor, "run", return_value=failure):
-            ready, detail = doctor.probe_soffice()
-        self.assertFalse(ready)
-        self.assertIn("找到 /opt/homebrew/bin/soffice，但无法启动", detail)
 
 
 if __name__ == "__main__":

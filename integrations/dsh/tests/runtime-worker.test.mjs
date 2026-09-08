@@ -41,7 +41,7 @@ test('真实诊断请求使用 Worker 的私有 Python 与静态默认环境', {
   await writeFile(runtime.paths.python, `#!${process.execPath}\nconsole.log(JSON.stringify({python:process.env.PYTHON,browser:process.env.AICO_BROWSER_EXECUTABLE,office:process.env.AICO_SOFFICE_EXECUTABLE,kind:process.env.AICO_RUNTIME_KIND,state:process.env.AICO_PPT_EDITOR_STATE_ROOT,pythonPath:process.env.PYTHONPATH,secret:process.env.AICO_PLUGIN_BRIDGE_TOKEN}));\n`, { mode:0o755 });
   const before = { ...process.env };
   const worker = await startRuntimeWorker(runtime, { environment:{
-    ...process.env, PYTHON:'/host/python', PYTHONPATH:'/host/modules',
+    ...process.env, PYTHON:'/host/python', PYTHONPATH:'/host/modules', AICO_SOFFICE_EXECUTABLE:'/old/soffice',
     AICO_PPT_EDITOR_STATE_ROOT:join(runtime.root, 'data'), AICO_PLUGIN_BRIDGE_TOKEN:'host-secret',
   } });
   t.after(() => worker.close());
@@ -51,7 +51,7 @@ test('真实诊断请求使用 Worker 的私有 Python 与静态默认环境', {
   const diagnostics = await response.json();
   assert.equal(response.status, 200, JSON.stringify(diagnostics));
   assert.deepEqual(diagnostics.environment, {
-    python:runtime.paths.python, browser:runtime.paths.browser, office:runtime.paths.office,
+    python:runtime.paths.python,
     kind:'desktop', state:join(runtime.root, 'data'), delivery:'desktop',
   });
   assert.equal(diagnostics.installation.delivery, 'desktop');

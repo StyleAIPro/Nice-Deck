@@ -73,8 +73,7 @@ try {
   }
 
   for (const t of targets) {
-    const handle = await page.evaluateHandle(i => document.querySelectorAll('.stage .slide-canvas')[i], t.idx);
-    const el = handle.asElement();
+    const el = (await page.$$('.stage .slide-canvas'))[t.idx];
     await el.scrollIntoViewIfNeeded();      // 原位测量，不要 position:fixed 钉页（canvas 祖先有 transform）
     await page.waitForTimeout(250);         // 滚动/懒渲染稳定
     const r = await el.evaluate((node, trunc) => {

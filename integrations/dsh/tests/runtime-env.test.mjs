@@ -18,8 +18,8 @@ test('私有运行时只使用声明的工具，保留数据目录且不修改�
   const before = structuredClone(inherited);
   const actual = await resolveRuntime(runtime, inherited);
   assert.equal(actual.environment.PYTHON, runtime.paths.python);
-  assert.equal(actual.environment.AICO_BROWSER_EXECUTABLE, runtime.paths.browser);
-  assert.equal(actual.environment.AICO_SOFFICE_EXECUTABLE, runtime.paths.office);
+  assert.equal(actual.environment.AICO_BROWSER_EXECUTABLE, undefined);
+  assert.equal(actual.environment.AICO_SOFFICE_EXECUTABLE, undefined);
   assert.equal(actual.environment.AICO_RUNTIME_KIND, 'desktop');
   assert.equal(actual.environment.AICO_HOME, inherited.AICO_HOME);
   assert.equal(actual.environment.AICO_PPT_EDITOR_STATE_ROOT, inherited.AICO_PPT_EDITOR_STATE_ROOT);
@@ -33,6 +33,7 @@ test('私有运行时只使用声明的工具，保留数据目录且不修改�
 test('运行时拒绝缺失文件、目录外路径、外部软链接和额外凭据字段', async t => {
   const runtime = await runtimeFixture(t);
   await assert.rejects(resolveRuntime({ ...runtime, token:'secret' }), /字段/);
+  await assert.rejects(resolveRuntime({ ...runtime, paths:{ ...runtime.paths, office:runtime.paths.python } }), /字段/);
   await assert.rejects(resolveRuntime({ ...runtime, paths:{ ...runtime.paths, python:'python3' } }), /绝对路径/);
   await assert.rejects(resolveRuntime({ ...runtime, paths:{ ...runtime.paths, python:process.execPath } }), /目录/);
   await assert.rejects(resolveRuntime({ ...runtime, paths:{ ...runtime.paths, python:join(runtime.root, 'missing') } }), /不存在/);

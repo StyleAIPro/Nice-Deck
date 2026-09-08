@@ -36,7 +36,7 @@ npm run test:editor:e2e     # 真实 Chrome E2E
 npm run test:editor         # 全部串行执行
 ```
 
-依赖：Node ≥ 18 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；PPTX 导出另需 `python3 -m pip install python-pptx`。edit-bundle.py 只用 Python 标准库。解析外部参考材料（pptx/pdf）另需本机 LibreOffice（`soffice`，pptx → PDF）与 `pymupdf`（渲染逐页图 / 抽图）；PDF 进阶处理（合并 / 拆分 / 表格 / 表单）用仓库内置 pdf skill（`.agents/skills/pdf/`）。
+依赖：独立 Skill 使用 Node ≥ 18 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；桌面版复用 Host 的 Electron 渲染服务，只携带插件包与私有 Python。edit-bundle.py、extract-pptx.py 与 PPTX 截图组装器只用 Python 标准库，HTML 附件图标另用 Pillow。参考 PPTX 运行 `python3 scripts/extract-pptx.py 参考.pptx 输出目录`，按页提取标题、正文、备注、表格与内嵌原图，供 AI 阅读；不生成版式预览、不转 PDF。`pptx-read` 检查随包提取器；`materials` 仅检查 PyMuPDF 与 pypdf，普通 PDF 操作用 PyMuPDF，AcroForm 字段填写用 pypdf。随包 `.agents/skills/pdf/` 已适配此依赖集，不用上游重装覆盖。桌面接口见 [ADR-0006](docs/adr/0006-desktop-runtime-capabilities.md)。
 
 仓库没有独立 lint 或构建步骤。Editor 回归测试由 Node 内置 test runner、Python unittest 与真实 Chrome E2E 组成，通过 `package.json` 的 `test:editor:*` 命令统一运行；模板 Deck 改动还必须跑 verify 三件套以及 `eb.verify(path)` 的结构一致性检查。
 

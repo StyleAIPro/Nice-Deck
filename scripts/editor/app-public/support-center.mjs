@@ -390,7 +390,8 @@ export function createSupportCenter({
       makeGroup('质量验证', [profileRow('verify', '截图、溢出检测和动画逐拍检查')]),
       makeGroup('导出与材料', [
         profileRow('pptx-export', '将 HTML Deck 导出为 PPTX'),
-        profileRow('materials', '读取 PDF/PPTX 参考材料'),
+        profileRow('pptx-read', '按页读取 PPTX 文字、备注、表格和内嵌原图'),
+        profileRow('materials', '读取和处理 PDF 参考材料'),
       ]),
     );
     const skillInput = ui.onboardingChecks.find(input => input.dataset.onboardingStep === 'skill');
