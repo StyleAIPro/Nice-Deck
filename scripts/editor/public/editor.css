@@ -900,6 +900,55 @@ p {
   outline: none;
 }
 
+.pptx-export-options {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+  padding: 0;
+  border: 0;
+}
+
+.pptx-export-option {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 72%);
+  cursor: pointer;
+}
+
+.pptx-export-option:has(input:checked) {
+  border-color: var(--brand-red);
+  background: rgb(199 0 11 / 4%);
+}
+
+.pptx-export-option input {
+  margin: 4px 0 0;
+  accent-color: var(--brand-red);
+}
+
+.pptx-export-option strong {
+  display: block;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.pptx-export-option em {
+  margin-left: 5px;
+  color: var(--brand-red-deep);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.pptx-export-option small,
+.pptx-export-limit {
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 20px;
+}
+
 .solidify-dialog-mark {
   display: grid;
   place-items: center;

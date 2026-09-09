@@ -74,7 +74,7 @@ export async function connectDesktopRenderer(home = process.env.AICO_HOME) {
         async waitForFunction(fn, arg, options = {}) {
           const deadline = Date.now() + (options.timeout ?? 60_000);
           while (!await page.evaluate(fn, arg)) {
-            if (Date.now() >= deadline) throw new Error('等待页面条件超时');
+            if (Date.now() >= deadline) throw Object.assign(new Error('等待页面条件超时'), { name:'TimeoutError' });
             await page.waitForTimeout(50);
           }
         },
@@ -88,6 +88,9 @@ export async function connectDesktopRenderer(home = process.env.AICO_HOME) {
           }));
         },
         async screenshot(options = {}) {
+          if (options.omitBackground && capability.features?.screenshotOmitBackground !== 1) {
+            throw new Error('当前桌面版不支持可编辑 PPTX 所需的透明截图，请升级 AICO 桌面版；也可选择高清图片 PPTX');
+          }
           const {path, ...settings} = options;
           const data = Buffer.from(await invoke('screenshot', {options:settings}), 'base64');
           if (path) await writeFile(path, data);

@@ -331,3 +331,20 @@ test('已完成任务按最近修改时间倒序展示，待处理任务保持�
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
+
+test('历史冲突展示真实原因，不再要求用户补充目标说明', async t => {
+  const app=await startFixtureServer();t.after(()=>app.close());
+  const {browser,page}=await openEditor(app);t.after(()=>browser.close());
+  await page.evaluate(async token=>{
+    const {renderTaskDrawer}=await import(`/editor/task-drawer.mjs?token=${encodeURIComponent(token)}`);
+    const root=document.createElement('aside');root.id='history-failure-drawer';root.className='task-drawer';root.dataset.open='true';document.body.append(root);
+    renderTaskDrawer(root,{tasks:[{
+      id:'failure',pageKey:'page-a',pageIndex:1,pageLabel:'目录',rect:{x:1,y:1,w:100,h:100},
+      instruction:'不要高亮',status:'failed',candidates:[],
+      lastError:{code:'HISTORY_DIVERGED',message:'编辑历史与页面状态不同步，本次修改未提交。',recovery:'请重新打开工作项后重试；无需重新描述标记对象。'},
+    }],onEdit(){}});
+  },app.token);
+  const row=page.locator('#history-failure-drawer');
+  assert.match(await row.innerText(),/HISTORY_DIVERGED/);
+  assert.doesNotMatch(await row.innerText(),/多个可能目标|补充说明/);
+});

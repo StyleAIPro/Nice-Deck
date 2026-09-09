@@ -388,9 +388,15 @@ export class CreationDraftStore {
       draft.generation.completedAt = this.now();
       draft.phase = 'page-plan';
     } else if (command.type === 'generation-ready') {
-      if (!draft.generation || draft.phase !== 'generating') {
+      const recoverable = draft.phase === 'failed'
+        && draft.generation?.status === 'failed' && draft.generation.stagingDeck
+        && draft.pagePlanStatus === 'confirmed' && draft.pagePlanConfirmedRevision !== null;
+      if (!draft.generation || (draft.phase !== 'generating' && !recoverable)) {
         throw creationError('CREATION_GATE_UNMET', 409, '当前没有等待验证的生成任务');
       }
+      // 对原工作副本重新执行完整验证，不通过新建 run 丢弃已完成的内容。
+      draft.phase = 'generating';
+      draft.generation.completedAt = null;
       draft.generation.status = 'verifying';
       if (command.diagnostics !== undefined) {
         draft.generation.agentReceipt = clone(command.diagnostics);

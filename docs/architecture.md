@@ -142,16 +142,21 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    IN["my-deck.html"] --> SH
+    IN["my-deck.html"] --> MODE{"--mode<br/>CLI 默认 image"}
     subgraph CV ["convert.py（跨平台入口；convert.sh 为 POSIX 包装）"]
+        MODE -->|image| SH
+        MODE -->|editable| EX["extract-editable.mjs<br/>提取文字 / 图形 / 表格<br/>复杂视觉保留图片"]
+        EX --> EP["build_editable_pptx.py<br/>标准库 ZIP/XML<br/>原生对象与图片组合"]
         SH["shoot.mjs<br/>Electron / Chrome 逐页截图<br/>layer 逐标签展开"] --> IMG["slide-NNN.jpg<br/>+ manifest.json"]
         IMG --> BP["build_pptx.py<br/>标准库 ZIP/XML 组装 16:9<br/>每页一张满屏原图"]
         OLE["ole_package.py<br/>原 HTML 封装为 OLE Package"] -.->|"EMBED_HTML=1 时嵌入第 1 页"| BP
+        OLE -.->|"EMBED_HTML=1"| EP
     end
     BP --> OUT["my-deck.pptx"]
+    EP --> OUT
 ```
 
-工具不解析打包结构——**渲染什么截什么**，改完 deck 直接重跑。已知限制：靠 React 内部 state 的自制交互页无法程序化展开，只截默认态。
+Editor 的格式选择弹层默认推荐可编辑模式，确认前可取消；旧 CLI 和未传 `mode` 的 HTTP 请求仍默认图片模式。两种模式都导出当前工作副本快照，不固化源文件。可编辑模式只转换支持的对象，复杂视觉保留图片；两种模式均不生成可编辑动画或网页交互。靠 React 内部 state 的自制交互页无法程序化展开，只处理默认态。
 
 ### 3.6 品牌替换（`branding.md`）
 
@@ -282,6 +287,7 @@ flowchart TD
 - **shot**：`.build` 强显，单页 element.screenshot。
 - **steps**：在页面里实现了一份与 deck 运行时相同的放映引擎规则——对 level 从 0 到 max+1 逐拍：build 按 `data-step < level` toggle `data-shown`；layer 每组取「data-step < level 中最大者，否则组内第一个按钮」toggle `data-active`；每拍截图并打印新出现元素摘要。**此实现与 deck 运行时的引擎规则一一对应，改任一侧必须同步另一侧。**
 - **shoot（html2pptx）**：不按拍数截图，而是做 **layer 标签展开**——探测每页的标签组（按钮须有配对面板才算），先把所有组切到第一个标签、截一张全默认态，再逐组逐标签各截一张（截某组时其余组停在第一个标签；`gi>0 && ki==0` 跳过，避免全默认态重复），按顺序写 `manifest.json`。34 页模板由此展开为 55 张。
+- **extract-editable（html2pptx）**：同样展开 layer 状态，额外识别未命名标签组；读取实际 DOM 几何与视觉行，写入文字、形状、原生表格及图片 manifest。复杂图形在隔离绘制后截图为透明 PNG，避免把可编辑文字重复烘入图片；空伪元素装饰作为背景保留，CSS 阴影的边界纳入截图。桌面通过 `features.screenshotOmitBackground: 1` 检查 Host 能力。提取时统一相邻单元格共享边框；`build_editable_pptx.py` 只用标准库写 ZIP/XML；字体不嵌入，Office 替代字体和表格重新排版属于已知兼容限制。当前授课模板含目录状态共展开 58 页。
 
 ### 4.4 apply_bg.py：品牌图替换流程
 
@@ -303,16 +309,20 @@ flowchart TD
     subgraph BROWSER ["验证 / 截图层（桌面 Electron；独立 Skill 为 Chrome + Playwright）"]
         VER["verify/measure_overflow.mjs<br/>verify/shot.mjs · verify/steps.mjs"]
         SH["html2pptx/shoot.mjs"]
+        EX["html2pptx/extract-editable.mjs"]
     end
     VER -->|"headless 渲染"| DECK
     SH -->|"headless 渲染"| DECK
     SH --> IMG["截图目录 + manifest.json"]
     IMG --> BP["html2pptx/build_pptx.py<br/>（标准库 ZIP/XML；EMBED_HTML 时 + PIL / ole_package.py）"]
+    EX -->|"headless 渲染 / 内容提取"| DECK
+    EX --> EP["html2pptx/build_editable_pptx.py<br/>标准库原生 PPTX 组装"]
 
     CD["check_deps.py"] -.->|"探测 / 自动安装"| BROWSER
     CD -.->|"探测 / 自动安装"| EXT["参考材料读取<br/>PPTX：extract-pptx.py（标准库，按页内容 / 原图）<br/>PDF：PyMuPDF + .agents/skills/pdf/"]
     CD -.->|"探测"| PPTXDEP["Pillow（仅 HTML 附件图标）"]
     PPTXDEP -.-> BP
+    PPTXDEP -.-> EP
 ```
 
 ### 4.6 后期编辑器组件与运行时契约
@@ -404,7 +414,7 @@ Windows WSL Codex 由 App Server 在打开任务前预热；进程级 runtime ca
 
 浏览器点击“交给 Agent”时只向 `POST /api/agent-runs` 发送 `expectedRevision` 和下一批候选中仍为 pending / failed 的任务 ID。`BridgeService.captureAgentBatch()` 在现有 mutation queue 内校验 revision、任务存在性和可处理状态，先把成员不可变的 `agentBatches[]` 记录持久化并增加 revision，`AgentBatchCoordinator` 才把该批次提交到终端；因此提交回执丢失、页面刷新或进程退出都不会丢失批次边界。后续快照通过 `GET /api/agent-runs/current` 和 observer WebSocket 的 `agent-run-updated` 同时投影 `activeBatch`、`nextBatch` 与 `residualBatches`。浏览器不能指定 executable、命令参数或 Prompt，因此该入口不是任意命令执行器。点击之后新建的任务不属于已冻结批次；活动批次成员禁止改删，下一批候选仍可继续编辑和删除。
 
-导入器先按 git 根、`AGENTS.md` / `SKILL.md` 标记和 Deck 父目录的顺序识别项目根目录，并在进入编辑器前让用户可见确认。独立 Dev Shell 没有手动会话绑定：Editor 启动新编辑任务时，立即为注册 provider 创建可恢复 CLI 会话，再由交互式 PTY 接管。Codex 从首个可见 turn 的 `thread.started` 发现真实 conversation ID；Claude Code 使用预分配 `--session-id` / `--resume`；OpenCode 以本轮唯一标识从 `opencode session list --format json` 发现真实 session，恢复时使用 `--session`。Codex 或 Claude Code 的 resume 子进程若从可见输出明确命中“会话 ID 不存在”，退出回调才以 `newConversation:true` 重启并持久化替代 ID；工作副本和待办不变，其他失败保持原绑定并向用户显示。首个 Prompt 对当前 `aico-ppt` Skill 只初始化一次，打开抽屉不会再创建第二个进程。项目根、活动 provider 与会话标识由独立 `workspaceRevision` 管理，不增加 Deck revision，也不进入编辑时间线或固化历史。旧 `session.json.agentConnection` 只读迁移，默认路径不再写它。
+导入器按“用户本次显式选择（`explicit`）→ 有效的持久化历史设置（`persisted`）→ HTML 实际文件的直接父目录”确定项目根目录，并在进入编辑器前让用户可见确认。默认目录取解析真实路径后的 HTML 所在目录，不再按启动器 `cwd`、`.git` 或工作区标记向上查找。历史任务和用户已选目录继续保留；范围过宽的目录仍须确认，使用前仍须复核目录的真实路径与 `dev/ino` identity，身份变化时要求重新选择。点击“更改目录”时，系统选择器从当前已配置的项目目录打开；取消保留现配置，成功更改后下次从最新目录打开。独立 Dev Shell 没有手动会话绑定：Editor 启动新编辑任务时，立即为注册 provider 创建可恢复 CLI 会话，再由交互式 PTY 接管。Codex 从首个可见 turn 的 `thread.started` 发现真实 conversation ID；Claude Code 使用预分配 `--session-id` / `--resume`；OpenCode 以本轮唯一标识从 `opencode session list --format json` 发现真实 session，恢复时使用 `--session`。Codex 或 Claude Code 的 resume 子进程若从可见输出明确命中“会话 ID 不存在”，退出回调才以 `newConversation:true` 重启并持久化替代 ID；工作副本和待办不变，其他失败保持原绑定并向用户显示。首个 Prompt 对当前 `aico-ppt` Skill 只初始化一次，打开抽屉不会再创建第二个进程。项目根、活动 provider 与会话标识由独立 `workspaceRevision` 管理，不增加 Deck revision，也不进入编辑时间线或固化历史。旧 `session.json.agentConnection` 只读迁移，默认路径不再写它。
 
 Agent 执行只有一条产品路径：`AgentTerminalSession` 统一管理 PTY 生命周期、输出缓冲、输入、resize、provider 白名单和重启；`AgentBatchCoordinator` 负责捕获、提交、结算冻结批次并核对成员是否真正完成，`AgentRunCoordinator` 仅保留为旧调用名的兼容别名。旧 provider adapters、会话扫描 catalog、手动 connection API 与结构化 Agent runtime 已删除。Editor URL 与 token 经环境变量传递，Agent 修改 Deck 仍只能走受控 CLI / HTTP action 协议。
 

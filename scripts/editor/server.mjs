@@ -1,3 +1,8 @@
+import {EditTimeline} from './edit-timeline.mjs';
+import {createEditorViews} from './editor-view.mjs';
+import {verifyEffectiveDeck,withEffectiveDeck} from './effective-deck.mjs';
+import {actionKey,compileActionGroups,sourceRebaseActionIds} from './action-compiler.mjs';
+import { reconcileSourceActions, reconcileLegacySourceHistory } from './source-action-reconciliation.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, unlinkSync, unwatchFile, watchFile } from 'node:fs';
 import { createServer } from 'node:http';
@@ -686,6 +691,8 @@ function errorResponse(response, error) {
   ]);
   const message = statusCode === 500 && !safeMessages.has(code) ? '服务内部错误' : error.message;
   const details = {};
+  if(error?.targetSummary)details.targetSummary=error.targetSummary;
+  if(error?.replayCode)details.replayCode=error.replayCode;
   if (typeof error?.failedActionId === 'string') details.failedActionId = error.failedActionId;
   if (Array.isArray(error?.candidates)) details.candidates = error.candidates.slice(0, 5);
   if (typeof error?.committed === 'boolean') details.committed = error.committed;
@@ -1537,6 +1544,25 @@ export async function startServer({
       migratedSession ??= structuredClone(sessionStore.state);
       delete migratedSession.startupRecovery;
     }
+    const reconciledHistory = workingDeckStore.managed
+      ? await reconcileLegacySourceHistory(migratedSession ?? sessionStore.state, sidecarBoundary.io, pythonExecutable) : null;
+    if(reconciledHistory) {
+      const groups=[{active:true,actions:reconciledHistory.solidifiedActions??[]},...reconciledHistory.groups];
+      const actions=compileActionGroups(groups);
+      const checked=await verifyEffectiveDeck({bytes:await workingDeckStore.read(),actions,pythonExecutable},
+        {verify:workingPatchVerifier,droppableActionIds:sourceRebaseActionIds(groups,actions)});
+      const removed=new Set(checked.droppedActionIds??[]);
+      if(removed.size) {
+        const entry=reconciledHistory.timeline.entries.slice(0,reconciledHistory.timeline.cursor)
+          .findLast(entry=>entry.mutation.kind==='source');
+        if(entry) {
+          const evidence=entry.mutation.source.actionReconciliation;
+          evidence.supersededKeys=[...new Set([...evidence.supersededKeys,...actions.filter(a=>removed.has(a.id)).map(actionKey)])];
+          EditTimeline.open(reconciledHistory);
+        }
+      }
+    }
+    migratedSession = reconciledHistory ?? migratedSession;
     if (migratedSession) await sessionStore.persistState(migratedSession);
     const persistedAgentWorkspace = await sidecarBoundary.io.readAgentWorkspace({ missingOk:true });
     projectResolution = await resolveProjectRoot({
@@ -1956,7 +1982,7 @@ export async function startServer({
 
   const publishSourceMutation = async (change, {
     sourceEditId=null, expectedRevision=sessionStore.state.revision,
-    solidifiedPatchRepair=null,
+    solidifiedPatchRepair=null, actionReconciliation=null,
   } = {}) => {
     const source = {
       beforeFingerprint:change.beforeFingerprint,
@@ -1965,6 +1991,8 @@ export async function startServer({
       summary:'终端或外部工具修改工作副本',
       recordedAt:new Date().toISOString(),
     };
+    source.actionReconciliation = actionReconciliation;
+    source.impact = actionReconciliation?.impact ?? {flow:'full-edit',pageKeys:[]};
     const transaction = {
       restore:(target, expected) => workingDeckStore.restore(target, expected),
     };
@@ -2009,7 +2037,9 @@ export async function startServer({
       (sessionStore.state.solidifiedActions ?? []).map(action => action?.id),
     );
     const droppedActionIds = [];
+    let actionReconciliation;
     try {
+      actionReconciliation = await reconcileSourceActions(change, sessionStore.state.groups, sidecarBoundary.io, pythonExecutable);
       while (true) {
         try {
           await workingPatchVerifier(workingDeckStore.path);
@@ -2031,6 +2061,15 @@ export async function startServer({
           change.afterFingerprint = rewritten.change.afterFingerprint;
         }
       }
+      // 新源码必须连同未固化动作验证，避免预览成功后到固化才发现旧动作失效。
+      const groups=[{active:true,actions:effectivePatches},...sessionStore.state.groups,
+        {id:'candidate-source',active:true,mutationType:'source',source:{...change,actionReconciliation},actions:[]}];
+      const actions=compileActionGroups(groups);
+      const checked=await verifyEffectiveDeck({bytes:await workingDeckStore.read(),actions,pythonExecutable},
+        {verify:workingPatchVerifier,droppableActionIds:[...new Set([...droppableActionIds,...sourceRebaseActionIds(groups,actions)])]});
+      const missing=new Set(checked.droppedActionIds ?? []);
+      actionReconciliation.supersededKeys=[...new Set([...actionReconciliation.supersededKeys,
+        ...actions.filter(a=>missing.has(a.id)).map(actionKey)])];
     } catch (error) {
       try {
         await workingDeckStore.discardExternalChange(change.beforeFingerprint);
@@ -2044,6 +2083,7 @@ export async function startServer({
       throw error;
     }
     return publishSourceMutation(change, {
+      actionReconciliation,
       sourceEditId,
       expectedRevision,
       solidifiedPatchRepair:droppedActionIds.length > 0 ? {
@@ -2053,10 +2093,11 @@ export async function startServer({
     });
   };
 
-  const restoreVerifiedSourceVersion = async (targetFingerprint, expectedFingerprint) => {
+  const restoreVerifiedSourceVersion = async (targetFingerprint, expectedFingerprint, actions=null) => {
     const restored = await workingDeckStore.restore(targetFingerprint, expectedFingerprint);
     try {
-      await workingPatchVerifier(workingDeckStore.path);
+      if(actions)await verifyEffectiveDeck({bytes:await workingDeckStore.read(),actions,pythonExecutable},{verify:workingPatchVerifier});
+      else await workingPatchVerifier(workingDeckStore.path);
     } catch (error) {
       try {
         await workingDeckStore.restore(expectedFingerprint, targetFingerprint);
@@ -2089,6 +2130,7 @@ export async function startServer({
   // 文件系统通知只能说明“可能发生了变化”，不能作为 mutation 的提交顺序。
   // 所有带 revision 的写操作先穿过同一个检查点 seam：若 Agent 已经写盘，
   // SourceMutation 必须先增加 revision，随后旧请求以 REVISION_CONFLICT 安全重试。
+  const editorView = createEditorViews();
   const guardWorkingRevision = async expectedRevision => {
     if (workingDeckStore.managed) await queueWorkingDeckCheckpoint();
     bridge.assertRevision(expectedRevision);
@@ -2148,6 +2190,40 @@ export async function startServer({
         return;
       }
 
+      if (request.method === 'POST' && ['/api/inspect','/api/verify'].includes(pathname)) {
+        const body=await readJson(request);
+        const revision=body.expectedRevision ?? sessionStore.state.revision;
+        requireRevision(revision);
+        await guardWorkingRevision(revision);
+        if(bridge.sourceEditSnapshot())throw httpError('SOURCE_EDIT_ACTIVE',409,'源码事务尚未完成');
+        const actions=bridge.compiledRuntimeWriteActions();
+        const bytes=await workingDeckStore.read();
+        bridge.assertRevision(revision);
+        let result;
+        if(pathname==='/api/verify') {
+          result=await verifyEffectiveDeck({bytes,actions,pythonExecutable},
+            {verify:workingPatchVerifier,droppableActionIds:bridge.sourceRebaseActionIds(actions)});
+          result={...result,scope:'full-history-replay'};
+        } else {
+          const task=body.taskId ? sessionStore.state.tasks.find(t=>t.id===body.taskId) : null;
+          if(body.taskId&&!task)throw httpError('TASK_NOT_FOUND',404,'找不到任务');
+          if(body.query!==undefined&&(typeof body.query!=='string'||body.query.length>500))throw httpError('INVALID_INPUT',400,'检索文字无效');
+          result=await editorView({bytes,actions,pythonExecutable},
+            {pageKey:body.pageKey??task?.pageKey,query:body.query??'',rect:task?.rect??null});
+          result={...result,task:task?structuredClone(task):null};
+        }
+        if(sessionStore.state.revision!==revision)throw httpError('SNAPSHOT_STALE',409,'检查期间编辑版本变化，请读取最新结果');
+        json(response,200,{...result,revision});
+        return;
+      }
+      const commandMatch=pathname.match(/^\/api\/commands\/([a-f0-9-]+)$/);
+      if(request.method==='GET'&&commandMatch) {
+        const receipt=sessionStore.state.completedCommands?.[commandMatch[1]];
+        json(response,200,{commandId:commandMatch[1],revision:sessionStore.state.revision,
+          committed:receipt?true:null,...(receipt?{receipt}:{}),
+          message:receipt?'修改已提交，请勿重新执行':'未找到提交回执；旧回执可能已过期，需核对任务和历史'});
+        return;
+      }
       if (request.method === 'GET' && pathname === '/api/session') {
         json(response, 200, sessionStore.state);
         return;
@@ -2170,8 +2246,11 @@ export async function startServer({
         return;
       }
       if (request.method === 'POST' && pathname === '/api/export/pptx') {
-        const { expectedRevision } = await readJson(request);
+        const { expectedRevision, mode = 'image' } = await readJson(request);
         requireRevision(expectedRevision);
+        if (mode !== 'image' && mode !== 'editable') {
+          throw httpError('PPTX_EXPORT_MODE_INVALID', 400, 'PPTX 导出模式必须为 image 或 editable');
+        }
         await guardWorkingRevision(expectedRevision);
         if (pptxExportBusy) {
           throw httpError('PPTX_EXPORT_BUSY', 409, '已有一个 PPTX 正在导出，请稍候');
@@ -2185,6 +2264,7 @@ export async function startServer({
             : await workingDeckStore.read();
           return pptxExporter({
             htmlBytes,
+            mode,
             pythonExecutable,
             timeoutMs:pptxExportTimeoutMs,
             signal:controller.signal,
@@ -2494,7 +2574,10 @@ export async function startServer({
         if (!Array.isArray(actions) || actions.length === 0) {
           throw httpError('INVALID_INPUT', 400, 'actions 必须为非空数组');
         }
-        actions.forEach(validateAction);
+        actions.forEach(action=>{
+          if(Object.hasOwn(action,'sourceResizeStyle'))throw httpError('INVALID_INPUT',400,'源码重放证据由编辑器生成');
+          validateAction(action);
+        });
         if (new Set(actions.map(action => action.id)).size !== actions.length) {
           throw httpError('DUPLICATE_ACTION_ID', 400, '同一批次 action id 不得重复');
         }
@@ -2621,6 +2704,8 @@ export async function startServer({
               writer:workingDeckStore.managed
                 ? async (patches, expectedFingerprint) => {
                   if (!solidify) {
+                    await verifyEffectiveDeck({bytes:await workingDeckStore.read(),actions:patches,pythonExecutable},
+                      {verify:workingPatchVerifier,droppableActionIds:bridge.sourceRebaseActionIds(patches)});
                     return {
                       ok:true,
                       fingerprint:workingDeckStore.fingerprint,
@@ -2780,6 +2865,10 @@ export async function startServer({
       }
       throw httpError('NOT_FOUND', 404, '资源不存在');
     } catch (error) {
+      if(error?.failedActionId) {
+        const failed=bridge.compiledWriteActions().find(action=>action.id===error.failedActionId);
+        if(failed)error.targetSummary={pageKey:failed.target.pageKey,kind:failed.kind,editorId:failed.target.editorId??null};
+      }
       errorResponse(response, error);
     }
   });
@@ -3152,6 +3241,7 @@ export async function startServer({
         unwatchFile(workingDeckStore.path, workingWatchListener);
       }
       bridge.close();
+      await editorView.close();
       detachTerminalState?.();
       detachTerminalProvider?.();
       detachTerminalInterrupt?.();

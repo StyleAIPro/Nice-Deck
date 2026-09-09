@@ -25,6 +25,8 @@ const token = params.get('token') ?? '';
 const editorToken = params.get('editorToken') ?? '';
 const embeddedCreation = params.get('embedded') === 'creation';
 const embeddedDsh = params.get('embedded') === 'dsh';
+// 创建画布的对话由外层宿主管理，不能重复初始化开发终端。
+const ownsAgentTerminal = !embeddedDsh && !embeddedCreation;
 const dshWorkItemCoordinatorEnabled = document.documentElement.dataset
   .dshWorkItemCoordinator === 'true';
 const dshParentOrigin = (() => {
@@ -40,7 +42,7 @@ const exitEditorButton = document.querySelector('[data-exit-editor]');
 const workspaceKind = params.get('workspaceKind') === 'creation' ? 'creation' : 'editing';
 if (embeddedCreation) document.documentElement.dataset.embedded = 'creation';
 if (embeddedDsh) document.documentElement.dataset.embedded = 'dsh';
-document.documentElement.dataset.runtimeProfile = embeddedDsh ? 'dsh-product' : 'standalone-dev';
+document.documentElement.dataset.runtimeProfile = ownsAgentTerminal ? 'standalone-dev' : 'dsh-product';
 if (embeddedDsh && exitEditorButton) {
   exitEditorButton.setAttribute('aria-label', '关闭 AICO-PPT 工作台');
   exitEditorButton.title = '关闭 AICO-PPT 工作台';
@@ -71,6 +73,10 @@ const zoomValue = document.querySelector('[data-zoom]');
 const revisionValue = document.querySelector('[data-revision]');
 const canvasPresentationButton = document.querySelector('[data-canvas-present]');
 const exportPptxButton = document.querySelector('[data-export-pptx]');
+const pptxExportDialog = document.querySelector('[data-pptx-export-dialog]');
+const pptxExportCancel = document.querySelector('[data-pptx-export-cancel]');
+const pptxExportConfirm = document.querySelector('[data-pptx-export-confirm]');
+const pptxExportModal = new AppModal(pptxExportDialog);
 const modeTools = document.querySelector('.mode-tools');
 const modeButtons = [...document.querySelectorAll('[data-mode]')];
 const pagePanelToggle = document.querySelector('[data-page-panel-toggle]');
@@ -404,6 +410,8 @@ async function requestJson(pathname, options) {
     error.status = response.status;
     error.code = body.error;
     error.failedActionId = body.failedActionId;
+    error.targetSummary = body.targetSummary;
+    error.replayCode = body.replayCode;
     error.candidates = body.candidates;
     error.committed = body.committed;
     error.commitConfirmed = body.commitConfirmed;
@@ -655,7 +663,7 @@ async function createCurrentDshWorkSession({ workId, contextKey } = {}) {
       `Work Item：${dshWorkItem.workId}`,
       `Deck：${dshWorkItem.deckPath}`,
       `项目目录：${dshWorkItem.projectRoot}`,
-      '后续只处理右侧 Editor 中这份 Deck 的需求；需要修改时等待 Editor 提交带 capability 的任务。',
+      '后续只处理右侧 Editor 中这份 Deck 的需求。当前工作区连接由 Host 按会话关联动态提供；用户可直接用自然语言讨论或要求修改，无需先提交区域任务。',
     ].join('\n'));
     showHistoryNotice('新的 DSH 任务会话已创建并设为活动会话', 'success');
     return {
@@ -682,8 +690,21 @@ function pptxDownloadName(response) {
   return plain || 'deck.pptx';
 }
 
+function openPptxExportDialog() {
+  if (pptxExportBusy) return;
+  const recommended = pptxExportDialog.querySelector('[value="editable"]');
+  recommended.checked = true;
+  pptxExportModal.show(recommended);
+}
+
+function closePptxExportDialog() {
+  pptxExportModal.close();
+}
+
 async function onExportPptx() {
   if (pptxExportBusy) return;
+  const mode = pptxExportDialog.querySelector('[name="pptx-export-mode"]:checked').value;
+  closePptxExportDialog();
   pptxExportBusy = true;
   exportPptxButton.disabled = true;
   exportPptxButton.dataset.exportState = 'busy';
@@ -696,7 +717,7 @@ async function onExportPptx() {
     const response = await fetch(endpoint('/api/export/pptx'), {
       method:'POST',
       headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ expectedRevision:revision }),
+      body:JSON.stringify({ expectedRevision:revision, mode }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -864,7 +885,7 @@ function renderAgentStatus() {
 }
 
 function renderAgentTerminal() {
-  if (embeddedDsh) {
+  if (!ownsAgentTerminal) {
     agentTerminalOpen = false;
     editorShell.dataset.agentTerminalOpen = 'false';
     agentTerminalRoot.hidden = true;
@@ -884,7 +905,7 @@ function openAgentTerminal() {
 }
 
 function ensureAgentTerminalOpen() {
-  if (embeddedDsh) return false;
+  if (!ownsAgentTerminal) return false;
   if (agentTerminalOpen) return false;
   agentTerminalOpen = true;
   renderAgentTerminal();
@@ -1188,6 +1209,10 @@ function renderHistory() {
   const refreshPending = loadedSessionRevision < historyRefreshTargetRevision
     || historySnapshotFulfilled < historySnapshotRequirement;
   const controlsBusy = historyBusy || solidifyBusy || refreshPending;
+  for (const button of taskDrawer.querySelectorAll('[data-history-method]')) {
+    button.disabled = controlsBusy || button.dataset.taskHistoryLocked === 'true';
+    button.setAttribute('aria-busy', String(controlsBusy));
+  }
   historyControls.dataset.busy = String(controlsBusy);
   historyControls.setAttribute('aria-busy', String(controlsBusy));
   undoButton.disabled = controlsBusy || !undoGroup;
@@ -1635,7 +1660,7 @@ async function solidifyChanges() {
     const failureMessage = error.code === 'REVISION_CONFLICT'
       ? '修改历史已经变化，请重新确认固化'
       : error.code === 'PATCH_REPLAY_FAILED'
-        ? '历史修改无法安全重放，已停止固化且原 Deck 未被改动'
+        ? `历史${({resize:'缩放',setText:'文字',setStyle:'样式',hide:'隐藏',translate:'移动'})[error.targetSummary?.kind] ?? '修改'}无法安全重放${error.failedActionId ? `（动作 ${error.failedActionId.slice(0,8)}）` : ''}，原 Deck 未被改动`
         : error.code === 'NEW_OVERFLOW'
           ? '检测到新的页面溢出，已停止固化且原 Deck 未被改动'
           : error.code === 'DECK_CHANGED'
@@ -1680,7 +1705,7 @@ function requireHistoryRefresh(targetRevision) {
 }
 
 async function changeHistory(method, button) {
-  if (historyBusy || !button.dataset.groupId) return;
+  if (historyBusy || solidifyBusy || button.disabled || !button.dataset.groupId) return;
   const groupId = button.dataset.groupId;
   historyBusy = true;
   renderHistory();
@@ -1790,7 +1815,12 @@ function onSelectionDeleteKeydown(event) {
 }
 
 async function changeTaskHistory(task, control) {
-  if (!task?.groupId || !control?.groupId || !['undo', 'redo'].includes(control.method)) return;
+  if (historyBusy || solidifyBusy
+    || loadedSessionRevision < historyRefreshTargetRevision
+    || historySnapshotFulfilled < historySnapshotRequirement
+    || !task?.groupId || !control?.groupId || !['undo', 'redo'].includes(control.method)) return;
+  historyBusy = true;
+  renderHistory();
   let { groupId, method } = control;
   const verb = () => method === 'undo' ? '撤销' : '重做';
   let retried = false;
@@ -1810,7 +1840,9 @@ async function changeTaskHistory(task, control) {
           await loadSession();
           const refreshed = tasks.find(candidate => candidate.id === task.id);
           const refreshedControl = taskHistoryControl(refreshed, sessionGroups);
-          if (!refreshedControl) return;
+          // 同一用户操作不能在刷新后变成相反操作或作用于另一历史组。
+          if (!refreshedControl || refreshedControl.method !== method
+            || refreshedControl.groupId !== groupId) return;
           task = refreshed;
           ({ groupId, method } = refreshedControl);
           continue;
@@ -1837,6 +1869,9 @@ async function changeTaskHistory(task, control) {
   } catch (error) {
     await loadSession(error.revision).catch(() => {});
     showTaskNotice(`${verb()}失败：${error.message || error.code || '未知错误'}`);
+  } finally {
+    historyBusy = false;
+    renderHistory();
   }
 }
 
@@ -2460,7 +2495,9 @@ function onTemporaryRegionKeyup(event) {
 const onModeClick = event => setEditorMode(event.currentTarget.dataset.mode);
 for (const button of modeButtons) button.addEventListener('click', onModeClick);
 canvasPresentationButton.addEventListener('click', enterCanvasPresentation);
-exportPptxButton.addEventListener('click', onExportPptx);
+exportPptxButton.addEventListener('click', openPptxExportDialog);
+pptxExportCancel.addEventListener('click', closePptxExportDialog);
+pptxExportConfirm.addEventListener('click', onExportPptx);
 const onInspectorCollapse = () => setInspectorExpanded(false);
 const onInspectorReopen = () => setInspectorExpanded(true);
 inspectorCollapseButton.addEventListener('click', onInspectorCollapse);
@@ -2506,7 +2543,7 @@ const resizeObserver = new ResizeObserver(() => {
 });
 resizeObserver.observe(frameViewport);
 fitFrame();
-if (!embeddedDsh) {
+if (ownsAgentTerminal) {
   const { AgentTerminalPanel } = await import('./agent-terminal-panel.mjs');
   agentTerminal = new AgentTerminalPanel(agentTerminalRoot, {
     token,
@@ -2525,7 +2562,7 @@ if (!embeddedDsh) {
 renderTasks();
 renderAgentTerminal();
 renderInspector();
-if (!embeddedDsh) agentStatus.addEventListener('click', openAgentTerminal);
+if (ownsAgentTerminal) agentStatus.addEventListener('click', openAgentTerminal);
 
 function onAgentTerminalKeydown(event) {
   if (event.key !== 'Escape' || !agentTerminalOpen) return;
@@ -2642,10 +2679,10 @@ const startupRequests = [
     if (adoptAgentRun(run)) renderTasks();
   }),
 ];
-if (!embeddedDsh) startupRequests.push(requestJson('/api/agent-terminal').then(state => {
+if (ownsAgentTerminal) startupRequests.push(requestJson('/api/agent-terminal').then(state => {
   adoptAgentTerminalState(state);
 }));
-else startupRequests.push(initializeDshWorkItem());
+else if (embeddedDsh) startupRequests.push(initializeDshWorkItem());
 void Promise.all(startupRequests).then(() => {
   renderAgentStatus();
 }).catch(error => {
@@ -2668,7 +2705,10 @@ function teardown() {
   deckFrame.removeEventListener('load', onDeckFrameLoad);
   for (const button of modeButtons) button.removeEventListener('click', onModeClick);
   canvasPresentationButton.removeEventListener('click', enterCanvasPresentation);
-  exportPptxButton.removeEventListener('click', onExportPptx);
+  exportPptxButton.removeEventListener('click', openPptxExportDialog);
+  pptxExportCancel.removeEventListener('click', closePptxExportDialog);
+  pptxExportConfirm.removeEventListener('click', onExportPptx);
+  pptxExportModal.destroy();
   inspectorCollapseButton.removeEventListener('click', onInspectorCollapse);
   inspectorReopenButton.removeEventListener('click', onInspectorReopen);
   pagePanelToggle.removeEventListener('click', onPagePanelToggle);

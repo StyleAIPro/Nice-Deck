@@ -84,3 +84,18 @@ node --test scripts/editor/test/dsh-embedded-renzhi.e2e.mjs
 桌面文件与目录选择能力通过 Host 到 Worker 的私有启动参数传递，仅注入系统选择器回调；地址与认证令牌不进入 Worker 通用环境、模型脚本或运行时描述文件。启动时验证通道必须是带认证信息的本机 `/pick` 地址。真实 Worker 到 Electron 对话框桥的回归覆盖 HTML 选择和创建项目目录选择，同时保留无令牌及带浏览器 Origin 请求的拒绝检查。
 
 Creation CLI 每次通过 `--capability-file` 读取 Draft 的本机服务 URL 与凭据；恢复 Draft 时以 0600 权限更新同一路径的动态端口与凭据，无需把秘密写入会话提示或 Host 环境。
+
+
+### Harness 会话直接编辑
+
+已明确关联 Deck 的 Harness 会话会在每次模型调用前获得当前 Editor 工作区连接，包含受限 action capability 文件与托管工作副本路径；恢复旧会话或重启后重新解析，不依赖固定措辞。用户可直接在左侧讨论或要求修改，讨论只读，明确修改复用右侧同一工作区，无需先提交区域任务或退出 Editor。结构修改按 begin-source-edit / commit-source-edit 事务提交，每批成功后更新预览；事务期间人工写入保持串行保护。未关联会话不注入 Deck 能力，已关联但 Editor 不可用时提示重新打开对应工作区，不另起 headless 编辑器抢占租约。
+
+## 简洁编辑与视觉确认
+
+Harness 中使用原生 `aico_ppt` 工具：`inspect` 返回当前版本、任务、目标、父容器和页面图；`edit` 原样使用 locator、expectedRevision 与稳定 commandId，返回提交状态、受影响页诊断及结果图。普通修改不重读完整 Skill，不额外扩宽或重排版式。`hide` 只隐藏、不补位；DOM 删除与补位走源码事务。
+
+`view` 提供包含未固化动作的 1920×1080、build 全显标准图，不改变用户画布的页码或缩放。它不是现场窗口截图，返回 stateId、revision、renderMode；内容变化使缓存失效。多页提交先返回首个受影响页，其余页按需 view。截图失败时保留已提交状态；使用 `result` 查询原 commandId 后补充 view，不用新命令重交。
+
+CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND_ID`。`verify` 通过只读 `/api/verify` 检查完整历史候选，不推进历史；普通动作诊断及同版本截图通过后无需重复验证。源码事务在提交、撤销和重做时检查有效历史，真实文件仅在固化成功后替换。页面、共享 CSS/脚本的实际差异决定局部结构或完整流程，不能由模型自称“简单”来绕过校验。
+
+桌面区域任务使用简短说明，同轮相同编辑上下文去重，换工作项、新轮与压缩后恢复必要说明；连接与凭据即时读取。PPT 插件承载协议，Host 只提供通用工具、图片附件和隐藏渲染能力。

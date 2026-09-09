@@ -36,18 +36,29 @@ node scripts/verify/steps.mjs my-deck.html <页label> /tmp/steps
 python3 scripts/check_deps.py --profile pptx-export --repair
 ```
 
-在 Editor 中，可点击画布工具栏右侧、画布尺寸之前的导出图标直接下载 PPTX。导出使用当前工作副本快照，包含屏幕上正在预览但尚未固化的修改；导出本身不会固化修改，也不会清空撤销记录。
+在 Editor 中，点击画布工具栏右侧、画布尺寸之前的导出图标，选择格式后点击“开始导出”；默认推荐“可编辑 PPTX”。取消、Esc 或点击弹层外部均不启动导出。开始后按钮显示忙碌状态，完成后下载文件。导出使用当前工作副本快照，包含屏幕上正在预览但尚未固化的修改；导出本身不会固化修改，也不会清空撤销记录。
 
-命令行导出：
+| 格式 | 适用场景与限制 |
+|---|---|
+| 可编辑 PPTX | 文字、常见图形和表格可修改；复杂视觉保留图片，不保证全部元素可编辑 |
+| 高清图片 PPTX | 优先还原外观，每页为高清图片；页面内部文字和图形不可分别编辑 |
+
+两种模式都导出静态页面，不将动画和网页交互转换为 PowerPoint 动画；导出后需复核字体与排版。
+
+导出会等待当前快照中的全部补丁应用完成，保留改字、字号、隐藏、移动和缩放等修改。若补丁目标失效、应用失败或超时，会中止导出并提示失败原因及补丁 ID，不会生成回滚后的旧内容；请先在编辑器中修复对应修改再重试。
+
+可编辑模式按浏览器中的视觉行生成文本框，统一使用微软雅黑（Microsoft YaHei），保留字号比例、粗体、斜体和颜色。字号依据原始画布与局部缩放换算，按实际文字基线定位，不自动缩小文字。普通表格使用原生单元格，含合并单元格或复杂效果的表格保留图片。字体文件不会嵌入 PPTX；接收方未安装微软雅黑时，Office 仍会替换字体，字宽和表格换行可能变化。需要完全保持版面时请选择“高清图片 PPTX”。桌面可编辑导出需要支持透明截图的新 Host，旧版会提示升级；图片模式仍可使用。
+
+命令行可编辑导出（改成 `--mode image` 选择高清图片；不传模式仍默认图片，以兼容原有脚本）：
 
 ```bash
-python3 scripts/html2pptx/convert.py my-deck.html my-deck.pptx
+python3 scripts/html2pptx/convert.py my-deck.html my-deck.pptx --mode editable
 ```
 
 Windows：
 
 ```powershell
-py -3 scripts\html2pptx\convert.py my-deck.html my-deck.pptx
+py -3 scripts\html2pptx\convert.py my-deck.html my-deck.pptx --mode editable
 ```
 
 页内 layer 多标签页会自动展开为多张 PPTX 页面。只有用户明确需要 PPTX 时才导出；后续继续修改 HTML 不会自动重导。

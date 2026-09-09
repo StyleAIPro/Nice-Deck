@@ -201,6 +201,7 @@ function completeTask(state, taskId, groupOrId) {
   const group = primaryTaskGroup(state, changedGroup);
   const groupId = group?.id ?? task.groupId;
   task.status = 'completed';
+  delete task.lastError;
   if (groupId) task.groupId = groupId;
   task.entryIds = [...new Set([
     ...(task.entryIds ?? []), groupId, changedGroup?.id,
@@ -242,6 +243,7 @@ function runtimeWriteActions(actions) {
     payload:structuredClone(action.payload),
     before:structuredClone(action.before),
     after:structuredClone(action.after),
+    ...(typeof action.sourceResizeStyle === 'string' ? {sourceResizeStyle:action.sourceResizeStyle} : {}),
     ...(action.appliedAt === undefined ? {} : { appliedAt:action.appliedAt }),
   }));
 }
@@ -844,6 +846,8 @@ export class BridgeService {
 
   applyActions({ taskId, actions, expectedRevision, coalesceKey = null, commandId = null }) {
     return this.#enqueue(async () => {
+      const started=Date.now();
+      let preparedAt=started,journalAt=started,syncedAt=started;
       this.#assertMutable();
       if (!Array.isArray(actions)
         || actions.some(action => action?.taskId !== taskId)) {
@@ -877,6 +881,7 @@ export class BridgeService {
       let prepared;
       try {
         prepared = await this.#prepare(actions, expectedRevision);
+        preparedAt=Date.now();
       } catch (error) {
         if (taskId === null || error?.code !== 'TARGET_AMBIGUOUS') throw error;
         const task = await this.#recordTaskNeedsConfirmation(taskId, error.candidates);
@@ -909,7 +914,9 @@ export class BridgeService {
         if (error?.code === 'RECOVERY_REQUIRED') throw error;
         await this.#rollbackOrSync(prepared.commandId);
         if (['HISTORY_DIVERGED', 'HISTORY_ORDER'].includes(error?.code)) {
+          const failedTask = taskId === null ? null : await this.#recordTaskHistoryFailure(taskId, error);
           throw serviceError(error.code, 409, error.message, {
+            ...(failedTask ? { task:structuredClone(failedTask), revision:this.sessionStore.state.revision } : {}),
             stage:error.stage ?? 'history-integrity',
             recovery:error.recovery ?? '重新同步编辑器后重试本次操作',
             ...(error.slot ? { slot:error.slot } : {}),
@@ -920,6 +927,7 @@ export class BridgeService {
         }
         throw serviceError('JOURNAL_PERSIST_FAILED', 500, '动作日志持久化失败，浏览器修改已回滚');
       }
+      journalAt=Date.now();
       const completedTask = taskId === null
         ? undefined
         : taskById(this.sessionStore.state, taskId);
@@ -930,6 +938,7 @@ export class BridgeService {
         ...(completedTask ? { task:structuredClone(completedTask) } : {}),
       };
       const confirmation = await this.#finalizeCommitted(prepared.commandId);
+      syncedAt=Date.now();
       const diagnosticsPending = await this.#refreshDiagnostics(
         this.#pageKeysForActions(prepared.results), result.revision,
       ).then(() => false, error => {
@@ -942,7 +951,16 @@ export class BridgeService {
       this.manualCoalesce = coalesceKey === null ? null : {
         key:coalesceKey, groupId:group.id, at:Date.now(),
       };
-      return { ...result, ...confirmation, diagnosticsPending };
+      const pageKeys=this.#pageKeysForActions(prepared.results);
+      const diagnosticsCurrent=this.sessionStore.state.diagnosticsCurrent??{};
+      const available=!diagnosticsPending&&pageKeys.every(key=>diagnosticsCurrent[key]);
+      const blockers=available?compareDiagnostics(this.sessionStore.state.diagnosticsBaseline,diagnosticsCurrent,pageKeys):[];
+      return { ...result, ...confirmation, diagnosticsPending,
+        flow:'direct-edit',affectedPages:pageKeys,
+        diagnostics:{status:available?(blockers.length?'blocked':'passed'):'pending',pageKeys,blockers},
+        timings:{prepareMs:preparedAt-started,persistMs:journalAt-preparedAt,syncMs:syncedAt-journalAt,
+          diagnosticsMs:Date.now()-syncedAt,totalMs:Date.now()-started},
+      };
     });
   }
 
@@ -1203,7 +1221,8 @@ export class BridgeService {
       const targetFingerprint = method === 'undo'
         ? originalGroup.source.beforeFingerprint
         : originalGroup.source.afterFingerprint;
-      await restore(targetFingerprint, currentFingerprint);
+      draftState.solidifiedActions=applySolidifiedPatchTransition(state.solidifiedActions,originalGroup.source?.solidifiedPatchTransition,method);
+      await restore(targetFingerprint, currentFingerprint, runtimeWriteActions(draft.compileForWrite()));
       let candidate = {
         ...structuredClone(state),
         timeline:structuredClone(draftState.timeline),
@@ -1880,12 +1899,28 @@ export class BridgeService {
     return result;
   }
 
+  async #recordTaskHistoryFailure(taskId, error) {
+    const candidate = structuredClone(this.sessionStore.state);
+    const task = taskById(candidate, taskId);
+    task.status = 'failed';
+    task.candidates = [];
+    task.lastError = {
+      code:error.code, message:'编辑历史与页面状态不同步，本次修改未提交。',
+      recovery:'请重新打开工作项后重试；无需重新描述标记对象。',
+    };
+    task.updatedAt = new Date().toISOString();
+    candidate.revision += 1;
+    await this.#persistCandidate(candidate, { operation:'task-history-failed', revision:candidate.revision });
+    return taskById(this.sessionStore.state, taskId);
+  }
+
   async #recordTaskNeedsConfirmation(taskId, candidates) {
     const state = this.sessionStore.state;
     const candidate = structuredClone(state);
     const task = taskById(candidate, taskId);
     if (!task) throw serviceError('TASK_NOT_FOUND', 404, '找不到任务');
     task.status = 'needs-confirmation';
+    delete task.lastError;
     delete task.groupId;
     task.candidates = structuredClone(Array.isArray(candidates) ? candidates.slice(0, 5) : []);
     task.updatedAt = new Date().toISOString();

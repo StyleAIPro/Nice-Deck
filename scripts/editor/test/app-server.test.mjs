@@ -1244,10 +1244,12 @@ test('陈旧 nonce、伪造 provider 和未确认的过宽目录都被拒绝', a
 
 test('项目选择器取消保留 Deck 候选，更改后使用服务器端路径', async t => {
   let pickProjectCount = 0;
+  const initialDirectories = [];
   const app = await startAppServer({
     token:'app-secret',
     pickDeck:async () => '/tmp/deck.html',
-    pickAgentProjectDirectory:async () => {
+    pickAgentProjectDirectory:async ({ defaultPath }) => {
+      initialDirectories.push(defaultPath);
       pickProjectCount += 1;
       return pickProjectCount === 1 ? null : '/tmp/chosen-project';
     },
@@ -1274,6 +1276,17 @@ test('项目选择器取消保留 Deck 候选，更改后使用服务器端路�
   const changed = await request({});
   assert.equal(changed.status, 'project-selected');
   assert.equal(changed.projectRoot.path, '/tmp/chosen-project');
+  await request({ selectionRevision:changed.selectionRevision, defaultPath:'/tmp/forged' });
+  assert.deepEqual(initialDirectories, ['/tmp/default-project', '/tmp/default-project', '/tmp/chosen-project']);
+});
+
+test('独立目录选择器把当前目录作为单个参数传给 Python', async () => {
+  const calls = [], defaultPath = '/tmp/中文 项目 "草稿"';
+  await pickProjectDirectoryWithSystemPicker({
+    defaultPath, environment:{}, pythonExecutable:'python-test',
+    spawnProcess:pickerProcess({ code:3 }, calls),
+  });
+  assert.deepEqual(calls[0].args.slice(1), ['--pick-directory-only', '--default-path', defaultPath]);
 });
 
 class FakeTerminal {
@@ -1541,6 +1554,9 @@ test('DSH Creation 发布后原任务原位进入 Editing，并继续使用已�
   const finalEditor = {
     url:'http://127.0.0.1:45690',
     token:'dsh-editor-token',
+    sessionDir:projectRoot,
+    deckPath,
+    workingDeckPath:join(projectRoot, 'working.html'),
     editorToken:'dsh-browser-token',
     deckId,
     binding,
@@ -1610,6 +1626,17 @@ test('DSH Creation 发布后原任务原位进入 Editing，并继续使用已�
   assert.equal(history.creation.length, 0);
   assert.deepEqual(history.editing.map(item => item.workId), [creationWorkId]);
   assert.equal((await workCatalog.resolveByDshSession('session-project')).kind, 'editing');
+  const contextResponse = await postJson(app, '/api/dsh-work-items/editing-context', { sessionId:'session-project' });
+  assert.equal(contextResponse.status, 200);
+  const context = await contextResponse.json();
+  assert.equal(context.status, 'ready');
+  assert.equal(context.workId, creationWorkId);
+  const capability = JSON.parse(await readFile(context.capabilityPath, 'utf8'));
+  assert.equal(capability.url, finalEditor.url);
+  assert.equal(capability.token, finalEditor.token);
+  assert.notEqual(capability.token, finalEditor.editorToken);
+  assert.deepEqual(await postJson(app, '/api/dsh-work-items/editing-context', { sessionId:'ordinary-session' }).then(r => r.json()), { status:'unlinked' });
+
 });
 
 test('新建 Deck 对话页切换项目时保留 Agent 运行时并在返回时直接复用', async t => {

@@ -249,9 +249,14 @@ def probe_pptx_extractor():
 
 def probe_pptx_builder():
     base = REPO / "scripts" / "html2pptx"
-    files = (base / "build_pptx.py", *(base / "template" / name for name in ("slideMaster.xml", "slideLayout.xml", "theme.xml")))
+    files = (
+        *(base / name for name in (
+            "build_pptx.py", "build_editable_pptx.py", "extract-editable.mjs", "editable-scene.mjs", "export-ready.mjs",
+        )),
+        *(base / "template" / name for name in ("slideMaster.xml", "slideLayout.xml", "theme.xml")),
+    )
     missing = [str(path.relative_to(REPO)) for path in files if not path.is_file()]
-    return not missing, "缺少 " + "、".join(missing) if missing else "标准库截图 PPTX 打包器与 XML 模板"
+    return not missing, "缺少 " + "、".join(missing) if missing else "图片与可编辑 PPTX 工具及 XML 模板"
 
 def probe_desktop_renderer():
     """实际连接当前宿主并验证隔离页面；能力文件存在不等于服务可用。"""
@@ -420,7 +425,7 @@ CHECKS = [
          hint="安装 Google Chrome（google.com/chrome）"),
     dict(key="desktop-renderer", label="桌面渲染服务", why="复用 AICO Electron 截图与验证",
          probe=probe_desktop_renderer, install=None, hint="启动或升级 AICO 桌面版，无需另装浏览器"),
-    dict(key="pptx-builder", label="PPTX 打包工具", why="将逐页截图打包为 PPTX（标准库）",
+    dict(key="pptx-builder", label="PPTX 打包工具", why="图片与可编辑 PPTX 组装（标准库）",
          probe=probe_pptx_builder, install=None, hint="恢复完整 AICO-PPT 文件或重新安装插件"),
     dict(key="pillow", label="Pillow", why="PPTX 中内嵌 HTML 附件的图标",
          probe=probe_pymod("PIL"), install=pip("pillow")),

@@ -627,19 +627,35 @@ class WindowsPersistentHelper:
         return fingerprint
 
     def read_working_deck(self, payload):
-        if payload not in ({"missingOk": True}, {"missingOk": False}):
-            raise SidecarIOError("read-working-deck payload 无效")
+        if not isinstance(payload, dict) or set(payload) not in (
+            {"missingOk"}, {"missingOk", "ifFingerprint"}, {"missingOk", "versionFingerprint"}
+        ) or not isinstance(payload.get("missingOk"), bool):
+            raise SidecarIOError("read-working-deck payload 格式无效")
+        version = payload.get("versionFingerprint")
+        if version is not None and (not isinstance(version, str) or not re.fullmatch(r"[0-9a-f]{64}", version)):
+            raise SidecarIOError("工作副本版本指纹无效")
+        expected = payload.get("ifFingerprint")
+        if expected is not None and (
+            not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
+        ):
+            raise SidecarIOError("工作副本条件指纹无效")
         try:
             contents = _read_file(
-                self.working, "deck.html", maximum=MAX_WORKING_DECK_BYTES
+                self.working_versions if version else self.working, f"{version}.html" if version else "deck.html", maximum=MAX_WORKING_DECK_BYTES
             )
         except FileNotFoundError:
             if payload["missingOk"]:
                 return None
             raise
+        fingerprint = hashlib.sha256(contents).hexdigest()
+        if version and fingerprint != version:
+            raise SidecarIOError("工作副本归档内容与指纹不一致")
+        # 仍读取并校验真实文件；相同时避免跨进程复制整份大 HTML。
+        if expected == fingerprint:
+            return {"unchanged": True, "fingerprint": fingerprint}
         return {
             "bytes": base64.b64encode(contents).decode("ascii"),
-            "fingerprint": hashlib.sha256(contents).hexdigest(),
+            "fingerprint": fingerprint,
         }
 
     def write_working_deck(self, payload):

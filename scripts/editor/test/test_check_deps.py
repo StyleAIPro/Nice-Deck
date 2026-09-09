@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -15,6 +16,31 @@ SPEC.loader.exec_module(doctor)
 
 
 class CheckDepsTest(unittest.TestCase):
+    def test_pptx_export_reports_missing_editable_tools_without_installing_dependencies(self):
+        _, checks = doctor.checks_for_profiles(["pptx-export"])
+        builder = next(check for check in checks if check["key"] == "pptx-builder")
+        self.assertIsNone(builder.get("install"))
+        for name in ("extract-editable.mjs", "editable-scene.mjs", "build_editable_pptx.py", "export-ready.mjs"):
+            with self.subTest(missing=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                base = root / "scripts" / "html2pptx"
+                shutil.copytree(ROOT / "scripts" / "html2pptx", base)
+                with mock.patch.object(doctor, "REPO", root), \
+                        mock.patch.object(doctor, "run") as run:
+                    self.assertTrue(doctor.do_probe(builder)[0])
+                    (base / name).unlink()
+                    ready, detail = doctor.do_probe(builder)
+                    self.assertFalse(ready)
+                    self.assertIn(f"scripts/html2pptx/{name}", detail)
+                    probe = doctor.do_probe
+                    with mock.patch.object(doctor, "do_probe", side_effect=lambda check: (
+                        probe(check) if check["key"] == "pptx-builder" else (True, "ok")
+                    )):
+                        snapshot = doctor.dependency_snapshot(["pptx-export"])
+                    self.assertFalse(snapshot["ready"])
+                    self.assertEqual(snapshot["profiles"]["pptx-export"]["state"], "manual-action-required")
+                    run.assert_not_called()
+
     def test_desktop_verify_uses_renderer_without_browser_or_playwright(self):
         with mock.patch.dict(os.environ, {"AICO_RUNTIME_KIND": "desktop"}):
             _, checks = doctor.checks_for_profiles(["pptx-export"])

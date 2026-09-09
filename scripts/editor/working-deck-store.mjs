@@ -67,7 +67,7 @@ function runPrepare(sourcePath, {
   });
 }
 
-function runPatchAdapter(bytes, patches, {
+export function materializePatchBytes(bytes, patches, {
   pythonExecutable=DEFAULT_PYTHON_EXECUTABLE, spawnProcess=spawn,
 } = {}) {
   return new Promise((resolvePromise, reject) => {
@@ -556,7 +556,7 @@ export class WorkingDeckStore {
         code:'WORKING_DECK_CHANGED',
       });
     }
-    const bytes = await runPatchAdapter(current, patches, {
+    const bytes = await materializePatchBytes(current, patches, {
       pythonExecutable:this.pythonExecutable, spawnProcess:this.spawnProcess,
     });
     const result = await this.replace(bytes, beforeFingerprint);
@@ -580,7 +580,7 @@ export class WorkingDeckStore {
         actualFingerprint:current.fingerprint,
       });
     }
-    const bytes = await runPatchAdapter(current.bytes, patches, {
+    const bytes = await materializePatchBytes(current.bytes, patches, {
       pythonExecutable:this.pythonExecutable, spawnProcess:this.spawnProcess,
     });
     const inspected = inspectBundle(bytes);
@@ -627,14 +627,16 @@ export class WorkingDeckStore {
       });
     }
     if (patches.length === 0) return Buffer.from(current);
-    return runPatchAdapter(current, patches, {
+    return materializePatchBytes(current, patches, {
       pythonExecutable:this.pythonExecutable, spawnProcess:this.spawnProcess,
     });
   }
 
   async checkpointExternalChange() {
     if (this.pendingExternalChange) return structuredClone(this.pendingExternalChange);
-    let value = decodeRead(await this.sidecarIO.readWorkingDeck({ missingOk:false }));
+    const read = await this.sidecarIO.readWorkingDeck({ missingOk:false, ifFingerprint:this.fingerprint });
+    if (read?.unchanged === true && read.fingerprint === this.fingerprint) return null;
+    let value = decodeRead(read);
     if (value.fingerprint === this.fingerprint) return null;
     const beforeFingerprint = this.fingerprint;
     let inspected;

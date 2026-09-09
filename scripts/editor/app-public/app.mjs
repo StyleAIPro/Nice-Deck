@@ -1518,7 +1518,8 @@ function renderMilestones(milestones) {
   for (const node of document.querySelectorAll('[data-milestone]')) {
     const key = node.dataset.milestone;
     const milestone = milestones[key] ?? { state:'pending', complete:false };
-    const nextState = milestone.complete ? 'complete' : milestone.state ?? 'pending';
+    const nextState = key === 'deck' && creationDraft?.generation?.status === 'failed'
+      ? 'failed' : milestone.complete ? 'complete' : milestone.state ?? 'pending';
     node.dataset.state = nextState;
     const detail = node.querySelector('[data-milestone-detail]');
     detail.textContent = milestoneDetails[key]?.[nextState] ?? '等待 Agent 更新';

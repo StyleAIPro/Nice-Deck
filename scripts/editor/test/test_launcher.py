@@ -222,6 +222,41 @@ class LauncherTest(unittest.TestCase):
         )
         root.destroy.assert_called_once_with()
 
+    def test_directory_picker_cli_forwards_configured_path(self):
+        with tempfile.TemporaryDirectory(prefix="项目 空格-") as directory:
+            with (
+                mock.patch.object(launcher, "choose_project_directory", return_value=None) as choose,
+                mock.patch("sys.stdout"),
+            ):
+                self.assertEqual(launcher.main([
+                    "--pick-directory-only", "--default-path", directory,
+                ]), 3)
+            choose.assert_called_once_with(default_path=directory)
+
+    def test_tk_directory_picker_starts_at_configured_path(self):
+        directory = r'C:\项目目录\中文 草稿'
+        with (
+            mock.patch.object(launcher.sys, "platform", "win32"),
+            mock.patch.object(launcher, "_choose_with_tk", return_value="") as choose,
+        ):
+            self.assertIsNone(launcher.choose_project_directory(default_path=directory))
+        choose.assert_called_once_with(
+            "askdirectory", title="选择 Agent 项目目录", mustexist=True, initialdir=directory,
+        )
+
+    def test_macos_directory_picker_passes_current_path_as_data(self):
+        directory = '/tmp/项目 "草稿"'
+        with (
+            mock.patch.object(launcher.sys, "platform", "darwin"),
+            mock.patch.object(launcher.Path, "is_file", return_value=True),
+            mock.patch.object(launcher, "_run_applescript", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")) as run,
+        ):
+            self.assertIsNone(launcher.choose_project_directory(default_path=directory))
+        source, prompt, initial_directory = run.call_args.args
+        self.assertEqual(initial_directory, directory)
+        self.assertNotIn(directory, source)
+        self.assertIn("default location", source)
+
     def test_finder_argument_and_ctrl_c_are_quiet(self):
         self.assertEqual(launcher.normalize_argv(["-psn_0_123", "deck.html"]), ["deck.html"])
         with mock.patch.object(launcher.subprocess, "call", side_effect=KeyboardInterrupt):

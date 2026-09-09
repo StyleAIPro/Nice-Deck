@@ -16,6 +16,7 @@ import {
 } from './agent-terminal-conversation-store.mjs';
 import { createRecentDeckStore } from './recent-deck-store.mjs';
 import { createWorkHistoryStore } from './work-history-store.mjs';
+import { resolveEditingContext } from './dsh-editing-context.mjs';
 import { createWorkCatalog } from './work-catalog.mjs';
 import {
   DeckCreationWorkspace,
@@ -1452,6 +1453,18 @@ export async function startAppServer({
         return;
       }
 
+      if (requestUrl.pathname === '/api/dsh-work-items/editing-context') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
+          code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
+        });
+        const { sessionId } = await readJson(request);
+        const result = await resolveEditingContext({
+          sessionId, workCatalog:activeWorkCatalog, findEditingRuntime,
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
       if (requestUrl.pathname === '/api/dsh-work-items/resolve-session') {
         if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
           code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
@@ -1652,7 +1665,9 @@ export async function startAppServer({
         activePicker = picker;
         let selectedPath;
         try {
-          selectedPath = await pickAgentProjectDirectory({ signal:picker.signal });
+          selectedPath = await pickAgentProjectDirectory({
+            signal:picker.signal, defaultPath:creationCandidate?.project.path,
+          });
         } finally {
           if (activePicker === picker) activePicker = null;
         }
@@ -2007,7 +2022,9 @@ export async function startAppServer({
         activePicker = picker;
         let selectedPath;
         try {
-          selectedPath = await pickAgentProjectDirectory({ signal:picker.signal });
+          selectedPath = await pickAgentProjectDirectory({
+            signal:picker.signal, defaultPath:selectedCandidate.project.path,
+          });
         } finally {
           if (activePicker === picker) activePicker = null;
         }

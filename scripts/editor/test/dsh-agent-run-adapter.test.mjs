@@ -30,7 +30,8 @@ test('DSH 适配器发布规范提示词，并以原任务状态完成批次', a
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(typeof published.requestId, 'string');
   assert.equal(published.assignedSessionId, 'session-deck');
-  assert.match(published.prompt, /^\/aico-ppt/u);
+  assert.match(published.prompt, /^AICO-PPT 区域编辑任务/u);
+  assert.doesNotMatch(published.prompt,/首次处理必须|先完整读取/);
   assert.doesNotMatch(published.prompt, /^\$aico-ppt/u);
   assert.match(published.prompt, /task-1/u);
   assert.match(published.prompt, /http:\/\/127\.0\.0\.1:4100/u);

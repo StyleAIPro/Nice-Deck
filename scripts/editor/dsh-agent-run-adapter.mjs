@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { buildAgentPrompt } from './agent-runner.mjs';
+import { buildEditorBatchPrompt } from './agent-runner.mjs';
 
 function bridgeError(code, statusCode, message) {
   return Object.assign(new Error(message), { code, statusCode });
@@ -76,10 +76,10 @@ export function createDshAgentRunAdapter({
         throw bridgeError('DSH_SESSION_REQUIRED', 409, '当前 Deck 工作项没有可用的活动 DSH 会话');
       }
       const requestId = randomUUID();
-      const prompt = buildAgentPrompt({
+      const prompt = buildEditorBatchPrompt({
         ...context,
         sourceThreadId:'dsh-native-session',
-        loadSkill:true,
+        loadSkill:false,
         skillInvocation:'/aico-ppt',
         environmentCredentials:false,
       });

@@ -153,12 +153,14 @@ def strip_stamp_attributes(fragment: str) -> str:
 def layout_fingerprint(fragment: str) -> str:
     clean = strip_stamp_attributes(fragment)
     clean = re.sub(
-        r"\sdata-(?:page-id|label|plan-page-id|plan-chapter-id)="
+        r"\sdata-(?:page-id|label|plan-page-id|plan-chapter-id|editor-id)="
         r"(?:\"[^\"]*\"|'[^']*')",
         "",
         clean,
         flags=re.I,
     )
+    # 编辑身份与空元素标签的序列化空格不属于版式结构。
+    clean = re.sub(r"\s+/>", "/>", clean)
     clean = re.sub(r">[^<]*<", "><", clean)
     clean = re.sub(r"\s+", " ", clean).strip()
     return hashlib.sha256(clean.encode("utf-8")).hexdigest()

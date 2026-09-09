@@ -52,6 +52,31 @@ function normalizeGeneratedRangeTargets(groups) {
   }));
 }
 
+function normalizeRecordedTextTargets(groups) {
+  const previous=[];
+  return groups.map(group=>({...group,actions:(group.actions??[]).map(action=>{
+    if(!group.active || action.kind!=='setText' || !action.target?.editorId
+      || action.target.textPath===undefined)return action;
+    const path=action.target.path.split('/'), textPath=action.target.textPath.split('/');
+    const candidates=previous.filter(candidate=>{
+      if(candidate.target.pageKey!==action.target.pageKey)return false;
+      const childPath=candidate.target.path.split('/');
+      const offset=childPath.length-path.length;
+      return offset>0 && path.every((part,i)=>part===childPath[i])
+        && childPath.slice(path.length).every((part,i)=>part===textPath[i])
+        && textPath.slice(offset).join('/')===candidate.target.textPath
+        && (candidate.after===action.before || (action.before===action.after && candidate.before===action.before));
+    });
+    const identities=new Map(candidates.map(candidate=>[stableTargetKey(candidate),candidate]));
+    // 同一文字节点因选择父容器产生不同 locator 时，复用唯一已记录的较小目标。
+    // 必须同时证明路径后缀和完整文字连续；重复文字或多个候选不做转换。
+    const candidate=identities.size===1?[...identities.values()][0]:null;
+    const result=candidate?{...action,target:candidate.target,payload:{text:action.payload.text}}:action;
+    previous.push(result);
+    return result;
+  })}));
+}
+
 export const actionKey = action => {
   const kind = action.kind === 'hide' || action.kind === 'show' ? 'visibility' : action.kind;
   const textRange = action.kind === 'setStyle' ? action.payload?.textRange : null;
@@ -268,9 +293,15 @@ function sourceSupersededActionKeys(groups, sourceIndex, endIndex) {
     }
   }
   const superseded = new Set();
+  const inspected = new Set();
   for (const group of groups.slice(sourceIndex + 1, endIndex)) {
     for (const action of group.actions ?? []) {
-      const previous = beforeSource.get(actionKey(action));
+      const key=actionKey(action);
+      // 只有源码之后该属性的第一个 before 能说明源码是否覆盖旧值。
+      // 第二次拖动的 before 是第一次拖动的 after，不能拿它与源码前末值比较。
+      if(inspected.has(key))continue;
+      inspected.add(key);
+      const previous = beforeSource.get(key);
       if (previous && Object.hasOwn(action, 'before') && Object.hasOwn(previous, 'after')
         && !sameCanonicalValue(action.before, previous.after)) {
         superseded.add(actionKey(action));
@@ -312,9 +343,29 @@ function continuousSourceActions(groups, sourceIndex, superseded) {
   return { keys, ids, elements, targets };
 }
 
+// 源码前后快照已证明被覆盖的槽位只退出投影；原历史仍支持顺序撤销。
+function applySourceReconciliations(groups) {
+  const overridden = new Set();
+  const resizeBaselines = new Map();
+  return [...groups].reverse().map(group => {
+    const actions = (group.actions ?? []).filter(action => !overridden.has(actionKey(action))).map(action => {
+      const basis=resizeBaselines.get(actionKey(action));
+      return typeof basis==='string' ? {...action,sourceResizeStyle:basis} : action;
+    });
+    if (group.active && group.mutationType === 'source') {
+      for (const key of group.source?.actionReconciliation?.supersededKeys ?? []) overridden.add(key);
+      for(const [key,value] of Object.entries(group.source?.actionReconciliation?.resizeBaselines ?? {})) {
+        if(!resizeBaselines.has(key))resizeBaselines.set(key,value);
+        else if(resizeBaselines.get(key)!==value)resizeBaselines.set(key,null);
+      }
+    }
+    return { ...group, actions };
+  }).reverse();
+}
+
 export function compileActionGroups(groups = []) {
   const normalizedGroups = normalizeGeneratedRangeTargets(
-    canonicalizeMergedTextBranches(groups),
+    canonicalizeMergedTextBranches(normalizeRecordedTextTargets(applySourceReconciliations(groups))),
   );
   const { sourceIndex, endIndex } = activeSourceSegment(normalizedGroups);
   const superseded = sourceSupersededActionKeys(
@@ -348,6 +399,22 @@ export function compileActionGroups(groups = []) {
       let hasBridgedBefore = false;
       if (action.kind === 'setText') {
         const elementKey = stableElementKey(action);
+        if(action.target?.editorId && action.target.textPath === undefined) {
+          for(const [key,earlier] of final) {
+            // 同一持久元素的整段替换覆盖旧文字节点分支。整段起始值必须
+            // 等于该节点记录的完整前值/后值，不能只按 path 或字符串包含推断。
+            if(earlier.kind==='setText' && earlier.target.textPath !== undefined
+              && stableElementKey(earlier)===elementKey
+              && typeof action.before==='string'
+              && (earlier.before===action.before || earlier.after===action.before)) {
+              final.delete(key);
+              if(!final.has(actionKey(action))) {
+                bridgedBefore=structuredClone(earlier.before);
+                hasBridgedBefore=true;
+              }
+            }
+          }
+        }
         for (const [key, previous] of final) {
           if (previous.kind === 'setStyle'
             && previous.payload?.textRange
@@ -393,6 +460,8 @@ export function compileActionGroups(groups = []) {
       const continuousTarget = continuous.targets.get(key);
       final.set(key, {
         ...action,
+        ...(typeof previous?.sourceResizeStyle==='string' && action.sourceResizeStyle===undefined
+          ? {sourceResizeStyle:previous.sourceResizeStyle} : {}),
         // 同一属性的连续动作只发布最终值，但离线固化和
         // replace 撤销必须从这条链的最早基线重放，不能把中间态
         // 误当成 Deck 基线。源码修改判定为 superseded 时，旧动作
@@ -417,7 +486,7 @@ export function compileActionGroups(groups = []) {
 }
 
 export function sourceRebaseActionIds(groups = [], compiled = compileActionGroups(groups)) {
-  const normalizedGroups = normalizeGeneratedRangeTargets(groups);
+  const normalizedGroups = normalizeGeneratedRangeTargets(applySourceReconciliations(groups));
   const { sourceIndex, endIndex } = activeSourceSegment(normalizedGroups);
   if (sourceIndex < 0) return [];
   const superseded = sourceSupersededActionKeys(

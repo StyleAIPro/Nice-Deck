@@ -69,7 +69,7 @@ export AICO_PPT_WORKSPACE_CAPABILITY_FILE=/absolute/path/to/workspace-capability
 node scripts/editor/cli.mjs status
 ```
 
-已有元素的文字、格式、移动、缩放和显隐继续使用 `locate-text` / `replace-text` / `apply`；页面增删排序、模板升级和复杂 DOM 重构先建立源码事务，再用 `scripts/edit-bundle.py` 修改 capability 中的 `workingDeckPath` 并显式提交。完成修改后，Agent 必须先执行 `node scripts/editor/cli.mjs verify`，再按用户意图处理：用户要求完成 / 保存 / 正式写入时执行 `node scripts/editor/cli.mjs solidify`；用户明确要求仅预览或暂不固化时保留 workspace 与历史并报告 capability 路径。`solidify` 成功后才替换真实 Deck 并清空撤销 / 重做队列。
+已有元素的文字、格式、移动、缩放和显隐在 Harness 内优先使用原生 `aico_ppt` 的 `inspect → edit`，其他环境可用 `locate-text` / `replace-text` / `apply`。普通动作返回的受影响页诊断通过且截图版本一致时，无需重复调用 task、verify 或重读完整 Skill。页面增删排序、模板升级和复杂 DOM 重构先建立源码事务，再用 `scripts/edit-bundle.py` 修改 capability 中的 `workingDeckPath` 并显式提交。结构修改与正式发布前执行 `node scripts/editor/cli.mjs verify` 检查完整历史候选；此命令只检查、不推进历史。用户要求完成 / 保存 / 正式写入时执行 `node scripts/editor/cli.mjs solidify`；用户明确要求仅预览或暂不固化时保留 workspace 与历史并报告 capability 路径。`solidify` 成功后才替换真实 Deck 并清空撤销 / 重做队列。
 
 新建 Deck 允许在尚无目标文件时直接复制所选模板；**合法 bundle 第一次落盘后，后续第一版制作立即按上述规则进入 Managed Workspace**。不要把整份第一版制作留在无历史的经典直改路径中。
 
@@ -78,7 +78,7 @@ node scripts/editor/cli.mjs status
 1. **按场景复制模板**（所有命令都在本 skill 根目录执行）：授课 `cp assets/training-deck.html my-deck.html`；技术分享用 `assets/tech-share-deck.html`；汇报 / 述职用 `assets/work-report-deck.html`（三套差异与逐页索引见 `references/template-pages.md`）
 2. **建立 Managed Workspace 后挑页改占位**：浏览器滚一遍场景外壳，对照 `references/template-pages.md`（三套模板逐页索引）从 `availablePageTypes` 选择原生或兼容共享页型；已有元素细节走 ActionMutation，原生页型结构走工作副本上的 `edit-bundle.py`，共享页型走 `deck_factory.py import-page`（见 `references/editing-guide.md`）；品牌图 / 口号 / 品牌色替换见 `references/branding.md`。
 3. **增删复制页**：用 `scripts/edit-bundle.py` 的 `insert_page` / `delete_page` / `move_page`——slide DOM、导航数组、章节起点**三处同步全自动**；从零拼页参考 `references/page-snippets.md`。
-4. **每改一批就验证**（verify 三件套，退出码 0 = 过）：
+4. **按实际影响验证**：普通文字、样式、移动、缩放、显隐使用 Editor 提交结果中的身份和版本校验、受影响页诊断及同版本截图，不默认重复全页和动画验证。DOM 修改必须通过完整历史候选重放；增删页、共享 CSS/脚本与影响范围不明时扩展全局检查。涉及制作、布局或动画时按影响页执行 verify 三件套，退出码 0 = 过：
 
    ```bash
    node scripts/verify/measure_overflow.mjs my-deck.html --all      # 溢出检测
@@ -88,7 +88,7 @@ node scripts/editor/cli.mjs status
 
    新建 Deck，或本次修改涉及目录 / 章节结构时，还必须按上一节运行 `toc_contract.py`；目录页不能只通过通用溢出检查。
 
-5. **用户明确要求 PPTX 时才导出**：macOS / Linux 用 `python3 scripts/html2pptx/convert.py my-deck.html`，Windows 用 `py -3 scripts\html2pptx\convert.py my-deck.html`；窗口化 Editor 也可点击画布工具栏导出图标下载当前工作副本快照（含尚未固化的预览修改，但不触发固化）——逐页截图组装 PPTX，layer 多标签页自动逐标签展开；后续只改 HTML 时不自动重导，除非用户再次要求。
+5. **用户明确要求 PPTX 时才导出**：macOS / Linux 用 `python3 scripts/html2pptx/convert.py my-deck.html --mode editable`，Windows 用 `py -3 scripts\html2pptx\convert.py my-deck.html --mode editable`。可编辑模式生成可修改的文字、常见图形和表格；原生文字统一微软雅黑，字号按 HTML 画布比例和局部缩放换算并对齐真实文字基线；复杂视觉保留图片，不保证全部元素或动画可编辑；`--mode image` 生成注重外观还原的高清图片页，CLI 不传模式仍默认 `image`。Editor 导出图标提供这两种选择，默认推荐可编辑，取消不启动导出。两种模式均使用当前工作副本快照（含尚未固化的预览修改，不触发固化），等待全部补丁应用并校验数量后才导出；失败或超时则中止并提示补丁错误，不生成回滚后的旧内容。layer 多标签页自动逐标签展开；后续只改 HTML 时不自动重导，除非用户再次要求。
 
 ## 旧 Deck 升级
 
@@ -141,7 +141,7 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 open -n "tools/dev-shell/AICO-PPT Dev Shell.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
 ```
 
-导入 Deck 时会展示自动识别的项目根目录，用户确认后再进入编辑器；也可以在导入页改选目录。默认流程不再要求手动绑定：Editor 打开新任务时在后台为当前 Deck 启动 CLI 会话；Codex 必须通过持久化的 `codex exec --json` 完成首个初始化 turn，并以真实 `thread.started` ID 确认本地 session 可恢复后才写入 sidecar，不能把短生命周期 App Server 的内存 thread ID 交给 `codex resume`。启动页点击“继续任务”时，以该 conversation ID 恢复原 CLI 会话与工作副本；若 Codex 或 Claude Code 的可见 CLI 明确报告该会话 ID 不存在，PTY 会自动创建并持久化新的可恢复会话，同时保留当前工作副本和全部待办，其他启动错误不得误清绑定。首个 Prompt 对当前 `aico-ppt` Skill 只初始化一次，打开终端只是接入已经启动的 PTY。活动 provider、项目根目录与会话标识写入独立的 `agent-workspace.json`，使用 `workspaceRevision`；这些设置不增加 Deck revision，不进入撤销 / 重做或固化历史。旧 `CODEX_THREAD_ID` 与 `session.json.agentConnection` 只用于一次兼容迁移，不再是默认权威状态。
+导入 Deck 时会展示项目根目录，用户确认后再进入编辑器：本次显式选择优先，其次保留有效的历史设置，否则默认使用 HTML 实际文件的直接父目录。“更改目录”从当前已配置目录打开系统选择器；取消保留现配置，再次更改使用最新目录。目录确认与身份校验仍按 `references/editing-guide.md` 执行。默认流程不再要求手动绑定：Editor 打开新任务时在后台为当前 Deck 启动 CLI 会话；Codex 必须通过持久化的 `codex exec --json` 完成首个初始化 turn，并以真实 `thread.started` ID 确认本地 session 可恢复后才写入 sidecar，不能把短生命周期 App Server 的内存 thread ID 交给 `codex resume`。启动页点击“继续任务”时，以该 conversation ID 恢复原 CLI 会话与工作副本；若 Codex 或 Claude Code 的可见 CLI 明确报告该会话 ID 不存在，PTY 会自动创建并持久化新的可恢复会话，同时保留当前工作副本和全部待办，其他启动错误不得误清绑定。首个 Prompt 对当前 `aico-ppt` Skill 只初始化一次，打开终端只是接入已经启动的 PTY。活动 provider、项目根目录与会话标识写入独立的 `agent-workspace.json`，使用 `workspaceRevision`；这些设置不增加 Deck revision，不进入撤销 / 重做或固化历史。旧 `CODEX_THREAD_ID` 与 `session.json.agentConnection` 只用于一次兼容迁移，不再是默认权威状态。
 
 右上角显示真实终端状态（准备中、处理中、等待确认、空闲或失败），点击后从画面右侧推出唯一的 Agent 交互终端；不再提供结构化对话页签、消息气泡或独立消息输入框。终端抽屉与属性面板同高，默认宽度为浏览器窗口的三分之一；左边界可拖动，向左加宽时同步压缩中间画布，任务 drawer 也自动向内避让。窗口化 Agent Host 的 provider 注册表只提供 Codex、Claude Code 与 OpenCode：前两者分别固定执行 `codex --dangerously-bypass-approvals-and-sandbox` 和 `claude --dangerously-skip-permissions`，OpenCode 使用固定 `opencode` TUI；浏览器不能指定 executable 或附加参数。不存在或未登录的 provider 返回自身错误，不能静默回退到 Codex。bypass 进程启动不等于输入框已就绪：三种 CLI 若先询问是否信任当前目录，会发布 `interactionRequired: directory-trust`；Codex 恢复目录选择发布 `working-directory-selection`，其他可判定的编号选择页发布 `terminal-selection`。这些状态都会自动展开或重新展开右侧终端并闪烁提示，解除加载遮罩但保持初始任务锁定；用户在终端确认、正常输入框真正出现后才自动粘贴任务并回车。Editor 启动后即在已确认的项目根目录后台创建 CLI 会话并加载一次 `aico-ppt` Skill；同一编辑服务内刷新页面只重连原 PTY，Agent 任务也写入这个终端。终端是 Editor 的实时交互视图，但任务完成、Deck action、撤销与固化仍以 sidecar 为权威。界面不提供高级设置或“连接已有会话”，也不扫描历史会话；旧绑定数据只在打开 sidecar 时静默迁移一次。
 
@@ -155,7 +155,7 @@ open -n "tools/dev-shell/AICO-PPT Dev Shell.app" --args --agent-thread-id "$CODE
 
 页面栏与属性面板的开合控件共用 30px 圆形白底 PillNav 箭头：hover 只运行液态圆形填充，不克隆箭头参与文字翻页；页面栏展开 / 收起朝左 / 右，右侧属性面板展开 / 收起朝右 / 左，顶部属性面板展开 / 收起朝上 / 下，方向变化只旋转同一枚 CSS chevron。
 
-顶栏的“撤销 / 重做”只移动同一条权威编辑时间线的唯一历史游标。历史按修改本质分为两类：`ActionMutation` 覆盖人工或 Agent 提交的文字、样式、移动、缩放与显隐，重放稳定 locator；`SourceMutation` 覆盖模板升级、复杂 DOM / 动画重构和整页增删排序，保存托管工作副本的前后 SHA-256 版本。两类共用 revision、历史游标和固化边界；新修改截断游标后的旧重做分支，结构修改必须按时间顺序撤销 / 重做，不能伪装成文字 action。所有带 revision 的写操作都会先登记已经写盘但尚未被文件通知处理的 SourceMutation，再拒绝过期请求；因此人工动作、撤销 / 重做和固化不能越过 Agent 的实际写盘顺序。源码基线后的旧 action 只在几何、语义指纹和语义规范化后的 `before` / `after` 当前值仍一致时重放；同一属性已被 Agent 改写、元素语义已替换或文字范围已变化时以 `HISTORY_DIVERGED` 安全报冲突，界面必须可见提示，固化补丁也执行同一规则。`Cmd/Ctrl+Z` 撤销，`Cmd/Ctrl+Shift+Z` 重做，Windows 也可用 `Ctrl+Y`。焦点位于文字或其他输入框时快捷键保留原生输入撤销，不触发 Deck 全局历史。任务行撤回非末尾 Agent ActionMutation 时追加可逆的补偿修改，保留后续仍成立的修改；涉及 SourceMutation 或无法证明安全时返回 `COMPENSATION_CONFLICT`。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
+顶栏的“撤销 / 重做”只移动同一条权威编辑时间线的唯一历史游标。历史按修改本质分为两类：`ActionMutation` 覆盖人工或 Agent 提交的文字、样式、移动、缩放与显隐，重放稳定 locator；`SourceMutation` 覆盖模板升级、复杂 DOM / 动画重构和整页增删排序，保存托管工作副本的前后 SHA-256 版本。两类共用 revision、历史游标和固化边界；新修改截断游标后的旧重做分支，结构修改必须按时间顺序撤销 / 重做，不能伪装成文字 action。所有带 revision 的写操作都会先登记已经写盘但尚未被文件通知处理的 SourceMutation，再拒绝过期请求；因此人工动作、撤销 / 重做和固化不能越过 Agent 的实际写盘顺序。源码基线后的旧 action 只在几何、语义指纹和语义规范化后的 `before` / `after` 当前值仍一致时重放；若受控源码前后归档能证明同一持久元素的静态文字已被覆盖，先将旧文字及失效字符范围样式记入源码事务的投影取代清单，保留原历史以支持撤销；其他无法证明的属性、语义或范围冲突仍以 `HISTORY_DIVERGED` 安全报冲突，界面必须可见提示，固化补丁也执行同一规则。`Cmd/Ctrl+Z` 撤销，`Cmd/Ctrl+Shift+Z` 重做，Windows 也可用 `Ctrl+Y`。焦点位于文字或其他输入框时快捷键保留原生输入撤销，不触发 Deck 全局历史。任务行撤回非末尾 Agent ActionMutation 时追加可逆的补偿修改，保留后续仍成立的修改；涉及 SourceMutation 或无法证明安全时返回 `COMPENSATION_CONFLICT`。区域任务可选择文件（支持多选和连续追加）或粘贴图片，粘贴图片会转为 PNG；每个任务最多 8 个附件，单个文件最大 25 MiB。浏览器无法取得原文件绝对路径，服务会把副本复制到 sidecar 会话的 `attachments/`。只有任务 payload 的序列化出口会派生路径：`GET /api/tasks`、`GET /api/tasks/<TASK_ID>`、`POST /api/tasks` 响应中的 `task`、`task-created` / `task-updated` 等事件或动作响应中的 `task`，以及 CLI `tasks` / `task`；这些出口返回副本绝对 path，供外部 Agent 读取。`GET /api/session` 与磁盘 `session.json` 只含 sidecar 相对 `relativePath`，不保存、也不返回附件绝对路径。附件不进入最终 deck，并随 sidecar 生命周期管理，也不属于 Deck 动作的撤销 / 重做范围。
 
 Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begin-source-task`）取得 `sourceEditId` 与预留 revision，成功后才能写工作副本，写盘完成必须执行 `commit-source-edit`；提交在登记 SourceMutation 前用真实浏览器重放已有固化补丁。若新源码确实删除了更早固化动作的页面或元素，验证器明确返回 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND` 时只剔除该旧动作并从头重放，同时把补丁转换记入 SourceMutation，撤销 / 重做会同步恢复 / 再次剔除；其他失败拒绝候选、恢复事务前工作副本并保留事务供取消或重试。失败后执行 `cancel-source-edit` 回滚。事务活动期间，人工 action、撤销、重做和固化统一返回 `SOURCE_EDIT_ACTIVE`，不能插入 Agent 写盘的中间。源码事务与 revision 一并持久化；服务重开后仍保留开始前基线，只允许同一 `sourceEditId` 继续 commit 提交或 cancel 取消，不由文件监视器猜测提交顺序。文件监视器只兼容旧客户端在事务外直接写入的路径，并执行同一补丁重放闸门；结构历史撤销 / 重做也先验证目标版本，失败时恢复当前工作副本且不移动历史游标。
 
@@ -265,3 +265,10 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 - 依赖：Editor Core 需 Node.js、`ws`、`html2canvas`、`busboy` 与 `three`；独立 `dev-shell` 才增加 `node-pty`、浏览器 / headless xterm 与一个本机 Agent CLI。桌面质量验证复用 Host 的 Electron 渲染服务，正式插件只携带私有 Python；独立 Skill 使用 Google Chrome + playwright-core（三级查找：`PLAYWRIGHT_CORE` 环境变量 → 根目录 `npm i playwright-core` → openclaw 内置路径）。PPTX 截图组装只用 Python 标准库，`--embed-html` 的附件图标另用 Pillow。桌面脚本沿用 `AICO_HOME` 与运行时包装器，能力不可用时启动或升级 AICO，不安装第二份浏览器。
 - **读取参考 PPTX**：运行 `python3 scripts/extract-pptx.py 参考.pptx 输出目录`（Windows 将 `python3` 换成 `py -3`），只用 Python 标准库，`pptx-read` Profile 只检查随包提取工具。输出 `slides.json`、`slides.md` 和 `media/`：按页提取标题、正文、备注、表格与内嵌原图，图片保留页关联。AI 直接阅读内容文件和需要的原图；结合原文件理解内容，不生成版式预览、不转 PDF、不安装 Office。图表、SmartArt 等未提取对象会逐页提示限制，不能把提取结果当作原文件全部内容。字段和操作见 [artwork.md](references/artwork.md#21-从-pptx-提取内容与原图)。
 - **读取 PDF 材料**：`materials` Profile 只检查 PyMuPDF 与 pypdf。文字、表格、原图、合并 / 拆分、渲染和普通批注用 PyMuPDF；AcroForm 字段填写用 pypdf，以保留中文字体外观。按随包 `.agents/skills/pdf/` 的适配方法执行，不用上游重装覆盖本地适配。PDF 工具缺失不影响 PPTX 内容读取。
+
+
+### Harness 会话直接编辑
+
+已明确关联 Deck 的 Harness 会话会在每次模型调用前获得当前 Editor 工作区连接，包含受限 action capability 文件与托管工作副本路径；恢复旧会话或重启后重新解析，不依赖固定措辞。用户可直接在左侧讨论或要求修改，讨论只读，明确修改复用右侧同一工作区，无需先提交区域任务或退出 Editor。结构修改按 begin-source-edit / commit-source-edit 事务提交，每批成功后更新预览；事务期间人工写入保持串行保护。未关联会话不注入 Deck 能力，已关联但 Editor 不可用时提示重新打开对应工作区，不另起 headless 编辑器抢占租约。
+
+创建画布由外层宿主管理对话，不初始化独立终端；模板预览与编辑桥接分别就绪。若生成因编辑器离线或验证失败而保留 staging，修复后使用原 Draft 的 `generation-ready` 和最新 `expectedRevision` 重新执行完整验证与发布，保留同一 run 和工作副本；`retry-generation` 会重新创建模板，仅用于明确重新生成。固定页结构校验忽略托管元素 `data-editor-id` 和空元素标签序列化空格，仍校验布局属性与 DOM 结构。

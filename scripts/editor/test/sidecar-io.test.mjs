@@ -198,9 +198,19 @@ test('托管工作副本按指纹写入、归档并可恢复历史版本', async
       sessionId, bytes:first, expectedFingerprint:null,
     }), { committed:true, commitScope:'working-deck', fingerprint:firstFingerprint });
     assert.equal((await io.readWorkingDeck()).fingerprint, firstFingerprint);
+    assert.deepEqual(await io.readWorkingDeck({ ifFingerprint:firstFingerprint }), {
+      unchanged:true, fingerprint:firstFingerprint,
+    }, '未变更的工作副本不能重复传输整份 HTML');
+    const changedRead = await io.readWorkingDeck({ ifFingerprint:secondFingerprint });
+    assert.equal(Buffer.from(changedRead.bytes, 'base64').toString(), 'working-a');
+
     assert.deepEqual(await io.writeWorkingDeck({
       sessionId, bytes:second, expectedFingerprint:firstFingerprint,
     }), { committed:true, commitScope:'working-deck', fingerprint:secondFingerprint });
+    const historical = await io.readWorkingDeck({ versionFingerprint:firstFingerprint });
+    assert.equal(Buffer.from(historical.bytes, 'base64').toString(), 'working-a');
+    assert.equal((await io.readWorkingDeck()).fingerprint, secondFingerprint, '读取归档不得切换当前工作副本');
+    await assert.rejects(io.readWorkingDeck({ versionFingerprint:'../deck' }));
     assert.deepEqual(await io.restoreWorkingDeck({
       fingerprint:firstFingerprint, expectedFingerprint:secondFingerprint,
     }), { fingerprint:firstFingerprint });

@@ -729,8 +729,9 @@ test('两个入口选过路径后都能返回首页并切换流程', async t => 
   assert.equal(await page.locator('[data-existing-flow]').isVisible(), true, '返回后应可重新进入另一条流程');
 });
 
-test('两个入口都能取消和多次更改项目目录', async t => {
+test('修改 Deck 从当前项目目录打开选择器，取消后可继续多次更改', async t => {
   const selectedPaths = [null, '/tmp/existing-project-b', '/tmp/existing-project-c'];
+  const initialDirectories = [];
   const app = await startAppServer({
     token:'browser-project-reselect-secret',
     pickDeck:async () => '/tmp/reselect-existing.html',
@@ -746,7 +747,10 @@ test('两个入口都能取消和多次更改项目目录', async t => {
         ino:'2',
       },
     }),
-    pickAgentProjectDirectory:async () => selectedPaths.shift() ?? null,
+    pickAgentProjectDirectory:async ({ defaultPath }) => {
+      initialDirectories.push(defaultPath);
+      return selectedPaths.shift() ?? null;
+    },
   });
   t.after(() => app.close());
   const chromium = await loadChromium();
@@ -767,6 +771,30 @@ test('两个入口都能取消和多次更改项目目录', async t => {
   await page.getByText('/tmp/existing-project-b').waitFor();
   await page.getByRole('button', { name:'更改目录' }).click();
   await page.getByText('/tmp/existing-project-c').waitFor();
+  assert.deepEqual(initialDirectories, ['/tmp/existing-project-a', '/tmp/existing-project-a', '/tmp/existing-project-b']);
+});
+
+test('嵌套 Git 仓库中的 HTML 在确认页默认显示自己的直接父目录', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'deck-directory-default-')));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckDirectory = join(root, '材料', '中文 文稿');
+  await mkdir(join(root, '.git'));
+  await mkdir(deckDirectory, { recursive:true });
+  await writeFile(join(root, 'package.json'), '{}');
+  const deckPath = join(deckDirectory, '汇报.html');
+  await writeFile(deckPath, '<!doctype html><title>汇报</title>');
+  const app = await startAppServer({ token:'deck-directory-default-secret', pickDeck:async () => deckPath });
+  t.after(() => app.close());
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(app.appUrl);
+  await page.getByRole('button', { name:/修改已经写好的deck，新任务/ }).click();
+  await page.getByRole('button', { name:/添加 Deck HTML/ }).click();
+  await page.getByText(deckDirectory, { exact:true }).waitFor();
+  assert.equal(await page.locator('[data-project-root]').textContent(), deckDirectory);
+  assert.equal(await page.locator('[data-project-source]').textContent(), 'Deck 所在目录');
 });
 
 test('修改 Deck 流程选中文件后仍可重新选择另一份 Deck', async t => {
@@ -797,9 +825,13 @@ test('修改 Deck 流程选中文件后仍可重新选择另一份 Deck', async 
 
 test('新建 Deck 项目目录取消后可重试，选中后也可取消和多次更改', async t => {
   const selectedPaths = [null, '/tmp/creation-project-a', null, '/tmp/creation-project-b'];
+  const initialDirectories = [];
   const app = await startAppServer({
     token:'browser-creation-project-reselect-secret',
-    pickAgentProjectDirectory:async () => selectedPaths.shift() ?? null,
+    pickAgentProjectDirectory:async ({ defaultPath }) => {
+      initialDirectories.push(defaultPath);
+      return selectedPaths.shift() ?? null;
+    },
     resolveCreationProject:async ({ selectedPath }) => ({
       path:selectedPath,
       source:'user-selected',
@@ -832,6 +864,7 @@ test('新建 Deck 项目目录取消后可重试，选中后也可取消和多�
 
   await page.getByRole('button', { name:'重新选择' }).click();
   await page.getByText('/tmp/creation-project-b').waitFor();
+  assert.deepEqual(initialDirectories, [undefined, undefined, '/tmp/creation-project-a', '/tmp/creation-project-a']);
 });
 
 test('选择 Deck 后先确认项目目录和 provider，点击打开才启动 Editor', async t => {

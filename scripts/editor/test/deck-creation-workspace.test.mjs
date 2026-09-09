@@ -288,3 +288,35 @@ test('Workspace 可按 projectRoot + draftId 重新打开同一份持久 Draft',
   assert.equal(reopened.snapshot().revision, 1);
   assert.match(reopened.capabilityPath, /resume-draft[\\/]agent-capability\.json$/);
 });
+
+
+test('就绪失败后在原 run 重新验证发布，不丢弃已有工作副本', async () => {
+  const store = await preparedStore();
+  store.adapter.draftDir = '/tmp/project/.aico-ppt-editor/drafts/draft-1';
+  let online = false;
+  let prepared = 0;
+  const workspace = new DeckCreationWorkspace({
+    store, terminal:{ snapshot:() => ({ state:'stopped' }) },
+    factory:{
+      prepare:async () => { prepared++; return { stagingDeck:'staging/run/new.html' }; },
+      verify:async () => ({ diagnostics:[] }),
+      publish:async () => ({ publishedDeck:'/tmp/project/new.html' }),
+    },
+    openManagedDeck:async options => ({
+      snapshot:() => ({ sourceDeckPath:options.sourceDeckPath }),
+      waitUntilReady:async () => { if (!online) throw Object.assign(new Error('等待编辑器页面就绪超时'), { code:'EDITOR_OFFLINE' }); },
+      preparePublish:async () => { assert.equal(online, true); },
+      close:async () => {},
+    }),
+  });
+  await assert.rejects(workspace.dispatch({ type:'start-generation', expectedRevision:7 }), /就绪超时/);
+  const failed = workspace.snapshot();
+  assert.equal(failed.phase, 'failed');
+  const runId = failed.generation.runId;
+  online = true;
+  const result = await workspace.dispatch({ type:'generation-ready', expectedRevision:failed.revision });
+  assert.equal(result.snapshot.phase, 'ready');
+  assert.equal(result.snapshot.generation.runId, runId);
+  assert.equal(prepared, 1);
+  await workspace.close();
+});

@@ -838,3 +838,103 @@ test('重复或畸形 data-page-id 明确拒绝而不是串页', async t => {
   });
   assert.deepEqual(result, ['PAGE_ID_INVALID', 'PAGE_ID_AMBIGUOUS']);
 });
+
+test('源码覆盖旧标题后重开可恢复其他样式并继续修改、撤销和重做', async t => {
+  const {compileActionGroups,sourceRebaseActionIds,actionKey}=await import('../action-compiler.mjs');
+  const {sameCanonicalActionValue}=await import('../action-canonicalizer.mjs');
+  const chromium=await loadChromium();
+  const browser=await chromium.launch({channel:'chrome',headless:true});
+  t.after(()=>browser.close());
+  const page=await browser.newPage();
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const original=await page.evaluate(()=>{
+    const rt=window.HuaweiDeckPatchRuntime;
+    const title=document.querySelector('h2');
+    title.closest('section').dataset.pageId='page-11111111111111111111111111111111';
+    title.dataset.editorId='element-11111111111111111111111111111111';
+    const target=rt.makeLocator(title);
+    return rt.applyTransaction([
+      {id:'title',target,kind:'setText',payload:{text:'旧编辑标题'}},
+      {id:'color',target,kind:'setStyle',payload:{property:'color',value:'#20252b'}},
+    ]);
+  });
+  const groups=[{active:true,actions:original},{active:true,mutationType:'source',source:{actionReconciliation:{version:1,supersededKeys:[actionKey(original[0])]}},actions:[]}];
+  await page.reload();
+  await page.evaluate(()=>{
+    const title=document.querySelector('h2');
+    title.closest('section').dataset.pageId='page-11111111111111111111111111111111';
+    title.dataset.editorId='element-11111111111111111111111111111111';
+    title.textContent='新的源码标题';
+  });
+  const actions=compileActionGroups(groups);
+  const outcome=await page.evaluate(({actions,ids})=>{
+    const rt=window.HuaweiDeckPatchRuntime;
+    rt.applyAllDroppingMissing(actions,{rebaseActionIds:ids});
+    const title=document.querySelector('h2');
+    const applied=rt.applyTransaction([{id:'next',target:rt.makeLocator(title),kind:'setStyle',payload:{property:'color',value:'#000000'}}])[0];
+    const text=title.textContent;
+    rt.applyAll(actions,{rebaseActionIds:ids});
+    const undo=getComputedStyle(title).color;
+    rt.applyTransaction([applied]);
+    return {applied,text,undo,redo:getComputedStyle(title).color};
+  },{actions,ids:sourceRebaseActionIds(groups,actions)});
+  assert.equal(outcome.text,'新的源码标题');
+  assert.ok(sameCanonicalActionValue(outcome.applied,outcome.applied.before,original[1].after));
+  assert.equal(outcome.undo,'rgb(32, 37, 43)');
+  assert.equal(outcome.redo,'rgb(0, 0, 0)');
+});
+
+test('非整数缩放下连续调整尺寸保持历史连续，撤销重放不丢失尺寸', async t => {
+  const browser = await (await loadChromium()).launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(() => {
+    const rt = window.HuaweiDeckPatchRuntime;
+    document.documentElement.style.zoom = '0.8333333333333333';
+    const el = document.querySelector('h2');
+    const target = rt.makeLocator(el);
+    const first = rt.applyTransaction([{ id:'resize-first', target, kind:'resize', payload:{width:308,height:168} }])[0];
+    const second = rt.applyTransaction([{ id:'resize-second', target, kind:'resize', payload:{width:320,height:175} }])[0];
+    rt.applyAll([first]);
+    const undone = {width:el.style.width,height:el.style.height};
+    rt.applyAll([second]);
+    const redone = {width:el.style.width,height:el.style.height};
+    return {first,second,undone,redone};
+  });
+  assert.deepEqual(result.second.before, result.first.after);
+  assert.deepEqual(result.undone, {width:'308px',height:'168px'});
+  assert.deepEqual(result.redone, {width:'320px',height:'175px'});
+});
+
+test('布局变化后 resize 仅凭源码声明证据重放，声明冲突仍拒绝', async t => {
+  const browser=await(await loadChromium()).launch({channel:'chrome',headless:true});
+  t.after(()=>browser.close());
+  const page=await browser.newPage();
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result=await page.evaluate(()=>{
+    const rt=window.HuaweiDeckPatchRuntime;
+    let el=document.querySelector('.card');
+    const section=el.closest('section');section.dataset.pageId='page-11111111111111111111111111111111';
+    el.dataset.editorId='element-11111111111111111111111111111111';
+    el.parentElement.style.width='300px';
+    el.style.cssText='width:100%;height:100px;overflow:hidden';
+    const target=rt.makeLocator(el);
+    const a={id:'resize',target,kind:'resize',payload:{width:400,height:200},before:{width:300,height:100},after:{width:400,height:200},sourceResizeStyle:el.style.cssText};
+    el.textContent='源码调整了内容';
+    el.parentElement.style.width='600px';
+    el.replaceWith(el.cloneNode(true));el=document.querySelector('.card');
+    let unproven;try{const {sourceResizeStyle,...without}=a;rt.applyAll([without],{rebaseActionIds:[a.id]});}catch(e){unproven=e.code;}
+    const applied=rt.applyAll([a],{rebaseActionIds:[a.id]});
+    rt.applyAll([]);
+    const restored=el.style.width;
+    el.style.width='500px';
+    el.replaceWith(el.cloneNode(true));el=document.querySelector('.card');
+    let error;try{rt.applyAll([a],{rebaseActionIds:[a.id]});}catch(e){error=e.code;}
+    return {applied:applied.length,restored,error,unproven};
+  });
+  assert.equal(result.applied,1);
+  assert.equal(result.restored,'100%');
+  assert.equal(result.unproven,'TARGET_AMBIGUOUS');
+  assert.equal(result.error,'TARGET_AMBIGUOUS');
+});

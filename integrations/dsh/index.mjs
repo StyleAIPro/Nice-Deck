@@ -7,6 +7,8 @@
 
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import {installEditingTools} from './editing-tools.mjs'
+import { installEditingContext } from './editing-context.mjs'
 import { startRuntimeWorker } from './runtime-host.mjs'
 
 const PROVIDER_NAME = 'aico-ppt-plugin'
@@ -107,7 +109,7 @@ function createProvider(runtimeConfigured) {
 export const name = 'aico-ppt'
 
 /** Skill 注册表由 DSH Host 基础组合提供。 */
-export const inject = ['skills', 'webServer']
+export const inject = ['skills', 'webServer', 'tools', 'attachments']
 
 /** 注册唯一 Skill，启动本地 Editor 运行时，并把入口作为只读 Client 启动输入。 */
 export async function apply(ctx, config = {}) {
@@ -126,6 +128,8 @@ export async function apply(ctx, config = {}) {
   })
   try {
     ctx.effect?.(() => () => editor.close(), 'aico-ppt: DSH Editor 运行时')
+    installEditingContext(ctx, editor.appUrl)
+    installEditingTools(ctx, editor.appUrl)
     const provider = createProvider(runtimeConfigured)
     ctx.skills.registerProvider(() => provider)
     ctx.on('webserver/index-inject', (table) => {

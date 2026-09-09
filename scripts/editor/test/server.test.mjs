@@ -160,9 +160,10 @@ test('Agent 终端凭据不能调用浏览器专用退出接口', async t => {
 test('PPTX 导出接口返回工作副本并使用源 Deck 文件名', async t => {
   let exportedHtml;
   const app = await makeApp(t, {
-    pptxExporter:async ({ htmlBytes, signal }) => {
+    pptxExporter:async ({ htmlBytes, signal, mode }) => {
       exportedHtml = Buffer.from(htmlBytes);
       assert.equal(signal.aborted, false);
+      assert.equal(mode, 'image');
       return Buffer.from('PK\u0003\u0004pptx');
     },
   });
@@ -179,6 +180,63 @@ test('PPTX 导出接口返回工作副本并使用源 Deck 文件名', async t =
   assert.match(response.headers.get('content-disposition'), /filename\*=UTF-8''deck\.pptx/);
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from('PK\u0003\u0004pptx'));
   assert.deepEqual(exportedHtml, Buffer.from('deck'));
+  assert.equal(await readFile(app.deckPath, 'utf8'), 'deck');
+});
+
+test('PPTX 导出接口传递可编辑模式并拒绝未知模式', async t => {
+  const modes = [];
+  const app = await makeApp(t, {
+    pptxExporter:async ({ mode }) => {
+      modes.push(mode);
+      return Buffer.from('PK\u0003\u0004pptx');
+    },
+  });
+  for (const mode of ['editable', 'image', 'unknown', '', null, {}]) {
+    const response = await fetch(`${app.url}/api/export/pptx?token=secret`, {
+      method:'POST',
+      headers:{ 'content-type':'application/json', origin:app.url },
+      body:JSON.stringify({ expectedRevision:0, mode }),
+    });
+    if (mode === 'editable' || mode === 'image') {
+      assert.equal(response.status, 200);
+      await response.arrayBuffer();
+    } else {
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).code, 'PPTX_EXPORT_MODE_INVALID');
+    }
+  }
+  assert.deepEqual(modes, ['editable', 'image']);
+});
+
+test('可编辑 PPTX 与图片导出共享并发锁，失败后可重试且不固化源文件', async t => {
+  let rejectExport;
+  let markStarted;
+  const started = new Promise(resolvePromise => { markStarted = resolvePromise; });
+  const pending = new Promise((_resolve, reject) => { rejectExport = reject; });
+  const modes = [];
+  const app = await makeApp(t, {
+    pptxExporter:async ({ htmlBytes, mode }) => {
+      modes.push(mode);
+      assert.deepEqual(htmlBytes, Buffer.from('deck'));
+      if (modes.length === 1) { markStarted(); await pending; }
+      return Buffer.from('PK\u0003\u0004pptx');
+    },
+  });
+  const request = mode => fetch(`${app.url}/api/export/pptx?token=secret`, {
+    method:'POST', headers:{ 'content-type':'application/json', origin:app.url },
+    body:JSON.stringify({ expectedRevision:0, mode }),
+  });
+  const first = request('editable');
+  await started;
+  const busy = await request('image');
+  assert.equal(busy.status, 409);
+  assert.equal((await busy.json()).code, 'PPTX_EXPORT_BUSY');
+  rejectExport(Object.assign(new Error('测试转换失败'), { statusCode:422 }));
+  assert.equal((await first).status, 422);
+  const retry = await request('image');
+  assert.equal(retry.status, 200);
+  await retry.arrayBuffer();
+  assert.deepEqual(modes, ['editable', 'image']);
   assert.equal(await readFile(app.deckPath, 'utf8'), 'deck');
 });
 
@@ -4303,7 +4361,7 @@ test('托管工作副本的外部结构修改进入统一历史且真实 Deck �
   result = await response.json();
   assert.equal(response.status, 409, JSON.stringify(result));
   assert.equal(result.code, 'PATCH_REPLAY_FAILED');
-  assert.equal(verifierCalls, 3);
+  assert.equal(verifierCalls, 4);
   assert.equal(app.session.revision, undoRevision);
   assert.match(await readFile(app.workingDeckPath, 'utf8'), /旧文案/);
   assert.deepEqual(await readFile(app.deckPath, 'utf8'), source);
@@ -4508,7 +4566,7 @@ test('源码事务删除已固化动作所在页面时剔除被取代补丁并�
   result = await response.json();
 
   assert.equal(response.status, 200, JSON.stringify(result));
-  assert.equal(verifierCalls, 2, '首次发现缺页后应剔除旧补丁并从头验证');
+  assert.equal(verifierCalls, 3, '剔除旧补丁后还应验证包含未固化动作的完整候选');
   assert.equal(app.session.tasks.find(task => task.id === taskId)?.status, 'completed');
   assert.deepEqual(app.session.solidifiedActions, []);
   assert.deepEqual(app.session.historyRepair?.droppedActionIds, [solidifiedAction.id]);
@@ -6013,4 +6071,118 @@ test('桌面模式在编辑器页面关闭后自动回收本地服务', async ()
   }
   assert.equal(stopped, true);
   await app.close();
+});
+
+test('历史冲突覆盖任务上残留的目标待确认提示，并广播实际失败原因', async t => {
+  const app = await makeApp(t);
+  const created = await createTask(app);
+  const taskId = created.task.id;
+  // 恢复已有待确认任务，随后精确定位成功但实际页面值与时间线不一致。
+  app.session.tasks[0].status = 'needs-confirmation';
+  app.session.tasks[0].candidates = [{path:'旧候选'}];
+  await connectCanonicalActionEditor(t,app);
+  const submit = body => fetch(`${app.url}/api/actions?token=secret`, {
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),
+  });
+  const first = await submit({expectedRevision:1,taskId:null,actions:[action]});
+  assert.equal(first.status,200);
+  const revision=(await first.json()).revision;
+  const failed = await submit({expectedRevision:revision,taskId,actions:[{
+    ...action,id:'history-conflict',taskId,payload:{text:'再修改'},after:'再修改',
+  }]});
+  assert.equal(failed.status,409);
+  assert.equal((await failed.json()).error,'HISTORY_DIVERGED');
+  const task=app.session.tasks.find(item=>item.id===taskId);
+  assert.equal(task.status,'failed');
+  assert.deepEqual(task.candidates,[]);
+  assert.equal(task.lastError.code,'HISTORY_DIVERGED');
+  assert.equal(app.session.groups.length,1);
+  assert.equal(app.session.revision,revision+1);
+});
+
+test('真实源码提交记录文字覆盖证据，旧样式保留且结构撤销恢复旧动作', async t => {
+  const {compileActionGroups}=await import('../action-compiler.mjs');
+  const app=await makeApp(t,{deckContents:managedBundle(),managedWorkingDeck:true,workingPatchVerifier:async()=>({ok:true})});
+  await connectCanonicalActionEditor(t,app);
+  const before=await readFile(app.workingDeckPath,'utf8');
+  const template=JSON.parse(before.match(/<script type="__bundler\/template">\s*([\s\S]*?)\s*<\/script>/)[1]);
+  const editorId=template.match(/<h1[^>]*data-editor-id="([^"]+)"/)[1];
+  const pageKey=template.match(/data-page-id="([^"]+)"/)[1];
+  const target={pageKey,editorId,tag:'H1',path:'0',fingerprint:'1234abcd'};
+  const post=(path,body)=>fetch(`${app.url}${path}?token=secret`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  let response=await post('/api/actions',{expectedRevision:0,taskId:null,actions:[
+    {...action,id:'old-title',target},
+    {id:'independent-style',taskId:null,target,kind:'setStyle',payload:{property:'color',value:'black'},before:'',after:'black'},
+  ]});
+  assert.equal(response.status,200);
+  response=await post('/api/source-edits',{expectedRevision:app.session.revision});
+  assert.equal(response.status,201);
+  const reserved=await response.json();
+  await writeFile(app.workingDeckPath,before.replace('旧文案','源码里的新标题'));
+  response=await post(`/api/source-edits/${reserved.sourceEditId}/commit`,{expectedRevision:reserved.revision});
+  const committed=await response.json();
+  assert.equal(response.status,200,JSON.stringify(committed));
+  assert.equal(app.session.groups.at(-1).source.actionReconciliation.supersededKeys.length,1);
+  assert.deepEqual(compileActionGroups(app.session.groups).map(a=>a.id),['independent-style']);
+  response=await post(`/api/groups/${committed.groupId}/undo`,{expectedRevision:committed.revision});
+  assert.equal(response.status,200,await response.text());
+  assert.deepEqual(compileActionGroups(app.session.groups).map(a=>a.id),['old-title','independent-style']);
+});
+
+test('源码提交会重放未固化动作；失败时恢复工作副本且不增加历史', async t=>{
+  let rejectCandidate=false;
+  const app=await makeApp(t,{deckContents:managedBundle(),managedWorkingDeck:true,
+    workingPatchVerifier:async path=>{
+      const bytes=await readFile(path,'utf8');
+      if(rejectCandidate && bytes.includes('pending-resize'))throw Object.assign(new Error('尺寸目标冲突'),{
+        code:'PATCH_REPLAY_FAILED',statusCode:409,replayCode:'TARGET_AMBIGUOUS',failedActionId:'pending-resize',stage:'patch-replay'});
+      return {ok:true};
+    }});
+  await connectCanonicalActionEditor(t,app);
+  const before=await readFile(app.workingDeckPath,'utf8');
+  const template=JSON.parse(before.match(/<script type="__bundler\/template">\s*([\s\S]*?)\s*<\/script>/)[1]);
+  const editorId=template.match(/<h1[^>]*data-editor-id="([^"]+)"/)[1];
+  const pageKey=template.match(/data-page-id="([^"]+)"/)[1];
+  const post=(path,body)=>fetch(`${app.url}${path}?token=secret`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  let response=await post('/api/actions',{expectedRevision:0,taskId:null,actions:[{
+    id:'pending-resize',taskId:null,target:{pageKey,editorId,tag:'H1',path:'0',fingerprint:'1234abcd'},kind:'resize',
+    payload:{width:400,height:100},before:{width:300,height:100},after:{width:400,height:100}}]});
+  assert.equal(response.status,200,await response.text());
+  response=await post('/api/source-edits',{expectedRevision:app.session.revision});
+  const reserved=await response.json();
+  const count=app.session.groups.length;
+  rejectCandidate=true;
+  await writeFile(app.workingDeckPath,before.replace('旧文案','结构改写'));
+  response=await post(`/api/source-edits/${reserved.sourceEditId}/commit`,{expectedRevision:reserved.revision});
+  const failure=await response.json();
+  assert.equal(response.status,409,JSON.stringify(failure));
+  assert.equal(failure.failedActionId,'pending-resize');
+  assert.equal(failure.targetSummary.kind,'resize');
+  assert.equal(app.session.groups.length,count);
+  assert.equal(await readFile(app.workingDeckPath,'utf8'),before);
+  assert.equal(await readFile(app.deckPath,'utf8'),managedBundle());
+});
+
+test('纯 verify 不写历史或 Deck；命令查询复用回执，伪造源码证据被拒绝',async t=>{
+  const inspected=[];
+  const app=await makeApp(t,{deckContents:managedBundle(),managedWorkingDeck:true,
+    workingPatchVerifier:async path=>{inspected.push(await readFile(path,'utf8'));return {ok:true};}});
+  await connectCanonicalActionEditor(t,app);
+  const post=(path,body)=>fetch(`${app.url}${path}?token=secret`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  const commandId='11111111-1111-4111-a111-111111111111';
+  let response=await post('/api/actions',{expectedRevision:0,commandId,taskId:null,actions:[action]});
+  assert.equal(response.status,200,await response.text());
+  const session=JSON.stringify(app.session), bytes=await readFile(app.workingDeckPath,'utf8');
+  response=await post('/api/verify',{});
+  const verified=await response.json();
+  assert.equal(response.status,200,JSON.stringify(verified));
+  assert.equal(verified.scope,'full-history-replay');
+  assert.ok(inspected.at(-1).includes('action-1'));
+  assert.equal(JSON.stringify(app.session),session);
+  assert.equal(await readFile(app.workingDeckPath,'utf8'),bytes);
+  assert.equal(await readFile(app.deckPath,'utf8'),managedBundle());
+  const receipt=await(await fetch(`${app.url}/api/commands/${commandId}?token=secret`)).json();
+  assert.equal(receipt.committed,true);
+  response=await post('/api/actions',{expectedRevision:app.session.revision,taskId:null,actions:[{...action,id:'forged',sourceResizeStyle:''}]});
+  assert.equal(response.status,400);
 });

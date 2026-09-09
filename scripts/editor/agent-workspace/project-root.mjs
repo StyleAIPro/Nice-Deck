@@ -1,8 +1,6 @@
-import { lstat, realpath, stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, parse, relative, resolve, win32 } from 'node:path';
-
-const WORKSPACE_MARKERS = Object.freeze(['AGENTS.md', 'package.json', 'pyproject.toml']);
+import { dirname, join, parse, resolve, win32 } from 'node:path';
 
 function projectError(code, statusCode, message) {
   return Object.assign(new Error(message), { code, statusCode });
@@ -21,31 +19,6 @@ async function existingDirectory(path) {
     };
   } catch {
     return null;
-  }
-}
-
-function contains(parent, child) {
-  const path = relative(parent, child);
-  return path === '' || (!path.startsWith('..') && !path.startsWith('/') && !path.startsWith('\\'));
-}
-
-async function hasMarker(directory, marker) {
-  try {
-    await lstat(join(directory, marker));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function ancestors(start) {
-  const values = [];
-  let current = start;
-  for (;;) {
-    values.push(current);
-    const parent = dirname(current);
-    if (parent === current) return values;
-    current = parent;
   }
 }
 
@@ -164,7 +137,6 @@ export async function resolveAgentTerminalCwd({
 export async function resolveProjectRoot({
   deckPath,
   persistedRoot = null,
-  launchCwd = null,
   explicitRoot = null,
   homeDir = homedir(),
 } = {}) {
@@ -179,23 +151,6 @@ export async function resolveProjectRoot({
   if (explicit) return result(explicit, 'explicit');
   const persisted = await existingDirectory(persistedRoot);
   if (persisted) return result(persisted, 'persisted');
-  const launch = await existingDirectory(launchCwd);
-  if (launch && contains(launch.path, deckRealPath)) return result(launch, 'launch-cwd');
-
-  const parents = ancestors(deckDirectory);
-  for (const directory of parents) {
-    if (await hasMarker(directory, '.git')) {
-      return result(await existingDirectory(directory), 'git-root');
-    }
-  }
-  for (const directory of parents) {
-    for (const marker of WORKSPACE_MARKERS) {
-      if (await hasMarker(directory, marker)) {
-        return result(await existingDirectory(directory), 'workspace-marker');
-      }
-    }
-  }
-
   const fallback = await existingDirectory(deckDirectory);
   const needsConfirmation = isBroadFallback(fallback.path, await realpath(homeDir).catch(() => homeDir));
   return result(fallback, 'deck-directory', {

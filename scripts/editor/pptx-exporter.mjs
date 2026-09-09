@@ -20,6 +20,7 @@ function exportError(code, statusCode, message, diagnostic) {
 }
 
 function runConverter(inputPath, outputPath, {
+  mode,
   pythonExecutable,
   spawnProcess,
   timeoutMs,
@@ -31,7 +32,7 @@ function runConverter(inputPath, outputPath, {
     let stderr = '';
     const child = spawnProcess(
       pythonExecutable,
-      [CONVERTER, inputPath, outputPath],
+      [CONVERTER, inputPath, outputPath, '--mode', mode],
       pythonUtf8SpawnOptions({ stdio:['ignore', 'pipe', 'pipe'] }),
     );
     const finish = (error, value) => {
@@ -73,9 +74,10 @@ function runConverter(inputPath, outputPath, {
     });
     child.once('close', code => {
       if (code !== 0) {
+        const patchFailure = stderr.match(/^PPTX_PATCH_REPLAY_FAILED: (.+)$/mu)?.[1];
         finish(exportError(
-          'PPTX_EXPORT_FAILED', 422,
-          'PPTX 导出失败，请在“安装与诊断”中检查 PPTX 导出能力',
+          patchFailure ? 'PPTX_PATCH_REPLAY_FAILED' : 'PPTX_EXPORT_FAILED', 422,
+          patchFailure ?? 'PPTX 导出失败，请在“安装与诊断”中检查 PPTX 导出能力',
           stderr.trim() || stdout.trim() || `转换器退出码 ${code}`,
         ));
         return;
@@ -89,6 +91,7 @@ function runConverter(inputPath, outputPath, {
 
 export async function exportPptxSnapshot({
   htmlBytes,
+  mode='image',
   pythonExecutable=defaultPythonExecutable(),
   spawnProcess=spawn,
   timeoutMs=DEFAULT_TIMEOUT_MS,
@@ -106,7 +109,7 @@ export async function exportPptxSnapshot({
   try {
     await writeFile(inputPath, htmlBytes);
     await runConverter(inputPath, outputPath, {
-      pythonExecutable, spawnProcess, timeoutMs, signal,
+      pythonExecutable, spawnProcess, timeoutMs, signal, mode,
     });
     const bytes = await readFile(outputPath);
     if (bytes.length < 4 || bytes.subarray(0, 2).toString('ascii') !== 'PK') {

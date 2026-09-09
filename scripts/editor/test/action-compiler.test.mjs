@@ -308,3 +308,57 @@ test('合并子标题并隐藏旧正文的分支规范化为最终标题与空�
     },
   ]);
 });
+
+test('源码明确覆盖的属性退出重放，其他页面样式保留，撤销源码后旧动作恢复', () => {
+  const title = {id:'title',kind:'setText',target:{...target,editorId:'element-11111111111111111111111111111111'},payload:{text:'旧动作标题'},before:'最初标题',after:'旧动作标题'};
+  const color = {...rangeStyle('color','fill','#20252b',0,1),payload:{property:'fill',value:'#20252b'}};
+  const key = `${title.target.pageKey}|id:${title.target.editorId}||setText||`;
+  const groups = [
+    {active:true,actions:[title]},
+    {active:true,mutationType:'source',source:{actionReconciliation:{version:1,supersededKeys:[key]}},actions:[]},
+    {active:true,actions:[color]},
+    {active:true,mutationType:'source',source:{actionReconciliation:{version:1,supersededKeys:[]}},actions:[]},
+  ];
+  assert.deepEqual(compileActionGroups(groups).map(a=>a.id),['color']);
+  assert.deepEqual(sourceRebaseActionIds(groups),['color']);
+  groups[1].active=false;groups[2].active=false;groups[3].active=false;
+  assert.deepEqual(compileActionGroups(groups).map(a=>a.id),['title']);
+});
+
+test('源码后整段手改覆盖同一标题的旧文字节点分支，撤销后保留节点修改',()=>{
+ const base={id:'base',target:{...target,editorId:'element-11111111111111111111111111111111'},kind:'setText',payload:{text:'中间标题'},before:'原始标题',after:'中间标题'};
+ const granular={...base,id:'granular',target:{...base.target,textPath:'0'},payload:{text:'Agent 标题'},before:'中间标题',after:'Agent 标题'};
+ const manual={...base,id:'manual',payload:{text:'用户标题'},before:'中间标题',after:'用户标题'};
+ const groups=[{active:true,actions:[base,granular]},{active:true,mutationType:'source',actions:[]},{active:true,actions:[manual]}];
+ let result=compileActionGroups(groups);
+ assert.deepEqual(result.map(a=>[a.id,a.before,a.after]),[['manual','原始标题','用户标题']]);
+ groups[2].active=false;
+ result=compileActionGroups(groups);
+ assert.ok(result.some(a=>a.id==='granular'&&a.after==='Agent 标题'));
+});
+
+test('源码后连续两次移动不把第二次的起始值误判为源码覆盖',()=>{
+ const t={...target,editorId:'element-11111111111111111111111111111111'};
+ const move=(id,before,after)=>({id,target:t,kind:'translate',payload:after,before,after});
+ const groups=[{active:true,actions:[move('base',{x:0,y:0},{x:-145,y:0})]},
+  {active:true,mutationType:'source',actions:[]},
+  {active:true,actions:[move('first',{x:-145,y:0},{x:-75,y:-1})]},
+  {active:true,actions:[move('second',{x:-75,y:-1},{x:-72,y:-8})]}];
+ const result=compileActionGroups(groups);
+ assert.equal(result.length,1);assert.deepEqual(result[0].before,{x:0,y:0});
+ assert.deepEqual(result[0].after,{x:-72,y:-8});
+ assert.deepEqual(sourceRebaseActionIds(groups,result),['second']);
+});
+
+test('同一文字节点通过子标题和祖先容器交替修改时合并连续链',()=>{
+ const child={...target,path:'3/0/0/3/0',editorId:'element-child',textPath:'0/0'};
+ const parent={...target,path:'3/0/0',editorId:'element-parent',textPath:'3/0/0/0'};
+ const edit=(id,target,before,after)=>({id,target,kind:'setText',payload:{text:after,sourceRange:{start:0,end:before.length}},before,after});
+ const groups=[{active:true,actions:[edit('child',child,'原始','很长的标题')]},
+  {active:true,actions:[edit('parent',parent,'很长的标题','短标题')]},
+  {active:true,actions:[edit('noop',parent,'短标题','短标题')]},
+  {active:true,actions:[edit('final',child,'很长的标题','短标题')]}];
+ const compiled=compileActionGroups(groups);
+ assert.equal(compiled.length,1);assert.equal(compiled[0].before,'原始');
+ assert.equal(compiled[0].after,'短标题');assert.equal(compiled[0].target.editorId,'element-child');
+});

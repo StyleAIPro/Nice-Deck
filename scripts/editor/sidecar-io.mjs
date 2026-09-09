@@ -358,8 +358,8 @@ class PersistentSidecarIO {
   readAgentWorkspace({ missingOk=false } = {}) {
     return this.#request('read-agent-workspace', { missingOk });
   }
-  readWorkingDeck({ missingOk=false } = {}) {
-    return this.#request('read-working-deck', { missingOk });
+  readWorkingDeck({ missingOk=false, ifFingerprint, versionFingerprint } = {}) {
+    return this.#request('read-working-deck', { missingOk, ...(ifFingerprint ? { ifFingerprint } : {}), ...(versionFingerprint ? { versionFingerprint } : {}) });
   }
   assertBound() { return this.#request('assert-bound', {}); }
   publishAttachments(payload) { return this.#request('publish-attachments', payload); }

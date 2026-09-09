@@ -26,6 +26,14 @@ def load_factory():
 
 
 class DeckFactoryContractTest(unittest.TestCase):
+    def test_fixed_layout_ignores_managed_identity_and_void_spacing(self):
+        factory = load_factory()
+        original = '<section style="color:red"><div>标题</div><img src="image"/><br/></section>'
+        managed = '<section style="color:red"><div data-editor-id="element-123">新标题</div><img src="image" /><br /></section>'
+        self.assertEqual(factory.layout_fingerprint(original), factory.layout_fingerprint(managed))
+        self.assertNotEqual(factory.layout_fingerprint(original), factory.layout_fingerprint(managed.replace('color:red', 'color:blue')))
+        self.assertNotEqual(factory.layout_fingerprint(original), factory.layout_fingerprint(managed.replace('<br />', '<hr />')))
+
     def test_imports_compatible_shared_page_without_merging_template_shells(self):
         factory = load_factory()
         with tempfile.TemporaryDirectory(prefix="deck-factory-shared-page-") as temp_dir:

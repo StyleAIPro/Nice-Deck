@@ -233,6 +233,7 @@
           <div class="canvas-tools" aria-label="画布状态">
             <button class="canvas-export-button" type="button" data-export-pptx
               aria-label="导出为 PPTX" title="导出为 PPTX" data-toolbar-tooltip="导出为 PPTX"
+              aria-haspopup="dialog"
               data-pill-nav data-pill-variant="ghost" data-pill-size="sm" data-pill-kind="icon">
               <svg class="canvas-export-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 15V3"></path>
@@ -294,6 +295,33 @@
     </section>
     <aside class="task-drawer" data-task-drawer aria-label="Agent 修改任务"></aside>
   </main>
+  <div data-pptx-export-dialog hidden>
+    <div class="ui-modal-backdrop" aria-hidden="true"></div>
+    <section class="solidify-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="pptx-export-title" tabindex="-1">
+      <div class="solidify-dialog-copy">
+        <h2 id="pptx-export-title">导出 PPTX</h2>
+        <p>选择适合后续使用的格式。</p>
+        <fieldset class="pptx-export-options" aria-label="PPTX 导出格式">
+          <label class="pptx-export-option">
+            <input type="radio" name="pptx-export-mode" value="editable" checked>
+            <span><strong>可编辑 PPTX <em>推荐</em></strong><small>文字统一微软雅黑，图形和表格可改，复杂视觉保留图片。</small></span>
+          </label>
+          <label class="pptx-export-option">
+            <input type="radio" name="pptx-export-mode" value="image">
+            <span><strong>高清图片 PPTX</strong><small>优先保持外观，每页为高清图片。</small></span>
+          </label>
+        </fieldset>
+        <p class="pptx-export-limit">两种模式均导出静态页面，动画和网页交互不会转换为可编辑效果。</p>
+      </div>
+      <div class="solidify-dialog-actions">
+        <button type="button" data-pptx-export-cancel data-pill-nav
+          data-pill-variant="secondary" data-pill-size="md" data-pill-kind="action">取消</button>
+        <button type="button" data-pptx-export-confirm data-pill-nav
+          data-pill-variant="primary" data-pill-size="md" data-pill-kind="action">开始导出</button>
+      </div>
+    </section>
+  </div>
   <div class="solidify-modal" data-solidify-dialog hidden>
     <div class="ui-modal-backdrop" aria-hidden="true"></div>
     <section class="solidify-dialog" role="dialog" aria-modal="true"

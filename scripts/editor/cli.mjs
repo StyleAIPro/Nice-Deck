@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile,writeFile } from 'node:fs/promises';
 import { readWorkspaceCapability } from './workspace-capability.mjs';
 
 const HELP = {
@@ -15,7 +15,7 @@ const HELP = {
     '--expected-revision N', '--help',
   ],
   commands: [
-    'revision', 'status', 'tasks', 'task', 'locate-text', 'replace-text',
+    'inspect TASK_ID OUT.png', 'view PAGE OUT.png', 'result COMMAND_ID', 'revision', 'status', 'tasks', 'task', 'locate-text', 'replace-text',
     'apply', 'begin-source-edit', 'begin-source-task',
     'commit-source-edit', 'cancel-source-edit', 'cancel-source-task',
     'undo', 'redo', 'verify', 'solidify', 'creation ...',
@@ -78,7 +78,7 @@ function parseArguments(argv) {
   }
   const [command, ...args] = positional;
   const expectedArgs = {
-    revision:0, status:0, tasks:0, task:1, 'locate-text':1,
+    inspect:2,view:2,result:1,revision:0, status:0, tasks:0, task:1, 'locate-text':1,
     'replace-text':2, apply:1,
     'begin-source-edit':0, 'begin-source-task':1,
     'commit-source-edit':1, 'cancel-source-edit':1, 'cancel-source-task':1,
@@ -275,6 +275,14 @@ async function executeCreation(argv) {
 
 async function execute(options) {
   const { command, args } = options;
+  if(command==='inspect'||command==='view') {
+    const result=await requestJson(options,'/api/inspect',{method:'POST',body:{
+      ...(command==='inspect'?{taskId:args[0]}:{pageKey:args[0]})}});
+    await writeFile(args[1],Buffer.from(result.image,'base64'));
+    const {image,...metadata}=result;
+    return {...metadata,imagePath:args[1]};
+  }
+  if(command==='result')return requestJson(options,`/api/commands/${encodeURIComponent(args[0])}`);
   if (command === 'revision') {
     const session = await requestJson(options, '/api/session');
     return { revision:session.revision };
@@ -339,7 +347,7 @@ async function execute(options) {
   }
   if (command === 'verify') {
     const expectedRevision = await mutationRevision(options);
-    return requestJson(options, '/api/write-deck', {
+    return requestJson(options, '/api/verify', {
       method:'POST', body:{ expectedRevision },
     });
   }

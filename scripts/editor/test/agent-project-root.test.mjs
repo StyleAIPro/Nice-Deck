@@ -17,7 +17,7 @@ async function fixture(t, name = 'project-root-') {
   return realpath(root);
 }
 
-test('Deck 子目录向上优先识别最近的 .git 根', async t => {
+test('Deck 位于 Git 仓库子目录时默认使用 HTML 的直接父目录', async t => {
   const root = await fixture(t);
   const deckDir = join(root, 'Deck-Projects', 'renzhi');
   await mkdir(join(root, '.git'));
@@ -26,12 +26,12 @@ test('Deck 子目录向上优先识别最近的 .git 根', async t => {
   await writeFile(deckPath, 'deck');
 
   const result = await resolveProjectRoot({ deckPath });
-  assert.equal(result.path, root);
-  assert.equal(result.source, 'git-root');
+  assert.equal(result.path, deckDir);
+  assert.equal(result.source, 'deck-directory');
   assert.equal(result.needsConfirmation, false);
 });
 
-test('有效 persisted 优先，消失后按 marker 降级重新识别', async t => {
+test('保留有效的已保存目录，消失后使用 HTML 父目录而不向上查找工作区标记', async t => {
   const root = await fixture(t);
   const persisted = join(root, 'persisted');
   const deckDir = join(root, 'workspace', 'slides');
@@ -44,11 +44,11 @@ test('有效 persisted 优先，消失后按 marker 降级重新识别', async t
   assert.equal((await resolveProjectRoot({ deckPath, persistedRoot:persisted })).path, persisted);
   await rm(persisted, { recursive:true });
   const fallback = await resolveProjectRoot({ deckPath, persistedRoot:persisted });
-  assert.equal(fallback.path, join(root, 'workspace'));
-  assert.equal(fallback.source, 'workspace-marker');
+  assert.equal(fallback.path, deckDir);
+  assert.equal(fallback.source, 'deck-directory');
 });
 
-test('显式目录优先于旧持久化目录和 launch cwd，launch cwd 必须真实包含 Deck', async t => {
+test('显式目录优先于已保存目录，启动目录不改变 HTML 的默认项目目录', async t => {
   const root = await fixture(t);
   const explicit = join(root, 'explicit');
   const persisted = join(root, 'persisted');
@@ -66,8 +66,8 @@ test('显式目录优先于旧持久化目录和 launch cwd，launch cwd 必须�
   assert.equal(result.path, explicit);
   assert.equal(result.source, 'explicit');
   result = await resolveProjectRoot({ deckPath, launchCwd:launch });
-  assert.equal(result.path, launch);
-  assert.equal(result.source, 'launch-cwd');
+  assert.equal(result.path, deckDir);
+  assert.equal(result.source, 'deck-directory');
   result = await resolveProjectRoot({ deckPath, launchCwd:explicit });
   assert.equal(result.path, deckDir);
   assert.equal(result.source, 'deck-directory');

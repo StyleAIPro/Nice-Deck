@@ -15,6 +15,7 @@ function pickPathWithSystemPicker({
   pickerFlag,
   resultKey,
   resultLabel,
+  defaultPath,
   signal,
   spawnProcess = spawn,
   environment = process.env,
@@ -25,7 +26,7 @@ function pickPathWithSystemPicker({
       const response = await fetchRequest(environment.AICO_DESKTOP_DIALOG_URL, {
         method:'POST', signal, redirect:'error',
         headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${environment.AICO_DESKTOP_DIALOG_TOKEN}` },
-        body:JSON.stringify({ kind:pickerFlag === '--pick-only' ? 'deck' : 'directory' }),
+        body:JSON.stringify({ kind:pickerFlag === '--pick-only' ? 'deck' : 'directory', defaultPath }),
       });
       const result = await response.json();
       if (!response.ok) throw pickerError(result.error || '原生文件选择器不可用');
@@ -40,7 +41,7 @@ function pickPathWithSystemPicker({
     }
     const child = spawnProcess(
       pythonExecutable,
-      [join(PROJECT_DIR, 'scripts/deck-editor.py'), pickerFlag],
+      [join(PROJECT_DIR, 'scripts/deck-editor.py'), pickerFlag, ...(defaultPath ? ['--default-path', defaultPath] : [])],
       pythonUtf8SpawnOptions({ cwd:PROJECT_DIR, stdio:['ignore', 'pipe', 'pipe'] }),
     );
     const stdout = [];

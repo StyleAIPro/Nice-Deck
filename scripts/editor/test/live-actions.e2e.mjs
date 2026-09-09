@@ -2104,3 +2104,64 @@ test('Agent apply/undo/redo 广播后 iframe-only reload 始终匹配权威编�
   assert.deepEqual(browserProblems,[]);
   assert.deepEqual(resourceProblems,[]);
 });
+
+test('任务与顶部历史入口在请求处理中共同禁用，连点不重发也不反向执行', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  const target = await page.frameLocator('#deck-frame').locator('h2').first()
+    .evaluate(element => window.HuaweiDeckPatchRuntime.makeLocator(element));
+  const created = await postJson(app, '/api/tasks', {
+    expectedRevision:0, pageKey:target.pageKey, pageIndex:1, pageLabel:'封面',
+    rect:{ x:100,y:100,w:300,h:120 }, instruction:'检查连点',
+  });
+  const taskId = created.body.task.id;
+  await postJson(app, '/api/actions', { expectedRevision:1, taskId,
+    actions:[{ id:'busy-task', taskId,target,kind:'setText',payload:{text:'连点测试'} }] });
+  await page.waitForSelector('[data-task-undo]', { state:'attached' });
+  let release;
+  let entered;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const requestSeen = new Promise(resolve => { entered = resolve; });
+  let count = 0;
+  await page.route('**/api/groups/*/undo*', async route => {
+    count++; entered(); await blocked; await route.continue();
+  });
+  t.after(() => release());
+  await page.evaluate(() => document.querySelector('[data-task-undo]').click());
+  await requestSeen;
+  try {
+    assert.equal(await page.locator('[data-task-undo]').isDisabled(), true, '任务入口必须立即禁用');
+    assert.equal(await page.locator('[data-history-undo]').isDisabled(), true, '顶部入口必须共享忙状态');
+    await page.evaluate(() => {
+      for (let i=0;i<5;i++) {
+        document.querySelector('[data-task-undo]').click();
+        document.querySelector('[data-history-undo]').click();
+      }
+    });
+  } finally { release(); }
+  await page.waitForFunction(() => {
+    const redo = document.querySelector('[data-task-redo]');
+    return redo && !redo.disabled;
+  });
+  assert.equal(count, 1);
+  assert.equal((await session(app)).revision, 3);
+  // 模拟另一写入方已完成重做，原请求收到旧 revision 冲突。
+  await page.route('**/api/groups/*/redo*', async route => {
+    const response = await fetch(route.request().url(), {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ expectedRevision:3 }),
+    });
+    assert.equal(response.status, 200);
+    await route.fulfill({ status:409, contentType:'application/json',
+      body:JSON.stringify({ code:'REVISION_CONFLICT', revision:4, message:'测试版本冲突' }) });
+  });
+  await page.evaluate(() => document.querySelector('[data-task-redo]').click());
+  await page.waitForFunction(() => {
+    const undo = document.querySelector('[data-task-undo]');
+    return undo && !undo.disabled;
+  });
+  assert.equal((await session(app)).revision, 4, '冲突刷新后不能自动反向撤销');
+  assert.equal(count, 1);
+});

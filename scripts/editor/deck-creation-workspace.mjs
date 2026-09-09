@@ -420,7 +420,8 @@ export class DeckCreationWorkspace {
   async #verifyAndPublish(command) {
     await this.store.dispatch(command);
     try {
-      await this.managedDeck?.preparePublish?.();
+      const managed = await this.#ensureManagedDeck();
+      await managed?.preparePublish?.();
       const verified = await this.factory.verify(this.snapshot());
       await this.store.updateGeneration(verified, 'creation-verification-updated');
       const published = await this.factory.publish(this.snapshot());

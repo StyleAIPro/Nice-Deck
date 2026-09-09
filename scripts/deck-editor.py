@@ -284,14 +284,18 @@ def choose_deck():
         raise LauncherError("无法打开系统文件选择器，请改用命令行传入 deck 路径") from error
 
 
-def choose_project_directory():
-    """用系统目录选择器选一份 Agent 项目目录；用户取消时返回 None。"""
+def choose_project_directory(default_path=None):
+    """从当前配置目录打开系统目录选择器；用户取消时返回 None。"""
     if sys.platform == "darwin" and Path("/usr/bin/osascript").is_file():
         result = _run_applescript(
             """
             on run argv
               try
-                set pickedFolder to choose folder with prompt (item 1 of argv)
+                if (count of argv) > 1 then
+                  set pickedFolder to choose folder with prompt (item 1 of argv) default location (POSIX file (item 2 of argv))
+                else
+                  set pickedFolder to choose folder with prompt (item 1 of argv)
+                end if
                 return POSIX path of pickedFolder
               on error number -128
                 return ""
@@ -299,6 +303,7 @@ def choose_project_directory():
             end run
             """,
             "选择 Agent 项目目录",
+            *([default_path] if default_path else []),
         )
         if result.returncode != 0:
             raise LauncherError((result.stderr or "无法打开系统目录选择器").strip())
@@ -310,6 +315,7 @@ def choose_project_directory():
             "askdirectory",
             title="选择 Agent 项目目录",
             mustexist=True,
+            **({"initialdir": default_path} if default_path else {}),
         )
         return Path(selected) if selected else None
     except Exception as error:
@@ -975,6 +981,7 @@ def main(argv=None):
     parser.add_argument("--detach-windows", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--pick-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--pick-directory-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--default-path", help=argparse.SUPPRESS)
     parser.add_argument("--agent-thread-id", help=argparse.SUPPRESS)
     parser.add_argument(
         "--agent-provider", default="auto",
@@ -1009,7 +1016,7 @@ def main(argv=None):
 
     if args.pick_directory_only:
         try:
-            selected = choose_project_directory()
+            selected = choose_project_directory(default_path=args.default_path)
             if selected is None:
                 return 3
             directory = Path(selected).expanduser().resolve()

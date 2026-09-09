@@ -311,6 +311,18 @@ export function renderTaskDrawer(root, {
       notice.append(indicator, copy);
       row.append(notice);
     }
+    if (task.status === 'failed' && task.lastError?.code) {
+      const notice = element('aside', 'task-confirmation-notice');
+      notice.dataset.taskFailureNotice = task.id;
+      notice.setAttribute('role', 'alert');
+      const copy = element('span', 'task-confirmation-copy');
+      copy.append(
+        element('strong', '', `${task.lastError.message}（${task.lastError.code}）`),
+        element('span', '', task.lastError.recovery ?? ''),
+      );
+      notice.append(copy);
+      row.append(notice);
+    }
     const mutable = !targetMissing
       && ['pending', 'failed', 'needs-confirmation'].includes(task.status)
       && !task.groupId;
@@ -440,6 +452,7 @@ export function renderTaskDrawer(root, {
       history.dataset[historyControl.label === '重做' ? 'taskRedo' : 'taskUndo'] = task.id;
       history.dataset.groupId = historyControl.groupId;
       history.dataset.historyMethod = historyControl.method;
+      history.dataset.taskHistoryLocked = String(activeIds.has(task.id));
       history.disabled = activeIds.has(task.id);
       applyPill(history, { variant:'neutral', size:'sm', kind:'action' });
       history.addEventListener('click', () => onHistory(task, historyControl));

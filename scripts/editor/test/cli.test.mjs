@@ -330,7 +330,7 @@ test('Managed Workspace CLI 支持环境变量、capability 与显式 verify/sol
     AICO_PPT_EDITOR_URL:'', AICO_PPT_EDITOR_TOKEN:'',
     AICO_PPT_WORKSPACE_CAPABILITY_FILE:'',
   }).result);
-  assert.equal(received.at(-1).url, '/api/write-deck');
+  assert.equal(received.at(-1).url, '/api/verify');
   assert.deepEqual(received.at(-1).body, { expectedRevision:7 });
   assert.equal(received.at(-1).authorization, 'Bearer capability-secret');
 
@@ -673,7 +673,7 @@ test('Agent CLI 区分 HTTP 失败 exit 1 与参数/文件/JSON错误 exit 2', a
 test('Agent CLI help 是 JSON 且列出固定命令', async () => {
   const help = parseJsonOutput(await runCli(['--help']));
   assert.deepEqual(help.commands, [
-    'revision', 'status', 'tasks', 'task', 'locate-text', 'replace-text',
+    'inspect TASK_ID OUT.png', 'view PAGE OUT.png', 'result COMMAND_ID', 'revision', 'status', 'tasks', 'task', 'locate-text', 'replace-text',
     'apply', 'begin-source-edit', 'begin-source-task',
     'commit-source-edit', 'cancel-source-edit', 'cancel-source-task',
     'undo', 'redo', 'verify', 'solidify', 'creation ...',

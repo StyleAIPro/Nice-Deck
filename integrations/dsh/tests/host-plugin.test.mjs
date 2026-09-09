@@ -16,15 +16,15 @@ test('Host 插件从仓库根目录注册唯一的 aico-ppt Skill', async (t) =>
       },
     },
     on(event, listener) {
-      assert.equal(event, 'webserver/index-inject')
-      indexListener = listener
+      if (event === 'webserver/index-inject') indexListener = listener
+      else assert.equal(event, 'agent/pre-step')
     },
     effect(effect) { closeRuntime = effect() },
   })
   t.after(async () => closeRuntime?.())
 
   assert.equal(name, 'aico-ppt')
-  assert.deepEqual(inject, ['skills', 'webServer'])
+  assert.deepEqual(inject, ['skills', 'webServer', 'tools', 'attachments'])
   assert.equal(typeof createProvider, 'function')
   const rows = []
   indexListener(rows)
@@ -59,7 +59,7 @@ test('配置私有运行时时保留同一 Skill 并追加模型脚本入口，�
   let closeRuntime
   await apply({
     skills:{ registerProvider(factory) { createProvider = factory } },
-    on(event, listener) { indexListener = listener },
+    on(event, listener) { if (event === 'webserver/index-inject') indexListener = listener },
     effect(effect) { closeRuntime = effect() },
     logger:{ error(error) { assert.fail(String(error)) } },
   }, { aicoRuntime:runtime })

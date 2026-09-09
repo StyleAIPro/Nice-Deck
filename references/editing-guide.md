@@ -74,7 +74,7 @@ python3 scripts/deck-editor.py Deck-Projects/renzhi/renzhi-deck.html
 open -n "tools/dev-shell/AICO-PPT Dev Shell.app" --args --agent-thread-id "$CODEX_THREAD_ID" "$(pwd)/my-deck.html"
 ```
 
-添加 Deck 后，先在导入页核对可见的项目根目录；自动识别不合适时可改选，确认后才进入工作台。默认不需要绑定既有会话：Editor 打开时就在后台启动新的 Codex / Claude Code / OpenCode 会话，并在首个 Prompt 中把当前 `aico-ppt` Skill 加载一次；打开终端只是接入已经运行的 runtime。项目根与活动 provider 存放在独立 `agent-workspace.json`，由 `workspaceRevision` 管理；更改它们不增加 Deck revision，也不进入撤销 / 重做和固化队列。其他 Agent 仍可直接使用 Skill 与普通 action capability，只是不进入窗口化自动终端支持范围。
+添加 Deck 后，先在导入页核对可见的项目根目录，确认后才进入工作台。项目目录优先使用本次显式选择，其次使用有效的历史设置；两者都没有时，默认使用 HTML 实际文件的直接父目录，不按启动器工作目录、Git 根或工作区标记向上查找。点击“更改目录”会从当前已配置目录打开系统选择器；取消保留现配置，再次更改从最新配置目录打开。范围过宽时仍需确认；目录身份校验失败时须重新选择。默认不需要绑定既有会话：Editor 打开时就在后台启动新的 Codex / Claude Code / OpenCode 会话，并在首个 Prompt 中把当前 `aico-ppt` Skill 加载一次；打开终端只是接入已经运行的 runtime。项目根与活动 provider 存放在独立 `agent-workspace.json`，由 `workspaceRevision` 管理；更改它们不增加 Deck revision，也不进入撤销 / 重做和固化队列。其他 Agent 仍可直接使用 Skill 与普通 action capability，只是不进入窗口化自动终端支持范围。
 
 右上角显示真实 PTY 状态，点击后从右侧推出唯一的 Agent 交互终端；没有结构化对话页签、消息气泡或独立消息输入框。终端抽屉与属性面板同高，默认宽度为浏览器窗口的三分之一；左边界可拖动，向左加宽会压缩中间画布，任务 drawer 同步向内避让。Codex 固定使用 `codex --dangerously-bypass-approvals-and-sandbox`，Claude Code 固定使用 `claude --dangerously-skip-permissions`，OpenCode 固定使用 `opencode`；`cc` 在 macOS 上可能是 C 编译器，因此实现不得把它当作 Claude executable。若任一 CLI 首屏询问是否 trust 当前目录，`AgentTerminalSession` 会保持初始 Prompt 为 pending、允许用户操作信任选择，并通过 `interactionRequired: directory-trust` 让新建页和编辑页自动展开右侧终端；Codex 恢复目录选择使用 `working-directory-selection`，其他带明确高亮编号项、至少两个编号选项和操作提示的未知 CLI 选择页使用 `terminal-selection`。这些交互状态都显示“等待确认”且终端标题脉冲提醒，加载遮罩不会挡住选择。只有用户确认后 CLI 绘出正常输入框，初始化 Prompt 或任务才会使用 bracketed paste 写入并单独回车；任务批次的就绪等待也受同一闸门约束。Editor 启动后即在已确认的项目根目录后台创建新 CLI 会话并加载一次 `aico-ppt` Skill；刷新浏览器只重连同一 PTY，任务批次直接写入这个终端。终端是 Editor 的实时交互视图，但任务完成、Deck action、撤销与固化仍以 sidecar 为权威。Windows / Linux 的 `Ctrl+V` 只粘贴一次剪贴板文字；有文字选区时，`Ctrl+C` 由浏览器复制且不向 PTY 发送 `0x03`，没有选区时仍发送终端中断。macOS 继续使用原生 `Cmd+C` / `Cmd+V` 路径。界面不提供高级设置或“连接已有会话”，也不扫描历史会话；旧绑定数据只在首次迁移 sidecar 时静默吸收。
 
@@ -126,7 +126,7 @@ open -n "tools/dev-shell/AICO-PPT Dev Shell.app" --args --agent-thread-id "$CODE
 
 外部 Codex / Claude Code / Agent 不是内置聊天机器人。drawer 的“交给 Agent 处理下一批”向 `POST /api/agent-runs` 提交当前 revision 和下一批候选任务 ID；服务端先在同一 mutation queue 中持久化成员不可变的执行批次，再启动 Agent，`GET /api/agent-runs/current` 与 `agent-run-updated` 事件同时投影活动批次、下一批候选和历史批次剩余任务。同一时间只允许一批运行；按钮之后新增的任务不会混入当前批次。终端出现 Codex steer 输入框时回合仍是 active，只有真正回到空闲输入态才开放下一批提交；失败、取消或重启后的未完成成员保留原批次归属，不自动并入新标注。
 
-Agent 只通过 CLI / HTTP 调用受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`GET /api/text-locations` 定位文字节点，`POST /api/actions` 提交带 `commandId` 的幂等动作命令，`POST /api/source-edits` 开始源码事务，`POST /api/source-edits/<SOURCE_EDIT_ID>/commit|cancel` 提交或取消事务，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/write-deck` 建立受控检查点。显式正式发布先调用 `POST /api/solidify-preflight`，再携带一次性令牌调用 `POST /api/solidify-deck`。可见 Editor 由用户点击“固化修改”确认；无窗口 Skill 在用户要求完成 / 保存 / 正式写入时由 Agent 显式调用 `solidify`，若用户要求仅预览则不得固化。相同 `commandId` 和相同 payload 的动作重试返回首次结果；同 ID 不同 payload 返回 `COMMAND_ID_REUSED`。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。真实 PTY 使用独立 `/agent-terminal` capability WebSocket；浏览器只允许选择产品注册表中的 Codex / Claude Code / OpenCode、发送键盘输入和终端尺寸，不能提交 executable、额外参数、环境变量或历史会话 ID。provider 未安装或未登录时必须返回清晰错误，不能静默切到 Codex。
+Agent 通过原生 aico_ppt 工具或 CLI / HTTP 调用同一套受控接口：`GET /api/session` 读取 status，`GET /api/tasks` 读取任务，`GET /api/text-locations` 定位文字节点，`POST /api/actions` 提交带 `commandId` 的幂等动作命令，`POST /api/source-edits` 开始源码事务，`POST /api/source-edits/<SOURCE_EDIT_ID>/commit|cancel` 提交或取消事务，`POST /api/groups/<GROUP_ID>/undo` 与 `POST /api/groups/<GROUP_ID>/redo` 执行 undo / redo，`POST /api/verify` 只读验证完整历史候选，旧 `POST /api/write-deck` 保留兼容检查点语义。显式正式发布先调用 `POST /api/solidify-preflight`，再携带一次性令牌调用 `POST /api/solidify-deck`。可见 Editor 由用户点击“固化修改”确认；无窗口 Skill 在用户要求完成 / 保存 / 正式写入时由 Agent 显式调用 `solidify`，若用户要求仅预览则不得固化。相同 `commandId` 和相同 payload 的动作重试返回首次结果；同 ID 不同 payload 返回 `COMMAND_ID_REUSED`。observer WebSocket 使用 `/events`，仅订阅服务事件；唯一 editor capability WebSocket 只在 parent 与服务之间传递 frame 事务命令和 ACK，不对外提交动作。真实 PTY 使用独立 `/agent-terminal` capability WebSocket；浏览器只允许选择产品注册表中的 Codex / Claude Code / OpenCode、发送键盘输入和终端尺寸，不能提交 executable、额外参数、环境变量或历史会话 ID。provider 未安装或未登录时必须返回清晰错误，不能静默切到 Codex。
 
 ```bash
 # Editor 内嵌 Agent 已自动获得 URL / token；无窗口模式可使用 capabilityPath
@@ -177,7 +177,7 @@ Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begi
 2. **令牌重验**：正式写入前再次核对 token 绑定的 revision、binding revision、双 fingerprint 和动作投影，过期、重复使用或变化都要求重新预检；
 3. **验证闸门**：修改页相对基线无新增溢出，候选 bundle 通过 `eb.verify`，全部离线补丁在真实浏览器中成功重放。
 
-会话重开与固化都使用同一受限恢复规则：只有被后续 SourceMutation 标记为可 rebase 的旧动作，且重放结果为 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND`，才可作为“源码已取代”跳过；未授权缺失、目标歧义和语义冲突仍会报错。固化验证在同一 Chrome 进程中一次收集全部可清理动作，恢复第一次候选后只重写一次并重新完整验证；写入期间进度条显示为不确定状态，不承诺无法准确测量的百分比。
+会话重开与固化先按受控快照证据排除已被源码覆盖的旧静态文字槽位（原历史仍保留）。其余动作使用同一受限恢复规则：只有被后续 SourceMutation 标记为可 rebase 的旧动作，且重放结果为 `PAGE_NOT_FOUND` / `TARGET_NOT_FOUND`，才可作为“源码已取代”跳过；未授权缺失、目标歧义和语义冲突仍会报错。固化验证在同一 Chrome 进程中一次收集全部可清理动作，恢复第一次候选后只重写一次并重新完整验证；写入期间进度条显示为不确定状态，不承诺无法准确测量的百分比。
 
 通过闸门后，`scripts/edit-bundle.py` 只负责 bundle 编解码和三处结构同步；sidecar helper 持有可信目录 identity，负责归档工作版本、真实 Deck 备份、transaction、双 fingerprint 复核、同目录候选与 `os.replace`。会话基线更新失败时会恢复工作副本或真实 Deck；冲突或验证失败不静默覆盖。
 
@@ -436,8 +436,11 @@ Agent 每次加载本 skill 后，首次接触一个已有 deck 目录时，对�
 
 窗口化 Editor 的模式栏左侧花形按钮用于“全屏播放”：点击后先切到预览，再触发 Deck 原生放映入口，逐拍、翻页与 `Esc` 退出均沿用 Deck 自身逻辑；画布状态区只保留导出图标，不再放置第二个全屏入口。DSH / Creation 父 iframe 与 Editor 内 Deck iframe 必须用 `allow="fullscreen *"` 显式向跨源后代委托权限。导出会把当前工作副本连同尚未固化、正在预览的 ActionMutation 临时物化为独立快照，再交给同一个 `convert.py` 下载 PPTX；该过程不写回源 Deck、不固化历史，也不清空撤销记录。
 
+Editor 弹层默认推荐“可编辑 PPTX”，可切换为“高清图片 PPTX”，确认前可取消。CLI 的 `--mode editable` 生成可修改的文字、常见图形和表格，复杂视觉保留图片；不传模式或 `--mode image` 沿用逐页高清图片导出。
+
 ```bash
-python3 scripts/html2pptx/convert.py my-deck.html             # 输出同名 my-deck.pptx
+python3 scripts/html2pptx/convert.py my-deck.html --mode editable # 可编辑 PPTX
+python3 scripts/html2pptx/convert.py my-deck.html             # 默认图片，输出同名 my-deck.pptx
 python3 scripts/html2pptx/convert.py my-deck.html 出货版.pptx   # 指定输出名
 python3 scripts/html2pptx/convert.py my-deck.html --scale 2 --quality 92
 python3 scripts/html2pptx/convert.py my-deck.html --embed-html # 第一页嵌原始 HTML（OLE）
@@ -452,8 +455,14 @@ py -3 scripts\html2pptx\convert.py .\my-deck.html --embed-html
 
 macOS / Linux 仍可使用 `bash scripts/html2pptx/convert.sh ...`；该脚本只转交 `convert.py`，不维护第二套转换逻辑。
 
-- 原理：浏览器逐页截图（桌面复用 Electron，独立 Skill 使用 headless Chrome；自动隐藏导航条等 UI 外壳、`.build` 全显），标准库 ZIP/XML 组装器按序生成精确 16:9 页面，每页一张满屏原图，共用截图只保存一份。工具不解析打包结构——渲染什么截什么，改完课件**直接重跑**即可。
-- **layer 页自动展开**：带 `[data-layer-btn]` 的页会逐标签各截一张、按顺序全部进 PPTX（一页 N 个标签 → N 张）；一页有多个 layer 组时逐组展开、其余组停在首标签，全默认态只截一张不重复（共 ΣN − (组数 − 1) 张）。所以模板 34 页导出为 **55 张**（`动画·layer切换` 4 张、`动画·混合链` 5 张、`动画·多组切换` 2 组共 5 张、`SFT vs LoRA` 6 张、`找问题·六层级` 6 张）。实测约 47 秒、22MB。
+可编辑模式的 `--scale` 范围为 0.5–4，控制保留图片的截图倍率；`--quality` 仅控制图片模式的 JPEG 质量。
+
+文字按浏览器实际视觉行生成独立文本框，统一使用微软雅黑（Microsoft YaHei），保留粗体、斜体、下划线、颜色及原始字号比例。CSS `zoom` 与编辑器 `scale` 的等比缩放纳入字号、字距和单元格边距，外层预览倍率不改变逻辑字号；文本框对齐实际字体基线而非 Range 顶部。字号与几何使用同一个画布换算，不开启 Office 自动缩小。简单表格生成原生单元格，合并单元格或带复杂视觉的表格使用图片。字体不嵌入 PPTX，接收方未安装微软雅黑时，替代字体仍可能影响字宽与表格换行。桌面透明图片依赖 Host 的 `features.screenshotOmitBackground: 1` 能力，旧 Host 会明确提示升级，不会静默生成白底图片。
+
+- 补丁一致性：图片与可编辑模式共用就绪校验，等待 `HuaweiDeckEditorPatchStatus` 为 `applied`，并确认 `expected / applied / adopted` 均等于内嵌补丁数后才读取页面。失败、缺少状态、计数不完整或超时均中止导出，向 Editor 传回失败原因和补丁 ID；`.build` 全显规则不覆盖补丁的内联透明度或变换。
+
+- 原理：浏览器读取实际渲染页面（桌面复用 Electron，独立 Skill 使用 headless Chrome；自动隐藏导航条等 UI 外壳、`.build` 全显），标准库 ZIP/XML 组装器按序生成 16:9 页面。图片模式每页一张满屏原图，共用截图只保存一份；可编辑模式提取支持的文字、形状、表格与图片，复杂视觉以图片保留。两种模式均不生成可编辑动画或网页交互，不承诺所有元素均可编辑，导出后应复核字体及排版。
+- **layer 页自动展开**：带 `[data-layer-btn]` 的页会逐标签各截一张、按顺序全部进 PPTX（一页 N 个标签 → N 张）；一页有多个 layer 组时逐组展开、其余组停在首标签，全默认态只截一张不重复（共 ΣN − (组数 − 1) 张）。所以模板 34 页导出为 **55 张**（`动画·layer切换` 4 张、`动画·混合链` 5 张、`动画·多组切换` 2 组共 5 张、`SFT vs LoRA` 6 张、`找问题·六层级` 6 张）。该页数示例来自图片模式；当前导出用时和体积以具体文稿与模式实测为准。
 - 已知限制：靠 React 内部 state 切换的自制交互页无法程序化展开，只能截到默认状态（模板自带页没有这种页；自己加页时若做了这类交互，导出前心里有数）。
 - 依赖：桌面使用 Host 的 Node 和 Electron 及插件私有 Python；独立 Skill 使用 Node + Chrome + playwright-core（同第 6 节三级查找）及 Python。组装器不依赖 python-pptx；可选 `--embed-html` 图标需要 Pillow。
 
@@ -467,3 +476,24 @@ macOS / Linux 仍可使用 `bash scripts/html2pptx/convert.sh ...`；该脚本�
 ## 10. AICO 桌面运行环境
 
 桌面 Host 提供 Node 和 Electron 渲染能力，PPT 插件提供私有 Python；Agent 沿用启动环境，不修改应用资源中的依赖。截图、验证和导出通过运行时包装器及私有 `AICO_HOME/desktop-renderer.json` 连接隐藏沙箱页面，Host 不可用时报告启动或升级要求。参考 PPTX 用 `scripts/extract-pptx.py` 按页提取内容和内嵌原图供 AI 直接阅读，仅用标准库；`pptx-read` 与 PDF 的 `materials` 分开诊断。打开 Deck、选择目录由桌面原生对话框处理。独立 Skill 继续使用原有宿主环境。接口与诊断行为见 [ADR-0006](../docs/adr/0006-desktop-runtime-capabilities.md)。
+
+
+### Harness 会话直接编辑
+
+已明确关联 Deck 的 Harness 会话会在每次模型调用前获得当前 Editor 工作区连接，包含受限 action capability 文件与托管工作副本路径；恢复旧会话或重启后重新解析，不依赖固定措辞。用户可直接在左侧讨论或要求修改，讨论只读，明确修改复用右侧同一工作区，无需先提交区域任务或退出 Editor。结构修改按 begin-source-edit / commit-source-edit 事务提交，每批成功后更新预览；事务期间人工写入保持串行保护。未关联会话不注入 Deck 能力，已关联但 Editor 不可用时提示重新打开对应工作区，不另起 headless 编辑器抢占租约。
+
+顶部、快捷键和任务卡片的撤销 / 重做共用忙状态：一次请求及其会话同步完成前禁用所有历史入口，重复点击不排队；版本冲突后只允许重试同方向、同一历史组，不能把撤销自动改成重做。
+
+创建画布由外层宿主管理对话，不初始化独立终端；模板预览与编辑桥接分别就绪。若生成因编辑器离线或验证失败而保留 staging，修复后使用原 Draft 的 `generation-ready` 和最新 `expectedRevision` 重新执行完整验证与发布，保留同一 run 和工作副本；`retry-generation` 会重新创建模板，仅用于明确重新生成。固定页结构校验忽略托管元素 `data-editor-id` 和空元素标签序列化空格，仍校验布局属性与 DOM 结构。
+
+源码修改与既有文字动作冲突时，Editor 会根据前后归档快照保留源码的新文字，停止重放已被覆盖的旧文字动作，同时恢复不相关的样式；历史条目仍保留以支持撤销。`HISTORY_DIVERGED` 表示页面与历史不同步，并不等同于标记对象不明确；应重新打开工作项同步后重试，不要求用户改写标注说明。
+
+## 简洁编辑与视觉确认
+
+Harness 中使用原生 `aico_ppt` 工具：`inspect` 返回当前版本、任务、目标、父容器和页面图；`edit` 原样使用 locator、expectedRevision 与稳定 commandId，返回提交状态、受影响页诊断及结果图。普通修改不重读完整 Skill，不额外扩宽或重排版式。`hide` 只隐藏、不补位；DOM 删除与补位走源码事务。
+
+`view` 提供包含未固化动作的 1920×1080、build 全显标准图，不改变用户画布的页码或缩放。它不是现场窗口截图，返回 stateId、revision、renderMode；内容变化使缓存失效。多页提交先返回首个受影响页，其余页按需 view。截图失败时保留已提交状态；使用 `result` 查询原 commandId 后补充 view，不用新命令重交。
+
+CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND_ID`。`verify` 通过只读 `/api/verify` 检查完整历史候选，不推进历史；普通动作诊断及同版本截图通过后无需重复验证。源码事务在提交、撤销和重做时检查有效历史，真实文件仅在固化成功后替换。页面、共享 CSS/脚本的实际差异决定局部结构或完整流程，不能由模型自称“简单”来绕过校验。
+
+桌面区域任务使用简短说明，同轮相同编辑上下文去重，换工作项、新轮与压缩后恢复必要说明；连接与凭据即时读取。PPT 插件承载协议，Host 只提供通用工具、图片附件和隐藏渲染能力。

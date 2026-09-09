@@ -1225,22 +1225,37 @@ class PersistentHelper:
         return fingerprint
 
     def read_working_deck(self, payload):
-        if not isinstance(payload, dict) or set(payload) != {"missingOk"} \
-                or not isinstance(payload["missingOk"], bool):
+        if not isinstance(payload, dict) or set(payload) not in (
+            {"missingOk"}, {"missingOk", "ifFingerprint"}, {"missingOk", "versionFingerprint"}
+        ) or not isinstance(payload.get("missingOk"), bool):
             raise SidecarIOError("read-working-deck payload 格式无效")
+        version = payload.get("versionFingerprint")
+        if version is not None and (not isinstance(version, str) or not re.fullmatch(r"[0-9a-f]{64}", version)):
+            raise SidecarIOError("工作副本版本指纹无效")
+        expected = payload.get("ifFingerprint")
+        if expected is not None and (
+            not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
+        ):
+            raise SidecarIOError("工作副本条件指纹无效")
         self._require_bound_session()
         self._assert_bound_directories(include_attachments=False)
         try:
             contents = _read_fd_file(
-                self.working_fd, "deck.html", max_bytes=MAX_WORKING_DECK_BYTES
+                self.working_versions_fd if version else self.working_fd, f"{version}.html" if version else "deck.html", max_bytes=MAX_WORKING_DECK_BYTES
             )
         except FileNotFoundError:
             if payload["missingOk"]:
                 return None
             raise
+        fingerprint = hashlib.sha256(contents).hexdigest()
+        if version and fingerprint != version:
+            raise SidecarIOError("工作副本归档内容与指纹不一致")
+        # 仍读取并校验真实文件；相同时避免跨进程复制整份大 HTML。
+        if expected == fingerprint:
+            return {"unchanged": True, "fingerprint": fingerprint}
         return {
             "bytes": base64.b64encode(contents).decode("ascii"),
-            "fingerprint": hashlib.sha256(contents).hexdigest(),
+            "fingerprint": fingerprint,
         }
 
     def write_working_deck(self, payload):

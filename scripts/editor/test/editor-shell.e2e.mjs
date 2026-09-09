@@ -247,12 +247,16 @@ test('页面抽屉箭头使用统一圆形样式并随状态反向', async t => 
   assert.deepEqual(resourceProblems, []);
 });
 
-test('画布工具栏用品牌导出图标下载当前工作副本 PPTX', async t => {
-  let exportCalls = 0;
+test('画布工具栏选择可编辑或高清图片 PPTX，取消不导出并保持忙碌状态', async t => {
+  const exportModes = [];
+  let releaseExport;
+  const pendingExport = new Promise(resolvePromise => { releaseExport = resolvePromise; });
+  t.after(() => releaseExport());
   const app = await startFixtureServer({
-    pptxExporter:async ({ htmlBytes }) => {
-      exportCalls += 1;
+    pptxExporter:async ({ htmlBytes, mode }) => {
+      exportModes.push(mode);
       assert.match(htmlBytes.toString('utf8'), /slide-canvas/);
+      await pendingExport;
       return Buffer.from('PK\u0003\u0004fixture-pptx');
     },
   });
@@ -284,17 +288,45 @@ test('画布工具栏用品牌导出图标下载当前工作副本 PPTX', async 
   ));
   assert.equal(await page.locator('[data-topbar-tooltip]').textContent(), '导出为 PPTX');
 
-  const downloadPromise = page.waitForEvent('download');
   await button.click();
+  const dialog = page.getByRole('dialog', { name:'导出 PPTX' });
+  await dialog.waitFor({ timeout:3_000 });
+  assert.equal(await dialog.getByRole('radio', { name:/可编辑 PPTX/ }).isChecked(), true);
+  assert.match(await dialog.textContent(), /复杂视觉保留图片/);
+  await dialog.getByRole('button', { name:'取消', exact:true }).click();
+  assert.equal(await dialog.isVisible(), false);
+  assert.deepEqual(exportModes, []);
+  await button.click();
+  await page.keyboard.press('Escape');
+  assert.equal(await dialog.isVisible(), false);
+  assert.deepEqual(exportModes, []);
+  await button.click();
+  await page.locator('[data-pptx-export-dialog] .ui-modal-backdrop').click({ position:{ x:4, y:4 } });
+  assert.equal(await dialog.isVisible(), false);
+  assert.deepEqual(exportModes, []);
+
+  await button.click();
+  const downloadPromise = page.waitForEvent('download');
+  await dialog.getByRole('button', { name:'开始导出', exact:true }).click();
+  assert.equal(await dialog.isVisible(), false);
+  assert.equal(await button.isEnabled(), false);
+  assert.equal(await button.getAttribute('aria-busy'), 'true');
+  releaseExport();
   const download = await downloadPromise;
   assert.equal(download.suggestedFilename(), 'minimal-deck.pptx');
   assert.deepEqual(await readFile(await download.path()), Buffer.from('PK\u0003\u0004fixture-pptx'));
-  assert.equal(exportCalls, 1);
+  assert.deepEqual(exportModes, ['editable']);
   await page.waitForFunction(() => (
     document.querySelector('[data-history-notice]')?.textContent
       === 'PPTX 已导出：minimal-deck.pptx'
   ));
   assert.equal(await button.isEnabled(), true);
+  await button.click();
+  await dialog.getByRole('radio', { name:/高清图片 PPTX/ }).check();
+  const imageDownload = page.waitForEvent('download');
+  await dialog.getByRole('button', { name:'开始导出', exact:true }).click();
+  await imageDownload;
+  assert.deepEqual(exportModes, ['editable', 'image']);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
@@ -962,3 +994,30 @@ for (const runtimeCase of [
     assert.match(await error.innerText(), new RegExp(runtimeCase.code));
   });
 }
+
+test('创建页内嵌 DSH 编辑器无需终端即可完成就绪与文字定位', async t => {
+  const app = await startFixtureServer({ dshAgentBridge:true, autoStartAgentTerminal:false });
+  t.after(() => app.close());
+  const outer = createServer((_request, response) => response.end(
+    `<iframe sandbox="allow-scripts allow-same-origin allow-downloads" src="${app.url}/editor/?token=${app.token}&editorToken=${app.editorToken}&embedded=creation&mode=preview"></iframe>`,
+  ));
+  await new Promise(resolve => outer.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => outer.close(resolve)));
+  const chromium = await loadChromium();
+  const browser = await chromium.launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  const errors = [];
+  const terminalRequests = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => {
+    if (/agent-terminal(?:-panel\.mjs|[/?])|xterm.*\.js/.test(request.url())) terminalRequests.push(request.url());
+  });
+  await page.goto(`http://127.0.0.1:${outer.address().port}`);
+  await app.waitUntilReady({ timeoutMs:5_000 });
+  const response = await fetch(`${app.url}/api/text-locations?token=${app.token}&text=Hello`);
+  assert.equal(response.status, 200);
+  assert.ok(Array.isArray((await response.json()).results));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(terminalRequests, []);
+});

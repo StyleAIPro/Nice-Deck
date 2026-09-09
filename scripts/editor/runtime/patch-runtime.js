@@ -214,6 +214,17 @@
       && leftKeys.every((key,index) => key===rightKeys[index]
         && sameCanonicalValue(left[key],right[key]));
   };
+  // 历史记录的是写入的 CSS 像素值；缩放后的 computed 值会有子像素舍入。
+  // 仅收养明确的 px，百分比和其他单位仍由布局引擎解析。
+  const resizeSizeOf = el => {
+    const computed=getComputedStyle(el);
+    const dimension = name => {
+      const inline=el.style.getPropertyValue(name).trim();
+      return /^\d+(?:\.\d+)?px$/.test(inline)
+        ? parseFloat(inline) : parseFloat(computed[name]);
+    };
+    return {width:dimension('width'),height:dimension('height')};
+  };
   const sourceRebaseCurrentValue = (action,el) => {
     if (action.kind==='setText') {
       const textTarget=textEditTarget(action,el);
@@ -224,13 +235,7 @@
       if (Object.hasOwn(action.payload,'scale')) {
         return {scale:parseFloat(getComputedStyle(el).scale)||1};
       }
-      const inlineWidth=parseFloat(el.style.width),inlineHeight=parseFloat(el.style.height);
-      if (Number.isFinite(inlineWidth) && inlineWidth>0
-        && Number.isFinite(inlineHeight) && inlineHeight>0) {
-        return {width:inlineWidth,height:inlineHeight};
-      }
-      const computed=getComputedStyle(el);
-      return {width:parseFloat(computed.width),height:parseFloat(computed.height)};
+      return resizeSizeOf(el);
     }
     if (action.kind==='setStyle') {
       return action.payload.textRange
@@ -252,6 +257,13 @@
     if ((!hasStableIdentity || hasTextRange) && typeof locator.sourceFingerprint==='string') {
       if (sourceFingerprint(el)!==locator.sourceFingerprint) return false;
     } else if ((!hasStableIdentity && action.kind!=='setText') || hasTextRange) return false;
+    // 只接受源码事务中前后声明相同的证据，不能仅凭身份或放宽浮点比较。
+    if(hasStableIdentity && action.kind==='resize' && !Object.hasOwn(action.payload,'scale')
+      && typeof action.sourceResizeStyle==='string') {
+      const declaration=document.createElement('div');
+      declaration.style.cssText=action.sourceResizeStyle;
+      if(declaration.style.cssText===el.style.cssText)return true;
+    }
     let current;
     try { current=sourceRebaseCurrentValue(action,el); }
     catch { return false; }
@@ -506,8 +518,7 @@
         before={ scale:parseFloat(getComputedStyle(el).scale)||1 }; after={ scale:action.payload.scale };
         el.style.scale=String(after.scale);
       } else {
-        const computed=getComputedStyle(el);
-        before={ width:parseFloat(computed.width), height:parseFloat(computed.height) };
+        before=resizeSizeOf(el);
         after={ width:action.payload.width, height:action.payload.height };
         el.style.width=`${after.width}px`; el.style.height=`${after.height}px`;
       }
@@ -560,8 +571,14 @@
     }
     return { display:inlineProperty(el,'display') };
   }
+  function baselineElement(action,baseline) {
+    // 恢复父容器的 HTML 会重建子元素，而子元素仍可能处于已修改状态。
+    // 沿用持久身份与 before/after 值校验，重新取得该元素后再恢复基线。
+    return baseline?.el?.isConnected ? baseline.el
+      : resolve(action.target,{allowSourceRebase:true,action});
+  }
   function restoreBaseline(action,baseline) {
-    const el=baseline.el?.isConnected ? baseline.el : resolve(action.target);
+    const el=baselineElement(action,baseline);
     if (action.kind==='setText') {
       // setText 可能跨越富文本后代。只恢复 textContent 无法重建被删除的 span，
       // 也会让更早的范围样式动作丢失目标；基线必须按结构快照恢复。
@@ -646,7 +663,7 @@
     const touched=new Set(prepared.map(item => item.el));
     for (const action of oldActions) {
       const baseline=oldBaselines.get(actionKey(action));
-      const el=baseline?.el?.isConnected ? baseline.el : resolve(action.target);
+      const el=baselineElement(action,baseline);
       touched.add(el);
     }
     const snapshots=new Map([...touched].map(el => [el,snapshotElement(el)]));
@@ -658,7 +675,10 @@
         const baseline=oldBaselines.get(actionKey(action));
         if (baseline) restoreBaseline(action,baseline);
       }
-      for (const {action,el} of prepared) {
+      for (const {action,el:preparedElement} of prepared) {
+        // 前面的基线恢复可能重建后代；不能把新动作写到已脱离页面的旧节点。
+        const el=preparedElement.isConnected ? preparedElement
+          : resolve(action.target,{allowSourceRebase:true,action});
         const key=actionKey(action);
         const baseline=nextBaselines.get(key) ?? { ...captureBaseline(action,el),el };
         const current=currentByKey.get(key);
@@ -770,9 +790,42 @@
     transaction.commit();
     return transaction.results;
   }
+  function captureReplayRollback(actions) {
+    const elements=new Set();
+    for (const action of actions) {
+      try { elements.add(locateTarget(action.target).el); }
+      catch { /* 缺失目标由正式恢复报告；仍须保护其余页面的可见状态。 */ }
+    }
+    const roots=[...elements].filter(el => ![...elements].some(parent => parent!==el && parent.contains(el)));
+    // 保存原节点引用，失败时连同子树和样式一起恢复。只保存 innerHTML 会
+    // 再次使旧缓存与基线脱离 DOM，从而把一次失败变成后续连续失败。
+    const capture=node => ({
+      node,
+      ...(node.nodeType===Node.ELEMENT_NODE ? {style:node.getAttribute('style')} : {data:node.nodeValue}),
+      children:[...node.childNodes].map(capture),
+    });
+    const snapshots=roots.map(capture);
+    const restore=snapshot => {
+      const {node,children}=snapshot;
+      if (node.nodeType===Node.ELEMENT_NODE) {
+        if (snapshot.style===null) node.removeAttribute('style');
+        else node.setAttribute('style',snapshot.style);
+      } else node.nodeValue=snapshot.data;
+      for (const child of children) restore(child);
+      if (node.childNodes.length!==children.length
+        || children.some((child,index)=>node.childNodes[index]!==child.node)) {
+        node.replaceChildren(...children.map(child=>child.node));
+      }
+    };
+    return () => {
+      for (const snapshot of snapshots) if (snapshot.node.isConnected) restore(snapshot);
+    };
+  }
   function applyAll(actions,{rebaseActionIds=[]}={}) {
     if (!Array.isArray(actions)) throw runtimeError('INVALID_ACTION');
     const oldActions=[...activeActions];
+    const oldBaselines=new Map(activeBaselines), oldResolved=new Map(resolved);
+    const rollback=captureReplayRollback([...oldActions,...actions]);
     tentativeCount+=1;
     clearTimeout(replayTimer);
     try {
@@ -785,13 +838,11 @@
       if (!actions.length) return [];
       return applyTransaction(actions,{rebaseActionIds});
     } catch (error) {
-      for (const action of [...activeActions].reverse()) {
-        const baseline=activeBaselines.get(actionKey(action));
-        if (baseline) restoreBaseline(action,baseline);
-      }
-      activeActions=[];
-      activeBaselines=new Map();
-      try { if (oldActions.length) applyTransaction(oldActions); } catch { /* 保留原始 sync 错误。 */ }
+      rollback();
+      activeActions=oldActions;
+      activeBaselines=oldBaselines;
+      resolved.clear();
+      for (const [key,element] of oldResolved) resolved.set(key,element);
       throw error;
     } finally {
       tentativeCount-=1;
@@ -830,13 +881,13 @@
     return adopted;
   }
   function suspendTarget(locator) {
-    const key=stableTargetKey(locator);
-    suspendedTargets.add(key);
+    const suspension={locator,element:resolve(locator)};
+    suspendedTargets.add(suspension);
     let resumed=false;
     return () => {
       if (resumed) return;
       resumed=true;
-      suspendedTargets.delete(key);
+      suspendedTargets.delete(suspension);
       // 直接编辑结束时会先恢复进入编辑前的 DOM。若等待 MutationObserver 的
       // 延迟重放，用户紧接着点击整框会在短暂的“无格式”窗口里取得错误快照。
       replayActive();
@@ -845,7 +896,16 @@
   function replayActive() {
     if (tentativeCount>0) return;
     for (const action of activeActions) {
-      if (suspendedTargets.has(stableTargetKey(action.target))) continue;
+      // 直接编辑会临时拆装富文本后代。暂停范围覆盖整个编辑子树，
+      // 同时暂停会改到它的祖先动作，不能只比较带 textPath 的动作键。
+      if ([...suspendedTargets].some(({locator,element}) => {
+        if (locator.pageKey!==action.target.pageKey) return false;
+        if (locatorIdentity(locator)===locatorIdentity(action.target)) return true;
+        const target=resolved.get(locatorKey(action.target));
+        if (target && (element.contains(target) || target.contains(element))) return true;
+        const editedPath=String(locator.path), actionPath=String(action.target.path);
+        return actionPath.startsWith(`${editedPath}/`) || editedPath.startsWith(`${actionPath}/`);
+      })) continue;
       try {
         // 大容器结束文字编辑时可能按 innerHTML 重建后代节点。
         // 此时元素的稳定 ID 不变，而指纹已经包含动作 after 状态；
