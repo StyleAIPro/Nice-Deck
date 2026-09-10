@@ -357,7 +357,7 @@ test('切换项目与收起 Editor 后，返回恢复导出转圈与保存结果
   await page.waitForFunction(() => document.querySelector('[data-pptx-export-status]')?.textContent === '正在生成 PPTX…');
   assert.equal(await page.locator('[data-export-pptx]').isDisabled(), true);
   assert.equal(calls, 1);
-  await page.screenshot({ path:'/tmp/aico-ppt-export-busy.png' });
+  await page.screenshot({ path:resolve(app.deckPath, '..', 'aico-ppt-export-busy.png') });
   await page.goto('about:blank');
   release();
   await page.goto(editorUrl);
@@ -617,6 +617,7 @@ test('Deck 首帧异步替换 canvas 后导航仍绑定稳定的当前页面', a
 setTimeout(() => {
   const stage = document.querySelector('.stage');
   stage.replaceChildren(...[...stage.children].map(canvas => canvas.cloneNode(true)));
+  window.__firstCanvasReplacementDone = true;
 }, 250);
 </script>
 </body>`),
@@ -624,6 +625,8 @@ setTimeout(() => {
   t.after(() => app.close());
   const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
   t.after(() => browser.close());
+  await page.waitForFunction(() => document.querySelector('#deck-frame')
+    ?.contentWindow?.__firstCanvasReplacementDone === true);
   await page.waitForFunction(() => document.querySelectorAll('[data-page-key]').length === 2);
 
   const navigationKeys = await page.locator('[data-page-key]').evaluateAll(elements => (
@@ -638,6 +641,9 @@ setTimeout(() => {
 
   await page.getByRole('button', { name:'02 目录页' }).click();
   await page.waitForFunction(() => document.querySelector('[data-current-page]')?.textContent === '02 目录页');
+  // 重建期间导航先保留高亮，再通过 postMessage 确认画布；必须等待实际滚动完成。
+  await page.waitForFunction(() => document.querySelector('#deck-frame')
+    ?.contentWindow?.scrollY > 900, undefined, { timeout:3_000 });
   assert.ok(await page.locator('#deck-frame').evaluate(frame => frame.contentWindow.scrollY > 900));
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);

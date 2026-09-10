@@ -10,7 +10,7 @@ deck 是一个「独立版」单文件 HTML：React 运行时、字体、全部�
 
 ### DSH 与桌面入口的会话边界
 
-DSH 插件和独立桌面入口共享本章的 Deck / Managed Workspace、frame bridge 与操作逻辑，但不共享对话宿主。DSH 是正式窗口壳；桌面入口是开发、回归和故障排查用的 `dev-shell`，保留自己的 Agent PTY。DSH 插件绝不能导入或实例化 Agent Terminal、加载 xterm、自动启动 `node-pty` 或连接 `/agent-terminal` WebSocket，而应在用户明确创建任务会话时，把带任务 ID、revision 和受控 CLI、且以 `/aico-ppt` 开头的 Skill 引用提示词发送到当前 DSH 会话；恢复、任务切换和 Session 切换不得再次发送提示词。跨任务恢复可以经过启动器内部路由，但过渡文档必须在首屏前隐藏启动初始页。`$aico-ppt` 只用于使用该语法的独立 Codex 流程。页面栏、三种模式、画布、属性、任务、撤销 / 重做、固化和导出属于 Editor；模型选择、聊天记录、审批、计划和执行状态属于 DSH。
+DSH 插件和独立桌面入口共享本章的 Deck / Managed Workspace、frame bridge 与操作逻辑，但不共享对话宿主。DSH 是正式窗口壳；桌面入口是开发、回归和故障排查用的 `dev-shell`，保留自己的 Agent PTY。DSH 插件绝不能导入或实例化 Agent Terminal、加载 xterm、自动启动 `node-pty` 或连接 `/agent-terminal` WebSocket。用户明确创建任务会话时才发送 Skill 引用提示词；已有工作区的区域任务使用带任务 ID、工作副本及受控 CLI 备用入口的简洁编辑协议，由原生 `aico_ppt` 的 inspect 获取 revision 后再 edit，不重复读取完整 Skill。恢复、任务切换和 Session 切换不得再次发送提示词。跨任务恢复可以经过启动器内部路由，但过渡文档必须在首屏前隐藏启动初始页。`$aico-ppt` 只用于使用该语法的独立 Codex 流程。页面栏、三种模式、画布、属性、任务、撤销 / 重做、固化和导出属于 Editor；模型选择、聊天记录、审批、计划和执行状态属于 DSH。
 
 DSH Client 不重写 Editor。它从左侧边栏底部打开通用右侧 workbench，并在其中嵌入原 App Server / Editor Runtime；因此直接文字与富文本、拖移、缩放、删除、区域标记、统一历史、Managed Workspace 固化与 PPTX 导出和桌面入口使用同一实现。嵌入态只改变布局与 Agent Adapter：属性栏固定在画布上方，任务 drawer 仍悬浮在右下角，原 provider 选择器和 PTY 不显示。实现边界见 `../integrations/dsh/README.md`。
 

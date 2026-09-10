@@ -30,7 +30,7 @@ AICO-PPT 仓库同时包含 Skill、模板与脚本、Managed Workspace、可视
 3. DSH 嵌入的是原 App/Editor Runtime。页面栏、三种模式、画布、属性、任务、动作历史、固化和导出不能在 Client Adapter 中重写。
 4. DSH 嵌入态不导入或实例化 Agent Terminal、不自动启动 PTY、不加载 xterm、不连接 `/agent-terminal`；桌面独立入口仅作为 Dev Shell 保留原 PTY 能力。
 5. 属性栏在嵌入态停靠于画布上方；任务 drawer 仍浮在 Editor 右下角。它们属于 Editor，不属于 DSH workbench chrome。
-6. “交给 Agent”通过当前 Session scope 的 `conversation.send()` 提交 `/aico-ppt` 提示词。DSH 把 `/name` 作为用户 Skill 引用；`$aico-ppt` 只用于使用该语法的独立 Codex 流程。提示词携带本批任务 ID、revision 与受控 Editor CLI；任务与修改完成状态仍由 Editor Server 判断。
+6. “交给 Agent”通过当前 Session scope 的 `conversation.send()` 提交区域编辑协议，携带本批任务 ID、工作副本与受控 Editor CLI；Agent 使用原生 `aico_ppt` 的 inspect 获取 revision，再按该版本 edit。已有工作区不重复加载完整 Skill；创建任务会话时仍可通过 `/aico-ppt` 引用 Skill，`$aico-ppt` 只用于使用该语法的独立 Codex 流程。任务与修改完成状态仍由 Editor Server 判断。
 7. 用户关闭或再次点击 AICO-PPT 只改变 sidecar 可见性，不终止 Host 持有的 Editor Runtime；重新打开应恢复当前 Deck。Session 切换同样不销毁 workbench。
 8. 只有用户显式固化，Editor 才把工作副本安全发布回真实 Deck；打开、预览和交给 DSH Agent 都不能绕过原发布闸门。
 

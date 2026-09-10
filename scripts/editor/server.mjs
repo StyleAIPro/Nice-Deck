@@ -3317,6 +3317,8 @@ export async function startServer({
       const httpClosed = new Promise(resolvePromise => server.close(() => resolvePromise()));
       await new Promise(resolvePromise => setImmediate(resolvePromise));
       server.closeIdleConnections?.();
+      // 不完整请求仍占据活动连接；必须在等待 close 回调前断开，避免关闭永久等待。
+      server.closeAllConnections?.();
       const writersSettled = Promise.allSettled(writerClosed);
       const exportsSettled = Promise.allSettled(exportClosed);
       const shutdown = await Promise.allSettled([
@@ -3334,7 +3336,6 @@ export async function startServer({
         bindingPersistenceQueue,
         bindingCoordinator.close(),
       ]);
-      server.closeAllConnections?.();
       const helperResult = await Promise.allSettled([sidecarBoundary.io.close()]);
       const failures = [...finalWorkingCheckpoint, ...shutdown, ...helperResult]
         .filter(result => result.status === 'rejected')

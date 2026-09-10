@@ -1089,38 +1089,40 @@ test('启动页任务卡片可以用稳定工作项身份就地改名', async t 
   );
 });
 
-test('启动页可以分别删除新建与修改任务记录', async t => {
+test('启动页可以分别移除新建与修改项目并保留恢复记录', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'deck-history-removal-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, 'delete-me.html');
+  await writeFile(deckPath, '<!doctype html>');
   const creation = [{
     kind:'creation', taskId:'draft-delete', draftId:'draft-delete',
-    projectRoot:'/tmp/deck-project', projectName:'deck-project',
+    projectRoot:root, projectName:'deck-project',
     title:'待删除 Draft', provider:'codex', phase:'outline', progress:'大纲已确认',
     revision:3, updatedAt:'2026-08-11T10:00:00.000Z', locked:false,
   }];
   const editing = [{
-    deckPath:'/tmp/delete-me.html', deckName:'delete-me.html', directory:'/tmp',
+    deckPath, deckName:'delete-me.html', directory:root,
     modifiedAt:'2026-08-11T11:00:00.000Z', provider:'codex', progress:'继续编辑',
   }];
+  const history = {
+    async list() { return { version:1, creation:[...creation], editing:[...editing] }; },
+  };
+  const catalog = new WorkCatalog({ filePath:join(root, 'catalog.json'), legacyHistory:history });
   const app = await startAppServer({
     token:'browser-history-delete-secret',
-    workHistoryStore:{
-      async list() { return { version:1, creation:[...creation], editing:[...editing] }; },
-      async dismissCreation({ draftId }) {
-        creation.splice(creation.findIndex(item => item.draftId === draftId), 1);
-      },
-      async dismissDeck(deckPath) {
-        editing.splice(editing.findIndex(item => item.deckPath === deckPath), 1);
-      },
-    },
+    workHistoryStore:history,
+    workCatalog:catalog,
   });
   t.after(() => app.close());
   const chromium = await loadChromium();
   const browser = await chromium.launch({ channel:'chrome', headless:true });
   t.after(() => browser.close());
   const page = await browser.newPage();
+  page.on('dialog', dialog => dialog.accept());
 
   await page.goto(app.appUrl);
   assert.equal(await page.locator('.work-item-arrow').count(), 0, '任务行不应再显示跳转箭头');
-  const creationDelete = page.getByRole('button', { name:'删除 待删除 Draft 的任务记录' });
+  const creationDelete = page.getByRole('button', { name:'移除项目 待删除 Draft' });
   await creationDelete.waitFor();
   assert.equal(await creationDelete.locator('.work-item-delete-icon').count(), 2,
     '删除入口应使用双层垃圾桶图标完成 PillNav 换色动效');
@@ -1134,8 +1136,12 @@ test('启动页可以分别删除新建与修改任务记录', async t => {
   assert.notEqual(afterHover, beforeHover, '悬停时红色圆形填充应扩张');
   await creationDelete.click();
   await page.getByText('还没有进行中的 Draft。').waitFor();
-  await page.getByRole('button', { name:'删除 delete-me.html 的任务记录' }).click();
+  await page.getByRole('button', { name:'移除项目 delete-me.html' }).click();
   await page.getByText('还没有可继续的 Deck。').waitFor();
+  const removed = await catalog.listRemoved();
+  assert.equal(removed.length, 2);
+  assert.ok(removed.every(item => item.lifecycle === 'removed'));
+  assert.equal(await readFile(deckPath, 'utf8'), '<!doctype html>', '移除项目保留源文件');
 });
 
 test('新建 Deck 终端复用修改页密度，输入行始终位于窗口内', async t => {
@@ -2124,7 +2130,7 @@ test('Agent 写入里程碑并创建独立 Deck 后，画布自动出现且终�
     return current.managedDeck?.revision > revision;
   }, { url:app.url, token:app.token, revision:beforeMutation.managedDeck.revision });
   await page.frameLocator('[data-deck-preview]').frameLocator('#deck-frame')
-    .getByText('创建页实时修改已经生效').waitFor();
+    .locator('#stage').getByText('创建页实时修改已经生效').waitFor();
 
   const current = await fetch(
     `${app.url}/api/creation-draft?token=${encodeURIComponent(app.token)}`,

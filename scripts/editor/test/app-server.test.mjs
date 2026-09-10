@@ -1700,6 +1700,8 @@ test('Creation Draft 页面关闭后回收孤儿服务并释放工作区', async
     createAgentTerminal:options => new FakeTerminal(options),
   });
   t.after(() => app.close());
+  // 真实页面先登记租约，再创建 Draft；避免测试把首次握手也压进 20ms 断线宽限。
+  await postJson(app, '/api/client-connected', { clientId:'creation-owner', sequence:1 });
   const selected = await post(app, '/api/choose-creation-project').then(response => response.json());
   const created = await postJson(app, '/api/creation-drafts', {
     candidateNonce:selected.candidateNonce,
@@ -1716,6 +1718,9 @@ test('Creation Draft 页面关闭后回收孤儿服务并释放工作区', async
     socket.once('open', resolvePromise);
     socket.once('error', reject);
   });
+  const released = await fetch(`${app.url}/api/close?token=${encodeURIComponent(app.token)}`
+    + '&clientId=creation-owner&sequence=1', { method:'POST', headers:{ origin:app.url } });
+  assert.equal(released.status, 204);
   socket.close();
   const deadline = Date.now() + 1_000;
   while (!workspaceClosed && Date.now() < deadline) {

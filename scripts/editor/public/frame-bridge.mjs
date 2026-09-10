@@ -1346,10 +1346,12 @@ function finishDirectEdit({ restore = true } = {}) {
   const state = directEdit;
   directEdit = null;
   state.element.removeEventListener('blur', onDirectEditBlur);
+  state.element.removeEventListener('input', onDirectEditInput);
   if (restore) state.element.innerHTML = state.originalHTML;
   state.element.removeAttribute('contenteditable');
   delete state.element.dataset.directEditing;
-  state.element.spellcheck = state.originalSpellcheck;
+  if (state.originalSpellcheck === null) state.element.removeAttribute('spellcheck');
+  else state.element.setAttribute('spellcheck', state.originalSpellcheck);
   state.resumeReplay?.();
   requestAuthoritativeReloadIfSettled();
 }
@@ -1358,6 +1360,13 @@ function onDirectEditBlur(event) {
   if (directEdit?.element !== event.currentTarget || directEdit.committing) return;
   if (textRangeSelection?.element === directEdit.formatRoot) return;
   commitDirectEdit();
+}
+
+function onDirectEditInput(event) {
+  if (directEdit?.element !== event.currentTarget) return;
+  // 原生输入已改变文字/光标；selectionchange 可能晚于跨 iframe 的失焦。
+  // 立即丢弃旧格式选区，不能让它把本次文字提交误当作工具栏格式操作。
+  clearTextRangeSelection();
 }
 
 function placeDirectEditCaret(element, event) {
@@ -1485,7 +1494,7 @@ function beginDirectTextEdit(event, { useNativePointer = false } = {}) {
     element, target, originalText: element.textContent ?? '',
     originalHTML:element.innerHTML, originalRuns:directTextRuns(element),
     hadRichText:element.children.length > 0,
-    originalSpellcheck: element.spellcheck, committing: false,
+    originalSpellcheck: element.getAttribute('spellcheck'), committing: false,
     formatRoot:element, formatTarget:target,
     resumeReplay: runtime.suspendTarget?.(target),
   };
@@ -1495,6 +1504,7 @@ function beginDirectTextEdit(event, { useNativePointer = false } = {}) {
   element.dataset.directEditing = '';
   element.spellcheck = false;
   element.addEventListener('blur', onDirectEditBlur);
+  element.addEventListener('input', onDirectEditInput);
   updateUiScale();
   element.focus({ preventScroll: true });
   if (!useNativePointer) placeDirectEditCaret(element, event);

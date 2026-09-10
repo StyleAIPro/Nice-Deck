@@ -46,6 +46,10 @@ class PdfMaterialsTest(unittest.TestCase):
         self.form_packages.mkdir()
         (self.form_packages / "pymupdf").symlink_to(Path(fitz.__file__).parent, target_is_directory=True)
         (self.form_packages / "pypdf").symlink_to(Path(__import__('pypdf').__file__).parent, target_is_directory=True)
+        if sys.version_info < (3, 10):
+            # pypdf 在 Python 3.9 上声明此兼容依赖；隔离环境仍禁止其他 PDF 工具。
+            import typing_extensions
+            (self.form_packages / "typing_extensions.py").symlink_to(Path(typing_extensions.__file__))
         self.source = self.root / "参考.pdf"
         with fitz.open() as doc:
             page = doc.new_page(width=400, height=500)

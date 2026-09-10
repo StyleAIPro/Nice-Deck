@@ -431,7 +431,7 @@ test('文字取消、空白和无变化均不创建动作组', async t => {
   await heading.fill('取消的文字');
   await page.waitForTimeout(180);
   await page.screenshot({
-    path: resolve('.superpowers/sdd/task-11-direct-edit.png'),
+    path: resolve(app.deckPath, '..', 'task-11-direct-edit.png'),
   });
   await heading.press('Escape');
   assert.equal(await heading.textContent(), '第一页标题');
@@ -450,6 +450,36 @@ test('文字取消、空白和无变化均不创建动作组', async t => {
   assert.deepEqual(state.groups, []);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
+});
+
+test('文字选区事件迟到时删除后点击外层工具栏仍提交文字修改', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(3_000);
+  const heading = page.frameLocator('#deck-frame').locator('h2').first();
+  await page.click('[data-mode="edit"]');
+  await heading.dblclick();
+  await heading.evaluate(element => {
+    const selection = element.ownerDocument.getSelection();
+    const range = element.ownerDocument.createRange();
+    range.setStart(element.firstChild, 0);
+    range.setEnd(element.firstChild, element.firstChild.textContent.length);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    element.ownerDocument.dispatchEvent(new Event('selectionchange'));
+    // 模拟浏览器尚未交付后续 selectionchange，不能让旧选区吞掉失焦提交。
+    element.ownerDocument.addEventListener('selectionchange', event => event.stopImmediatePropagation(), true);
+  });
+  await page.waitForFunction(() => document.querySelector('[data-selection-state]')?.textContent === '选中文字');
+  await heading.press('Backspace');
+  assert.equal(await heading.textContent(), '');
+  await page.locator('[data-current-page]').click();
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  const state = await session(app);
+  assert.equal(state.groups[0].actions[0].kind, 'setText');
+  assert.equal(state.groups[0].actions[0].payload.text, '');
 });
 
 test('文字编辑全选删除会提交空字符串且刷新后不恢复原文', async t => {
@@ -667,7 +697,7 @@ test('统一编辑模式直接移动与缩放，单击抖动不误提交且控�
   assert.ok(handleBox.width >= 10 && handleBox.height >= 10, JSON.stringify(handleBox));
   await page.waitForTimeout(180);
   await page.screenshot({
-    path: resolve('.superpowers/sdd/task-11-transform.png'),
+    path: resolve(app.deckPath, '..', 'task-11-transform.png'),
   });
   await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
   await page.mouse.down();
@@ -889,10 +919,13 @@ for (const scenario of [
       });
     });
     await page.click('[data-mode="edit"]');
+    const originalSpellcheck = await frame.locator(scenario.target).first().getAttribute('spellcheck');
     await frame.locator(scenario.target).first().click();
     assert.equal(await frame.locator('[data-transform-selection]').count(), 1);
     assert.equal(await frame.locator('[data-resize-handle]').count(), scenario.handle ? 1 : 0);
     await frame.locator('[data-transform-move-handle="left"]').click();
+    assert.equal(await frame.locator(scenario.target).first().getAttribute('spellcheck'), originalSpellcheck,
+      '结束直接文本编辑必须原样恢复 spellcheck 属性，避免重建后的页面标识漂移');
 
     await page.waitForTimeout(900);
     await page.locator('#deck-frame').evaluate(frameElement => {

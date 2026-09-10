@@ -394,8 +394,12 @@ test('DSH 右侧工作台完整承载原版 renzhi Editor 操作与 Agent 消息
   await page.locator('[data-process-all]').click();
   await page.waitForFunction(() => window.__dshAgentRequests.length === 1);
   const request = await page.evaluate(() => window.__dshAgentRequests[0]);
-  assert.match(request.prompt, /^\/aico-ppt/u);
-  assert.doesNotMatch(request.prompt, /^\$aico-ppt/u);
+  assert.match(request.prompt, /^AICO-PPT 区域编辑任务：/u);
+  assert.doesNotMatch(request.prompt, /^[/$]aico-ppt/u,
+    '已有工作区的区域任务使用简洁编辑协议，不重新加载完整 Skill');
+  assert.match(request.prompt, /aico_ppt\(\{operation:"inspect",taskId\}\)/u);
+  assert.match(request.prompt, /operation:"edit"，expectedRevision 使用 inspect 返回值/u);
+  assert.ok(request.prompt.includes(app.workingDeckPath), '任务必须绑定当前托管工作副本');
   assert.match(request.prompt, new RegExp(task.id, 'u'));
   assert.equal(request.sessionId, 'dsh-test-session');
   await page.evaluate(({ requestId }) => {

@@ -23,7 +23,7 @@
 4. 新建 Deck 先用系统目录选择器确定 `projectRoot`；修改 Deck 使用已确认或恢复的项目根。插件按规范目录幂等解析 DSH Workspace，再为工作项创建独立 Session。
 5. DSH 左侧“新会话”是唯一入口。只要 WorkCatalog 中存在可用 Deck，菜单就显示一行 `AICO-PPT` 专属标签；右侧箭头打开项目子菜单，当前关联项目或最近项目位于首项，Editor 关闭或当前会话未关联也不会隐藏该入口。“新建普通会话”保留在页脚。每个项目选项显式携带自己的 `workId` 和绑定 revision key；选择项目后按需打开 workbench，先导航到目标页面，目标页面发布同一 key 后才创建，避免旧页面误接请求。已有 `workspaceId` 时直接复用持久关联，不重复等待远端 Workspace 创建。新 Session 在打开前写入“创建/修改 Deck：任务名”的持久中文标题，多会话追加“会话 2/3”序号，并预加载历史窗口；不能根据目录、标题或 `/aico-ppt` 文本猜测关联。
 6. 打开已有 Deck 后进入原 Editor Runtime。预览、编辑、区域标记三种一级模式，以及页序、富文本、拖移、缩放、删除、属性、任务、撤销 / 重做、固化和 PPTX 导出均走原来的 Managed Workspace 与 frame bridge。
-7. 区域任务点击“交给 Agent”时，Editor Server 在捕获执行批次时固定 `assignedSessionId`，生成带任务 ID、revision 和 CLI capability 的 `/aico-ppt` 提示词，并精确提交到该工作项的活动 DSH Session。后续切换页面或会话不会迁移在途批次。
+7. 区域任务点击“交给 Agent”时，Editor Server 在捕获执行批次时固定 `assignedSessionId`，生成带任务 ID、托管工作副本和受控 CLI 备用入口的简洁编辑提示词，并精确提交到该工作项的活动 DSH Session。Agent 先用原生 `aico_ppt` 工具 inspect 获取 revision，再按该版本 edit；区域任务不重复加载完整 Skill。后续切换页面或会话不会迁移在途批次。
 8. 点击已关联 Session 会反向找到 `workId` 并切换对应 Editor 工作项；Editor 已关闭时会先重新打开 workbench，Editor 已经显示 AICO-PPT 时重复事件不会再次调用打开或重载 iframe。点击普通 Session 会自动收起 AICO-PPT Workbench，但不改变任何工作项，也不会把后续请求误投到普通 Session。
 9. Creation 发布出 Deck 后，同一 Work Item 原位转为 Editing，不产生重复任务卡；项目根不变时保留 `workId`、Workspace 和全部 Session Link，显式换根时历史化旧 Link 并清空旧 Workspace 与活动指针。
 

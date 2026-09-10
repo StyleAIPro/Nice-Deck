@@ -304,20 +304,24 @@ test('stage 调用独立 spawnAttachmentWriter 注入点并按序执行多文件
 });
 
 test('stream 截断错误会杀死 writer，并冻结无 receipt partial 留给 reconcile', async t => {
-  const fx = await fixture();
+  const ids = [
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+  ];
+  const fx = await fixture({ randomUUID:() => ids.shift() });
   t.after(fx.cleanup);
   const upload = fx.store.beginUpload();
   await upload.stage({ stream:Readable.from(['first']), name:'first.txt', mime:'text/plain', source:'selected' });
-  const broken = new Readable({
-    read() {
-      this.push(Buffer.from('partial'));
-      queueMicrotask(() => this.destroy(Object.assign(new Error('truncated'), { code:'ECONNRESET' })));
-    },
-  });
-  await assert.rejects(
-    upload.stage({ stream:broken, name:'broken.txt', mime:'text/plain', source:'selected' }),
-    error => error.code === 'ATTACHMENT_STREAM_ERROR',
-  );
+  const broken = new PassThrough();
+  const staging = upload.stage({ stream:broken, name:'broken.txt', mime:'text/plain', source:'selected' });
+  broken.write('partial');
+  const partial = join(fx.staging, upload.id, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc.txt');
+  // 先证明 writer 已写入，再注入截断；无界 _read 推送会把测试变成背压/进程启动竞速。
+  await waitForPath(partial);
+  broken.destroy(Object.assign(new Error('truncated'), { code:'ECONNRESET' }));
+  await assert.rejects(staging, error => error.code === 'ATTACHMENT_STREAM_ERROR');
+  assert.equal(await readFile(partial, 'utf8'), 'partial');
   assert.deepEqual(await lstat(join(fx.staging, upload.id)).then(() => 'exists', () => 'missing'), 'exists');
   assert.equal(fx.calls.discard.length, 0);
   assert.deepEqual(await upload.discard(), {

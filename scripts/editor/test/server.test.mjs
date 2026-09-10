@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { createServer as createNetServer } from 'node:net';
+import { createServer as createNetServer, createConnection } from 'node:net';
 import { PassThrough, Writable } from 'node:stream';
 import {
   mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile,
@@ -87,6 +87,35 @@ async function makeApp(t, options = {}) {
   t.after(() => app.close());
   return app;
 }
+
+test('关闭服务会断开未发送完整的 HTTP 请求并释放监听端口', async t => {
+  const app = await makeApp(t);
+  const socket = createConnection({ host:'127.0.0.1', port:app.port });
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  socket.write('POST /api/actions?token=secret HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{');
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const closing = app.close();
+  let timer;
+  try {
+    await Promise.race([
+      closing,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('未完成 HTTP 请求阻塞了服务关闭')), 2_000); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    socket.destroy();
+    await closing;
+  }
+  const probe = createNetServer();
+  await new Promise((resolve, reject) => {
+    probe.once('error', reject);
+    probe.listen(app.port, '127.0.0.1', resolve);
+  });
+  await new Promise(resolve => probe.close(resolve));
+});
 
 test('DSH Editor Core 不创建 Agent PTY，也不暴露 xterm 页面资源', async t => {
   let terminalCreations = 0;
@@ -3818,8 +3847,16 @@ test('重启按 durable record 收敛 old、candidate 与 third 状态后才清�
   ];
 
   for (const current of cases) {
-    await t.test(current.name, async () => {
-      const root = await mkdtemp(join(tmpdir(), 'deck-restart-transaction-'));
+    await t.test(current.name, async t => {
+      const directory = await mkdtemp(join(tmpdir(), 'deck-restart-transaction-'));
+      t.after(() => rm(directory, { recursive:true, force:true }));
+      const root = process.platform === 'darwin' ? join(directory, 'parent-alias', 'project') : directory;
+      if (process.platform === 'darwin') {
+        const actualParent = join(directory, 'parent');
+        await mkdir(join(actualParent, 'project'), { recursive:true });
+        // 与 /var → /private/var 相同：祖先目录存在别名，项目目录本身仍为真实目录。
+        await symlink(actualParent, join(directory, 'parent-alias'), 'dir');
+      }
       const fixture = await createPendingTransactionFixture({
         root,
         diskBytes:current.diskBytes,
@@ -3828,7 +3865,7 @@ test('重启按 durable record 收敛 old、candidate 与 third 状态后才清�
         sessionFingerprint:current.sessionFingerprint,
       });
       if (process.platform === 'darwin') {
-        assert.notEqual(await realpath(root), root, 'macOS 临时目录应覆盖 /var 路径别名');
+        assert.notEqual(await realpath(root), root, 'macOS fixture 必须覆盖词法路径与 realpath 不同的目录别名');
         const registry = JSON.parse(await readFile(join(fixture.sidecarRoot, 'sessions.json')));
         const record = JSON.parse(await readFile(fixture.transaction));
         assert.equal(record.deckPath, fixture.deckPath, 'producer 保持项目词法路径');
