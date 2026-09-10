@@ -114,7 +114,7 @@ export class DshWorkBridge {
     clearTimeout(pending.timer);
     if (event.data.ok === true) pending.resolve(event.data.result);
     else pending.reject(bridgeError(
-      'DSH_COMMAND_FAILED',
+      event.data.error?.code || 'DSH_COMMAND_FAILED',
       event.data.error?.message || 'DSH 操作失败',
       { command:pending.command },
     ));

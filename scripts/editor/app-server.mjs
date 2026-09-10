@@ -924,7 +924,7 @@ export async function startAppServer({
     const dshBridgeOrigin = embeddedMode === 'dsh'
       && (
         (request.method === 'POST'
-          && requestUrl.pathname === '/api/dsh-work-items/resolve-session')
+          && ['/api/dsh-work-items/resolve-session', '/api/dsh-work-items/restore-session', '/api/dsh-work-items/complete-restore'].includes(requestUrl.pathname))
         || (request.method === 'GET' && requestUrl.pathname === '/api/work-history')
       )
       ? loopbackHttpOrigin(request.headers.origin)
@@ -1141,7 +1141,7 @@ export async function startAppServer({
 
     if (request.method === 'GET' && requestUrl.pathname === '/api/work-history') {
       try {
-        sendJson(response, 200, await runtimeAwareHistory());
+        sendJson(response, 200, { ...await runtimeAwareHistory(), removed:await activeWorkCatalog.listRemoved() });
       } catch (error) {
         sendJson(response, 500, {
           code:'WORK_HISTORY_UNAVAILABLE', message:error.message || '无法读取可继续任务',
@@ -1333,7 +1333,25 @@ export async function startAppServer({
         return;
       }
 
+      if (requestUrl.pathname.startsWith('/api/project-lifecycle/')) {
+        if (state !== 'idle') throw Object.assign(new Error('请返回项目首页后操作'), { code:'INVALID_APP_STATE', statusCode:409 });
+        const action = requestUrl.pathname.split('/').at(-1);
+        const commands = { begin:'beginRemoval', complete:'completeRemoval', cancel:'cancelRemoval', restore:'restoreProject' };
+        if (!commands[action]) throw Object.assign(new Error('项目生命周期操作无效'), { statusCode:400 });
+        const input = await readJson(request);
+        // 仅当前 App 拥有的空闲 Draft 租约可由本流程移除，不能信任客户端声明所有权。
+        input.ownsCreationLease = false;
+        if (action === 'begin') {
+          const item = (await activeWorkCatalog.list()).creation.find(entry => entry.workId === input.workId);
+          input.ownsCreationLease = Boolean(item && creationRuntimes.has(creationRuntimeKey(item)));
+        }
+        const workItem = await activeWorkCatalog[commands[action]](input);
+        sendJson(response, 200, { workItem });
+        return;
+      }
+
       if (requestUrl.pathname === '/api/work-history/dismiss') {
+        if (embeddedMode === 'dsh') throw Object.assign(new Error('请通过项目移除流程归档关联会话'), { code:'PROJECT_LIFECYCLE_REQUIRED', statusCode:409 });
         if (state !== 'idle') throw Object.assign(new Error('只能在首页删除任务记录'), {
           code:'INVALID_APP_STATE', statusCode:409,
         });
@@ -1465,12 +1483,26 @@ export async function startAppServer({
         return;
       }
 
+      if (requestUrl.pathname === '/api/dsh-work-items/complete-restore') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), { statusCode:409 });
+        const workItem = await activeWorkCatalog.completeDshRestore(await readJson(request));
+        sendJson(response, 200, { workItem });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/dsh-work-items/restore-session') {
+        if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), { code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409 });
+        const workItem = await activeWorkCatalog.restoreDshSession(await readJson(request));
+        sendJson(response, 200, { workItem });
+        return;
+      }
+
       if (requestUrl.pathname === '/api/dsh-work-items/resolve-session') {
         if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
           code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
         });
-        const { sessionId } = await readJson(request);
-        const workItem = await activeWorkCatalog.resolveByDshSession(sessionId);
+        const { sessionId, includeRemoved } = await readJson(request);
+        const workItem = await activeWorkCatalog.resolveByDshSession(sessionId, { includeRemoved:includeRemoved === true });
         sendJson(response, 200, { status:workItem ? 'linked' : 'unlinked', workItem });
         return;
       }

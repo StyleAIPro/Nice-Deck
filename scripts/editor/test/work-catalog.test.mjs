@@ -725,3 +725,83 @@ test('明确失败只清除对应 pending，不改变原活动会话', async t =
   assert.equal(recovered.dshBinding.pendingOperation, null);
   assert.equal(recovered.dshBinding.sessions.length, 1);
 });
+
+test('项目移除持久记录归档集合，明确恢复保留身份且不会恢复旧活动会话', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ppt-lifecycle-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, '项目.html');
+  await writeFile(deckPath, '<!doctype html>');
+  const catalog = new WorkCatalog({ filePath:join(root, 'catalog.json'),
+    legacyHistory:{ async list() { return { creation:[], editing:[{ deckPath }] }; } } });
+  let item = (await catalog.list()).editing[0];
+  item = await catalog.setDshWorkspace({ workId:item.workId, workspaceId:'workspace-a', expectedBindingRevision:0 });
+  item = await catalog.beginDshSessionProvision({ workId:item.workId, workspaceId:'workspace-a', sessionId:'session-a', operationId:'13333333-3333-4333-8333-333333333333', origin:'fresh', expectedBindingRevision:item.dshBinding.revision });
+  item = await catalog.completeDshSessionProvision({ workId:item.workId, operationId:'13333333-3333-4333-8333-333333333333' });
+  const pending = await catalog.beginRemoval({ workId:item.workId, expectedRevision:item.revision });
+  assert.deepEqual(pending.removal.sessionIds, ['session-a']);
+  assert.equal((await catalog.list()).editing.length, 0);
+  await assert.rejects(catalog.reopenEditing({ deckPath }), { code:'PROJECT_REMOVING' });
+  await catalog.completeRemoval({ workId:item.workId, operationId:pending.removal.operationId, changedSessionIds:['session-a'] });
+  const removed = (await catalog.listRemoved())[0];
+  assert.equal(removed.lifecycle, 'removed');
+  const restored = await catalog.reopenEditing({ deckPath });
+  assert.equal(restored.workId, item.workId);
+  assert.equal(restored.dshBinding.activeSessionId, null);
+  assert.equal(restored.dshBinding.sessions[0].state, 'archived');
+  assert.equal(await readFile(deckPath, 'utf8'), '<!doctype html>');
+});
+
+test('移除失败可恢复活动项目，移除重试不更换操作身份或归档其他会话', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ppt-remove-retry-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, '项目.html');
+  await writeFile(deckPath, '<!doctype html>');
+  const catalog = new WorkCatalog({ filePath:join(root, 'catalog.json'),
+    legacyHistory:{ async list() { return { creation:[], editing:[{ deckPath }] }; } } });
+  const item = (await catalog.list()).editing[0];
+  const pending = await catalog.beginRemoval({ workId:item.workId, expectedRevision:item.revision });
+  assert.equal((await catalog.beginRemoval({ workId:item.workId, expectedRevision:item.revision })).removal.operationId, pending.removal.operationId);
+  await assert.rejects(catalog.completeRemoval({ workId:item.workId, operationId:pending.removal.operationId, changedSessionIds:['foreign-session'] }), { code:'INVALID_DSH_SESSION_IDS' });
+  await catalog.cancelRemoval({ workId:item.workId, operationId:pending.removal.operationId, expectedRevision:pending.revision });
+  assert.equal((await catalog.list()).editing[0].lifecycle, 'active');
+});
+
+test('会话恢复持久锁阻止并发移除，重启重试复用操作身份', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ppt-restore-fence-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, '恢复.html');
+  await writeFile(deckPath, '<!doctype html>');
+  const options = { filePath:join(root, 'catalog.json'), legacyHistory:{ async list() { return { creation:[], editing:[{ deckPath, projectRoot:root }] }; } } };
+  let catalog = new WorkCatalog(options);
+  let work = (await catalog.list()).editing[0];
+  work = await catalog.beginDshSessionProvision({ workId:work.workId, workspaceId:'workspace-a', sessionId:'session-a', operationId:'83333333-3333-4333-8333-333333333333', origin:'fresh', expectedBindingRevision:0 });
+  work = await catalog.completeDshSessionProvision({ workId:work.workId, operationId:work.dshBinding.pendingOperation.operationId });
+  const pending = await catalog.restoreDshSession({ workId:work.workId, sessionId:'session-a', workspaceId:'workspace-a', expectedRevision:work.revision });
+  assert.equal(pending.lifecycle, 'restoring');
+  await assert.rejects(catalog.beginRemoval({ workId:work.workId, expectedRevision:pending.revision }), { code:'PROJECT_BUSY' });
+  assert.equal((await catalog.list()).editing.length, 0);
+  catalog = new WorkCatalog(options);
+  const retried = await catalog.restoreDshSession({ workId:work.workId, sessionId:'session-a', workspaceId:'workspace-a', expectedRevision:work.revision });
+  assert.equal(retried.restoreOperation.operationId, pending.restoreOperation.operationId);
+  await catalog.completeDshRestore({ workId:work.workId, operationId:pending.restoreOperation.operationId });
+  await catalog.completeDshRestore({ workId:work.workId, operationId:pending.restoreOperation.operationId });
+  assert.equal((await catalog.list()).editing[0].lifecycle, 'active');
+});
+
+
+test('迟到的忙碌回包不能撤销另一窗口已完成的项目移除，取消要求开始时版本', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ppt-remove-late-busy-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, '并发移除.html');
+  await writeFile(deckPath, '<!doctype html>');
+  const options = { filePath:join(root, 'catalog.json'), legacyHistory:{ async list() { return { creation:[], editing:[{ deckPath, projectRoot:root }] }; } } };
+  const catalog = new WorkCatalog(options);
+  const item = (await catalog.list()).editing[0];
+  const pending = await catalog.beginRemoval({ workId:item.workId, expectedRevision:item.revision });
+  await assert.rejects(catalog.cancelRemoval({ workId:item.workId, operationId:pending.removal.operationId, expectedRevision:item.revision }), { code:'PROJECT_OPERATION_CONFLICT' });
+  const anotherWindow = new WorkCatalog(options);
+  await anotherWindow.completeRemoval({ workId:item.workId, operationId:pending.removal.operationId, changedSessionIds:[] });
+  await assert.rejects(catalog.cancelRemoval({ workId:item.workId, operationId:pending.removal.operationId, expectedRevision:pending.revision }), { code:'PROJECT_OPERATION_CONFLICT' });
+  assert.equal((await catalog.listRemoved())[0].lifecycle, 'removed');
+  assert.equal((await catalog.list()).editing.length, 0);
+});

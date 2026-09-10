@@ -138,3 +138,13 @@ _Avoid_：PPTX 渲染、版式预览、转 PDF
 
 **材料能力 Profile（Material Capability Profile）**：
 `pptx-read` 只检查随包提取工具，不安装第三方依赖；`materials` 只检查 PyMuPDF 与 pypdf，后者负责 AcroForm 字段填写。PPTX 读取与截图打包只用标准库，附件图标使用 Pillow。桌面运行时只声明私有 Python，截图和验证复用 Host 的 Electron；独立 Skill 保留 Playwright 与本机 Chrome。
+
+## 项目移除与恢复
+
+**项目生命周期（Project Lifecycle）**：工作项的 `active → removing → removed` 与 `restoring → active` 状态独立于源文件是否存在。`removing` 持久保存操作标识和精确会话集合；Host 确认归档后才完成移除。重复请求复用操作标识。Host 明确忙碌可回退，网络结果不确定时保留移除记录以重试。历史会话恢复持久保存 `restoreOperation`，恢复期间阻止并发移除，失败可使用同一操作身份重试。
+
+**项目恢复（Project Restore）**：明确重新打开源文件或点击“恢复项目”，恢复原 `workId`，保留归档历史，随后创建新会话。点击 Harness 归档列表中某一段会话的恢复按钮，只恢复该段及对应项目；其他历史会话保持归档。
+
+**工作区登记修复（Workspace Registration Repair）**：每次明确创建或打开项目会话，按原项目规范目录确保登记存在；修复登记保留原会话与预留的会话创建身份。多个 Deck 共用目录时不能连带移除其他项目或会话。
+
+跨插件的权威规则见 [Harness 插件项目生命周期规范](../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)，本适配器实现记录见 [项目生命周期](docs/design/project-lifecycle.md)。

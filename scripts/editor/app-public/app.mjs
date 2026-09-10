@@ -827,8 +827,8 @@ function renderWorkList(kind, entries) {
     dismiss.type = 'button';
     dismiss.className = 'work-item-delete';
     dismiss.dataset.dismissWork = creation ? 'creation' : 'editing';
-    dismiss.setAttribute('aria-label', `删除 ${displayName} 的任务记录`);
-    dismiss.title = '只删除首页记录，不删除 Deck 或 Draft 文件';
+    dismiss.setAttribute('aria-label', `移除项目 ${displayName}`);
+    dismiss.title = '移除项目并归档关联会话，保留内容文件';
     dismiss.append(createTrashIcon('work-item-delete-icon-default'));
     applyPill(dismiss, { variant:'danger', size:'md', kind:'icon' });
     dismiss.addEventListener('click', () => void dismissWorkTask(kind, entry, dismiss));
@@ -878,29 +878,80 @@ async function rebindWorkTask(entry, button) {
 
 async function dismissWorkTask(kind, entry, button) {
   if (state !== 'idle') return;
+  if (entry.lifecycle !== 'removing' && !window.confirm(`移除项目“${entry.displayName}”？\n将归档关联的 ${entry.dshBinding?.sessions?.length ?? 0} 段会话，并移除项目入口。内容文件和历史记录保留。`)) return;
   button.disabled = true;
-  historyStatus(kind, '正在删除任务记录…', 'working');
+  historyStatus(kind, '正在移除项目并归档会话…', 'working');
+  let pending;
   try {
-    await post('/api/work-history/dismiss', kind === 'creation'
-      ? {
-          kind, workId:entry.workId, expectedRevision:entry.revision,
-          projectRoot:entry.projectRoot, draftId:entry.draftId,
-        }
-      : {
-          kind, workId:entry.workId, expectedRevision:entry.revision,
-          deckPath:entry.deckPath,
-        });
+    pending = (await post('/api/project-lifecycle/begin', { workId:entry.workId, expectedRevision:entry.revision })).workItem;
+    const removal = pending.removal;
+    let result = { changedSessionIds:[] };
+    if (removal.sessionIds.length) {
+      if (!dshBridge) throw Object.assign(new Error('请在 AICO-Harness 中移除此项目，以归档关联会话'), { code:'HOST_LIFECYCLE_UNAVAILABLE' });
+      result = await dshBridge.request('project-sessions', { operationId:removal.operationId, sessionIds:removal.sessionIds, action:'archive' });
+    }
+    await post('/api/project-lifecycle/complete', { workId:entry.workId, operationId:removal.operationId, changedSessionIds:result.changedSessionIds });
     await loadWorkHistory();
-    historyStatus(kind, '任务记录已删除；内容文件仍保留');
+    historyStatus(kind, '项目已移除，关联会话已归档；内容文件保留');
   } catch (error) {
+    if (pending && ['PROJECT_BUSY', 'project/busy', 'HOST_LIFECYCLE_UNAVAILABLE'].includes(error.code)) {
+      await post('/api/project-lifecycle/cancel', { workId:entry.workId, operationId:pending.removal.operationId, expectedRevision:pending.revision }).catch(() => {});
+    }
+    await loadWorkHistory();
     button.disabled = false;
-    historyStatus(kind, error.message || '任务记录删除失败', 'error');
+    historyStatus(kind, error.message || '项目移除尚未完成，请在已移除项目中重试', 'error');
+  }
+}
+
+function renderRemovedProjects(entries) {
+  let section = document.getElementById('removed-projects');
+  if (!section) {
+    section = document.createElement('details');
+    section.id = 'removed-projects';
+    historyUi.editingList.parentElement.append(section);
+  }
+  section.replaceChildren();
+  section.hidden = entries.length === 0;
+  const summary = document.createElement('summary');
+  summary.textContent = `已移除项目（${entries.length}）`;
+  section.append(summary);
+  for (const entry of entries) {
+    const row = document.createElement('div');
+    row.className = 'work-item';
+    const label = document.createElement('span');
+    label.textContent = entry.displayName;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = entry.restoreOperation ? '重试恢复会话' : entry.lifecycle === 'removing' ? '重试移除' : '恢复项目';
+    button.addEventListener('click', async () => {
+      if (entry.lifecycle === 'removing') return dismissWorkTask(entry.kind, entry, button);
+      button.disabled = true;
+      try {
+        if (entry.restoreOperation) {
+          if (!dshBridge) throw new Error('请在 AICO-Harness 中重试恢复会话');
+          await dshBridge.request('restore-linked-session', { sessionId:entry.restoreOperation.sessionId });
+          await loadWorkHistory();
+          return;
+        }
+        const { workItem } = await post('/api/project-lifecycle/restore', { workId:entry.workId, expectedRevision:entry.revision });
+        await loadWorkHistory();
+        window.location.assign(workspaceTaskNavigationUrl(workItem.kind, workItem));
+      } catch (error) {
+        historyStatus(entry.kind, error.message, 'error');
+        button.disabled = false;
+      }
+    });
+    row.append(label, button);
+    section.append(row);
   }
 }
 
 async function loadWorkHistory() {
   try {
     const result = await requestJson('/api/work-history');
+    dshWorkHistory = result;
+    publishCreationDshWorkContext({ refreshHistory:false });
+    renderRemovedProjects(result.removed ?? []);
     renderWorkList('creation', Array.isArray(result.creation) ? result.creation : []);
     renderWorkList('editing', Array.isArray(result.editing) ? result.editing : []);
     historyStatus('creation');

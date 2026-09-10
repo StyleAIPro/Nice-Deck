@@ -78,3 +78,7 @@ edit-bundle 的不变量（改该脚本时必须保持）：
 ## 本地试装
 
 Codex 的标准用户级注册位置是 `~/.agents/skills/aico-ppt`。开发时运行 `python3 scripts/install.py install --skill-only` 建立受控软链接；Windows PowerShell 使用 `py -3 scripts\install.py install --skill-only` 建立 junction。改动会即时同步。
+
+## 插件项目与会话生命周期
+
+新增或修改项目导入、移除、恢复、会话绑定、工作区登记时，必须遵循 Harness 的[插件项目生命周期规范](../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)。发布包不包含相邻仓库时，到 AICO-Harness 仓库读取 `docs/cookbook/plugin-project-lifecycle.zh.md`。PPT 的适配细节与验证记录见 [项目生命周期](docs/design/project-lifecycle.md)。不要根据目录相同推断会话归属，不要以隐藏首页记录代替归档关联会话。

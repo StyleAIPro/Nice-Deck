@@ -62,7 +62,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    async function resolveDshSession(sessionId) {
+    async function resolveDshSession(sessionId, includeRemoved = false) {
       const endpoint = appCommandUrl("/api/dsh-work-items/resolve-session");
       if (endpoint === null) return { status:"unlinked", workItem:null };
       const response = await fetch(endpoint, {
@@ -70,7 +70,7 @@ window.__ModuleLoader__.load({
         // text/plain 保持简单跨源请求；App Server 只对带令牌的本地 DSH Origin
         // 开放这一条只读解析命令，不扩大其他写接口的 Origin 边界。
         headers:{ "content-type":"text/plain;charset=UTF-8" },
-        body:JSON.stringify({ sessionId }),
+        body:JSON.stringify({ sessionId, includeRemoved }),
       });
       if (!response.ok) throw new Error(`工作项关联查询失败：HTTP ${response.status}`);
       return response.json();
@@ -83,12 +83,34 @@ window.__ModuleLoader__.load({
       return value;
     }
 
+    async function waitForWorkspaceReady(ctx) {
+      const source = ctx.workspaces.list;
+      if (source.getSnapshot()?.phase === "ready") return;
+      await new Promise((resolve, reject) => {
+        let unsubscribe = () => {};
+        const timer = setTimeout(() => {
+          unsubscribe();
+          reject(Object.assign(new Error("工作区及归档状态仍在加载，请稍后重试"), { code:"WORKSPACE_NOT_READY" }));
+        }, 30_000);
+        const check = () => {
+          if (source.getSnapshot()?.phase !== "ready") return;
+          clearTimeout(timer);
+          unsubscribe();
+          resolve();
+        };
+        unsubscribe = source.subscribe(check);
+        check();
+      });
+    }
+
     function archivedSessionIds(ctx) {
-      const values = ctx.workspaces?.list?.getSnapshot?.()?.archivedSessionIds;
-      return new Set(Array.isArray(values) ? values : []);
+      const snapshot = ctx.workspaces?.list?.getSnapshot?.();
+      if (snapshot?.phase !== "ready") throw Object.assign(new Error("工作区及归档状态尚未就绪"), { code:"WORKSPACE_NOT_READY" });
+      return new Set(snapshot.archivedSessionIds);
     }
 
     function sessionSummary(ctx, sessionId) {
+      if (ctx.workspaces.list.getSnapshot()?.phase !== "ready") return undefined;
       if (typeof sessionId !== "string") return null;
       const row = ctx.sessions.list.getSnapshot().byId?.[sessionId];
       const persistentTitle = typeof row?.title === "string"
@@ -175,8 +197,34 @@ window.__ModuleLoader__.load({
       return conversation.send(prompt);
     }
 
+    async function restoreLinkedSession(ctx, sessionId) {
+      await waitForWorkspaceReady(ctx);
+      const linked = await resolveDshSession(sessionId, true);
+      const work = linked?.workItem;
+      if (!work) return false;
+      if (work.lifecycle === "removing") throw new Error("项目正在移除，请先完成移除后恢复会话");
+      const workspace = await ctx.workspaces.create({ path:work.projectRoot });
+      const response = await fetch(appCommandUrl("/api/dsh-work-items/restore-session"), {
+        method:"POST", headers:{ "content-type":"text/plain;charset=UTF-8" },
+        body:JSON.stringify({ workId:work.workId, sessionId, workspaceId:workspace.workspaceId, expectedRevision:work.revision }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "项目会话恢复尚未完成，请重试");
+      await ctx.workspaces.projectSessions({
+        operationId:result.workItem.restoreOperation.operationId,
+        action:"restore", sessionIds:[sessionId], workspaceId:workspace.workspaceId,
+      });
+      const completed = await fetch(appCommandUrl("/api/dsh-work-items/complete-restore"), {
+        method:"POST", headers:{ "content-type":"text/plain;charset=UTF-8" },
+        body:JSON.stringify({ workId:work.workId, operationId:result.workItem.restoreOperation.operationId }),
+      });
+      if (!completed.ok) throw new Error("会话恢复收据尚未保存，请在项目首页重试恢复");
+      return true;
+    }
+
     function createDshWorkBridge(ctx) {
       return async (command, payload = {}) => {
+        await waitForWorkspaceReady(ctx);
         switch (command) {
           case "current-session": {
             return sessionSummary(ctx, ctx.sessions.list.getSnapshot().current);
@@ -190,6 +238,13 @@ window.__ModuleLoader__.load({
               return snapshot.byId?.[sessionId] || archived.has(sessionId)
                 ? sessionSummary(ctx, sessionId) : null;
             });
+          }
+          case "restore-linked-session": {
+            return restoreLinkedSession(ctx, requireBridgeString(payload.sessionId, "sessionId"));
+          }
+          case "project-sessions": {
+            if (typeof ctx.workspaces.projectSessions !== "function") throw Object.assign(new Error("请更新 AICO-Harness 以支持项目会话管理"), { code:"HOST_LIFECYCLE_UNAVAILABLE" });
+            return ctx.workspaces.projectSessions(payload);
           }
           case "ensure-workspace": {
             const workspace = await ctx.workspaces.create({
@@ -220,9 +275,11 @@ window.__ModuleLoader__.load({
           }
           case "open-session": {
             const sessionId = requireBridgeString(payload.sessionId, "sessionId");
+            if (archivedSessionIds(ctx).has(sessionId)) throw new Error("会话已归档，请从历史记录明确恢复");
             if (payload.title !== undefined) {
               scheduleSessionTitle(ctx, sessionId, payload.title);
             }
+            if (payload.workspaceId) await ctx.sessions.create({ sessionId, workspaceId:payload.workspaceId });
             prepareSession(ctx, sessionId);
             ctx.sessions.open(sessionId);
             return sessionSummary(ctx, sessionId) || { sessionId };
@@ -279,12 +336,16 @@ window.__ModuleLoader__.load({
       return targets;
     }
 
+    let catalogFetchSequence = 0;
     async function fetchSessionStartTargets() {
+      const fetchSequence = ++catalogFetchSequence;
       const endpoint = appCommandUrl("/api/work-history");
       if (endpoint === null) return [];
       const response = await fetch(endpoint, { headers:{ accept:"application/json" } });
       if (!response.ok) throw new Error(`AICO-PPT 项目列表读取失败：HTTP ${response.status}`);
-      return sessionStartTargetsFromHistory(await response.json());
+      const targets = sessionStartTargetsFromHistory(await response.json());
+      targets.fetchSequence = fetchSequence;
+      return targets;
     }
 
     function createContextualSessionStart(openWorkbench) {
@@ -294,6 +355,7 @@ window.__ModuleLoader__.load({
       let preferredWorkId = null;
       let currentWorkId = null;
       let sequence = 0;
+      let appliedCatalogSequence = 0;
       const listeners = new Set();
       const pending = new Map();
       const source = {
@@ -315,6 +377,8 @@ window.__ModuleLoader__.load({
         && typeof context.contextKey === "string"
         && ["creation", "editing"].includes(context.kind));
       const replaceTargets = (targets) => {
+        if (targets?.fetchSequence < appliedCatalogSequence) return;
+        if (targets?.fetchSequence) appliedCatalogSequence = targets.fetchSequence;
         const ordered = [];
         const seen = new Set();
         for (const candidate of Array.isArray(targets) ? targets : []) {
@@ -377,6 +441,7 @@ window.__ModuleLoader__.load({
         }, active.origin);
       };
       const adopt = (context, target, origin, targets) => {
+        if (targets?.fetchSequence < appliedCatalogSequence) return;
         if (context !== null && !validContext(context)) return;
         const ordered = [];
         const seen = new Set();
@@ -390,7 +455,8 @@ window.__ModuleLoader__.load({
         }
         active = { context, target, origin };
         if (validContext(context) && currentWorkId === null) preferredWorkId = context.workId;
-        if (ordered.length > 0) replaceTargets(ordered);
+        ordered.fetchSequence = targets?.fetchSequence;
+        if (Array.isArray(targets) || ordered.length > 0) replaceTargets(ordered);
         for (const request of pending.values()) route(request);
       };
       const receive = (message) => {
@@ -452,6 +518,7 @@ window.__ModuleLoader__.load({
         const targetOrigin = activeFrameOrigin.current;
         if (targetOrigin === null || !target) return;
         const session = props.currentSession();
+        if (session === undefined) return;
         const signature = JSON.stringify(session);
         if (!force && signature === lastPublishedSession.current) return;
         target.postMessage({
@@ -503,12 +570,11 @@ window.__ModuleLoader__.load({
             return;
           }
           if (event.data.type === "aico-ppt:dsh-work-context") {
-            props.sessionStarter.adopt(
-              event.data.context ?? null,
-              event.source,
-              event.origin,
-              event.data.targets,
-            );
+            await waitForWorkspaceReady({ workspaces:{ list:props.workspaceSource } });
+            // iframe 的迟到上下文不是项目存在性的证据；以服务端目录为准。
+            const targets = await fetchSessionStartTargets();
+            const context = targets.find(target => target.workId === event.data.context?.workId) ?? null;
+            props.sessionStarter.adopt(context, event.source, event.origin, targets);
             return;
           }
           if (event.data.type === "aico-ppt:create-work-session-result"
@@ -538,7 +604,7 @@ window.__ModuleLoader__.load({
                 type:"aico-ppt:dsh-result",
                 requestId:event.data.requestId,
                 ok:false,
-                error:{ message },
+                error:{ message, code:cause?.code || cause?.rpcError?.code },
               }, event.origin);
               setError(`DSH 操作失败：${message}`);
             }
@@ -629,7 +695,7 @@ window.__ModuleLoader__.load({
       ctx.effect(() => {
         let disposed = false;
         const refresh = () => {
-          void fetchSessionStartTargets().then(targets => {
+          void waitForWorkspaceReady(ctx).then(() => fetchSessionStartTargets()).then(targets => {
             if (!disposed) sessionStarter.refresh(targets);
           }).catch(error => {
             if (!disposed) console.warn("AICO-PPT 项目列表刷新失败", error);
@@ -649,7 +715,8 @@ window.__ModuleLoader__.load({
         const inspectSelection = (sessionId) => {
           const revision = ++selectionRevision;
           if (typeof sessionId !== "string") return;
-          void resolveDshSession(sessionId).then(result => {
+          void waitForWorkspaceReady(ctx).then(() => archivedSessionIds(ctx).has(sessionId)
+            ? { status:"unlinked" } : resolveDshSession(sessionId)).then(result => {
             if (disposed || revision !== selectionRevision
               || ctx.sessions.list.getSnapshot().current !== sessionId) return;
             const linked = result?.status === "linked";
@@ -672,6 +739,11 @@ window.__ModuleLoader__.load({
           unsubscribe?.();
         };
       }, "aico-ppt: 已关联会话自动打开 Editor");
+
+      ctx.effect(() => ctx.on("session/restore-requested", async ({ sessionId }, next) => {
+        if (!await restoreLinkedSession(ctx, sessionId)) return next();
+        sessionStarter.refresh(await fetchSessionStartTargets());
+      }), "aico-ppt: 明确恢复历史会话");
 
       ctx.effect(() => {
         if (document.getElementById(STYLE_ID) !== null) return () => {};

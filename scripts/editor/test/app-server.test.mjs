@@ -1848,3 +1848,29 @@ test('生成成功后 Editor 接收同一个 PTY runtime，交接请求保持幂
   assert.equal((await reopened.json()).editorUrl, result.editorUrl);
   assert.equal(handoffCount, 1);
 });
+
+test('项目生命周期 HTTP 流程保留文件，末项移除返回空目录并提供恢复入口', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ppt-lifecycle-http-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const deckPath = join(root, '生命周期.html');
+  await writeFile(deckPath, '<!doctype html>');
+  const workHistoryStore = { async list() { return { creation:[], editing:[{ deckPath, projectRoot:root }] }; } };
+  const workCatalog = new WorkCatalog({ filePath:join(root, 'catalog.json'), legacyHistory:workHistoryStore });
+  const app = await startAppServer({ token:'lifecycle-fixture', workHistoryStore, workCatalog });
+  t.after(() => app.close());
+  const initial = (await workCatalog.list()).editing[0];
+  const beginResponse = await postJson(app, '/api/project-lifecycle/begin', { workId:initial.workId, expectedRevision:initial.revision });
+  assert.equal(beginResponse.status, 200);
+  const { workItem:pending } = await beginResponse.json();
+  const completed = await postJson(app, '/api/project-lifecycle/complete', { workId:initial.workId, operationId:pending.removal.operationId, changedSessionIds:[] });
+  assert.equal(completed.status, 200);
+  const historyUrl = new URL('/api/work-history', app.url);
+  historyUrl.searchParams.set('token', app.token);
+  const history = await (await fetch(historyUrl)).json();
+  assert.deepEqual(history.editing, []);
+  assert.equal(history.removed[0].workId, initial.workId);
+  const restored = await postJson(app, '/api/project-lifecycle/restore', { workId:initial.workId, expectedRevision:history.removed[0].revision });
+  assert.equal(restored.status, 200);
+  assert.equal((await restored.json()).workItem.workId, initial.workId);
+  assert.equal(await readFile(deckPath, 'utf8'), '<!doctype html>');
+});

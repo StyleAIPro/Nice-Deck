@@ -16,6 +16,9 @@ async function installedFixture(t, appSource) {
     await copyFile(new URL('../' + name, import.meta.url), join(integration, name));
   }
   await writeFile(join(editor, 'app-server.mjs'), appSource);
+  // Worker 的模块加载边界包含桌面保存能力；本夹具不启动实际编辑器或文件选择器。
+  await writeFile(join(editor, 'server.mjs'), 'export const startServer = () => { throw new Error("夹具不应启动编辑器"); };');
+  await writeFile(join(editor, 'system-picker.mjs'), 'export const pickPptxSaveWithSystemPicker = () => { throw new Error("夹具不应打开文件选择器"); };');
   const { startRuntimeWorker:start } = await import(pathToFileURL(join(integration, 'runtime-host.mjs')));
   return { runtime, start };
 }

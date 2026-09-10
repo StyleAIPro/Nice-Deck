@@ -115,6 +115,9 @@ function publicEditing(item) {
     runtimeState:item.runtimeState,
     binding:structuredClone(item.binding),
     dshBinding:structuredClone(item.dshBinding),
+    lifecycle:item.lifecycle ?? (item.hiddenAt ? 'hidden' : 'active'),
+    removal:structuredClone(item.removal ?? null),
+    restoreOperation:structuredClone(item.restoreOperation ?? null),
   };
 }
 
@@ -140,6 +143,9 @@ function publicCreation(item) {
     locked:item.locked,
     runtimeState:item.runtimeState,
     dshBinding:structuredClone(item.dshBinding),
+    lifecycle:item.lifecycle ?? (item.hiddenAt ? 'hidden' : 'active'),
+    removal:structuredClone(item.removal ?? null),
+    restoreOperation:structuredClone(item.restoreOperation ?? null),
   };
 }
 
@@ -492,11 +498,13 @@ export class WorkCatalog {
       ));
       if (index < 0) return null;
       const current = state.workItems[index];
+      if (['removing', 'restoring'].includes(current.lifecycle)) throw catalogError('PROJECT_REMOVING', 409, '项目正在移除，请先完成或重试移除');
       if (current.hiddenAt === null) return publicEditing(current);
       const next = {
         ...current,
         revision:current.revision + 1,
         hiddenAt:null,
+        lifecycle:'active',
       };
       await this.#write({
         ...state,
@@ -535,6 +543,66 @@ export class WorkCatalog {
         workItems,
       });
       return next.kind === 'editing' ? publicEditing(next) : publicCreation(next);
+    });
+  }
+
+  listRemoved() {
+    return this.#enqueue(async () => (await this.#read()).workItems
+      .filter(item => item.restoreOperation || ['removed', 'removing'].includes(item.lifecycle)).map(publicWorkItem));
+  }
+
+  beginRemoval({ workId, expectedRevision, ownsCreationLease = false }) {
+    return this.#enqueue(async () => {
+      const state = await this.#read();
+      const current = state.workItems.find(item => item.workId === workId);
+      if (!current) throw catalogError('WORK_ITEM_NOT_FOUND', 404, '项目不存在');
+      if (current.lifecycle === 'removing' || current.lifecycle === 'removed') return publicWorkItem(current);
+      if (current.revision !== expectedRevision) throw catalogError('WORK_ITEM_REVISION_CONFLICT', 409, '项目已更新，请刷新后重试');
+      if (current.restoreOperation || current.dshBinding.pendingOperation || (current.locked && !ownsCreationLease)) throw catalogError('PROJECT_BUSY', 409, '项目有未完成的会话创建或编辑，请完成后再移除');
+      const next = { ...current, revision:current.revision + 1, lifecycle:'removing', hiddenAt:this.now().toISOString(),
+        removal:{ operationId:systemRandomUUID(), sessionIds:current.dshBinding.sessions.map(link => link.sessionId),
+          changedSessionIds:[], workspaceId:current.dshBinding.workspaceId } };
+      await this.#write({ ...state, revision:state.revision + 1, workItems:state.workItems.map(item => item === current ? next : item) });
+      return publicWorkItem(next);
+    });
+  }
+
+  completeRemoval({ workId, operationId, changedSessionIds }) {
+    return this.#enqueue(async () => {
+      const state = await this.#read();
+      const current = state.workItems.find(item => item.workId === workId);
+      if (!current || current.removal?.operationId !== operationId) throw catalogError('PROJECT_OPERATION_CONFLICT', 409, '项目移除操作已过期');
+      if (current.lifecycle === 'removed') return publicWorkItem(current);
+      if (current.lifecycle !== 'removing') throw catalogError('PROJECT_OPERATION_CONFLICT', 409, '项目不在移除状态');
+      if (!Array.isArray(changedSessionIds) || changedSessionIds.some(id => !current.removal.sessionIds.includes(id))) throw catalogError('INVALID_DSH_SESSION_IDS', 400, '归档结果包含其他项目的会话');
+      const next = { ...current, revision:current.revision + 1, lifecycle:'removed',
+        removal:{ ...current.removal, changedSessionIds:[...new Set(changedSessionIds)] },
+        dshBinding:{ ...current.dshBinding, revision:current.dshBinding.revision + 1, activeSessionId:null,
+          sessions:current.dshBinding.sessions.map(link => ({ ...link, state:link.state === 'missing' ? 'missing' : 'archived' })) } };
+      await this.#write({ ...state, revision:state.revision + 1, workItems:state.workItems.map(item => item === current ? next : item) });
+      return publicWorkItem(next);
+    });
+  }
+
+  cancelRemoval({ workId, operationId, expectedRevision }) {
+    return this.#enqueue(async () => {
+      const state = await this.#read();
+      const current = state.workItems.find(item => item.workId === workId);
+      if (!current || current.lifecycle !== 'removing' || current.removal?.operationId !== operationId || current.revision !== expectedRevision) throw catalogError('PROJECT_OPERATION_CONFLICT', 409, '项目移除操作已过期');
+      const next = { ...current, revision:current.revision + 1, lifecycle:'active', hiddenAt:null, removal:null };
+      await this.#write({ ...state, revision:state.revision + 1, workItems:state.workItems.map(item => item === current ? next : item) });
+      return publicWorkItem(next);
+    });
+  }
+
+  restoreProject({ workId, expectedRevision }) {
+    return this.#enqueue(async () => {
+      const state = await this.#read();
+      const current = state.workItems.find(item => item.workId === workId);
+      if (!current || current.lifecycle !== 'removed' || current.revision !== expectedRevision) throw catalogError('PROJECT_OPERATION_CONFLICT', 409, '项目状态已更新，请刷新后重试');
+      const next = { ...current, revision:current.revision + 1, lifecycle:'active', hiddenAt:null };
+      await this.#write({ ...state, revision:state.revision + 1, workItems:state.workItems.map(item => item === current ? next : item) });
+      return publicWorkItem(next);
     });
   }
 
@@ -731,7 +799,7 @@ export class WorkCatalog {
     });
   }
 
-  setDshWorkspace({ workId, workspaceId, expectedBindingRevision }) {
+  setDshWorkspace({ workId, workspaceId, expectedBindingRevision, repairRegistration = false }) {
     return this.#enqueue(async () => {
       requireUuid(workId, 'workId');
       requireOpaqueId(workspaceId, 'workspaceId');
@@ -741,7 +809,7 @@ export class WorkCatalog {
       requireBindingRevision(current, expectedBindingRevision);
       const sessions = current.dshBinding.sessions.map(link => (
         link.workspaceId !== workspaceId && link.state === 'available'
-          ? { ...link, state:'historical' }
+          ? (repairRegistration ? { ...link, workspaceId } : { ...link, state:'historical' })
           : link
       ));
       const active = sessions.find(link => (
@@ -757,7 +825,7 @@ export class WorkCatalog {
           workspaceId,
           activeSessionId:active?.sessionId ?? null,
           sessions,
-          pendingOperation:null,
+          pendingOperation:repairRegistration && current.dshBinding.pendingOperation ? { ...current.dshBinding.pendingOperation, workspaceId } : null,
         },
       };
       await this.#write({
@@ -1032,14 +1100,43 @@ export class WorkCatalog {
     });
   }
 
-  resolveByDshSession(sessionId) {
+  restoreDshSession({ workId, sessionId, workspaceId, expectedRevision }) {
+    return this.#enqueue(async () => {
+      const state = await this.#read();
+      const current = state.workItems.find(item => item.workId === workId);
+      if (current?.restoreOperation?.sessionId === sessionId) return publicWorkItem(current);
+      if (!current || current.restoreOperation || current.lifecycle === 'removing' || current.revision !== expectedRevision) throw catalogError('PROJECT_OPERATION_CONFLICT', 409, '项目状态已更新，请刷新后重试');
+      requireOpaqueId(workspaceId, 'workspaceId');
+      if (!current.dshBinding.sessions.some(link => link.sessionId === sessionId)) throw catalogError('DSH_SESSION_NOT_LINKED', 404, '会话不属于此项目');
+      const next = { ...current, revision:current.revision + 1, lifecycle:'restoring', hiddenAt:current.hiddenAt ?? this.now().toISOString(),
+        restoreOperation:{ operationId:systemRandomUUID(), sessionId, workspaceId },
+        dshBinding:{ ...current.dshBinding, revision:current.dshBinding.revision + 1, workspaceId, activeSessionId:sessionId,
+          sessions:current.dshBinding.sessions.map(link => link.sessionId === sessionId ? { ...link, state:'available', workspaceId } : link) } };
+      await this.#write({ ...state, revision:state.revision + 1, workItems:state.workItems.map(item => item === current ? next : item) });
+      return publicWorkItem(next);
+    });
+  }
+
+  completeDshRestore({ workId, operationId }) {
+    return this.#enqueue(async () => {
+      const state = await this.#read();
+      const current = state.workItems.find(item => item.workId === workId);
+      if (current?.lastRestoreOperationId === operationId) return publicWorkItem(current);
+      if (!current || current.restoreOperation?.operationId !== operationId) throw catalogError('PROJECT_OPERATION_CONFLICT', 409, '恢复操作已过期');
+      const next = { ...current, revision:current.revision + 1, lifecycle:'active', hiddenAt:null, restoreOperation:null, lastRestoreOperationId:operationId };
+      await this.#write({ ...state, revision:state.revision + 1, workItems:state.workItems.map(item => item === current ? next : item) });
+      return publicWorkItem(next);
+    });
+  }
+
+  resolveByDshSession(sessionId, { includeRemoved = false } = {}) {
     return this.#enqueue(async () => {
       requireOpaqueId(sessionId, 'sessionId');
       const state = await this.#read();
       const owner = state.workItems.find(item => (
-        item?.hiddenAt === null
+        (includeRemoved || item?.hiddenAt === null)
         && item.dshBinding?.sessions?.some(link => (
-          link.sessionId === sessionId && link.state === 'available'
+          link.sessionId === sessionId && (includeRemoved || link.state === 'available')
         ))
       ));
       return owner ? publicWorkItem(owner) : null;

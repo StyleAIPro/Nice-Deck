@@ -330,3 +330,9 @@ renzhi 业务 Deck 不随仓库发布，其三项专项验收在未找到材料�
 Editor 的源码事务通过归档快照对账已被覆盖的静态文字动作，保留独立样式及完整撤销历史；历史同步失败会在任务卡显示实际原因。对账边界见 [编辑时间线决策](docs/adr/0002-linear-edit-timeline-and-compensation.md)。
 
 编辑器支持原生 `aico_ppt` 目标检查、提交和同版本截图；结构修改包含完整历史重放。详见 [编辑指南](references/editing-guide.md#简洁编辑与视觉确认)。
+
+### Harness 项目与会话管理
+
+AICO-PPT 的一份 Deck 对应一个项目，可关联多段 Harness 会话。在项目首页移除项目会归档绑定会话，保留源文件、工作副本和历史；“已移除项目”提供恢复入口。重新打开文件恢复原项目身份，旧会话继续归档。运行中或排队的会话会阻止移除，避免后台继续修改已移除项目。
+
+所有 AICO 插件遵循 [Harness 插件项目生命周期规范](../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)；PPT 的适配与测试见 [项目生命周期](docs/design/project-lifecycle.md)。上述宿主能力需要配套支持项目会话管理的 Harness 版本，旧宿主会给出更新提示。

@@ -314,6 +314,7 @@ test('检测到 fresh pending 时只幂等补建原 Session，不再分配第二
     bridge:{
       async request(command, payload) {
         calls.push(['bridge', command, structuredClone(payload)]);
+        if (command === 'ensure-workspace') return { workspaceId:'workspace-project' };
         return { sessionId:payload.sessionId };
       },
     },
@@ -333,15 +334,16 @@ test('检测到 fresh pending 时只幂等补建原 Session，不再分配第二
 
   assert.equal(result.session.sessionId, 'session-preallocated');
   assert.deepEqual(calls.map(([side, command]) => `${side}:${command}`), [
+    'bridge:ensure-workspace',
     'bridge:create-session',
     'catalog:complete-session',
     'bridge:open-session',
     'catalog:activate-session',
   ]);
-  assert.equal(calls[0][2].title, '修改 Deck：技术解析.html');
+  assert.equal(calls[1][2].title, '修改 Deck：技术解析.html');
 });
 
-test('已有 Workspace 关联时新建会话不再等待重复 ensure-workspace', async () => {
+test('已有 Workspace 关联时仍核验登记但不重复创建身份', async () => {
   const calls = [];
   const longDisplayName = '客户技术评审'.repeat(16);
   let current = workItem(emptyBinding({
@@ -362,8 +364,9 @@ test('已有 Workspace 关联时新建会话不再等待重复 ensure-workspace'
       async request(command, payload) {
         calls.push(['bridge', command, structuredClone(payload)]);
         if (command === 'ensure-workspace') {
-          throw new Error('重复 Workspace RPC 不可用');
+          return { workspaceId:'workspace-project' };
         }
+        if (command === 'ensure-workspace') return { workspaceId:'workspace-project' };
         return { sessionId:payload.sessionId };
       },
     },
@@ -414,6 +417,7 @@ test('已有 Workspace 关联时新建会话不再等待重复 ensure-workspace'
 
   assert.equal(result.workItem.dshBinding.sessions.length, 2);
   assert.deepEqual(calls.map(([side, command]) => `${side}:${command}`), [
+    'bridge:ensure-workspace',
     'catalog:begin-session',
     'bridge:create-session',
     'catalog:complete-session',
@@ -445,6 +449,7 @@ test('激活旧关联会话时携带中文任务标题，但由 DSH 只补尚未
     bridge:{
       async request(command, payload) {
         calls.push([command, structuredClone(payload)]);
+        if (command === 'ensure-workspace') return { workspaceId:'workspace-project' };
         return { sessionId:payload.sessionId };
       },
     },
@@ -453,9 +458,9 @@ test('激活旧关联会话时携带中文任务标题，但由 DSH 只补尚未
 
   await coordinator.activate({ workItem:current });
 
-  assert.deepEqual(calls, [[
+  assert.deepEqual(calls, [['ensure-workspace', { path:current.projectRoot }], [
     'open-session',
-    { sessionId:'session-existing', title:'修改 Deck：技术解析.html' },
+    { sessionId:'session-existing', workspaceId:'workspace-project', title:'修改 Deck：技术解析.html' },
   ]]);
 });
 
@@ -482,6 +487,7 @@ test('目标会话打开失败时保留原活动会话', async () => {
     bridge:{
       async request(command, payload) {
         calls.push(['bridge', command, structuredClone(payload)]);
+        if (command === 'ensure-workspace') return { workspaceId:'workspace-project' };
         throw new Error('DSH 会话打开失败');
       },
     },
@@ -503,6 +509,7 @@ test('目标会话打开失败时保留原活动会话', async () => {
 
   assert.equal(current.dshBinding.activeSessionId, 'session-a');
   assert.deepEqual(calls.map(([side, command]) => `${side}:${command}`), [
+    'bridge:ensure-workspace',
     'bridge:open-session',
   ]);
 });

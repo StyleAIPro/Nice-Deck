@@ -169,7 +169,7 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
     },
     workspaces: {
       list: {
-        getSnapshot() { return { archivedSessionIds:[] } },
+        getSnapshot() { return { phase:'ready', archivedSessionIds:[] } },
         subscribe() { return () => {} },
       },
       async create({ path }) {
@@ -377,7 +377,7 @@ test('Editor 关闭时仍按项目目录显示 AICO-PPT 入口，并在选择后
       },
       binding:() => null,
     },
-    workspaces:{ list:{ getSnapshot:() => ({ archivedSessionIds:[] }), subscribe:() => () => {} } },
+    workspaces:{ list:{ getSnapshot:() => ({ phase:'ready', archivedSessionIds:[] }), subscribe:() => () => {} } },
     workbench:{
       active:() => activeWorkbench,
       open(id, width) {
@@ -459,7 +459,11 @@ test('Editor 关闭时仍按项目目录显示 AICO-PPT 入口，并在选择后
 })
 
 test('workbench 对会话切换提供轮询兜底，并在 Editor ready 后重放当前会话', async () => {
-  const loaded = await loadClientBundle()
+  let catalogRows = [
+    { workId:'work-1', kind:'editing', deckName:'技术解析', displayName:'技术解析', projectRoot:'/project/deck', dshBinding:{ revision:2 } },
+    { workId:'work-2', kind:'editing', deckName:'季度汇报.html', displayName:'季度汇报.html', projectRoot:'/project/report', dshBinding:{ revision:5 } },
+  ]
+  const loaded = await loadClientBundle({ fetchImpl:async url => ({ ok:true, json:async () => String(url).includes('/api/work-history') ? { editing:catalogRows } : { status:'unlinked' } }) })
   const registrations = []
   let currentSessionId = 'session-1'
   let archivedSessionIds = []
@@ -489,7 +493,7 @@ test('workbench 对会话切换提供轮询兜底，并在 Editor ready 后重�
     },
     workspaces:{
       list:{
-        getSnapshot() { return { archivedSessionIds } },
+        getSnapshot() { return { phase:'ready', archivedSessionIds } },
         subscribe(listener) {
           workspaceSubscribers.add(listener)
           return () => workspaceSubscribers.delete(listener)
@@ -726,6 +730,15 @@ test('workbench 对会话切换提供轮询兜底，并在 Editor ready 后重�
     'http://127.0.0.1:4100',
     '从修改任务切回创建任务时，应将发布目标恢复为启动页 Origin',
   )
+  catalogRows = []
+  for (const listener of loaded.windowListeners.get('message') ?? []) {
+    await listener({ source:contentWindow, origin:'http://127.0.0.1:4100', data:{
+      type:'aico-ppt:dsh-work-context',
+      context:{ workId:'work-1', contextKey:'work-1:2', kind:'editing', displayName:'迟到的旧项目', projectRoot:'/project/deck' },
+      targets:[],
+    } })
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(sessionStartContribution.source.getSnapshot())), [], '最后一个项目移除后，迟到 iframe 上下文不得恢复新会话入口')
   for (const cleanup of cleanups.reverse()) cleanup()
 })
 
@@ -762,6 +775,7 @@ test('会话选择只在绑定状态变化时打开或关闭 Editor，重复事�
   const ctx = {
     effect(effect) { return effect() },
     on(type, listener) {
+      if (type === 'session/restore-requested') return () => {}
       assert.equal(type, 'session/open-requested')
       openSubscribers.add(listener)
       return () => openSubscribers.delete(listener)
@@ -776,7 +790,7 @@ test('会话选择只在绑定状态变化时打开或关闭 Editor，重复事�
         subscribe() { return () => {} },
       },
     },
-    workspaces:{ list:{ getSnapshot:() => ({ archivedSessionIds:[] }), subscribe:() => () => {} } },
+    workspaces:{ list:{ getSnapshot:() => ({ phase:'ready', archivedSessionIds:[] }), subscribe:() => () => {} } },
     workbench:{
       active() { return activeWorkbench },
       open(target, width) {
@@ -853,6 +867,7 @@ test('会话关联查询晚到时不得为已经离开的旧会话重开 Editor'
   const ctx = {
     effect(effect) { return effect() },
     on(type, listener) {
+      if (type === 'session/restore-requested') return () => {}
       assert.equal(type, 'session/open-requested')
       openSubscribers.add(listener)
       return () => openSubscribers.delete(listener)
@@ -864,7 +879,7 @@ test('会话关联查询晚到时不得为已经离开的旧会话重开 Editor'
         subscribe() { return () => {} },
       },
     },
-    workspaces:{ list:{ getSnapshot:() => ({ archivedSessionIds:[] }), subscribe:() => () => {} } },
+    workspaces:{ list:{ getSnapshot:() => ({ phase:'ready', archivedSessionIds:[] }), subscribe:() => () => {} } },
     workbench:{
       active() { return null },
       open(target, width) { opened.push([target, width]) },
@@ -902,4 +917,37 @@ test('package manifest 同时声明 Host bundle 与 Client 依赖', async () => 
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-workbench'))
   assert.match(patch, /id: aico-ppt/u)
   assert.match(patch, /name: aico-ppt-skill/u)
+})
+
+test('工作区初始 pending 时不解析会话或发布项目菜单，就绪后已归档会话不误打开', async () => {
+  let snapshot = { phase:'pending', archivedSessionIds:[] }
+  const subscribers = new Set()
+  const fetched = []
+  const opened = []
+  let contribution
+  const loaded = await loadClientBundle({ fetchImpl:async (url, options) => {
+    fetched.push(String(url))
+    return { ok:true, json:async () => String(url).includes('/api/work-history')
+      ? { editing:[{ workId:'work-archived', kind:'editing', deckName:'历史 Deck', projectRoot:'/project', dshBinding:{ revision:1 } }] }
+      : { status:'linked', workItem:{ workId:'work-archived' } } }
+  } })
+  const ctx = {
+    effect:effect => effect(), on:() => () => {},
+    slots:{ inject(_name, mount) { return mount() }, register:() => () => {} },
+    sessions:{ list:{ getSnapshot:() => ({ current:'session-archived', byId:{} }) } },
+    workspaces:{ list:{ getSnapshot:() => snapshot, subscribe:listener => { subscribers.add(listener); return () => subscribers.delete(listener) } } },
+    workbench:{ active:() => null, open:() => opened.push(true), close() {}, toggle() {} },
+    sessionStarts:{ register(value) { contribution = value; return () => {} } },
+  }
+  loaded.plugin.apply(ctx)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(fetched, [])
+  assert.deepEqual(JSON.parse(JSON.stringify(contribution.source.getSnapshot())), [])
+  snapshot = { phase:'ready', archivedSessionIds:['session-archived'] }
+  for (const listener of [...subscribers]) listener()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fetched.length, 1)
+  assert.ok(fetched[0].includes('/api/work-history'))
+  assert.deepEqual(opened, [])
+  assert.equal(contribution.source.getSnapshot().length, 1)
 })

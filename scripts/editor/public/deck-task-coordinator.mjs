@@ -62,16 +62,6 @@ export class DeckTaskCoordinator {
   }
 
   async #ensureWorkspace(workItem) {
-    if (typeof workItem.dshBinding.workspaceId === 'string'
-      && workItem.dshBinding.workspaceId) {
-      return {
-        workItem,
-        workspace:{
-          workspaceId:workItem.dshBinding.workspaceId,
-          path:workItem.projectRoot,
-        },
-      };
-    }
     const workspace = await this.bridge.request('ensure-workspace', { path:workItem.projectRoot });
     if (!workspace?.workspaceId) {
       throw coordinatorError('DSH_WORKSPACE_INVALID', 'DSH 没有返回有效 Workspace');
@@ -82,6 +72,7 @@ export class DeckTaskCoordinator {
     const result = await this.catalogCommand('set-workspace', {
       workId:workItem.workId,
       workspaceId:workspace.workspaceId,
+      repairRegistration:true,
       expectedBindingRevision:workItem.dshBinding.revision,
     });
     return { workItem:result.workItem, workspace };
@@ -126,13 +117,13 @@ export class DeckTaskCoordinator {
 
   async createSession({ workItem, mode = 'fresh', sourceSessionId = null } = {}) {
     workItem = requireWorkItem(workItem);
+    const ensured = await this.#ensureWorkspace(workItem);
+    workItem = ensured.workItem;
     const recovered = await this.#recoverPending(workItem);
     if (recovered) return recovered;
     if (mode !== 'fresh') {
       throw coordinatorError('DSH_FORK_NOT_IMPLEMENTED', '当前版本只支持为此 Deck 新建独立会话');
     }
-    const ensured = await this.#ensureWorkspace(workItem);
-    workItem = ensured.workItem;
     const operationId = freshUuid();
     const sessionId = `session-${freshUuid()}`;
     const begun = await this.catalogCommand('begin-session', {
@@ -147,6 +138,7 @@ export class DeckTaskCoordinator {
     await this.bridge.request('create-session', {
       workspaceId:ensured.workspace.workspaceId,
       sessionId,
+      workspaceId:workItem.dshBinding.workspaceId,
       title:sessionTitleFor(workItem, sessionId),
     });
     const completed = await this.catalogCommand('complete-session', {
@@ -169,8 +161,10 @@ export class DeckTaskCoordinator {
   async activate({ workItem, sessionId = workItem?.dshBinding?.activeSessionId } = {}) {
     workItem = requireWorkItem(workItem);
     if (!sessionId) return { workItem, session:null };
+    workItem = (await this.#ensureWorkspace(workItem)).workItem;
     const session = await this.bridge.request('open-session', {
       sessionId,
+      workspaceId:workItem.dshBinding.workspaceId,
       title:sessionTitleFor(workItem, sessionId),
     });
     let next = workItem;
