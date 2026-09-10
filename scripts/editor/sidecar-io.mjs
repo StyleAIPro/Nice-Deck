@@ -36,6 +36,9 @@ const DEFAULT_ATTACHMENT_TIMEOUT_MS = 90_000;
 const MAX_ATTACHMENT_TIMEOUT_MS = 120_000;
 const DEFAULT_WORKING_DECK_TIMEOUT_MS = 30_000;
 const MAX_WORKING_DECK_TIMEOUT_MS = 120_000;
+// Python 冷启动先完成可信握手，再进入普通文件命令的短时限。
+const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+const MAX_STARTUP_TIMEOUT_MS = 30_000;
 const WORKING_DECK_COMMANDS = new Set([
   'read-working-deck', 'write-working-deck', 'archive-working-deck',
   'restore-working-deck', 'publish-working-deck',
@@ -85,7 +88,7 @@ function activeLifecycleError(error, request) {
 
 class PersistentSidecarIO {
   constructor(child, {
-    timeoutMs, maxInputBytes, maxOutputBytes,
+    timeoutMs, startupTimeoutMs, maxInputBytes, maxOutputBytes,
     maxSessionInputBytes, maxSessionOutputBytes,
     maxWorkingDeckInputBytes, maxWorkingDeckOutputBytes,
     maxAgentWorkspaceInputBytes, maxAgentWorkspaceOutputBytes,
@@ -93,6 +96,7 @@ class PersistentSidecarIO {
   }) {
     this.child = child;
     this.timeoutMs = timeoutMs;
+    this.startupTimeoutMs = Math.min(startupTimeoutMs, MAX_STARTUP_TIMEOUT_MS);
     this.maxInputBytes = maxInputBytes;
     this.maxOutputBytes = maxOutputBytes;
     this.maxSessionInputBytes = maxSessionInputBytes;
@@ -285,11 +289,13 @@ class PersistentSidecarIO {
     if (request.settled || this.active !== request) return;
     request.dispatched = true;
     request.state = 'active';
-    const requestTimeoutMs = ATTACHMENT_LONG_COMMANDS.has(request.command)
-      ? this.attachmentTimeoutMs
-      : WORKING_DECK_COMMANDS.has(request.command)
-        ? this.workingDeckTimeoutMs
-        : this.timeoutMs;
+    const requestTimeoutMs = request.command === 'initialize'
+      ? this.startupTimeoutMs
+      : ATTACHMENT_LONG_COMMANDS.has(request.command)
+        ? this.attachmentTimeoutMs
+        : WORKING_DECK_COMMANDS.has(request.command)
+          ? this.workingDeckTimeoutMs
+          : this.timeoutMs;
     request.timer = setTimeout(() => {
       if (this.active !== request || request.settled) return;
       this.#abort(lifecycleError('SIDECAR_HELPER_TIMEOUT', 'sidecar helper 请求超时'));
@@ -464,6 +470,7 @@ export async function createPersistentSidecarIO({
   pythonExecutable='python3',
   helperPath=HELPER,
   timeoutMs=1_000,
+  startupTimeoutMs=DEFAULT_STARTUP_TIMEOUT_MS,
   maxInputBytes=1024 * 1024,
   maxOutputBytes=1024 * 1024,
   maxSessionInputBytes=64 * 1024 * 1024,
@@ -480,7 +487,7 @@ export async function createPersistentSidecarIO({
     stdio:['pipe', 'pipe', 'pipe'],
   }));
   const io = new PersistentSidecarIO(child, {
-    timeoutMs, maxInputBytes, maxOutputBytes,
+    timeoutMs, startupTimeoutMs, maxInputBytes, maxOutputBytes,
     maxSessionInputBytes, maxSessionOutputBytes,
     maxWorkingDeckInputBytes, maxWorkingDeckOutputBytes,
     attachmentTimeoutMs, workingDeckTimeoutMs,

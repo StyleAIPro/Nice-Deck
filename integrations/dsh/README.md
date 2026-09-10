@@ -46,11 +46,13 @@
 
 AICO-Harness 桌面安装器只安装 Host。用户从设置中的插件目录安装 AICO-PPT 后，插件管理器负责下载与校验本包及 Python，桌面渲染复用 Host 的 Electron，准备成功后再注册现有 Web profile；卸载只移除插件注册与可回收发行文件，项目和用户数据保持原位。独立 Skill 与源码安装不要求桌面运行时描述文件。
 
-桌面管理器调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python } } })`。`root` 是当前插件发行目录，Python 路径为存在的绝对文件路径；跟随软链接后的实际文件必须位于该目录内。描述对象只接受这些字段，不接受凭据或任意环境变量。管理器将同一个 `aicoRuntime` 对象写入插件包根目录的 `.aico-runtime.json`，供模型脚本包装器读取。Node 始终使用 `process.execPath`，不在 PPT 插件内安装第二份 Node。PPTX 参考材料由标准库工具 `scripts/extract-pptx.py` 按页提取内容与原图；运行时不接受 `office` 或 `browser` 字段，也不设置相应工具路径。新发布声明 `apiVersion: 2` 和 `requires: {desktopRenderer: 1}`；桌面脚本通过 `AICO_HOME/desktop-renderer.json` 连接 Host 的私有渲染服务，Host 不可用时不回退本机浏览器。继承的 `AICO_SOFFICE_EXECUTABLE` 仍被过滤，避免旧环境污染。
+桌面管理器调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python } } })`。`root` 是当前插件发行目录，Python 路径为存在的绝对文件路径；跟随软链接后的实际文件必须位于该目录内。描述对象只接受这些字段，不接受凭据或任意环境变量。管理器将同一个 `aicoRuntime` 对象写入插件包根目录的 `.aico-runtime.json`，供模型脚本包装器读取。Node 始终使用 `process.execPath`，不在 PPT 插件内安装第二份 Node。PPTX 参考材料由标准库工具 `scripts/extract-pptx.py` 按页提取内容与原图；运行时不接受 `office` 或 `browser` 字段，也不设置相应工具路径。新发布声明 `apiVersion: 3` 和 `requires: {desktopRenderer: 1}`；桌面脚本通过 `AICO_HOME/desktop-renderer.json` 连接 Host 的私有渲染服务，Host 不可用时不回退本机浏览器。继承的 `AICO_SOFFICE_EXECUTABLE` 仍被过滤，避免旧环境污染。
 
 Host 在创建 Worker 时传入独立环境，Worker 收到环境后才导入 Editor 模块，并显式传入 `pythonExecutable`。私有 PATH 包含声明的工具、Host Node 和基本系统工具目录；继承的 Python / Node / Playwright 运行时覆盖与凭据变量被移除。`AICO_HOME`、`AICO_PPT_EDITOR_STATE_ROOT`、项目 sidecar 和工作副本仍由现有状态解析器管理，插件不修改全局 `process.env`。没有 `aicoRuntime` 时，`apply(ctx)` 沿用源码 Editor 行为。
 
 只有配置桌面运行时的 Skill 定义会在规范正文后追加包装器说明，磁盘上的 `SKILL.md` 不变。包装器允许 `python3` / `node` 的普通参数、`-m` / `-c` / `-e`、stdin 和项目脚本；它只选择环境，命令审批与沙箱仍归 Harness。调用保持原工作目录，文档中的 `scripts/` 相对路径须解析到本 Skill 根目录，输出继续指向用户项目。
+
+可信 sidecar helper 的 Python 冷启动握手单独等待最多 10 秒；握手成功后，普通文件命令仍使用原来的 1 秒预算。启动时限可显式配置，但最多 30 秒；超时仍终止并回收 helper，未得到可信 ACK 不继续打开编辑器。
 
 启动失败直接拒绝插件激活；启动后的 Worker 崩溃写入 Host 日志，并使后续页面注入报告失败。移除插件时先请求 `app.close()`，随后等待 Worker 退出；超过 15 秒仍未退出时，等待强制终止完成并报告关闭超时。启动超过 30 秒也会终止并拒绝激活。
 

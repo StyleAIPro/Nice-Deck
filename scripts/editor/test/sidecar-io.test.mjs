@@ -603,6 +603,39 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
   };
   const baseIdentity = { path:'/tmp/project', realPath:'/tmp/project', dev:'1', ino:'2' };
 
+  await t.test('initialize 独立等待冷启动，普通请求仍受原时限约束', async () => {
+    const child = fakeChild((current, line) => {
+      const request = JSON.parse(String(line));
+      if (request.command !== 'initialize') return;
+      setTimeout(() => current.stdout.emit('data', `${JSON.stringify({
+        id:request.id, ok:true, result:{ initialized:true },
+      })}\n`), 125);
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:50, startupTimeoutMs:500,
+    });
+    await assert.rejects(() => io.discover({ deckName:'deck.html' }), error => (
+      error.code === 'SIDECAR_HELPER_TIMEOUT'
+    ));
+    assert.equal(child.killed, true);
+    await io.close();
+  });
+
+  await t.test('initialize 超过独立启动时限仍终止并回收 helper', async () => {
+    const child = fakeChild((current, line) => {
+      const request = JSON.parse(String(line));
+      setTimeout(() => current.stdout.emit('data', `${JSON.stringify({
+        id:request.id, ok:true, result:{ initialized:true },
+      })}\n`), 125);
+    });
+    await assert.rejects(() => createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child,
+      timeoutMs:500, startupTimeoutMs:30,
+    }), error => error.code === 'SIDECAR_HELPER_TIMEOUT' && error.committed === false);
+    assert.equal(child.killed, true);
+  });
+
   await t.test('request timeout 终止 helper', async () => {
     const child = fakeChild();
     const io = await createPersistentSidecarIO({
@@ -769,8 +802,12 @@ test('附件 publish 使用专用有界超时且未知 ACK 一律保守标记已
     await writeFile(join(source, 'attachment.bin'), 'bytes');
     const script = `
       const fs = require('node:fs');
-      process.stdin.setEncoding('utf8');
-      process.stdin.once('data', () => {
+      require('node:readline').createInterface({ input:process.stdin }).on('line', line => {
+        const request = JSON.parse(line);
+        if (request.command === 'initialize') {
+          process.stdout.write(JSON.stringify({ id:request.id, ok:true, result:{} }) + '\\n');
+          return;
+        }
         fs.renameSync(${JSON.stringify(source)}, ${JSON.stringify(target)});
         setTimeout(() => {}, 10_000);
       });
@@ -782,7 +819,6 @@ test('附件 publish 使用专用有界超时且未知 ACK 一律保守标记已
       }),
       timeoutMs:10,
       attachmentTimeoutMs:300,
-      skipReadyHandshake:true,
     });
     await assert.rejects(() => io.publishAttachments(payload), error => (
       error.code === 'SIDECAR_HELPER_TIMEOUT'

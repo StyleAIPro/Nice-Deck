@@ -13,7 +13,7 @@ AICO-PPT 是**可独立使用的 Skill + AICO-Harness 编辑器插件**。独立
 
 本仓库同时提供可选的 DSH 插件适配层，但适配层不会复制这份 Skill。DSH Host 直接把当前 `SKILL.md` 注册进全局 skill 目录并启动原 Editor Runtime，DSH Client 在原生对话右侧的通用 `workbench.persistent-view` 中嵌入它；页面栏、三种模式、属性、任务、历史、固化和导出仍由 Editor Core 拥有。每个 Deck 工作项通过稳定 `workId` 显式关联项目目录、DSH Workspace 和一个或多个 Session；Harness 左侧“新会话”中的 AICO-PPT 项目子菜单显式携带 `workId` 建立关联，普通新会话不关联 Deck；Editor 顶部选择器只展示和切换关联会话。明确创建的任务 Session 首条可见指令必须以 `/aico-ppt` 开头；恢复、切换任务或切换 Session 不得发送任何“继续”Prompt。“交给 Agent”必须固定发送到工作项的活动 DSH Session，不能回退到临时选中的普通 Session，也不得在插件内再启动 Codex / Claude Code / OpenCode PTY。切换普通 Session 不得改变或重载 Editor；点击已关联 Session 才切换对应工作项，内部恢复路由不得短暂显示启动初始页。原独立 Editor 只是带 PTY 的 `dev-shell` 开发/排障壳，不是第二个正式产品。能力边界见 `integrations/dsh/README.md`。
 
-在 AICO 桌面包内（`AICO_RUNTIME_KIND=desktop`），Host 提供 Node 与 Electron 渲染服务，插件携带私有 Python 及 PyMuPDF、pypdf、Pillow。新版插件发布使用 `apiVersion: 2`，要求 Host 支持 `desktopRenderer: 1`。沿用注入的 `PYTHON`、PATH、`AICO_HOME` 与运行时包装器，不在应用资源目录运行 npm/pip 安装或修复；渲染服务不可用时启动或升级兼容的 AICO Host，插件文件缺失时从商店重装插件。具体接口见 `docs/adr/0006-desktop-runtime-capabilities.md`。
+在 AICO 桌面包内（`AICO_RUNTIME_KIND=desktop`），Host 提供 Node 与 Electron 渲染服务，插件携带私有 Python 及 PyMuPDF、pypdf、Pillow。新版插件发布使用 `apiVersion: 3`，要求 Host 支持 `desktopRenderer: 1`。沿用注入的 `PYTHON`、PATH、`AICO_HOME` 与运行时包装器，不在应用资源目录运行 npm/pip 安装或修复；渲染服务不可用时启动或升级兼容的 AICO Host，插件文件缺失时从商店重装插件。具体接口见 `docs/adr/0006-desktop-runtime-capabilities.md`。 sidecar 的 Python 冷启动握手单独等待最多 10 秒；普通文件命令与可信路径检查保持原约束。Windows 使用默认数据目录，过深自定义 `AICO_HOME` 可能超出上游 Python 的路径处理范围。
 
 ## 从零做一份 PPT？先走流程
 
