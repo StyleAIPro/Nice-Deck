@@ -180,6 +180,35 @@ class LauncherTest(unittest.TestCase):
         with mock.patch.object(launcher, "choose_deck", return_value=None):
             self.assertEqual(launcher.main(["--pick-only"]), 3)
 
+    def test_save_pptx_defaults_to_project_path_and_supports_cancel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "演示文稿.pptx"
+            with mock.patch.object(launcher, "choose_pptx_save", return_value=path) as choose:
+                with mock.patch("sys.stdout") as stdout:
+                    self.assertEqual(launcher.main(["--save-pptx-only", "--default-path", str(path)]), 0)
+                choose.assert_called_once_with(str(path))
+            payload = json.loads("".join(call.args[0] for call in stdout.write.call_args_list))
+            self.assertEqual(payload["savePath"], str(path.absolute()))
+            with mock.patch.object(launcher, "choose_pptx_save", return_value=None):
+                self.assertEqual(launcher.main(["--save-pptx-only", "--default-path", str(path)]), 3)
+
+    def test_save_pptx_system_dialog_receives_directory_and_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "演示文稿.pptx"
+            with mock.patch.object(launcher.sys, "platform", "win32"), mock.patch.object(
+                launcher, "_choose_with_tk", return_value=str(path)
+            ) as choose:
+                self.assertEqual(launcher.choose_pptx_save(str(path)), path)
+                self.assertEqual(choose.call_args.args, ("asksaveasfilename",))
+                self.assertEqual(choose.call_args.kwargs["initialdir"], str(path.parent))
+                self.assertEqual(choose.call_args.kwargs["initialfile"], path.name)
+                self.assertTrue(choose.call_args.kwargs["confirmoverwrite"])
+            with mock.patch.object(launcher.sys, "platform", "darwin"), mock.patch.object(
+                launcher, "_run_applescript", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            ) as choose:
+                self.assertIsNone(launcher.choose_pptx_save(str(path)))
+                self.assertEqual(choose.call_args.args[1:], (path.name, str(path.parent)))
+
     def test_pick_directory_only_has_small_machine_readable_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(

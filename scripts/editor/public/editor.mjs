@@ -73,6 +73,8 @@ const zoomValue = document.querySelector('[data-zoom]');
 const revisionValue = document.querySelector('[data-revision]');
 const canvasPresentationButton = document.querySelector('[data-canvas-present]');
 const exportPptxButton = document.querySelector('[data-export-pptx]');
+const pptxExportControl = document.querySelector('[data-pptx-export-control]');
+const pptxExportStatus = document.querySelector('[data-pptx-export-status]');
 const pptxExportDialog = document.querySelector('[data-pptx-export-dialog]');
 const pptxExportCancel = document.querySelector('[data-pptx-export-cancel]');
 const pptxExportConfirm = document.querySelector('[data-pptx-export-confirm]');
@@ -209,6 +211,10 @@ let inspectorNotice = '';
 let pendingInspectorRequest = null;
 let historyNoticeTimer;
 let pptxExportBusy = false;
+let pptxExportTimer = null;
+let pptxExportRequest = 0;
+let pptxExportStarting = false;
+let pptxExportAnnouncement = '';
 const createRequests = new Set();
 const manualRequests = new Set();
 const commandReplies = new Map();
@@ -679,15 +685,47 @@ async function createCurrentDshWorkSession({ workId, contextKey } = {}) {
   }
 }
 
-function pptxDownloadName(response) {
-  const disposition = response.headers.get('content-disposition') ?? '';
-  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-  if (encoded) {
-    try { return decodeURIComponent(encoded); }
-    catch { /* 回退到兼容文件名。 */ }
+function renderPptxExport(state) {
+  const labels = { preparing:'准备导出…', choosing:'选择保存位置…',
+    exporting:'正在生成 PPTX…', saving:'正在保存…', completed:'PPTX 已保存',
+    failed:'导出失败，可重试', cancelled:'已取消导出' };
+  pptxExportBusy = ['preparing', 'choosing', 'exporting', 'saving'].includes(state.status);
+  exportPptxButton.disabled = pptxExportBusy;
+  exportPptxButton.dataset.exportState = pptxExportBusy ? 'busy' : state.status;
+  pptxExportControl.dataset.exportState = exportPptxButton.dataset.exportState;
+  exportPptxButton.setAttribute('aria-busy', String(pptxExportBusy));
+  const label = pptxExportBusy ? labels[state.status] : '导出为 PPTX';
+  exportPptxButton.setAttribute('aria-label', label);
+  exportPptxButton.title = label;
+  exportPptxButton.dataset.toolbarTooltip = label;
+  pptxExportStatus.textContent = labels[state.status] ?? '';
+  pptxExportStatus.hidden = state.status === 'idle';
+  pptxExportStatus.title = state.path ?? state.message ?? '';
+  const announcement = `${state.id}:${state.status}`;
+  if (announcement !== pptxExportAnnouncement) {
+    pptxExportAnnouncement = announcement;
+    if (state.status === 'completed') showHistoryNotice(`PPTX 已保存：${state.path}`, 'success');
+    if (state.status === 'failed') showHistoryNotice(`PPTX 导出失败：${state.message}`, 'error');
   }
-  const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
-  return plain || 'deck.pptx';
+}
+
+const pptxExportEndpoint = `/api/export/pptx/job?editorToken=${encodeURIComponent(editorToken)}`;
+async function refreshPptxExport() {
+  if (pptxExportStarting) return;
+  clearTimeout(pptxExportTimer);
+  const request = ++pptxExportRequest;
+  try {
+    const state = await requestJson(pptxExportEndpoint);
+    if (tornDown || request !== pptxExportRequest) return;
+    renderPptxExport(state);
+    if (!pptxExportBusy) return;
+  } catch {
+    // 页面恢复或网络重连时继续查询原任务，不重发导出请求。
+    if (tornDown || request !== pptxExportRequest) return;
+    pptxExportStatus.hidden = false;
+    pptxExportStatus.textContent = '正在恢复导出状态…';
+  }
+  pptxExportTimer = setTimeout(() => void refreshPptxExport(), 1000);
 }
 
 function openPptxExportDialog() {
@@ -705,53 +743,27 @@ async function onExportPptx() {
   if (pptxExportBusy) return;
   const mode = pptxExportDialog.querySelector('[name="pptx-export-mode"]:checked').value;
   closePptxExportDialog();
-  pptxExportBusy = true;
-  exportPptxButton.disabled = true;
-  exportPptxButton.dataset.exportState = 'busy';
-  exportPptxButton.setAttribute('aria-busy', 'true');
-  exportPptxButton.setAttribute('aria-label', '正在导出 PPTX');
-  exportPptxButton.title = '正在导出 PPTX';
-  exportPptxButton.dataset.toolbarTooltip = '正在导出 PPTX';
-  showHistoryNotice('正在生成 PPTX，页数较多时可能需要几十秒…');
+  clearTimeout(pptxExportTimer);
+  const request = ++pptxExportRequest;
+  pptxExportStarting = true;
+  renderPptxExport({ status:'preparing' });
   try {
-    const response = await fetch(endpoint('/api/export/pptx'), {
+    const state = await requestJson(pptxExportEndpoint, {
       method:'POST',
       headers:{ 'content-type':'application/json' },
       body:JSON.stringify({ expectedRevision:revision, mode }),
     });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      const error = new Error(body.message || `HTTP ${response.status}`);
-      error.code = body.code ?? body.error;
-      throw error;
-    }
-    const filename = pptxDownloadName(response);
-    const blob = await response.blob();
-    const href = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = href;
-    link.download = filename;
-    link.hidden = true;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(href), 0);
-    showHistoryNotice(`PPTX 已导出：${filename}`, 'success');
+    if (!tornDown && request === pptxExportRequest) renderPptxExport(state);
   } catch (error) {
     const message = error.code === 'REVISION_CONFLICT'
       ? '编辑内容刚刚更新，请再次点击导出'
       : error.code === 'PPTX_EXPORT_BUSY'
         ? '已有一个 PPTX 正在导出，请稍候'
         : error.message;
-    showHistoryNotice(`PPTX 导出失败：${message}`, 'error');
+    if (!tornDown) showHistoryNotice(`PPTX 导出未启动：${message}`, 'error');
   } finally {
-    pptxExportBusy = false;
-    exportPptxButton.disabled = false;
-    delete exportPptxButton.dataset.exportState;
-    exportPptxButton.removeAttribute('aria-busy');
-    exportPptxButton.setAttribute('aria-label', '导出为 PPTX');
-    exportPptxButton.title = '导出为 PPTX';
-    exportPptxButton.dataset.toolbarTooltip = '导出为 PPTX';
+    pptxExportStarting = false;
+    if (!tornDown && request === pptxExportRequest) void refreshPptxExport();
   }
 }
 
@@ -2667,12 +2679,13 @@ eventsClient = connectEvents({
       deckFrame.contentWindow?.postMessage({ type:'rollback-all-tentative' }, location.origin);
     } else {
       announceDeckReady();
-      if (seenOnline) void loadSession().catch(() => {});
+      if (seenOnline) { void loadSession().catch(() => {}); void refreshPptxExport(); }
       else seenOnline = true;
     }
   },
 });
 const startupRequests = [
+  refreshPptxExport(),
   loadSession(),
   requestJson('/api/deck-binding').then(binding => renderDeckBinding(binding)),
   requestJson('/api/agent-runs/current').then(run => {
@@ -2692,6 +2705,8 @@ void Promise.all(startupRequests).then(() => {
 function teardown() {
   if (tornDown) return;
   tornDown = true;
+  clearTimeout(pptxExportTimer);
+  pptxExportRequest += 1;
   pendingHistoryShortcut = null;
   clearTimeout(historyNoticeTimer);
   deckFrame.contentWindow?.postMessage({ type: 'editor-teardown' }, location.origin);

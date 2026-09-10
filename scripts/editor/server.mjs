@@ -41,6 +41,8 @@ import {
 } from './creation-handoff-context.mjs';
 import { parseTaskMultipart } from './multipart-task.mjs';
 import { exportPptxSnapshot } from './pptx-exporter.mjs';
+import { createPptxExportJob } from './pptx-export-job.mjs';
+import { pickPptxSaveWithSystemPicker } from './system-picker.mjs';
 import { defaultPythonExecutable, pythonUtf8SpawnOptions } from './python-utf8.mjs';
 import { openDeckBinding } from './deck-binding-coordinator.mjs';
 import { pickDeckWithSystemPicker } from './system-picker.mjs';
@@ -1398,6 +1400,7 @@ export async function startServer({
   editorAssets = null,
   pythonExecutable = DEFAULT_PYTHON_EXECUTABLE,
   pptxExporter = exportPptxSnapshot,
+  pickPptxFile = options => pickPptxSaveWithSystemPicker({ pythonExecutable, ...options }),
   pptxExportTimeoutMs = 5 * 60 * 1_000,
   managedWorkingDeck = true,
   workingPatchVerifier = verifyWorkingPatchReplay,
@@ -2174,6 +2177,18 @@ export async function startServer({
     void queueWorkingDeckCheckpoint().catch(() => {});
   };
 
+  const pptxExportJob = createPptxExportJob({
+    prepare:async expectedRevision => {
+      await guardWorkingRevision(expectedRevision);
+      const patches = bridge.compiledRuntimeWriteActions();
+      return workingDeckStore.managed
+        ? workingDeckStore.materializePatches(patches)
+        : workingDeckStore.read();
+    },
+    pickPath:pickPptxFile,
+    convert:input => pptxExporter({ ...input, pythonExecutable, timeoutMs:pptxExportTimeoutMs }),
+  });
+
   const server = createServer(async (request, response) => {
     response.once('finish', () => {
       if (watcherClosed) server.closeIdleConnections?.();
@@ -2245,6 +2260,34 @@ export async function startServer({
         setImmediate(() => void close().catch(() => {}));
         return;
       }
+      if (pathname === '/api/export/pptx/job') {
+        if (url.searchParams.get('editorToken') !== editorToken) {
+          throw httpError('EDITOR_CAPABILITY_REQUIRED', 403, '导出保存需要编辑器能力令牌');
+        }
+        if (request.method === 'GET') {
+          json(response, 200, pptxExportJob.snapshot());
+          return;
+        }
+        if (request.method === 'POST') {
+          if (request.headers.origin === undefined) {
+            throw httpError('BROWSER_ORIGIN_REQUIRED', 403, '保存窗口只接受当前 Editor 页面发起的请求');
+          }
+          const { expectedRevision, mode = 'editable' } = await readJson(request);
+          requireRevision(expectedRevision);
+          if (expectedRevision !== sessionStore.state.revision) {
+            throw httpError('REVISION_CONFLICT', 409, '编辑内容刚刚更新，请再次点击导出');
+          }
+          if (!['image', 'editable'].includes(mode)) {
+            throw httpError('PPTX_EXPORT_MODE_INVALID', 400, 'PPTX 导出模式必须为 image 或 editable');
+          }
+          if (pptxExportBusy) throw httpError('PPTX_EXPORT_BUSY', 409, '已有一个 PPTX 正在导出，请稍候');
+          const filename = `${basename(currentDeckPath, extname(currentDeckPath)) || 'deck'}.pptx`;
+          const projectRoot = agentWorkspaceStore.snapshot().projectRoot;
+          json(response, 202, pptxExportJob.start({ expectedRevision, mode,
+            defaultPath:join(projectRoot, filename) }));
+          return;
+        }
+      }
       if (request.method === 'POST' && pathname === '/api/export/pptx') {
         const { expectedRevision, mode = 'image' } = await readJson(request);
         requireRevision(expectedRevision);
@@ -2252,7 +2295,7 @@ export async function startServer({
           throw httpError('PPTX_EXPORT_MODE_INVALID', 400, 'PPTX 导出模式必须为 image 或 editable');
         }
         await guardWorkingRevision(expectedRevision);
-        if (pptxExportBusy) {
+        if (pptxExportBusy || pptxExportJob.busy) {
           throw httpError('PPTX_EXPORT_BUSY', 409, '已有一个 PPTX 正在导出，请稍候');
         }
         pptxExportBusy = true;
@@ -3260,7 +3303,7 @@ export async function startServer({
         writerClosed.push(writer.closed);
         writer.cancel(httpError('SERVICE_CLOSED', 503, '服务已关闭'));
       }
-      const exportClosed = [];
+      const exportClosed = [pptxExportJob.close()];
       for (const job of activePptxExports) {
         exportClosed.push(job.promise);
         job.controller.abort();

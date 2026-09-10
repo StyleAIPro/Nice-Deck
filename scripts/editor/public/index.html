@@ -231,7 +231,8 @@
             </span>
           </div>
           <div class="canvas-tools" aria-label="画布状态">
-            <button class="canvas-export-button" type="button" data-export-pptx
+            <span class="pptx-export-control" data-pptx-export-control>
+            <button class="canvas-export-button" type="button" data-export-pptx disabled
               aria-label="导出为 PPTX" title="导出为 PPTX" data-toolbar-tooltip="导出为 PPTX"
               aria-haspopup="dialog"
               data-pill-nav data-pill-variant="ghost" data-pill-size="sm" data-pill-kind="icon">
@@ -241,6 +242,8 @@
                 <path d="M7 9H5.8A1.8 1.8 0 0 0 4 10.8v7.4A1.8 1.8 0 0 0 5.8 20h12.4a1.8 1.8 0 0 0 1.8-1.8v-7.4A1.8 1.8 0 0 0 18.2 9H17"></path>
               </svg>
             </button>
+            <span class="pptx-export-status" data-pptx-export-status role="status" aria-live="polite" hidden></span>
+            </span>
             <span class="canvas-resolution">画布 1920 × 1080</span>
             <span class="zoom-value">缩放 <span data-zoom>—</span></span>
             <span class="revision-value">会话版本 R<span data-revision>0</span></span>
@@ -302,6 +305,7 @@
       <div class="solidify-dialog-copy">
         <h2 id="pptx-export-title">导出 PPTX</h2>
         <p>选择适合后续使用的格式。</p>
+        <p>保存位置默认当前项目目录。切换项目或收起工作台后，导出仍会继续。</p>
         <fieldset class="pptx-export-options" aria-label="PPTX 导出格式">
           <label class="pptx-export-option">
             <input type="radio" name="pptx-export-mode" value="editable" checked>

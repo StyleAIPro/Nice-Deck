@@ -322,6 +322,38 @@ def choose_project_directory(default_path=None):
         raise LauncherError("无法打开系统目录选择器") from error
 
 
+def choose_pptx_save(default_path):
+    """选择 PPTX 保存位置，系统窗口负责覆盖确认。"""
+    path = Path(default_path).expanduser().absolute()
+    if sys.platform == "darwin" and Path("/usr/bin/osascript").is_file():
+        result = _run_applescript(
+            """
+            on run argv
+              try
+                set pickedFile to choose file name with prompt "保存 PPTX" default name (item 1 of argv) default location (POSIX file (item 2 of argv))
+                return POSIX path of pickedFile
+              on error number -128
+                return ""
+              end try
+            end run
+            """,
+            path.name, str(path.parent),
+        )
+        if result.returncode != 0:
+            raise LauncherError((result.stderr or "无法打开保存窗口").strip())
+        selected = result.stdout.strip()
+    else:
+        try:
+            selected = _choose_with_tk(
+                "asksaveasfilename", title="保存 PPTX", initialdir=str(path.parent),
+                initialfile=path.name, defaultextension=".pptx",
+                filetypes=[("PowerPoint", "*.pptx")], confirmoverwrite=True,
+            )
+        except Exception as error:
+            raise LauncherError("无法打开 PPTX 保存窗口") from error
+    return Path(selected) if selected else None
+
+
 def show_native_error(message):
     """桌面模式用原生对话框报告错误；失败时退回 stderr。"""
     detail = str(message).strip() or "未知错误"
@@ -981,6 +1013,7 @@ def main(argv=None):
     parser.add_argument("--detach-windows", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--pick-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--pick-directory-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--save-pptx-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--default-path", help=argparse.SUPPRESS)
     parser.add_argument("--agent-thread-id", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -999,8 +1032,24 @@ def main(argv=None):
             "--agent-provider 只支持 auto、" + "、".join(AGENT_PROVIDERS)
         )
 
-    if args.pick_only and args.pick_directory_only:
-        parser.error("--pick-only 与 --pick-directory-only 不能同时使用")
+    if sum([args.pick_only, args.pick_directory_only, args.save_pptx_only]) > 1:
+        parser.error("文件、目录和 PPTX 保存选择器不能同时使用")
+
+    if args.save_pptx_only:
+        if not args.default_path:
+            parser.error("PPTX 保存选择器需要 --default-path")
+        try:
+            selected = choose_pptx_save(args.default_path)
+            if selected is None:
+                return 3
+            path = selected.expanduser().absolute()
+            if path.suffix.lower() != ".pptx":
+                raise LauncherError("请选择 .pptx 格式的保存路径")
+        except LauncherError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        print(json.dumps({"savePath": str(path)}, ensure_ascii=False))
+        return 0
 
     if args.pick_only:
         try:

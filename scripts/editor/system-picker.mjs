@@ -15,6 +15,7 @@ function pickPathWithSystemPicker({
   pickerFlag,
   resultKey,
   resultLabel,
+  kind = pickerFlag === '--pick-only' ? 'deck' : 'directory',
   defaultPath,
   signal,
   spawnProcess = spawn,
@@ -26,9 +27,12 @@ function pickPathWithSystemPicker({
       const response = await fetchRequest(environment.AICO_DESKTOP_DIALOG_URL, {
         method:'POST', signal, redirect:'error',
         headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${environment.AICO_DESKTOP_DIALOG_TOKEN}` },
-        body:JSON.stringify({ kind:pickerFlag === '--pick-only' ? 'deck' : 'directory', defaultPath }),
+        body:JSON.stringify({ kind, defaultPath }),
       });
       const result = await response.json();
+      if (!response.ok && kind === 'pptx' && result.error === 'Invalid picker') {
+        throw pickerError('当前 AICO 桌面版本不支持 PPTX 保存窗口，请更新桌面应用');
+      }
       if (!response.ok) throw pickerError(result.error || '原生文件选择器不可用');
       if (result.path !== null && (typeof result.path !== 'string' || !result.path)) throw pickerError('原生文件选择器返回路径无效');
       return result.path;
@@ -111,5 +115,12 @@ export function pickProjectDirectoryWithSystemPicker(options = {}) {
     pickerFlag:'--pick-directory-only',
     resultKey:'directoryPath',
     resultLabel:'目录',
+  });
+}
+
+export function pickPptxSaveWithSystemPicker(options = {}) {
+  return pickPathWithSystemPicker({
+    ...options, kind:'pptx', pickerFlag:'--save-pptx-only',
+    resultKey:'savePath', resultLabel:'保存位置',
   });
 }

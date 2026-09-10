@@ -20,7 +20,7 @@
 <section data-label="页名" style="width:100%; height:100%; padding:56px 90px; display:flex; flex-direction:column; background:#fff; font-family:'Noto Sans SC',sans-serif; overflow:hidden; position:relative;">
   <div style="font-family:'JetBrains Mono',monospace; font-size:18px; letter-spacing:.2em; color:#b5333b; margin-bottom:10px;">1.3 · 小节名 / ENGLISH</div>
   <h3 style="margin:0 0 8px; font-weight:600; font-size:46px; letter-spacing:-.02em; color:#1a1a1c;">大标题</h3>
-  <p style="margin:0 0 22px; max-width:1320px; font-size:21px; line-height:1.55; color:#585860;">一行导语，<b style="color:#1565c0;">点睛的结论用蓝色加粗</b>。</p>
+  <!-- 导语默认省略；只有新增且必需的背景才加 21px 正文，取舍见 design-system.md 第 4.1 节 -->
   <div style="flex:1; min-height:0;">
     <!-- 主体：卡片 / 两栏 / 网格 / 图。flex:1 + min-height:0 让它吃满并能收缩 -->
   </div>

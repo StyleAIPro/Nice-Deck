@@ -19,7 +19,7 @@ AICO-Harness 桌面 Host 与 PPT 分开发行。用户在插件商店安装 PPT 
 
 桌面渲染服务通过认证的回环 TCP 连接管理隐藏沙箱页面，连接关闭即释放页面；能力文件不进入插件归档或网页配置。新发布声明 `apiVersion: 2` 与 `requires: {desktopRenderer: 1}`，缺少兼容 Host 能力时不能使用桌面渲染，也不回退系统 Chrome。独立 Skill 保留 Playwright 与本机 Chrome。这些工具变量只在 PPT 私有 Worker 及 `runtime-run.mjs` 脚本包装器中设置，Host 全局 PATH 不加入插件 Python。模型脚本通过包装器读取同一 `.aico-runtime.json`，重建私有环境；Node 复用 Host 的 `process.execPath`。
 
-原生文件选择请求只传入 `deck` 或 `directory`，返回用户选择的路径或取消结果。桌面端限制单个活动对话框；后端仍按已有路径和文件安全检查打开内容，原生对话框不扩大文件处理接口。
+原生文件选择请求传入 `deck`、`directory` 或 `pptx`；前两者打开文件或目录，`pptx` 打开保存窗口。可选的 `defaultPath` 指定默认目录或完整文件名，返回用户选择的路径或取消结果。桌面端限制单个活动对话框，保存窗口确认覆盖已有文件；PPT 后端只将导出结果原子写入选择器返回的 `.pptx` 路径，不接受网页直接提交写入路径。
 
 参考 PPTX 仅用标准库提取标题、正文、备注、表格与原始内嵌图片，供 AI 直接阅读，不提供 PPTX 渲染或转 PDF 能力。`pptx-read` 只检查随包提取工具；PPTX 截图组装也只用标准库，可选 HTML 附件图标使用 Pillow。`materials` 只检查 PyMuPDF 与 pypdf，前者负责普通 PDF 操作，后者负责 AcroForm 字段填写；运行时不再设置 `AICO_SOFFICE_EXECUTABLE`，仍过滤继承的同名变量。
 

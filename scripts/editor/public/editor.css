@@ -2804,13 +2804,40 @@ html[data-embedded="dsh"] .editor-shell[data-inspector-state="collapsed"] .canva
   stroke-width: 2;
 }
 
-.canvas-export-button[data-export-state="busy"] .canvas-export-icon {
-  animation: canvas-export-bob 900ms ease-in-out infinite;
+.pptx-export-control {
+  position: relative;
+  display: inline-flex;
+  flex: none;
 }
 
-@keyframes canvas-export-bob {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-2px); }
+.pptx-export-control[data-export-state="busy"]::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 2px solid rgb(200 0 15 / 16%);
+  border-top-color: var(--brand-red);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: pptx-export-spin 850ms linear infinite;
+}
+
+.pptx-export-status {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  max-width: 180px;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--brand-red-deep);
+}
+
+@keyframes pptx-export-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pptx-export-control[data-export-state="busy"]::after { animation-duration: 2s; }
 }
 
 .mode-tools {

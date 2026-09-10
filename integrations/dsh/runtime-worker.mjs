@@ -5,6 +5,8 @@ let app;
 let closing;
 const ready = (async () => {
   const { startAppServer, pickDeckWithSystemPicker, pickProjectDirectoryWithSystemPicker } = await import('../../scripts/editor/app-server.mjs');
+  const { startServer } = await import('../../scripts/editor/server.mjs');
+  const { pickPptxSaveWithSystemPicker } = await import('../../scripts/editor/system-picker.mjs');
   const pickerOptions = options => ({ ...options, pythonExecutable:workerData.paths.python, environment:workerData.desktopDialogs });
   app = await startAppServer({
     host:'127.0.0.1', port:0, openBrowser:false, embeddedMode:'dsh',
@@ -12,6 +14,10 @@ const ready = (async () => {
     ...(workerData.desktopDialogs ? {
       pickDeck:options => pickDeckWithSystemPicker(pickerOptions(options)),
       pickAgentProjectDirectory:options => pickProjectDirectoryWithSystemPicker(pickerOptions(options)),
+      // 打开已有 Deck 与创建流程中的 Editor 共用这个工厂，保存能力不进入脚本环境。
+      startEditor:options => startServer({ ...options,
+        pickPptxFile:input => pickPptxSaveWithSystemPicker(pickerOptions(input)),
+      }),
     } : {}),
   });
   parentPort.postMessage({ type:'ready', appUrl:app.appUrl });

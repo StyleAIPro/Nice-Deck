@@ -249,10 +249,12 @@ test('页面抽屉箭头使用统一圆形样式并随状态反向', async t => 
 
 test('画布工具栏选择可编辑或高清图片 PPTX，取消不导出并保持忙碌状态', async t => {
   const exportModes = [];
+  let savedPath;
   let releaseExport;
   const pendingExport = new Promise(resolvePromise => { releaseExport = resolvePromise; });
   t.after(() => releaseExport());
   const app = await startFixtureServer({
+    pickPptxFile:async ({ defaultPath }) => { savedPath = defaultPath; return defaultPath; },
     pptxExporter:async ({ htmlBytes, mode }) => {
       exportModes.push(mode);
       assert.match(htmlBytes.toString('utf8'), /slide-canvas/);
@@ -306,29 +308,62 @@ test('画布工具栏选择可编辑或高清图片 PPTX，取消不导出并保
   assert.deepEqual(exportModes, []);
 
   await button.click();
-  const downloadPromise = page.waitForEvent('download');
   await dialog.getByRole('button', { name:'开始导出', exact:true }).click();
   assert.equal(await dialog.isVisible(), false);
   assert.equal(await button.isEnabled(), false);
   assert.equal(await button.getAttribute('aria-busy'), 'true');
+  assert.equal(await page.locator('[data-pptx-export-control]').evaluate(node => (
+    getComputedStyle(node, '::after').animationName
+  )), 'pptx-export-spin');
   releaseExport();
-  const download = await downloadPromise;
-  assert.equal(download.suggestedFilename(), 'minimal-deck.pptx');
-  assert.deepEqual(await readFile(await download.path()), Buffer.from('PK\u0003\u0004fixture-pptx'));
-  assert.deepEqual(exportModes, ['editable']);
   await page.waitForFunction(() => (
-    document.querySelector('[data-history-notice]')?.textContent
-      === 'PPTX 已导出：minimal-deck.pptx'
+    document.querySelector('[data-pptx-export-status]')?.textContent === 'PPTX 已保存'
   ));
+  assert.deepEqual(await readFile(savedPath), Buffer.from('PK\u0003\u0004fixture-pptx'));
+  assert.deepEqual(exportModes, ['editable']);
   assert.equal(await button.isEnabled(), true);
   await button.click();
   await dialog.getByRole('radio', { name:/高清图片 PPTX/ }).check();
-  const imageDownload = page.waitForEvent('download');
   await dialog.getByRole('button', { name:'开始导出', exact:true }).click();
-  await imageDownload;
+  await page.waitForFunction(() => (
+    document.querySelector('[data-pptx-export-status]')?.textContent === 'PPTX 已保存'
+  ));
   assert.deepEqual(exportModes, ['editable', 'image']);
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
+});
+
+test('切换项目与收起 Editor 后，返回恢复导出转圈与保存结果', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  let calls = 0;
+  const app = await startFixtureServer({
+    pickPptxFile:async ({ defaultPath }) => defaultPath,
+    pptxExporter:async () => { calls += 1; await pending; return Buffer.from('PK\u0003\u0004后台结果'); },
+  });
+  const other = await startFixtureServer();
+  t.after(async () => { await app.close(); await other.close(); });
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  const editorUrl = page.url();
+  await page.locator('[data-export-pptx]').click();
+  await page.getByRole('button', { name:'开始导出', exact:true }).click();
+  await page.waitForFunction(() => document.querySelector('[data-pptx-export-status]')?.textContent === '正在生成 PPTX…');
+  await page.goto(`${other.url}/editor/?token=${other.token}&editorToken=${other.editorToken}`);
+  await page.waitForFunction(() => !document.querySelector('[data-export-pptx]')?.disabled);
+  assert.equal(await page.locator('[data-pptx-export-status]').isVisible(), false);
+  await page.goto(editorUrl);
+  await page.waitForFunction(() => document.querySelector('[data-pptx-export-status]')?.textContent === '正在生成 PPTX…');
+  assert.equal(await page.locator('[data-export-pptx]').isDisabled(), true);
+  assert.equal(calls, 1);
+  await page.screenshot({ path:'/tmp/aico-ppt-export-busy.png' });
+  await page.goto('about:blank');
+  release();
+  await page.goto(editorUrl);
+  await page.waitForFunction(() => document.querySelector('[data-pptx-export-status]')?.textContent === 'PPTX 已保存');
+  assert.equal(await page.locator('[data-export-pptx]').isEnabled(), true);
+  assert.equal(calls, 1);
 });
 
 test('Agent 任务列表点击外部区域自动收起，内部操作保持展开', async t => {

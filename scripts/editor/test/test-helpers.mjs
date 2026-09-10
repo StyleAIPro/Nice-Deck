@@ -46,6 +46,7 @@ export async function startFixtureServer(options = {}) {
       resumeAgentTerminalConversation: options.resumeAgentTerminalConversation,
       autoStartAgentTerminal: options.autoStartAgentTerminal,
       pptxExporter:options.pptxExporter,
+      pickPptxFile:options.pickPptxFile,
       pptxExportTimeoutMs:options.pptxExportTimeoutMs,
       workingPatchVerifier: options.workingPatchVerifier ?? (async () => ({ ok:true })),
       pickDeckFile:options.pickDeckFile,

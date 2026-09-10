@@ -5,6 +5,32 @@ import {
   buildSkillContractInstructions,
   coreQualityRules,
 } from '../deck-quality-contract.mjs';
+import {
+  buildCreationInitializationPrompt,
+  buildGenerationPrompt,
+} from '../deck-creation-workspace.mjs';
+import { buildSessionInitializationPrompt } from '../agent-runner.mjs';
+
+test('新建、初版生成与编辑初始化完整注入共享规则', () => {
+  const prompts = {
+    新建:buildCreationInitializationPrompt({
+      projectRoot:'/tmp/project', capabilityPath:'/tmp/capability.json',
+    }),
+    初版生成:buildGenerationPrompt({
+      generation:{ stagingDeck:'/tmp/deck.html', stagingPlan:'/tmp/deck.plan.md' },
+      outline:{ sections:[] }, pagePlan:{ pages:[] },
+    }),
+    编辑:buildSessionInitializationPrompt({
+      deckPath:'/tmp/deck.html', projectPath:'/tmp/project', skillRoot:'/skill',
+    }),
+  };
+  const rules = coreQualityRules();
+  for (const [entry, prompt] of Object.entries(prompts)) {
+    for (const [index, rule] of rules.entries()) {
+      assert.ok(prompt.includes(`${index + 1}. ${rule}`), `${entry} 漏掉共享规则 ${index + 1}`);
+    }
+  }
+});
 
 test('所有入口原样复用同一质量契约且 phase 不产生分支', () => {
   const expected = buildSkillContractInstructions({ skillRoot:'/skill' });
