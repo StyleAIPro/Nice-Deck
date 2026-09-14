@@ -172,3 +172,15 @@ test('持久化 Adapter 可恢复完整确认状态，事件 revision 与快照�
   assert.equal(events.at(-1).revision, store.snapshot().revision);
   assert.equal(events.at(-1).snapshot.revision, store.snapshot().revision);
 });
+
+// 场景必须通过需求确认闸门，不能只在模板目录中显示。
+test('任职材料与项目评审场景能够确认需求并进入大纲', async () => {
+  for (const [scene, templateId] of [['任职材料', 'qualification'], ['项目评审', 'project-review']]) {
+    const store = await createStore();
+    await store.dispatch({ type:'update-brief', expectedRevision:0, patch:{ ...validBrief(), scene, recommendedTemplateId:templateId } });
+    const confirmed = await store.dispatch({ type:'confirm-brief', expectedRevision:1 });
+    assert.equal(confirmed.snapshot.phase, 'outline');
+    assert.equal(confirmed.snapshot.brief.scene, scene);
+    assert.equal(confirmed.snapshot.brief.recommendedTemplateId, templateId);
+  }
+});

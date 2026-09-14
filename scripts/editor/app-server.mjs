@@ -544,7 +544,8 @@ export async function startAppServer({
       return entry;
     }
   };
-  const runtimeAwareHistory = async () => {
+  const runtimeAwareHistory = async ({ bindings = 'refresh' } = {}) => {
+    if (bindings === 'metadata') return activeWorkCatalog.listSessionTargets();
     const history = await activeWorkCatalog.list();
     const editing = await Promise.all(history.editing.map(async entry => {
       const runtime = findEditingRuntime(entry);
@@ -821,12 +822,13 @@ export async function startAppServer({
     await activeWorkCatalog.reopenEditing({
       deckPath:selectedCandidate.deckPath,
     });
-    const history = await activeWorkCatalog.list();
+    const history = await activeWorkCatalog.listSessionTargets();
     const canonicalDeckPath = await realpath(selectedCandidate.deckPath)
       .catch(() => resolve(selectedCandidate.deckPath));
-    const workItem = history.editing.find(entry => (
+    const found = history.editing.find(entry => (
       entry.deckPath === canonicalDeckPath
     )) ?? null;
+    const workItem = found ? await activeWorkCatalog.resolve(found.workId) : null;
     if (workItem) {
       selectedCandidate.workId = workItem.workId;
       selectedCandidate.deckId = workItem.deckId;
@@ -1141,7 +1143,8 @@ export async function startAppServer({
 
     if (request.method === 'GET' && requestUrl.pathname === '/api/work-history') {
       try {
-        sendJson(response, 200, { ...await runtimeAwareHistory(), removed:await activeWorkCatalog.listRemoved() });
+        const bindings = requestUrl.searchParams.get('bindings') === 'metadata' ? 'metadata' : 'refresh';
+        sendJson(response, 200, { ...await runtimeAwareHistory({ bindings }), removed:await activeWorkCatalog.listRemoved() });
       } catch (error) {
         sendJson(response, 500, {
           code:'WORK_HISTORY_UNAVAILABLE', message:error.message || '无法读取可继续任务',

@@ -96,6 +96,50 @@ test('陈旧更新返回独立 WORKSPACE_REVISION_CONFLICT', async () => {
   assert.equal(store.snapshot().activeProvider, 'claude-code');
 });
 
+function legacyDshWorkspace() {
+  const value = createEmptyWorkspace({ deckSessionId:SESSION_ID, projectRoot:ROOT });
+  value.activeProvider = 'dsh';
+  value.providers = { dsh:{ activeConversationId:null, conversations:[] } };
+  value.projectRoot = process.platform === 'win32' ? '/Users/old/project' : String.raw`C:\old\project`;
+  return value;
+}
+
+test('嵌入宿主恢复旧 dsh 空占位记录，同时保留 Deck 身份并修复跨系统目录', async () => {
+  const persisted = legacyDshWorkspace();
+  const sidecarIO = memorySidecar({ persisted });
+  const store = await openStore(sidecarIO, { dshAgentBridge:true });
+  assert.equal(store.snapshot().deckSessionId, persisted.deckSessionId);
+  assert.equal(store.snapshot().workspaceRevision, persisted.workspaceRevision);
+  assert.equal(store.snapshot().createdAt, persisted.createdAt);
+  assert.equal(store.snapshot().projectRoot, ROOT);
+  assert.equal(store.snapshot().activeProvider, 'codex');
+  assert.deepEqual(Object.keys(store.snapshot().providers).sort(), ['claude-code','codex','opencode']);
+  assert.equal(sidecarIO.writes, 1);
+  await store.close();
+  await openStore(sidecarIO, { dshAgentBridge:true });
+  assert.equal(sidecarIO.writes, 1, '重启不得重复迁移');
+});
+
+test('旧 dsh 占位修复不丢弃会话、未知字段，也不用于独立终端', async () => {
+  for (const mutate of [
+    value => { value.providers.dsh.conversations = [{ id:'keep-history' }]; },
+    value => { value.providers.dsh.activeConversationId = 'keep-history'; },
+    value => { value.providers.dsh.extra = 'keep-data'; },
+    value => { value.providers.extra = {}; },
+    value => { value.extra = 'keep-data'; },
+    value => { value.deckSessionId = 'another-deck'; },
+  ]) {
+    const persisted = legacyDshWorkspace(); mutate(persisted);
+    const sidecarIO = memorySidecar({ persisted });
+    await assert.rejects(() => openStore(sidecarIO, { dshAgentBridge:true }));
+    assert.equal(sidecarIO.writes, 0);
+    assert.deepEqual(sidecarIO.disk, persisted);
+  }
+  const sidecarIO = memorySidecar({ persisted:legacyDshWorkspace() });
+  await assert.rejects(() => openStore(sidecarIO), /provider dsh 不受支持/);
+  assert.equal(sidecarIO.writes, 0);
+});
+
 test('持久化失败不发布 candidate，且不会泄漏可变状态引用', async () => {
   const sidecarIO = memorySidecar({
     failWrite:({ writes }) => writes === 2

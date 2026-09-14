@@ -11,7 +11,8 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
     description:'操作当前会话关联的 PPT。先 inspect 读取 taskId 或 pageKey/query 的目标、父容器和当前截图，再 edit 原样使用目标提交。普通编辑无需读取完整 Skill、源码或协议，不要额外改版式。edit 返回提交结果及同版本截图；已提交但检查未完成时用 view/result，禁止重交。setText payload={text}; setStyle={property,value}; translate={x,y}; resize={width,height} 或 {scale}; hide/show={}; hide 是隐藏、不补位。复杂 DOM/整页修改仍走源码事务。',
     parameters:{type:'object',additionalProperties:false,properties:{
       operation:{type:'string',enum:['inspect','edit','view','result','verify']},
-      taskId:{type:'string'},pageKey:{type:'string'},query:{type:'string'},
+      taskId:{type:'string',description:'区域反馈任务 ID，不是 workId 或会话 ID。左侧对原任务的补充仍传原 taskId；独立新修改不传。'},
+      taskRelation:{type:'string',enum:['supplement','new'],description:'由 Agent 根据用户意图判断。supplement 需原 taskId；new 不传 taskId，不完成已有任务。有未完成标注时必须明确选择，歧义先澄清。'},pageKey:{type:'string'},query:{type:'string'},
       expectedRevision:{type:'integer',minimum:0},commandId:{type:'string'},
       actions:{type:'array',items:{type:'object',properties:{
         target:{type:'object'},kind:{type:'string',enum:['setText','setStyle','translate','resize','hide','show']},payload:{type:'object'},
@@ -28,6 +29,11 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
       if(!linked.ok)throw new Error('无法取得当前 PPT 工作区');
       const context=await linked.json();
       if(context.status!=='ready')throw new Error('请先打开此会话关联的 PPT Editor');
+      if(args.taskId&&args.taskId===context.workId)return {
+        status:'invalid-target',code:'WORK_ID_NOT_TASK_ID',
+        message:'传入的是工作项 ID，不是区域反馈任务 ID。当前工作区已由会话明确关联。',
+        recovery:'普通查看请调用 inspect 不传 taskId；指定页面用 pageKey/query。只有明确的区域反馈任务才传它自己的 taskId。',
+      };
       const capability=await readWorkspaceCapability(context.capabilityPath);
       const call=async(path,body)=>{
         const response=await request(new URL(path,capability.url),{method:body?'POST':'GET',
@@ -49,12 +55,27 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
         const imageRef=await attachments.saveImage({data:Buffer.from(image,'base64'),mediaType:'image/png',name:'aico-ppt-page.png'});
         return {...metadata,imageRef,visualStatus:'ready'};
       };
-      if(args.operation==='inspect'||args.operation==='view')return picture({taskId:args.taskId,pageKey:args.pageKey,query:args.query});
+      if(args.operation==='inspect'||args.operation==='view'){
+        try{return await picture({taskId:args.taskId,pageKey:args.pageKey,query:args.query});}
+        catch(error){
+          if(error.code!=='EDITOR_SOLIDIFYING')throw error;
+          return {status:'busy',code:error.code,message:'此 Deck 正在固化，尚未读取或修改中间副本。',recovery:'可以继续普通问答；固化完成后再 inspect 获取新版本，不要重复提交固化。'};
+        }
+      }
       if(args.operation==='result') {
         if(!args.commandId)throw new Error('读取结果需要 commandId');
         return call(`/api/commands/${encodeURIComponent(args.commandId)}`);
       }
       if(args.operation==='verify')return call('/api/verify',{});
+      const feedbackTasks=context.feedbackTasks??[];
+      const relationError=(code,message)=>({status:'needs-task-relation',code,message,committed:false,feedbackTasks,
+        recovery:'结合用户补充与最近追问自主判断：补充则传原 taskId 和 taskRelation:"supplement"；独立新修改传 taskRelation:"new" 且不传 taskId；有歧义才询问用户。已提交过的命令先用 result 查回执，不重放。'});
+      if(args.taskRelation==='new'&&args.taskId)return relationError('TASK_RELATION_CONFLICT','独立新修改不能同时关联原反馈任务');
+      if(args.taskRelation!==undefined&&!['supplement','new'].includes(args.taskRelation))return relationError('TASK_RELATION_CONFLICT','无效的任务归属判断');
+      if(!args.taskId&&(args.taskRelation==='supplement'||(feedbackTasks.length&&args.taskRelation!=='new')))
+        return relationError('TASK_RELATION_REQUIRED','尚未明确这是对哪条任务的补充，或独立新修改；未执行任何写入');
+      if(args.taskId&&Array.isArray(context.feedbackTasks)&&!feedbackTasks.some(task=>task.taskId===args.taskId))
+        return relationError('TASK_RELATION_STALE','该反馈任务已结束或不属于当前工作项，请重新确认任务状态');
       if(!Number.isSafeInteger(args.expectedRevision)||!Array.isArray(args.actions)||!args.actions.length)throw new Error('edit 需要 inspect 返回的 expectedRevision 和非空 actions');
       // 将命令号返回给调用方；断线后只按同一号查回执，不自动换版本重放写操作。
       const commandId=args.commandId??randomUUID();

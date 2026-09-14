@@ -452,7 +452,7 @@ function publishDshWorkContext({ refreshHistory = true } = {}) {
   ];
   dshWorkBridge.publishWorkContext(context, targets);
   if (!refreshHistory || dshWorkHistoryRequest) return;
-  dshWorkHistoryRequest = requestJson('/api/workspace-history').then(history => {
+  dshWorkHistoryRequest = requestJson('/api/workspace-history?bindings=metadata').then(history => {
     dshWorkHistory = history;
     publishDshWorkContext({ refreshHistory:false });
   }).catch(error => {

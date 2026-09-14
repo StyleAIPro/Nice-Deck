@@ -81,6 +81,8 @@ node --test scripts/editor/test/dsh-embedded-renzhi.e2e.mjs
 
 第二条测试复制 `Deck-Projects/renzhi/renzhi-deck.html` 到临时目录，验证 21 页加载、三种模式、顶部属性栏、原任务 drawer、任务转交、历史、固化和导出，并确认源文件字节没有变化。
 
+业务材料缺失时专项测试明确跳过；可用 `AICO_PPT_RENZHI_FIXTURE` 指定实际 Deck，用 `AICO_PPT_RENZHI_PAGE_COUNT` 指定嵌入态专项测试预期页数（默认 21），测试仍只操作副本。
+
 `test:dsh-plugin` 同时验证源码回退、桌面 Skill 追加说明、实际 Worker HTTP 启停、私有环境诊断、异常退出、关闭超时、模型 Node 参数和 Python stdin。运行时描述与子进程夹具全部位于测试独占临时目录；测试不会写入用户插件描述文件。设计决策见 [ADR-0007](../../docs/adr/0007-plugin-private-runtime.md)。
 
 桌面文件与目录选择能力通过 Host 到 Worker 的私有启动参数传递，仅注入系统选择器回调；地址与认证令牌不进入 Worker 通用环境、模型脚本或运行时描述文件。启动时验证通道必须是带认证信息的本机 `/pick` 地址。真实 Worker 到 Electron 对话框桥的回归覆盖 HTML 选择和创建项目目录选择，同时保留无令牌及带浏览器 Origin 请求的拒绝检查。
@@ -94,10 +96,14 @@ Creation CLI 每次通过 `--capability-file` 读取 Draft 的本机服务 URL �
 
 ## 简洁编辑与视觉确认
 
+左侧补充说明的任务归属由 Agent 根据最近追问、原任务描述、标注区域和新消息判断，不按“最近一条”或区域重叠自动绑定。每步上下文提供当前未完成反馈任务的精简列表；补充原任务时 `edit` 传 `taskRelation:"supplement"` 和原 `taskId`，独立新修改传 `taskRelation:"new"` 且不传 `taskId`。有待办却缺少归属选择时，工具返回候选信息且不写入；Agent 能判断就自行选择，歧义才询问用户。新修改不完成旧任务，也不自动把下一批标注并入当前批次。补充的源码修改沿用 `begin-source-task TASK_ID`，不能因消息来自左侧就改用无关联事务。关联修改提交后沿用 Editor 的任务与批次结算；失败、取消和等待澄清不冒充成功。
+
 Harness 中使用原生 `aico_ppt` 工具：`inspect` 返回当前版本、任务、目标、父容器和页面图；`edit` 原样使用 locator、expectedRevision 与稳定 commandId，返回提交状态、受影响页诊断及结果图。普通修改不重读完整 Skill，不额外扩宽或重排版式。`hide` 只隐藏、不补位；DOM 删除与补位走源码事务。
 
 `view` 提供包含未固化动作的 1920×1080、build 全显标准图，不改变用户画布的页码或缩放。它不是现场窗口截图，返回 stateId、revision、renderMode；内容变化使缓存失效。多页提交先返回首个受影响页，其余页按需 view。截图失败时保留已提交状态；使用 `result` 查询原 commandId 后补充 view，不用新命令重交。
 
 CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND_ID`。`verify` 通过只读 `/api/verify` 检查完整历史候选，不推进历史；普通动作诊断及同版本截图通过后无需重复验证。源码事务在提交、撤销和重做时检查有效历史，真实文件仅在固化成功后替换。页面、共享 CSS/脚本的实际差异决定局部结构或完整流程，不能由模型自称“简单”来绕过校验。
+
+普通查看不传 `taskId`；工作项 `workId` 不能当成区域任务 ID。固化期间读取返回明确忙碌状态，避免暴露中间副本。上下文探测的超时或断连不会终止普通问答，但本步禁止使用历史凭据操作 Deck；用户主动取消仍按 Host 的取消语义处理。这些逻辑与分块消息接收优化均为三平台共用实现。
 
 桌面区域任务使用简短说明，同轮相同编辑上下文去重，换工作项、新轮与压缩后恢复必要说明；连接与凭据即时读取。PPT 插件承载协议，Host 只提供通用工具、图片附件和隐藏渲染能力。

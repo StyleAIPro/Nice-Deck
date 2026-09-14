@@ -1,18 +1,20 @@
-# template-pages.md — 三套模板逐页索引
+# template-pages.md — 五套模板逐页索引
 
-`assets/` 下三套模板 deck 平等并列，同一套设计系统与工具链（edit-bundle / verify / html2pptx 全部通用），**按场景选起点**：
+`assets/` 下五套模板 deck 平等并列，同一套设计系统与工具链（edit-bundle / verify / html2pptx 全部通用），**按场景选起点**：
 
 | 场景 | 模板起点 | 页数 / 章 |
 |---|---|---|
 | 授课 / 培训 | `training-deck.html`（含黑板 / 研讨 / 动画全集） | 34 页 · 6 章 |
 | 技术分享 | `tech-share-deck.html`（深色 KV 封面 + 技术深挖章） | 37 页 · 5 章 |
+| 项目评审 / DRB | `project-review-deck.html`（组织、架构、组网、计划与填写表格） | 54 页 · 10 章 |
+| 任职资格评审 | `qualification-deck.html`（通用任职占位与举证页型） | 22 页 · 3 章 |
 | 汇报 / 述职 / 方案评审 | `work-report-deck.html`（官方化门面 + 业务页型全集） | 46 页 · 5 章 |
 
 **先用浏览器打开选定的 deck 从头滚一遍，再回来查对应小节的表。** 模板的占位文案本身就是「这一栏该写什么」的说明书：每个占位都在告诉你此处内容的写法、长度与语气。按场景选页型的基调见 `workflow.md` 场景适配表。
 
-**完整目录与固定页契约**：Editor 的 `template-catalog.mjs` 会直接解码三套 bundle，自动登记每一个实际页面；`template-catalog.json` 为全部页面补充稳定语义 ID，并由目录层给出视觉家族、密度、节奏角色、适用说明、来源模板与兼容场景，不再使用 `source-page-NN` 匿名兜底。创建 Deck 或修改其页面结构时，都必须保留所选 / 现有外壳的第 1 页封面、第 2 页目录和最后一页感谢页，分别使用 `cover` / `toc` / `thanks`。封面、感谢页只换必要文案；新建，或修改涉及目录 / 章节结构时，目录页保留外层版式，但内部条目和逐章动画按当前实际大纲重建。与页面结构无关的修改保持这些固定页不变。
+**完整目录与固定页契约**：Editor 的 `template-catalog.mjs` 会直接解码五套 bundle，自动登记每一个实际页面；`template-catalog.json` 为全部页面补充稳定语义 ID，并由目录层给出视觉家族、密度、节奏角色、适用说明、来源模板与兼容场景，不再使用 `source-page-NN` 匿名兜底。创建 Deck 或修改其页面结构时，都必须保留所选 / 现有外壳的第 1 页封面、第 2 页目录和最后一页感谢页，分别使用 `cover` / `toc` / `thanks`。封面、感谢页只换必要文案；新建，或修改涉及目录 / 章节结构时，目录页保留外层版式，但内部条目和逐章动画按当前实际大纲重建。与页面结构无关的修改保持这些固定页不变。
 
-**三份模板不合并，页型目录可以共享**：`pageTypes` 是当前场景外壳的原生页面；`availablePageTypes` 再加入明确声明 `compatibleWith` 的共享页型。同名页型始终优先当前外壳原生版本。借用页只允许通过下面的命令导入，工具会复制完整 section、合并该页实际引用的 manifest 资源，并写入来源模板、页型、PagePlan 页面和章节身份；不要手工把另一份 bundle 的 DOM 或资源 UUID 粘进目标文件。
+**五份模板不合并，页型目录可以共享**：`pageTypes` 是当前场景外壳的原生页面；`availablePageTypes` 再加入明确声明 `compatibleWith` 的共享页型。同名页型始终优先当前外壳原生版本。借用页只允许通过下面的命令导入，工具会复制完整 section、合并该页实际引用的 manifest 资源，并写入来源模板、页型、PagePlan 页面和章节身份；不要手工把另一份 bundle 的 DOM 或资源 UUID 粘进目标文件。
 
 ```bash
 python3 scripts/editor/deck_factory.py import-page my-deck.html \
@@ -26,13 +28,13 @@ python3 scripts/editor/deck_factory.py import-page my-deck.html \
   --plan-chapter-id practice
 ```
 
-## 三套通用规则
+## 五套通用规则
 
 - **页序即 data-label 清单**：页序从 0 起；shot / steps / measure_overflow / edit-bundle 把 `data-label` 当作工具侧页名，因此复制页后必须保持 label 唯一。Managed Editor 的稳定页面身份另由持久 `data-page-id` 承担，不随页序或标题变化。
 - **拍数** = 放映时这一页要点击几次才讲完，1 = 无动画；通用规律：**拍数 = 页内最大 `data-step` + 2**（进页空场算第 0 拍，讲完再多点一次翻页）。调节拍 = 改 `data-step` 编号，详见 `animation.md`。
 - **视觉家族与密度不是装饰标签**：逐页规划用它们控制节奏；连续三页同一视觉家族会被拒绝，四页以上的章节不得只有一种视觉家族，dense 页后优先接 light / breather 页。
 - **复制某页做多页**（详见 `editing-guide.md` 第 3 节）：用 `edit-bundle.py` 取出该页的整块 `<div class="slide-fit">…</div></div>`，把 `data-label` 改成新名字，再 `insert_page(s, 新块, before_label='目标位置页', nav_code='两字码', nav_label='新页名')`——DOM / 导航 / 章节起点三处同步它自动做完。⚠ 复制**封面 / 目录 / 章扉页 / 结语页 / 问题页 / 研讨页 / 黑板页**时注意：这些页的背景画、黑板底图、人像装饰是靠 `<style id="tpl-bg-950">` 里**按 data-label 精确匹配**的 CSS 规则挂上去的，新 label 要在该样式块里补一个选择器（如把 `section[data-label="章扉页"]` 的规则加上 `, section[data-label="章扉页2"]`），否则新页没有背景。
-- 三套模板共用页型只在授课节写全「长什么样 / 常用于 / 怎么改」三段，变体小节的表内直接指向授课节对应条目，避免三处重复维护。
+- 五套模板共用页型只在授课节写全「长什么样 / 常用于 / 怎么改」三段，变体小节的表内直接指向授课节对应条目，避免三处重复维护。
 
 ---
 
@@ -366,7 +368,15 @@ python3 scripts/editor/deck_factory.py import-page my-deck.html \
 
 ## 跨模板统计与提醒
 
-- 三套模板共含 30 页从官方 PPT/PDF 复刻的页型，具体以表内“复刻自官方参考胶片”标记为准；这些页均无动画。
+- 五套模板共含 30 页从官方 PPT/PDF 复刻的页型，具体以表内“复刻自官方参考胶片”标记为准；这些页均无动画。
 - 新增的 6 个复合高密度页型从经典项目胶片抽象为中性结构：代码曲线指标、战略能力项目组合、系统全景与交付侧栏、分层平台与运维侧栏、双层方法管线与原则栏、阶段责任交付图；全部登记为三场景可借用的共享页型。
 - 两套变体的 TOC 左侧动画只是中性 / 场景风格示例——新建 Deck 时按授课节「目录」条目和已确认大纲重建固定 layer 面板、`tocBuilders` 数组与每章动画。
 - 所有占位文案沿用「画廊即文档」风格：占位文字本身在教这一栏怎么写，标题常示范「标题即观点、点名技术」句式。制作时按 `workflow.md` 的页面任务重写，不强套句式；示例导语、标签与页尾说明按 `design-system.md` 第 4.1 节取舍，不是必填项。业务页型只是材料组织形式，不与任何具体业务绑定。
+
+## 任职材料 qualification-deck.html
+
+22 页、3 章，详见 [任职材料填写说明与逐页索引](qualification-template.md)。原材料的重复目录页已区分为目录、自评章扉、思考章扉，全部页面使用唯一 label。
+
+## 项目评审 project-review-deck.html
+
+54 页、10 章，详见 [项目评审填写说明与来源索引](project-review-template.md)。原始 53 页 PPTX 逐页映射到模板，目录前移，重复目录改为章扉，另加决策事项页；技术图纸重建为可编辑图形，附件改为证据占位。

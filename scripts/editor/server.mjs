@@ -1589,6 +1589,7 @@ export async function startServer({
       persistedConnection:sessionStore.state.agentConnection,
     });
     agentWorkspaceStore = await AgentWorkspaceStore.open({
+      dshAgentBridge,
       deckSessionId:sessionStore.state.sessionId,
       projectRoot:defaultAgentProject,
       projectRootSource,
@@ -2189,7 +2190,9 @@ export async function startServer({
     convert:input => pptxExporter({ ...input, pythonExecutable, timeoutMs:pptxExportTimeoutMs }),
   });
 
+  let solidifying = false;
   const server = createServer(async (request, response) => {
+    let ownsSolidification = false;
     response.once('finish', () => {
       if (watcherClosed) server.closeIdleConnections?.();
     });
@@ -2207,6 +2210,9 @@ export async function startServer({
 
       if (request.method === 'POST' && ['/api/inspect','/api/verify'].includes(pathname)) {
         const body=await readJson(request);
+        if(solidifying)throw httpError('EDITOR_SOLIDIFYING',409,'Deck 正在固化，请在完成后读取稳定版本');
+        const task=body.taskId ? sessionStore.state.tasks.find(t=>t.id===body.taskId) : null;
+        if(body.taskId&&!task)throw httpError('TASK_NOT_FOUND',404,'找不到区域反馈任务；普通查看不传 taskId，Work Item ID 不是 taskId');
         const revision=body.expectedRevision ?? sessionStore.state.revision;
         requireRevision(revision);
         await guardWorkingRevision(revision);
@@ -2220,8 +2226,6 @@ export async function startServer({
             {verify:workingPatchVerifier,droppableActionIds:bridge.sourceRebaseActionIds(actions)});
           result={...result,scope:'full-history-replay'};
         } else {
-          const task=body.taskId ? sessionStore.state.tasks.find(t=>t.id===body.taskId) : null;
-          if(body.taskId&&!task)throw httpError('TASK_NOT_FOUND',404,'找不到任务');
           if(body.query!==undefined&&(typeof body.query!=='string'||body.query.length>500))throw httpError('INVALID_INPUT',400,'检索文字无效');
           result=await editorView({bytes,actions,pythonExecutable},
             {pageKey:body.pageKey??task?.pageKey,query:body.query??'',rect:task?.rect??null});
@@ -2363,7 +2367,9 @@ export async function startServer({
         return;
       }
       if (request.method === 'GET' && pathname === '/api/workspace-history') {
-        json(response, 200, await workspaceHistoryProvider());
+        json(response, 200, await workspaceHistoryProvider({
+          bindings:url.searchParams.get('bindings') === 'metadata' ? 'metadata' : 'refresh',
+        }));
         return;
       }
       if (request.method === 'GET' && pathname === '/api/dsh-work-item') {
@@ -2714,6 +2720,11 @@ export async function startServer({
       }
       if (request.method === 'POST'
         && ['/api/write-deck', '/api/solidify-deck'].includes(pathname)) {
+        if(solidifying)throw httpError('EDITOR_SOLIDIFYING',409,'Deck 正在固化，请勿重复提交');
+        if(pathname==='/api/solidify-deck') {
+          solidifying=true;
+          ownsSolidification=true;
+        }
         const {
           expectedRevision, expectedBindingRevision, preflightToken=null,
         } = await readJson(request);
@@ -2913,6 +2924,8 @@ export async function startServer({
         if(failed)error.targetSummary={pageKey:failed.target.pageKey,kind:failed.kind,editorId:failed.target.editorId??null};
       }
       errorResponse(response, error);
+    } finally {
+      if(ownsSolidification)solidifying=false;
     }
   });
 

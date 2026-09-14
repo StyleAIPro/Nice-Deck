@@ -22,7 +22,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CURRENT_VERSION = "2026.08.3"
-VERSION_RE = re.compile(r'<meta name="aico-ppt-version" content="([^"]+)">')
+VERSION_RE = re.compile(r'<meta name="(?:aico-ppt|huawei-deck)-version" content="([^"]+)">')
 
 
 def load_edit_bundle():
@@ -57,12 +57,14 @@ USER_STYLE_START = "<!-- AICO_PPT_USER_STYLE_START -->"
 USER_STYLE_END = "<!-- AICO_PPT_USER_STYLE_END -->"
 USER_SCRIPT_START = "<!-- AICO_PPT_USER_SCRIPT_START -->"
 USER_SCRIPT_END = "<!-- AICO_PPT_USER_SCRIPT_END -->"
-HASH_RE = re.compile(r'<meta name="aico-ppt-runtime-hash" content="([^"]+)">')
-KIND_RE = re.compile(r'<meta name="aico-ppt-template-kind" content="([^"]+)">')
+HASH_RE = re.compile(r'<meta name="(?:aico-ppt|huawei-deck)-runtime-hash" content="([^"]+)">')
+KIND_RE = re.compile(r'<meta name="(?:aico-ppt|huawei-deck)-template-kind" content="([^"]+)">')
 LATEST_TEMPLATES = {
     "teaching": REPO / "assets" / "training-deck.html",
     "tech-share": REPO / "assets" / "tech-share-deck.html",
     "work-report": REPO / "assets" / "work-report-deck.html",
+    "qualification": REPO / "assets" / "qualification-deck.html",
+    "project-review": REPO / "assets" / "project-review-deck.html",
 }
 
 # 授课模板曾使用过过宽的 template-deck.html 名称。模板改名不能切断旧 Deck
@@ -71,12 +73,25 @@ TEMPLATE_HISTORY_PATHS = {
     "teaching": ("assets/training-deck.html", "assets/template-deck.html"),
     "tech-share": ("assets/tech-share-deck.html",),
     "work-report": ("assets/work-report-deck.html",),
+    "qualification": ("assets/qualification-deck.html",),
+    "project-review": ("assets/project-review-deck.html",),
 }
 
 
 def get_version(s):
     match = VERSION_RE.search(s)
     return match.group(1) if match else "未标记"
+
+
+def canonicalize_metadata(s):
+    """旧品牌标记与当前标记表示同一份元数据和用户扩展槽。"""
+    s = re.sub(r'(<meta name=")huawei-deck-(version|runtime-hash|template-kind)(")',
+               r'\1aico-ppt-\2\3', s)
+    for kind in ("STYLE", "SCRIPT"):
+        for edge in ("START", "END"):
+            s = s.replace(f"<!-- HUAWEI_DECK_USER_{kind}_{edge} -->",
+                          f"<!-- AICO_PPT_USER_{kind}_{edge} -->")
+    return s
 
 
 def set_version(s, version):
@@ -181,6 +196,7 @@ def _replace_profile(result, latest_block, user_block, label):
 
 
 def extract_user_content(s):
+    s = canonicalize_metadata(s)
     if not is_recomposable(s):
         raise MigrationError("无法唯一识别页面、导航或章节，不能安全重组公共外壳。")
     slide_start, slide_end = _slide_bounds(s)
@@ -209,6 +225,7 @@ def _replace_user_references(content, old, new):
 
 
 def compose_latest(latest, content):
+    latest = canonicalize_metadata(latest)
     slide_start, slide_end = _slide_bounds(latest)
     result = latest[:slide_start] + content["slides"] + latest[slide_end:]
     for name in ("nav", "chapters"):
@@ -238,6 +255,7 @@ def compose_latest(latest, content):
 
 def _normalize_runtime(s):
     """删除用户拥有区域，返回只代表 Skill 公共外壳的稳定文本。"""
+    s = canonicalize_metadata(s)
     s = patch_bundle.strip_block(s)
     content = extract_user_content(s)
     slide_start, slide_end = _slide_bounds(s)
@@ -338,6 +356,7 @@ def select_latest_template(s):
 
 def _merge_normalize(s):
     """三方合并用：只把用户页面数据换成稳定占位，保留壳内用户定制。"""
+    s = canonicalize_metadata(s)
     start, end = _slide_bounds(s)
     result = s[:start] + "__AICO_PPT_SLIDES__" + s[end:]
     for name in ("nav", "chapters"):
@@ -513,8 +532,8 @@ def merge_manifests(old_manifest, latest_manifest, latest, content):
 def build_upgrade(old_lines, latest_lines, template_kind):
     original_with_patches = eb.get_template(old_lines)
     patches = patch_bundle.extract_patches(original_with_patches)
-    original = patch_bundle.strip_block(original_with_patches)
-    latest = patch_bundle.strip_block(eb.get_template(latest_lines))
+    original = canonicalize_metadata(patch_bundle.strip_block(original_with_patches))
+    latest = canonicalize_metadata(patch_bundle.strip_block(eb.get_template(latest_lines)))
     content = extract_user_content(original)
     merged_manifest, content = merge_manifests(
         eb.get_manifest(old_lines), eb.get_manifest(latest_lines), latest, content
@@ -529,7 +548,13 @@ def build_upgrade(old_lines, latest_lines, template_kind):
     # 已有新版元数据也不代表公共壳没有被业务 Deck 直接定制。声明指纹与实际
     # 规范化外壳不一致时，必须把这些差异作为用户修改参与三方合并；直接
     # compose_latest 会静默丢掉目录交互等壳内逻辑，并连带让既有补丁失效。
-    has_custom_shell = bool(declared_hash and runtime_hash(original) != declared_hash)
+    original_hash = runtime_hash(original)
+    latest_hash = runtime_hash(latest)
+    # 品牌标记规范化或旧指纹算法会使声明值过期；外壳与当前模板完全相同
+    # 时直接重组，避免无意义的历史合并改变元数据顺序和扩展槽空白。
+    has_custom_shell = bool(
+        declared_hash and original_hash != declared_hash and original_hash != latest_hash
+    )
     if is_legacy or has_custom_shell:
         upgraded, _, _ = merge_legacy_shell(
             original, latest, template_kind, content

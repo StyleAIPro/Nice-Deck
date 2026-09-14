@@ -23,7 +23,7 @@ AICO-PPT 是**可独立使用的 Skill + AICO-Harness 编辑器插件**。独立
 
 本 Skill **不按新建 Deck 和修改 Deck 维护两套规范**。无论从 Creation Draft、Editor 终端、区域任务还是直接调用 Skill 进入，下面同一份质量契约都必须原样生效，不得按入口切换、删减或降级。入口差异只决定当前状态：还没有合法 bundle 时先收集需求、确认大纲与页面规划；已经有合法 bundle 时直接进入 Managed Workspace。合法 bundle 一旦出现，后续创建、续作和修改使用相同的编辑、验证与固化路径。
 
-1. **先识别或选择场景外壳，再从共享页型库选版式**：`training` / `tech-share` / `work-report` 三份 HTML 继续独立，决定封面、目录、感谢页和整套视觉基调；已有 Deck 默认继承现有外壳，除非用户明确要求不得换壳。逐页规划使用目录提供的 `availablePageTypes`（当前外壳原生页 + 明确标记兼容的共享页）。能套用既有页型时必须复用原 DOM 与组件，不另造一套卡片和布局；借用页只能经 `deck_factory.py import-page` 受控导入，不能手工跨 bundle 粘贴。
+1. **先识别或选择场景外壳，再从共享页型库选版式**：`training` / `tech-share` / `work-report` / `qualification` / `project-review` 五份 HTML 继续独立，决定封面、目录、感谢页和整套视觉基调；已有 Deck 默认继承现有外壳，除非用户明确要求不得换壳。逐页规划使用目录提供的 `availablePageTypes`（当前外壳原生页 + 明确标记兼容的共享页）。能套用既有页型时必须复用原 DOM 与组件，不另造一套卡片和布局；借用页只能经 `deck_factory.py import-page` 受控导入，不能手工跨 bundle 粘贴。
 2. **固定页角色不可丢，目录始终服从当前大纲**：封面必须第一、目录必须第二、感谢页必须最后，三者各一页。封面和感谢页仅替换必要文案并保留原始结构；目录页保留模板外层版式。新建，或修改涉及章数、章名、章节目标、页序、目录 DOM 或目录动画时，内部条目、layer 和动画必须按当前实际大纲重建；无关修改则保持目录结构不变，不能继承或重新带回模板示例内容。
 3. **标题就是核心观点**：内容页标题写清对象与主要判断；机制页点名技术，资产 / 计划页点明产物或目标场景，不强套技术句式或塞满全页要点；全部标题连读应形成论证链。
 4. **投影可读是硬门槛**：正文散文默认不小于 21px；代码、表格、坐标轴等例外遵循 `design-system.md`，不能靠无上限缩字塞内容。
@@ -32,7 +32,7 @@ AICO-PPT 是**可独立使用的 Skill + AICO-Harness 编辑器插件**。独立
 7. **先有事实与信息任务，再写页面**：直接写对象、动作、约束和结果，不写套话或 AI 式比喻；分清已完成、探索与建议、本项目新增与既有积累，核对数字口径。成果汇报要写出可重复方法、成果证据、具体资产，以及有目标对象的后续行动，不用泛化建议代替实际产物，也不编造缺失事实。材料组织与初版 / 终版内容自检见 `references/workflow.md` 第 1.1、2.1、4.1 节。
 8. **默认不补无用小字**：导语、页尾总结和装饰标签不是模板必填项；删去不影响理解的重复句与过程说明。必要单位、基线、范围随结论清楚呈现，详细来源实际保存到备注或伴生材料；取舍与来源去向见 `references/design-system.md` 第 4.1 节。
 
-创建会话和编辑会话由同一个质量契约模块生成初始化指令；`scripts/editor/template-catalog.mjs` 从模板 bundle 自动读取全部 34 / 37 / 46 页，并为每个实际页面补齐稳定语义 ID、视觉家族、密度、节奏角色、适用说明和来源模板，不再依赖容易漏页的手写六页清单或 `source-page-NN` 匿名兜底。`availablePageTypes` 在所选场景外壳之上合并经过 `compatibleWith` 审核的共享页型；同名页型优先使用当前外壳原生页。`DeckFactory` 在 staging 阶段给每页写入真实模板来源，并保存已确认 PagePlan 的只读发布契约；借用页由 `deck_factory.py import-page` 连同其 manifest 资源安全导入。发布前逐页核对页数、顺序、页型、页面 / 章节身份和 label，同时验证封面 / 感谢页结构锁、目录自适应契约、排版理由、配图计划与视觉家族节奏。少页、多页、错序、漏掉固定页、使用虚构页型、连续版式雷同、重做封面 / 感谢页或沿用目录示例动画都会拒绝发布。
+创建会话和编辑会话由同一个质量契约模块生成初始化指令；`scripts/editor/template-catalog.mjs` 从模板 bundle 自动读取全部 34 / 37 / 46 / 22 / 54 页，并为每个实际页面补齐稳定语义 ID、视觉家族、密度、节奏角色、适用说明和来源模板，不再依赖容易漏页的手写六页清单或 `source-page-NN` 匿名兜底。`availablePageTypes` 在所选场景外壳之上合并经过 `compatibleWith` 审核的共享页型；同名页型优先使用当前外壳原生页。`DeckFactory` 在 staging 阶段给每页写入真实模板来源，并保存已确认 PagePlan 的只读发布契约；借用页由 `deck_factory.py import-page` 连同其 manifest 资源安全导入。发布前逐页核对页数、顺序、页型、页面 / 章节身份和 label，同时验证封面 / 感谢页结构锁、目录自适应契约、排版理由、配图计划与视觉家族节奏。少页、多页、错序、漏掉固定页、使用虚构页型、连续版式雷同、重做封面 / 感谢页或沿用目录示例动画都会拒绝发布。
 
 ### 目录页自适应契约（新建与目录结构修改共用）
 
@@ -76,8 +76,8 @@ node scripts/editor/cli.mjs status
 
 ## 快速上手（5 步）
 
-1. **按场景复制模板**（所有命令都在本 skill 根目录执行）：授课 `cp assets/training-deck.html my-deck.html`；技术分享用 `assets/tech-share-deck.html`；汇报 / 述职用 `assets/work-report-deck.html`（三套差异与逐页索引见 `references/template-pages.md`）
-2. **建立 Managed Workspace 后挑页改占位**：浏览器滚一遍场景外壳，对照 `references/template-pages.md`（三套模板逐页索引）从 `availablePageTypes` 选择原生或兼容共享页型；已有元素细节走 ActionMutation，原生页型结构走工作副本上的 `edit-bundle.py`，共享页型走 `deck_factory.py import-page`（见 `references/editing-guide.md`）；品牌图 / 口号 / 品牌色替换见 `references/branding.md`。
+1. **按场景复制模板**（所有命令都在本 skill 根目录执行）：授课 `cp assets/training-deck.html my-deck.html`；技术分享用 `assets/tech-share-deck.html`；汇报 / 述职用 `assets/work-report-deck.html`；任职资格评审用 `assets/qualification-deck.html`，先读 `references/qualification-template.md`；项目评审用 `assets/project-review-deck.html`，先读 `references/project-review-template.md`（五套差异与逐页索引见 `references/template-pages.md`）
+2. **建立 Managed Workspace 后挑页改占位**：浏览器滚一遍场景外壳，对照 `references/template-pages.md`（五套模板逐页索引）从 `availablePageTypes` 选择原生或兼容共享页型；已有元素细节走 ActionMutation，原生页型结构走工作副本上的 `edit-bundle.py`，共享页型走 `deck_factory.py import-page`（见 `references/editing-guide.md`）；品牌图 / 口号 / 品牌色替换见 `references/branding.md`。
 3. **增删复制页**：用 `scripts/edit-bundle.py` 的 `insert_page` / `delete_page` / `move_page`——slide DOM、导航数组、章节起点**三处同步全自动**；从零拼页参考 `references/page-snippets.md`。
 4. **按实际影响验证**：普通文字、样式、移动、缩放、显隐使用 Editor 提交结果中的身份和版本校验、受影响页诊断及同版本截图，不默认重复全页和动画验证。DOM 修改必须通过完整历史候选重放；增删页、共享 CSS/脚本与影响范围不明时扩展全局检查。涉及制作、布局或动画时按影响页执行 verify 三件套，退出码 0 = 过：
 
@@ -197,7 +197,7 @@ CLI 出现 `COMMAND_TIMEOUT` 时不得绕过 Action 直接修改真实 Deck，�
 11. **卡片只用统一白卡体系**：同组同角色的大卡片统一白底 + 浅灰细边 + 14px 圆角，标题 / 正文 / 标签的字体层级与留白完全一致；默认黑色标题，只有文案明确说明选中、推荐、当前、风险或结论差异时才允许单卡红色高亮；删除不承载业务信息的胶囊、角标和版式说明标签 → `references/design-system.md` 第 5～6 节
 12. **异构架构必须展开差异单元**：当不同层 / Block / 模块的执行路径不同，不能只画抽象层列表；必须依据项目源码或正式规格展开代表单元，标清输入输出、状态、缓存、分支与选择策略 → `references/artwork.md` 第 3 节
 13. **自绘图按工程图验收**：红色只标真正关键节点，不画无意义红框；所有 SVG / HTML 图逐项检查文字不越框、箭头方向正确、线条接在框边而非穿框或悬空，普通 overflow 检测不能替代截图目检 → `references/artwork.md` 第 5 节
-14. **导航 / 缩放 / 放映运行时三模板一致**：左上侧边预览统一为 `图标 + x/yy`；放大后统一支持空格临时抓手、glass 小手锁定；放映态普通滚轮统一复用方向键节拍且按手势防抖。修改公共运行时只需同步三套模板并更新版本标记；外壳 hash 会自动触发旧 Deck 重组。只有用户内容 seam 或 bundle 格式变化时才改升级器 → `references/animation.md`
+14. **导航 / 缩放 / 放映运行时维护**：左上侧边预览统一为 `图标 + x/yy`；放大后统一支持空格临时抓手、glass 小手锁定；放映态普通滚轮统一复用方向键节拍且按手势防抖。修改公共运行时同步通用外壳并更新版本标记；外壳 hash 会自动触发旧 Deck 重组。只有用户内容 seam 或 bundle 格式变化时才改升级器 → `references/animation.md`
 15. **页内多画面只用 layer 协议**：目录、标签页、方案切换、阶段视图等互斥画面统一使用固定 DOM 的 `data-layer-btn` / `data-layer-panel` / `data-layer-group` / `data-active`；禁止再造 `_cur` / `data-mod` 状态机，也禁止在切换时用 `innerHTML` 重建按钮或面板 → `references/animation.md` 第 3 节
 16. **目录动画始终服从当前大纲**：新建，或修改涉及章数、章名、章节目标、页序、目录 DOM 或目录动画时，都必须逐章重建；不得原样继承模板 `tocBuilders`，发布前必须通过 `toc_contract.py` 与目录逐拍截图 → `references/animation.md` 第 3.2 节
 
@@ -208,8 +208,12 @@ CLI 出现 `COMMAND_TIMEOUT` 时不得绕过 Action 直接修改真实 Deck，�
 | `assets/training-deck.html` | 34 页授课模板 deck（复制后再改） |
 | `assets/tech-share-deck.html` | 37 页技术分享模板（深色 KV 封面 / 选型 / 原理 / 性能 / 代码曲线指标 / 精读 / 跟读 / 踩坑 / Takeaway） |
 | `assets/work-report-deck.html` | 46 页工作汇报模板（TL;DR / KPI / 战略能力组合 / 系统交付侧栏 / 分层运维架构 / 双层方法管线 / 阶段责任交付 / 甘特 / 风险） |
+| `assets/qualification-deck.html` | 22 页通用任职模板，保留举证页型，个人信息与图片均为占位 |
+| `assets/project-review-deck.html` | 54 页 DRB 项目评审模板（组织、架构、组网、计划与表格） |
+| `references/qualification-template.md` | 任职材料填写边界与页型索引 |
+| `references/project-review-template.md` | DRB 填写要求与原 PPTX 页码映射 |
 | `references/workflow.md` | 七阶段协作流程；材料事实整理、按页面问题组织、初版与终版内容自检 |
-| `references/template-pages.md` | 三套模板逐页索引：怎么选模板 + 每页长什么样 / 常用于 / 怎么改 / 动画拍数 |
+| `references/template-pages.md` | 五套模板逐页索引：怎么选模板 + 每页长什么样 / 常用于 / 怎么改 / 动画拍数 |
 | `references/design-system.md` | 颜色、字体、可读性、排版与卡片；导语 / 小字取舍和来源去向 |
 | `references/animation.md` | build / layer / SMIL 三机制写法、节拍设计与验证 |
 | `references/page-snippets.md` | 可直接粘贴的页面骨架与构件（每段注明模板活例） |
@@ -273,3 +277,11 @@ eb.verify('my-deck.html')           # 页数 / 导航 / 章节一致性检查
 已明确关联 Deck 的 Harness 会话会在每次模型调用前获得当前 Editor 工作区连接，包含受限 action capability 文件与托管工作副本路径；恢复旧会话或重启后重新解析，不依赖固定措辞。用户可直接在左侧讨论或要求修改，讨论只读，明确修改复用右侧同一工作区，无需先提交区域任务或退出 Editor。结构修改按 begin-source-edit / commit-source-edit 事务提交，每批成功后更新预览；事务期间人工写入保持串行保护。未关联会话不注入 Deck 能力，已关联但 Editor 不可用时提示重新打开对应工作区，不另起 headless 编辑器抢占租约。
 
 创建画布由外层宿主管理对话，不初始化独立终端；模板预览与编辑桥接分别就绪。若生成因编辑器离线或验证失败而保留 staging，修复后使用原 Draft 的 `generation-ready` 和最新 `expectedRevision` 重新执行完整验证与发布，保留同一 run 和工作副本；`retry-generation` 会重新创建模板，仅用于明确重新生成。固定页结构校验忽略托管元素 `data-editor-id` 和空元素标签序列化空格，仍校验布局属性与 DOM 结构。
+
+### 任职资格评审
+
+用户要写任职材料时，优先选 `qualification`（22 页），按 [任职材料模板](references/qualification-template.md) 收集申请专业、级别与举证材料。沿用页型并填写当前申请人的事实与举证材料，姓名、项目、结果、证明人与图片均需来自当前材料。目录按当前大纲重建。
+
+### 项目评审与 DRB
+
+用户要写项目评审材料时，优先选 `project-review`（54 页），先读 [项目评审模板](references/project-review-template.md)。按本次评审范围填写输入件、合同与责任边界、方案可交付性、实施与资源计划、伙伴、假设、风险、运维、成本和待决策事项。原参考文件为历史案例，当前流程及结论必须重新核实。

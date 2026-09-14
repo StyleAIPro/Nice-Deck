@@ -21,9 +21,10 @@ export async function connectDesktopRenderer(home = process.env.AICO_HOME) {
     || capability.port < 1 || capability.port > 65535 || !/^[a-f0-9]{64}$/.test(capability.token)) throw new Error('桌面渲染服务描述无效');
   const socket = connect(capability.port, capability.host);
   const requests = new Map(), pages = new Map();
-  let next = 0, buffer = '', closed = false;
+  let next = 0, chunks = [], bytes = 0, closed = false;
   const fail = () => {
     closed = true;
+    chunks = []; bytes = 0;
     for (const request of requests.values()) { clearTimeout(request.timer); request.reject(new Error('桌面渲染连接已关闭')); }
     requests.clear();
   };
@@ -31,11 +32,16 @@ export async function connectDesktopRenderer(home = process.env.AICO_HOME) {
   socket.on('close', fail);
   socket.setEncoding('utf8');
   socket.on('data', chunk => {
-    buffer += chunk;
-    if (Buffer.byteLength(buffer) > 64 * 1024 * 1024) { socket.destroy(); return; }
-    let end;
-    while ((end = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+    let offset = 0;
+    while (offset < chunk.length) {
+      const end = chunk.indexOf('\n', offset);
+      const part = chunk.slice(offset, end === -1 ? undefined : end);
+      bytes += Buffer.byteLength(part);
+      if (bytes > 64 * 1024 * 1024) { socket.destroy(); return; }
+      chunks.push(part);
+      if (end === -1) return;
+      const line = chunks.join(''); chunks = []; bytes = 0;
+      offset = end + 1;
       let result;
       try { result = JSON.parse(line); } catch { socket.destroy(); return; }
       if (result.event === 'pageerror') { pages.get(result.page)?.emit('pageerror', Object.assign(new Error(result.error.message), { name:result.error.name })); continue; }

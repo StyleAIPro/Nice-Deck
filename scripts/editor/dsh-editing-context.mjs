@@ -15,5 +15,11 @@ export async function resolveEditingContext({ sessionId, workCatalog, findEditin
     deckPath:app.deckPath, workingDeckPath:app.workingDeckPath,
     sessionDir:app.sessionDir, pid:process.pid,
   });
-  return { status:'ready', ...identity, capabilityPath, workingDeckPath:app.workingDeckPath };
+  // 只投影关联判断所需的任务信息，不加载截图、候选元素或整份修改历史。
+  const feedbackTasks = (app.session?.tasks ?? []).filter(task => task.status !== 'completed').map(task => {
+    const batch = [...(app.session?.agentBatches ?? [])].reverse().find(item => item.taskIds.includes(task.id));
+    return {taskId:task.id, instruction:task.instruction, pageKey:task.pageKey, pageLabel:task.pageLabel,
+      rect:task.rect, status:task.status, batchId:batch?.id ?? null, batchSettled:!!batch?.settlement};
+  });
+  return { status:'ready', ...identity, capabilityPath, workingDeckPath:app.workingDeckPath, feedbackTasks };
 }

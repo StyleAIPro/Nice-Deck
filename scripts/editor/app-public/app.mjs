@@ -349,7 +349,7 @@ function publishCreationDshWorkContext({ refreshHistory = true } = {}) {
     : [context, ...historyTargets.filter(target => target.workId !== context.workId)];
   dshBridge.publishWorkContext(context, targets);
   if (!refreshHistory || dshWorkHistoryRequest) return;
-  dshWorkHistoryRequest = requestJson('/api/work-history').then(history => {
+  dshWorkHistoryRequest = requestJson('/api/work-history?bindings=metadata').then(history => {
     dshWorkHistory = history;
     publishCreationDshWorkContext({ refreshHistory:false });
   }).catch(error => {
@@ -948,7 +948,7 @@ function renderRemovedProjects(entries) {
 
 async function loadWorkHistory() {
   try {
-    const result = await requestJson('/api/work-history');
+    const result = await requestJson('/api/work-history?bindings=metadata');
     dshWorkHistory = result;
     publishCreationDshWorkContext({ refreshHistory:false });
     renderRemovedProjects(result.removed ?? []);

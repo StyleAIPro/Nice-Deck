@@ -221,6 +221,33 @@ class SidecarAgentWorkspaceIOTest(unittest.TestCase):
             "未交换成功的事务必须清理，避免重启误判为已发布",
         )
 
+    def test_uncertain_publish_keeps_original_backup_and_transaction(self):
+        helper, session, project = self.make_bound_helper()
+        deck = project / "deck.html"
+        original = deck.read_bytes()
+        working = b"pending-publish"
+        helper.write_working_deck({
+            "sessionId": SESSION_ID,
+            "bytes": base64.b64encode(working).decode("ascii"),
+            "expectedFingerprint": None,
+        })
+        transaction_id = "923e4567-e89b-42d3-a456-426614174000"
+        uncertain = sidecar_io.SidecarIOError(
+            "发布回执丢失", committed=True, code="WINDOWS_PUBLISH_FAILED"
+        )
+        with mock.patch.object(sidecar_io, "_exchange_file_entries", side_effect=uncertain):
+            with self.assertRaises(sidecar_io.SidecarIOError):
+                helper.publish_working_deck({
+                    "sessionId": SESSION_ID, "transactionId": transaction_id,
+                    "expectedDeckFingerprint": hashlib.sha256(original).hexdigest(),
+                    "expectedWorkingFingerprint": hashlib.sha256(working).hexdigest(),
+                })
+        record = json.loads((session / "transactions" / f"{transaction_id}.json").read_text())
+        self.assertEqual(Path(record["backup"]).read_bytes(), original)
+        self.assertEqual(deck.read_bytes(), original)
+        self.assertEqual((session / "working" / "deck.html").read_bytes(), working)
+        self.assertEqual(len(list(project.glob(".deck.html.*.tmp"))), 1)
+
     def test_symlink_directory_fifo_and_oversize_are_rejected(self):
         helper, session, project = self.make_bound_helper()
         outside = project / "outside.json"

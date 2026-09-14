@@ -205,7 +205,7 @@ class LauncherTest(unittest.TestCase):
                 self.assertTrue(choose.call_args.kwargs["confirmoverwrite"])
             with mock.patch.object(launcher.sys, "platform", "darwin"), mock.patch.object(
                 launcher, "_run_applescript", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            ) as choose:
+            ) as choose, mock.patch.object(launcher.Path, "is_file", return_value=True):
                 self.assertIsNone(launcher.choose_pptx_save(str(path)))
                 self.assertEqual(choose.call_args.args[1:], (path.name, str(path.parent)))
 

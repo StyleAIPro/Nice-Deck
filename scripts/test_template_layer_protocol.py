@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""三套模板的页内多画面协议回归测试。"""
+"""全部模板的页内多画面协议回归测试。"""
 
 import importlib.util
 import re
@@ -12,6 +12,8 @@ TEMPLATES = (
     REPO / "assets" / "training-deck.html",
     REPO / "assets" / "tech-share-deck.html",
     REPO / "assets" / "work-report-deck.html",
+    REPO / "assets" / "qualification-deck.html",
+    REPO / "assets" / "project-review-deck.html",
 )
 
 
@@ -29,9 +31,10 @@ up = load_module("upgrade_deck_layer_contract", REPO / "scripts" / "upgrade_deck
 
 class TemplateLayerProtocolTest(unittest.TestCase):
     def test_toc_uses_fixed_layer_dom_in_all_templates(self):
-        expected = ["chapter-01", "chapter-02", "chapter-03", "chapter-04"]
         for path in TEMPLATES:
             with self.subTest(template=path.name):
+                count = {"qualification-deck.html": 3, "project-review-deck.html": 10}.get(path.name, 4)
+                expected = [f"chapter-{i:02d}" for i in range(1, count + 1)]
                 source = eb.get_template(eb.load(path))
                 start = source.index('<section data-label="目录"')
                 end = source.index("</section>", start)
@@ -46,7 +49,7 @@ class TemplateLayerProtocolTest(unittest.TestCase):
                 )
                 self.assertEqual(buttons, expected)
                 self.assertEqual(panels, expected)
-                self.assertEqual(toc.count('data-toc-visual-index="'), 4)
+                self.assertEqual(toc.count('data-toc-visual-index="'), count)
                 self.assertNotIn("data-mod", toc)
                 self.assertNotIn("innerHTML", toc)
                 button_tags = re.findall(r'<button\b[^>]+>', toc)

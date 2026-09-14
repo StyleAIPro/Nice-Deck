@@ -16,6 +16,23 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const FINGERPRINT = /^[a-f0-9]{64}$/;
 const DEFAULT_PYTHON_EXECUTABLE = defaultPythonExecutable();
 
+// 只扫描新到达的数据；逐块计算累计字符串大小会让大 Deck 接收退化为平方复杂度。
+function collectWorkingOutput(child) {
+  const chunks=[];
+  let bytes=0,exceeded=false;
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data',chunk=>{
+    if(exceeded)return;
+    bytes+=Buffer.byteLength(chunk);
+    if(bytes>MAX_WORKING_DECK_JSON_BYTES){exceeded=true;child.kill('SIGKILL');return;}
+    chunks.push(chunk);
+  });
+  return ()=>{
+    if(exceeded)throw new Error('工作副本适配器输出超过上限');
+    return chunks.join('');
+  };
+}
+
 function invalidWorkingDeck(error) {
   if (error && typeof error === 'object') {
     error.code = 'INVALID_WORKING_DECK';
@@ -46,14 +63,9 @@ function runPrepare(sourcePath, {
     const child = spawnProcess(pythonExecutable, [ADAPTER, sourcePath], pythonUtf8SpawnOptions({
       stdio:['ignore', 'pipe', 'pipe'],
     }));
-    let stdout = '';
+    const readOutput = collectWorkingOutput(child);
     let stderr = '';
-    child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => {
-      stdout += chunk;
-      if (Buffer.byteLength(stdout) > MAX_WORKING_DECK_JSON_BYTES) child.kill('SIGKILL');
-    });
     child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-16_384); });
     child.once('error', reject);
     child.once('close', code => {
@@ -61,7 +73,7 @@ function runPrepare(sourcePath, {
         reject(new Error(stderr.trim() || `工作副本适配器退出码 ${code}`));
         return;
       }
-      try { resolvePromise(decodePrepared(stdout)); }
+      try { resolvePromise(decodePrepared(readOutput())); }
       catch (error) { reject(error); }
     });
   });
@@ -74,14 +86,9 @@ export function materializePatchBytes(bytes, patches, {
     const child = spawnProcess(pythonExecutable, [ADAPTER, '--apply-patches'], pythonUtf8SpawnOptions({
       stdio:['pipe', 'pipe', 'pipe'],
     }));
-    let stdout = '';
+    const readOutput = collectWorkingOutput(child);
     let stderr = '';
-    child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => {
-      stdout += chunk;
-      if (Buffer.byteLength(stdout) > MAX_WORKING_DECK_JSON_BYTES) child.kill('SIGKILL');
-    });
     child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-16_384); });
     child.once('error', reject);
     child.once('close', code => {
@@ -90,7 +97,7 @@ export function materializePatchBytes(bytes, patches, {
         return;
       }
       try {
-        const value = JSON.parse(stdout);
+        const value = JSON.parse(readOutput());
         const output = Buffer.from(value.bytes, 'base64');
         if (!output.length) throw new Error('工作副本补丁适配器返回空内容');
         resolvePromise(output);
@@ -109,14 +116,9 @@ function runIdentityAdapter(bytes, {
     const child = spawnProcess(pythonExecutable, [ADAPTER, '--normalize-bytes'], pythonUtf8SpawnOptions({
       stdio:['pipe', 'pipe', 'pipe'],
     }));
-    let stdout = '';
+    const readOutput = collectWorkingOutput(child);
     let stderr = '';
-    child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => {
-      stdout += chunk;
-      if (Buffer.byteLength(stdout) > MAX_WORKING_DECK_JSON_BYTES) child.kill('SIGKILL');
-    });
     child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-16_384); });
     child.once('error', reject);
     child.once('close', code => {
@@ -125,7 +127,7 @@ function runIdentityAdapter(bytes, {
         return;
       }
       try {
-        const value = JSON.parse(stdout);
+        const value = JSON.parse(readOutput());
         const output = Buffer.from(value.bytes, 'base64');
         if (!output.length) throw new Error('工作副本身份适配器返回空内容');
         resolvePromise(output);

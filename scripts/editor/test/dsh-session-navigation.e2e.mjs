@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -11,12 +11,23 @@ import { startAppServer } from '../app-server.mjs';
 import { startServer } from '../server.mjs';
 import { WorkCatalog } from '../work-catalog.mjs';
 
-test('DSH 会话点击与项目切换都能在修改和创建任务间可靠往返', {
+test('DSH 恢复旧空占位后，打开编辑器与项目会话切换可靠往返', {
   timeout:45_000,
 }, async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-dsh-session-navigation-'));
   const deckPath = join(projectRoot, '会话切换测试.html');
   await copyFile(resolve('scripts/editor/test/fixtures/minimal-deck.html'), deckPath);
+  const seeded = await startServer({ deckPath, dshAgentBridge:true,
+    workId:'11111111-1111-4111-8111-111111111111',
+    dshWorkItemProvider:async () => null, dshWorkItemCommand:async () => null,
+  });
+  const legacyPath = join(seeded.sessionDir, 'agent-workspace.json');
+  await seeded.close();
+  const legacy = JSON.parse(await readFile(legacyPath, 'utf8'));
+  legacy.activeProvider = 'dsh';
+  legacy.providers = { dsh:{ activeConversationId:null, conversations:[] } };
+  legacy.projectRoot = process.platform === 'win32' ? '/Users/old/project' : String.raw`C:\old\project`;
+  await writeFile(legacyPath, JSON.stringify(legacy));
   const history = { creation:[], editing:[] };
   const workHistoryStore = {
     filePath:join(projectRoot, 'work-history.json'),
@@ -200,6 +211,10 @@ test('DSH 会话点击与项目切换都能在修改和创建任务间可靠往�
   await workbench.getByRole('button', { name:/打开编辑器/ }).click();
   const editingSelect = workbench.locator('[data-dsh-session-select]');
   await editingSelect.locator('option[value^="session-"]').waitFor({ state:'attached' });
+  const repaired = JSON.parse(await readFile(legacyPath, 'utf8'));
+  assert.equal(repaired.deckSessionId, legacy.deckSessionId);
+  assert.equal(repaired.projectRoot, projectRoot);
+  assert.equal(repaired.activeProvider, 'codex');
   assert.equal(
     await workbench.locator('[data-current-project-name]').textContent(),
     '会话切换测试.html',

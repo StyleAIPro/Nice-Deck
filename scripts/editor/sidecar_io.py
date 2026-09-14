@@ -409,6 +409,15 @@ def _exchange_file_entries(directory_fd, left, right):
         raise SidecarIOError("当前平台不支持原子文件 exchange")
     if result != 0:
         error_number = ctypes.get_errno()
+        if sys.platform.startswith("linux") and os.environ.get("WSL_DISTRO_NAME") \
+                and error_number in (errno.EINVAL, errno.ENOTSUP, errno.ENOSYS):
+            from wsl_file_exchange import exchange as windows_exchange, ExchangeError
+            try:
+                return windows_exchange(directory_fd, os.fsdecode(left), os.fsdecode(right))
+            except ExchangeError as error:
+                raise SidecarIOError(str(error), code="WINDOWS_PUBLISH_FAILED",
+                                     committed=error.committed,
+                                     commit_scope="deck" if error.committed else None) from error
         raise OSError(error_number, os.strerror(error_number), os.fsdecode(right))
 
 
@@ -1457,7 +1466,9 @@ class PersistentHelper:
                 "backup": backup_path,
                 "transaction": transaction_path,
             }
-        except Exception:
+        except Exception as error:
+            if getattr(error, "committed", False):
+                exchanged = True
             if exchanged:
                 try:
                     current = _read_fd_file(self.project_fd, self.deck_name)

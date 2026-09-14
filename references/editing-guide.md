@@ -496,4 +496,6 @@ Harness 中使用原生 `aico_ppt` 工具：`inspect` 返回当前版本、任�
 
 CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND_ID`。`verify` 通过只读 `/api/verify` 检查完整历史候选，不推进历史；普通动作诊断及同版本截图通过后无需重复验证。源码事务在提交、撤销和重做时检查有效历史，真实文件仅在固化成功后替换。页面、共享 CSS/脚本的实际差异决定局部结构或完整流程，不能由模型自称“简单”来绕过校验。
 
+普通会话查看使用 `aico_ppt({operation:"inspect"})`，不要把工作项 `workId` 填成区域任务 `taskId`；误填会返回 `WORK_ID_NOT_TASK_ID` 和重试说明。固化期间查看或验证返回 `EDITOR_SOLIDIFYING`，工具会说明稍后读取稳定版本，不自动重复固化。插件上下文暂不可达时仍可普通问答，但不得复用旧端口或凭据执行 Deck 操作。
+
 桌面区域任务使用简短说明，同轮相同编辑上下文去重，换工作项、新轮与压缩后恢复必要说明；连接与凭据即时读取。PPT 插件承载协议，Host 只提供通用工具、图片附件和隐藏渲染能力。

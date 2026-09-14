@@ -400,6 +400,7 @@ export function buildEditorBatchPrompt({taskIds,deckPath,serviceUrl,token}) {
     'AICO-PPT 区域编辑任务：'+JSON.stringify(taskIds),
     '托管工作副本：'+deckPath,
     '先用 aico_ppt({operation:"inspect",taskId}) 读取任务、当前 revision、目标与父容器和截图。已有文字/样式/位置/尺寸/显隐用 operation:"edit"，expectedRevision 使用 inspect 返回值，target 原样使用，actions 为 {target,kind,payload} 数组。',
+    '区域任务的 edit 必须带原 taskId 和 taskRelation:"supplement"，否则修改不能回写该任务。若用户随后在左侧补充，结合最近追问和任务语义自主判断；属于原任务则继续携带原 taskId，独立新修改用 taskRelation:"new" 且不传 taskId，不结束原任务；多个任务无法区分时才澄清。',
     '普通修改不重新读取完整 Skill、设计规范、创建背景或协议源码，不写临时定位/截图脚本。不擅自扩宽或重排无关内容。目标不明确时补查父容器，仍不明确才澄清。',
     'edit 已含提交、局部诊断与结果图。结果成功就无需重复 task/verify；先看图确认。若 visualStatus 待检查用 view；传输不明用 result 查询 commandId，不能重复执行已提交修改。',
     '复杂 DOM、整页删除/增删排序和全局模板变更才读取相应编辑规范，使用 CLI begin-source-task TASK_ID → edit-bundle.py → commit-source-edit；失败 cancel-source-edit，禁止直改真实源文件、手工补丁或退出 Editor。',

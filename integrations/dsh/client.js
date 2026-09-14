@@ -341,7 +341,9 @@ window.__ModuleLoader__.load({
       const fetchSequence = ++catalogFetchSequence;
       const endpoint = appCommandUrl("/api/work-history");
       if (endpoint === null) return [];
-      const response = await fetch(endpoint, { headers:{ accept:"application/json" } });
+      const metadataEndpoint = new URL(endpoint);
+      metadataEndpoint.searchParams.set("bindings", "metadata");
+      const response = await fetch(metadataEndpoint.href, { headers:{ accept:"application/json" } });
       if (!response.ok) throw new Error(`AICO-PPT 项目列表读取失败：HTTP ${response.status}`);
       const targets = sessionStartTargetsFromHistory(await response.json());
       targets.fetchSequence = fetchSequence;

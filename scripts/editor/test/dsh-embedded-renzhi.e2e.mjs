@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { startServer } from '../server.mjs';
 import { createPilotTasks, openEditor } from './test-helpers.mjs';
 
-const SOURCE_DECK = fileURLToPath(new URL(
+const SOURCE_DECK = process.env.AICO_PPT_RENZHI_FIXTURE ? resolve(process.env.AICO_PPT_RENZHI_FIXTURE) : fileURLToPath(new URL(
   '../../../Deck-Projects/renzhi/renzhi-deck.html', import.meta.url,
 ));
+const pageCount = Number(process.env.AICO_PPT_RENZHI_PAGE_COUNT ?? 21);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function waitRevision(page, expected) {
@@ -32,6 +34,8 @@ async function dragHandle(page, locator, { dx, dy }) {
 
 test('DSH 右侧工作台完整承载原版 renzhi Editor 操作与 Agent 消息桥', {
   timeout:90_000,
+  skip:!process.env.AICO_PPT_RENZHI_FIXTURE && !existsSync(SOURCE_DECK)
+    ? '未提供 renzhi 业务验收 Deck；可用 AICO_PPT_RENZHI_FIXTURE 指定' : false,
 }, async t => {
   const sourceBefore = sha256(await readFile(SOURCE_DECK));
   const root = await mkdtemp(join(tmpdir(), 'aico-ppt-dsh-renzhi-'));
@@ -133,7 +137,7 @@ test('DSH 右侧工作台完整承载原版 renzhi Editor 操作与 Agent 消息
   const { page, browserProblems, resourceProblems } = opened;
   page.setDefaultTimeout(15_000);
   await page.setViewportSize({ width:1920, height:1080 });
-  await page.waitForFunction(() => document.querySelectorAll('[data-page-key]').length === 21);
+  await page.waitForFunction(count => document.querySelectorAll('[data-page-key]').length === count, pageCount);
   await page.evaluate(projectRoot => window.postMessage({
     type:'aico-ppt:dsh-session-changed',
     session:{ sessionId:'dsh-test-session', title:'Deck 测试会话', cwd:projectRoot },

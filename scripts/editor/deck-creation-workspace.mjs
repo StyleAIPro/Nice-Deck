@@ -56,7 +56,7 @@ export function buildCreationInitializationPrompt({ projectRoot, capabilityPath 
     '用 propose-outline / confirm-outline、propose-page-plan / confirm-page-plan 依次沉淀大纲与页面规划；用户在对话中的明确同意就是确认依据。',
     'pageTypeId 必须来自所选模板目录；封面 cover 排第一、目录 toc 排第二、感谢页 thanks 排最后，三者必须各有且只有一页。',
     '页面不会提供前三步的结构化编辑器或确认按钮。完成页面规划后，由你执行 set-output，再执行 start-generation。',
-    'set-output payload 形如 {"output":{"fileName":"主题.html","templateId":"training|tech-share|work-report","includePlan":true,"trialPptx":false,"autoOpenEditor":true}}。独立 Deck 一出现，页面会自动显示 Deck 画布。',
+    'set-output payload 形如 {"output":{"fileName":"主题.html","templateId":"training|tech-share|work-report|qualification|project-review","includePlan":true,"trialPptx":false,"autoOpenEditor":true}}。独立 Deck 一出现，页面会自动显示 Deck 画布。',
     `当前 Draft capability 文件：${capabilityPath}。每次 creation CLI 命令均须加 --capability-file 参数；文件由服务维护，恢复后仍读取同一路径，不要读取、打印或复制其中凭据。`,
     `不要修改内置模板，也不要直接覆盖最终输出文件。独立 Deck 出现后，系统会给出 Editor 托管工作副本；结构制作只编辑该工作副本，并且必须通过 ${EDIT_BUNDLE}。`,
   ].join('\n');

@@ -42,6 +42,8 @@ const MAX_STARTUP_TIMEOUT_MS = 30_000;
 const WORKING_DECK_COMMANDS = new Set([
   'read-working-deck', 'write-working-deck', 'archive-working-deck',
   'restore-working-deck', 'publish-working-deck',
+  // 源文件和备份也要完整读取大 Deck，不能按轻量目录操作的 1s 预算处理。
+  'hash-deck', 'verify-backup',
 ]);
 const plainIdentity = identity => Object.fromEntries(
   ['path', 'realPath', 'dev', 'ino'].map(key => [key, identity[key]]),
@@ -113,7 +115,8 @@ class PersistentSidecarIO {
     );
     this.queue = [];
     this.active = null;
-    this.stdout = '';
+    this.stdoutChunks = [];
+    this.stdoutBytes = 0;
     this.stderr = '';
     this.closed = false;
     this.finished = false;
@@ -142,6 +145,8 @@ class PersistentSidecarIO {
     }
     this.finished = true;
     this.aborting = true;
+    this.stdoutChunks = [];
+    this.stdoutBytes = 0;
     clearTimeout(this.reapTimer);
     this.#failAll(error);
     this.resolveClosed();
@@ -189,24 +194,31 @@ class PersistentSidecarIO {
 
   #onStdout(chunk) {
     if (this.finished || this.aborting) return;
-    this.stdout += chunk;
-    const activeLimit = this.active?.command === 'read-working-deck'
-      ? this.maxWorkingDeckOutputBytes
-      : this.active?.command === 'read-session'
-        ? this.maxSessionOutputBytes
-      : this.active?.command === 'read-agent-workspace'
-        ? this.maxAgentWorkspaceOutputBytes
-        : this.maxOutputBytes;
-    if (Buffer.byteLength(this.stdout) > activeLimit) {
-      this.#abort(lifecycleError(
-        'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 输出超过上限',
-      ));
-      return;
-    }
-    let newline;
-    while ((newline = this.stdout.indexOf('\n')) >= 0) {
-      const line = this.stdout.slice(0, newline);
-      this.stdout = this.stdout.slice(newline + 1);
+    let offset = 0;
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf('\n', offset);
+      const part = chunk.slice(offset, newline < 0 ? chunk.length : newline);
+      const activeLimit = this.active?.command === 'read-working-deck'
+        ? this.maxWorkingDeckOutputBytes
+        : this.active?.command === 'read-session'
+          ? this.maxSessionOutputBytes
+          : this.active?.command === 'read-agent-workspace'
+            ? this.maxAgentWorkspaceOutputBytes
+            : this.maxOutputBytes;
+      this.stdoutBytes += Buffer.byteLength(part);
+      if (this.stdoutBytes + (newline < 0 ? 0 : 1) > activeLimit) {
+        this.#abort(lifecycleError(
+          'SIDECAR_HELPER_OUTPUT_LIMIT', 'sidecar helper 输出超过上限',
+        ));
+        return;
+      }
+      this.stdoutChunks.push(part);
+      if (newline < 0) return;
+      // 换行查找只扫描当前块，完整 JSON 仅在一条响应收齐时拼接一次。
+      const line = this.stdoutChunks.join('');
+      this.stdoutChunks = [];
+      this.stdoutBytes = 0;
+      offset = newline + 1;
       let response;
       try { response = JSON.parse(line); }
       catch {

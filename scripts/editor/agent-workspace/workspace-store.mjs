@@ -3,6 +3,7 @@ import { isAbsolute, posix, win32 } from 'node:path';
 import {
   createEmptyWorkspace,
   normalizeWorkspaceState,
+  AGENT_PROVIDER_IDS,
 } from './schema.mjs';
 
 function storeError(code, statusCode, message, details = {}) {
@@ -51,6 +52,25 @@ function repairForeignPersistedPaths(value, { projectRoot, projectRootSource }) 
   return { value:candidate, repaired };
 }
 
+function repairEmptyDshPlaceholder(value, enabled, activeProvider) {
+  const legacy = value?.providers?.dsh;
+  if (!enabled || value?.activeProvider !== 'dsh'
+    || Object.keys(value.providers ?? {}).length !== 1
+    || legacy === null || typeof legacy !== 'object' || Array.isArray(legacy)
+    || Object.keys(legacy).sort().join(',') !== 'activeConversationId,conversations'
+    || legacy.activeConversationId !== null
+    || !Array.isArray(legacy.conversations) || legacy.conversations.length !== 0) {
+    return { value, repaired:false };
+  }
+  // 旧嵌入模式的 dsh 只是空占位，不是可转成 Codex 的终端会话。
+  // 含有历史或未知字段的记录继续拒绝；其余字段仍经完整 schema 校验。
+  return { repaired:true, value:{ ...value, activeProvider,
+    providers:Object.fromEntries(AGENT_PROVIDER_IDS.map(id => [id, {
+      activeConversationId:null, conversations:[],
+    }])),
+  } };
+}
+
 export class AgentWorkspaceStore {
   static async open({
     deckSessionId,
@@ -59,6 +79,7 @@ export class AgentWorkspaceStore {
     projectRoot,
     projectRootSource = 'deck-directory',
     activeProvider = 'codex',
+    dshAgentBridge = false,
     now = () => new Date().toISOString(),
   }) {
     if (!sidecarIO
@@ -68,7 +89,8 @@ export class AgentWorkspaceStore {
     }
 
     const persisted = await sidecarIO.readAgentWorkspace({ missingOk:true });
-    const repairedPersisted = repairForeignPersistedPaths(persisted, {
+    const repairedProvider = repairEmptyDshPlaceholder(persisted, dshAgentBridge, activeProvider);
+    const repairedPersisted = repairForeignPersistedPaths(repairedProvider.value, {
       projectRoot,
       projectRootSource,
     });
@@ -93,7 +115,7 @@ export class AgentWorkspaceStore {
       state:candidate,
       now,
     });
-    if (persisted === null || repairedPersisted.repaired) {
+    if (persisted === null || repairedPersisted.repaired || repairedProvider.repaired) {
       await store.#persistAndPublish(candidate, { publish:false });
     }
     return store;

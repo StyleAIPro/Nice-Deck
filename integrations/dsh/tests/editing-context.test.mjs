@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installEditingContext } from '../editing-context.mjs';
+import { installEditingContext, renderEditingContext } from '../editing-context.mjs';
 import { resolveEditingContext } from '../../../scripts/editor/dsh-editing-context.mjs';
 
 test('自然语言与已有会话每步复用明确绑定的工作区，连接更新不串会话', async t => {
@@ -63,4 +63,29 @@ test('同轮相同上下文只注入一次，压缩和新轮次重新注入',asy
  assert.equal((await callback(input,async()=>decision)).messages.length,1);
  events.push({type:'turn/start',seq:3});
  assert.equal((await callback(input,async()=>decision)).messages.length,1);
+});
+
+test('PPT 暂时无响应不终止普通问答，也不继续使用历史编辑凭据',async()=>{
+ let callback;
+ installEditingContext({on(_event,fn){callback=fn;}},'http://localhost:1234/?token=x',{
+  fetchContext:async()=>{throw new DOMException('连接超时','TimeoutError');}});
+ const result=await callback({agent:{session:{id:'s'}},signal:new AbortController().signal},async()=>({kind:'continue',messages:[]}));
+ assert.equal(result.kind,'continue');
+ assert.match(result.messages[0].content[0].text,/暂时无法确认/);
+ assert.match(result.messages[0].content[0].text,/不要使用历史/);
+});
+
+test('每轮提供当前待办的精简关联信息，补充与新指令由 Agent 判断而非默认绑定',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'aico-task-context-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const state={tasks:[{id:'task-a',status:'pending',instruction:'ttt',pageKey:'p',pageLabel:'封面',rect:{x:1,y:2,w:3,h:4},snapshotPath:'不可注入的图片路径'},
+  {id:'task-b',status:'pending',instruction:'第二条'}, {id:'done',status:'completed'}],
+  agentBatches:[{id:'batch-a',taskIds:['task-a'],settlement:null}]};
+ const app={sessionDir:root,workingDeckPath:'/copy',deckPath:'/source',url:'http://localhost:1234',token:'private',session:state};
+ const resolve=()=>resolveEditingContext({sessionId:'s',workCatalog:{resolveByDshSession:async()=>({kind:'editing',workId:'w'})},findEditingRuntime:()=>({app})});
+ const context=await resolve();assert.equal(context.feedbackTasks.length,2);
+ assert.deepEqual(context.feedbackTasks.map(t=>t.taskId),['task-a','task-b']);
+ assert.equal(context.feedbackTasks[0].batchId,'batch-a');assert.equal(context.feedbackTasks[1].batchId,null);
+ assert.ok(!JSON.stringify(context.feedbackTasks).includes('snapshotPath'));
+ const text=renderEditingContext(context);assert.match(text,/supplement/);assert.match(text,/taskRelation.*new/);assert.match(text,/澄清/);assert.match(text,/task-a/);
+ state.tasks[0].status='completed';assert.deepEqual((await resolve()).feedbackTasks.map(t=>t.taskId),['task-b']);
 });

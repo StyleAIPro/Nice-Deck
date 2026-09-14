@@ -4,11 +4,13 @@
 
 产品定位：**独立 Skill + AICO-Harness 编辑器插件**。独立 Skill 可在没有 AICO-Harness 的环境正常创建、修改、验证和导出 Deck；所有用户可视化编辑入口统一位于 AICO-Harness 应用。源码配套安装、Harness 网页启动器和独立 Editor 均仅用于开发、回归与故障排查，见[开发调试说明](INSTALL.md#开发调试)。
 
-华为红品牌 **单文件 HTML 演示（网页 PPT）Agent Skill + DSH 可视化插件**。一套 1920×1080、离线可拷走的幻灯片系统：三套场景模板、点击 / 方向键放映、刷新续播，并可按需转成 PPTX。正式窗口入口是 AICO-Harness（内部沿用 DSH 协议）中的“左侧对话 + 右侧 Editor”；原独立 Editor 仅作为开发、回归和故障排查用的 Dev Shell 保留。
+华为红品牌 **单文件 HTML 演示（网页 PPT）Agent Skill + DSH 可视化插件**。一套 1920×1080、离线可拷走的幻灯片系统：五套场景模板、点击 / 方向键放映、刷新续播，并可按需转成 PPTX。正式窗口入口是 AICO-Harness（内部沿用 DSH 协议）中的“左侧对话 + 右侧 Editor”；原独立 Editor 仅作为开发、回归和故障排查用的 Dev Shell 保留。
 
 Skill 让 Codex、Claude Code 等 Agent 掌握 AICO-PPT 的工作流；Editor Core 提供新建、预览、区域任务、直接编辑、撤销和安全固化。没有任何窗口时，Skill 仍可独立创建和修改 Deck；需要可视化编辑时，打开 AICO 应用并使用插件商店安装的 AICO-PPT。
 
 ## DSH 插件
+
+左侧对话可以补充右侧标注，也可以提出独立新修改；Agent 结合上下文判断归属，歧义时澄清。补充修改保留原任务身份并同步完成状态，新修改不会误关已有待办，详见[简洁编辑与视觉确认](integrations/dsh/README.md#简洁编辑与视觉确认)。
 
 仓库根目录同时是一个可由 DSH 本地安装的 Host/Client 双面插件包，但 **Skill 仍只有根目录 `SKILL.md` 一份**。插件在左侧边栏底部注册 AICO-PPT 入口，并在 DSH 原生对话右侧打开可缩放、跨会话常驻的通用 workbench；右边直接运行原 App Server 与 Editor Runtime，不复制 Editor UI 或事务代码。DSH 版不会导入或创建 `node-pty` / xterm 终端。每个 Deck 工作项以稳定 `workId` 关联项目目录、一个 DSH Workspace 和一个或多个原生 Session；Harness 左侧“新会话”中的 AICO-PPT 项目子菜单显式建立关联，普通新会话不关联 Deck；Editor 顶部选择器只展示和切换关联会话。任务会话的首条可见指令以 `/aico-ppt` 开头；恢复、切换任务或切换会话不发送“继续”命令。“交给 Agent”固定发送到该工作项的活动 Session，而不是临时选中的普通 Session。切换普通会话不会改变任务或打开 Editor；点击已关联 Session 才打开或恢复 workbench、同步切换对应工作项，并在内部路由恢复期间隐藏启动初始页。`$aico-ppt` 只保留给使用该语法的独立 Codex 流程。
 
@@ -17,6 +19,12 @@ DSH 嵌入态完整复用原 Editor 的页面栏、预览 / 编辑 / 区域标�
 正式安装通过 AICO 应用的插件商店完成。维护者需要联调源码时，使用[开发调试说明](INSTALL.md#开发调试)中的 Harness 网页入口或高级源码配套安装；它们不属于普通用户安装流程。插件专项测试运行 `npm run test:dsh-plugin`。
 
 Windows 首次打开 Deck 时，私有 Python 的冷启动握手最多等待 10 秒，随后仍执行原有的可信路径校验与文件操作时限。深度自定义数据目录可能超过上游 Python 的 Windows 路径处理范围；请使用默认数据目录，运行时拒绝或超时不会绕过 sidecar 保护。
+
+大 Deck 的进程输出按数据块累计字节数，并在完整消息到达后只拼接一次；此公共实现同时用于 macOS、Windows 和 Linux，不放宽消息大小、路径或发布校验。固化期间 `inspect` / `verify` 明确返回 `EDITOR_SOLIDIFYING`，不读取正在发布的中间副本；普通问答不因插件上下文探测超时而整轮失败，但连接无法确认时禁止使用历史凭据写 Deck。`workId` 不是区域反馈 `taskId`，普通查看不传 `taskId`。
+
+WSL2 在 Windows 挂载卷保存时，若文件系统不支持 Linux 原子交换，则使用受控的 Windows `ReplaceFileW` 发布桥。仅接受可核验目录身份的 64 位 9p 本地盘路径，固定父目录链、拒绝链接目录、不重新创建已移动的源文件；保留原文备份和事务记录，回执不确定时停止并留待恢复。此兼容分支不改变原生 macOS、Linux 文件系统和 Windows 的既有发布实现。
+
+工作项目录的并发刷新共享同一轮文件扫描，并为各调用方返回独立快照；任何修改进入队列后，后续读取都重新检查，不缓存已完成的结果。会话菜单和上下文通知只读取已登记的项目元数据，不能以此快照认定文件可写；打开、重新绑定、固化仍实时验证源文件。源文件及备份的全量哈希使用大 Deck 的独立 I/O 时限。此公共优化适用于 macOS、Windows 和 Linux，避免界面通知重复扫描大 Deck 而阻塞会话绑定。
 
 正式桌面发布包仅保留制作与编辑所需资源；展示媒体、独立 Dev Shell 依赖、多余 Three.js 文件及可重新生成的 Python 缓存由发布工具裁剪。源码仓库中的演示和 Dev Shell 继续完整保留，开发依赖仍可按需安装，详见[安装指南](INSTALL.md#普通用户安装-aico-应用与-ppt-插件)。
 
@@ -30,7 +38,7 @@ Windows 首次打开 Deck 时，私有 Python 的冷启动握手最多等待 10 
 
 内容质量规范在所有入口共用：先核对材料事实，再按页面问题组织能力、成果、具体资产与后续行动；初版即检查主线、数字口径与冗余文字。导语和页尾小字默认不补，必要单位 / 基线 / 范围就近保留，详细来源实际保存到伴生材料。写作流程见 [`workflow.md`](references/workflow.md#11-先整理材料中的事实)，删字与来源规则见 [`design-system.md`](references/design-system.md#41-小字取舍与来源去向)。
 
-- 三套模板按场景起步但不物理合并：**授课**（34 页全量画廊）、**技术分享**（37 页，新增代码 + 曲线 + 指标证据页）、**工作汇报**（46 页，新增战略能力组合、系统交付侧栏、分层运维架构、双层方法管线和阶段责任交付页）。场景模板负责整套外壳，页级目录再加入经过兼容性审核的共享页型；`references/workflow.md` 有完整的七阶段协作流程与场景适配
+- 五套模板按场景起步但不物理合并：**授课**（34 页全量画廊）、**技术分享**（37 页，新增代码 + 曲线 + 指标证据页）、**工作汇报**（46 页，含复合信息页型）、**任职材料**（22 页通用任职模板）、**项目评审**（54 页 DRB 填写模板）。场景模板负责整套外壳，页级目录再加入经过兼容性审核的共享页型；`references/workflow.md` 有完整的七阶段协作流程与场景适配
 - 保留整套设计系统：三色体系（品牌红 `#b5333b`）、Noto Sans SC + JetBrains Mono、统一字号刻度、品牌红表头 / 黑边分组标准表格、玻璃组件、放映 / 滚动双模式、独立内容缩放、放大后空格 / 小手抓取平移，以及三种手动推进动画机制（build / layer / SMIL）；目录、标签页和阶段视图等页内多画面统一使用固定 DOM 的 layer 协议
 - 品牌可替换：换 logo / 金色背景画 / 口号 / 品牌色（`references/branding.md` + `scripts/apply_bg.py`）
 - 配图有工作流：初版类型化占位标注，终版从素材 PDF 抽原图（PyMuPDF）、自绘流程 / 架构图、制表落地（`references/artwork.md`）
@@ -110,11 +118,14 @@ aico-ppt/
 ├── assets/
 │   ├── training-deck.html   # ★34 页授课模板（离线单文件，~12MB）
 │   ├── tech-share-deck.html # 37 页技术分享模板（含代码/曲线/指标证据页）
+│   ├── qualification-deck.html # 22 页任职示例模板
+│   ├── project-review-deck.html # 54 页 DRB 填写模板
+│   ├── project-review-refs/ # 原始 DRB PPTX
 │   ├── work-report-deck.html# 46 页工作汇报模板（含五种复合高密度页型）
 │   └── huawei-refs/         # 华为官方 PPT 提取素材库：封面 KV / logo / 图标 / 组件 + 官方模板 pptx
 ├── references/
 │   ├── workflow.md          # 从零做一份 deck 的七阶段协作流程（授课/汇报/自读通用）
-│   ├── template-pages.md    # 三套模板逐页索引：怎么选 + 每页长什么样 / 常用于 / 怎么改
+│   ├── template-pages.md    # 五套模板逐页索引：怎么选 + 每页长什么样 / 常用于 / 怎么改
 │   ├── design-system.md     # 颜色 / 字体 / 字号刻度 / 版式硬规
 │   ├── animation.md         # build / layer / SMIL 三机制写法 + 放映键位
 │   ├── page-snippets.md     # 可直接粘贴的 <section> 片段
@@ -338,3 +349,11 @@ Editor 的源码事务通过归档快照对账已被覆盖的静态文字动作�
 AICO-PPT 的一份 Deck 对应一个项目，可关联多段 Harness 会话。在项目首页移除项目会归档绑定会话，保留源文件、工作副本和历史；“已移除项目”提供恢复入口。重新打开文件恢复原项目身份，旧会话继续归档。运行中或排队的会话会阻止移除，避免后台继续修改已移除项目。
 
 所有 AICO 插件遵循 [Harness 插件项目生命周期规范](../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)；PPT 的适配与测试见 [项目生命周期](docs/design/project-lifecycle.md)。上述宿主能力需要配套支持项目会话管理的 Harness 版本，旧宿主会给出更新提示。
+
+### 任职材料模板
+
+新增 `qualification`（任职材料），22 页通用占位模板，保留原始英文版式与能力举证结构。填写说明和全部页型见 [任职材料模板](references/qualification-template.md)。示例个人信息、项目事实、指标和证明材料必须按新申请人替换。
+
+### 项目评审模板
+
+新增 `project-review`（项目评审），54 页、10 章可填写 DRB 模板。按原参考提炼评审字段，使用 AICO-PPT 外壳及白底红线表格，原始 53 页 PPTX 一并保留，详见 [项目评审模板](references/project-review-template.md)。

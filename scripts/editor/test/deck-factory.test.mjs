@@ -24,13 +24,13 @@ function snapshot(runId = 'run-1') {
   };
 }
 
-test('模板目录只公开三套白名单模板，路径仅在服务端解析', async () => {
+test('模板目录只公开五套白名单模板，路径仅在服务端解析', async () => {
   const catalog = await TemplateCatalog.open();
   const publicCatalog = catalog.snapshot();
   assert.deepEqual(publicCatalog.templates.map(item => item.templateId), [
-    'training', 'tech-share', 'work-report',
+    'training', 'tech-share', 'work-report', 'qualification', 'project-review',
   ]);
-  assert.deepEqual(publicCatalog.templates.map(item => item.pageTypes.length), [34, 37, 46]);
+  assert.deepEqual(publicCatalog.templates.map(item => item.pageTypes.length), [34, 37, 46, 22, 54]);
   for (const template of publicCatalog.templates) {
     assert.deepEqual(template.requiredPages, ['cover', 'toc', 'thanks']);
     assert.equal(template.pageTypes.at(0).pageTypeId, 'cover');
@@ -57,7 +57,7 @@ test('模板目录只公开三套白名单模板，路径仅在服务端解析',
     'method-pipeline-guardrails',
     'stage-deliverable-map',
   ]) {
-    const pages = publicCatalog.templates.map(template => (
+    const pages = publicCatalog.templates.filter(template => ['training', 'tech-share', 'work-report'].includes(template.templateId)).map(template => (
       template.availablePageTypes.find(page => page.pageTypeId === pageTypeId)
     ));
     assert.ok(pages.every(Boolean), `${pageTypeId} 应对三套场景外壳可用`);

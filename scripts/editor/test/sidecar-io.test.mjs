@@ -675,6 +675,23 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
     await io.close();
   });
 
+  await t.test('源文件和备份哈希读取使用完整 Deck 的时限', async () => {
+    const child = fakeChild((current, line) => {
+      const request = JSON.parse(String(line));
+      setTimeout(() => current.stdout.emit('data', `${JSON.stringify({
+        id:request.id, ok:true, result:{ fingerprint:'0'.repeat(64) },
+      })}\n`), 35);
+    });
+    const io = await createPersistentSidecarIO({
+      project:baseIdentity, spawnHelper:() => child, timeoutMs:10,
+      workingDeckTimeoutMs:100, skipReadyHandshake:true,
+    });
+    try {
+      assert.equal((await io.hashDeck()).fingerprint, '0'.repeat(64));
+      assert.equal((await io.verifyBackup({ backupName:'deck.html', expectedFingerprint:'0'.repeat(64) })).fingerprint, '0'.repeat(64));
+    } finally { await io.close(); }
+  });
+
   await t.test('oversized stdout 终止 helper', async () => {
     const child = fakeChild(current => queueMicrotask(() => {
       current.stdout.emit('data', 'x'.repeat(65));

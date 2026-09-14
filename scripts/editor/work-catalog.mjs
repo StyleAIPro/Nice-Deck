@@ -199,6 +199,7 @@ export class WorkCatalog {
     this.randomUUID = randomUUID;
     this.now = now;
     this.operations = Promise.resolve();
+    this.pendingList = null;
   }
 
   #enqueue(operation) {
@@ -362,7 +363,7 @@ export class WorkCatalog {
     };
   }
 
-  async #listUnlocked() {
+  async #listUnlocked({ refreshBindings = true } = {}) {
     const [persisted, legacy] = await Promise.all([this.#read(), this.legacyHistory.list()]);
     const items = persisted.workItems.map(item => structuredClone(item));
     let changed = false;
@@ -455,7 +456,7 @@ export class WorkCatalog {
       changed = true;
     }
     for (let index = 0; index < items.length; index += 1) {
-      if (items[index]?.kind !== 'editing') continue;
+      if (!refreshBindings || items[index]?.kind !== 'editing') continue;
       const refreshed = await this.#refreshEditing(items[index]);
       if (refreshed !== items[index]) {
         items[index] = refreshed;
@@ -480,7 +481,25 @@ export class WorkCatalog {
   }
 
   list() {
-    return this.#enqueue(() => this.#listUnlocked());
+    if (this.pendingList?.tail === this.operations) {
+      return this.pendingList.result.then(value => structuredClone(value));
+    }
+    const result = this.#enqueue(() => this.#listUnlocked());
+    // 只合并同一队尾的在途读取。任何修改入队都会使旧读取失效，
+    // 既避免界面通知重复扫描大 Deck，也保留修改后读取的串行顺序。
+    const pending = { result, tail:this.operations };
+    this.pendingList = pending;
+    const clear = () => {
+      if (this.pendingList === pending) this.pendingList = null;
+    };
+    void result.then(clear, clear);
+    return result.then(value => structuredClone(value));
+  }
+
+  // 会话菜单只展示已登记的身份，不把展示快照当作文件可写性的证据。
+  // 打开、重新绑定与固化仍走实时文件校验。
+  listSessionTargets() {
+    return this.#enqueue(() => this.#listUnlocked({ refreshBindings:false }));
   }
 
   reopenEditing({ deckPath }) {
@@ -1145,10 +1164,21 @@ export class WorkCatalog {
 
   async resolve(workId) {
     requireUuid(workId, 'workId');
-    const history = await this.list();
-    const item = [...history.creation, ...history.editing].find(entry => entry.workId === workId);
-    if (!item) throw catalogError('WORK_ITEM_NOT_FOUND', 404, '工作项不存在或已隐藏');
-    return item;
+    return this.#enqueue(async () => {
+      const history = await this.#listUnlocked({ refreshBindings:false });
+      const item = [...history.creation, ...history.editing].find(entry => entry.workId === workId);
+      if (!item) throw catalogError('WORK_ITEM_NOT_FOUND', 404, '工作项不存在或已隐藏');
+      if (item.kind !== 'editing') return item;
+      const state = await this.#read();
+      const index = state.workItems.findIndex(entry => entry.workId === workId);
+      const current = state.workItems[index];
+      const refreshed = await this.#refreshEditing(current);
+      if (refreshed !== current) {
+        await this.#write({ ...state, revision:state.revision + 1,
+          workItems:state.workItems.map((entry, candidate) => candidate === index ? refreshed : entry) });
+      }
+      return publicEditing(refreshed);
+    });
   }
 }
 

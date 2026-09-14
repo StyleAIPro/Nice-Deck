@@ -4,7 +4,7 @@ import { AGENT_PROVIDER_IDS } from './agent-provider-registry.mjs';
 
 const PHASES = new Set(['brief', 'outline', 'page-plan', 'generating', 'ready', 'failed']);
 const PROVIDERS = new Set(AGENT_PROVIDER_IDS);
-const SCENES = new Set(['授课培训', '技术分享', '工作汇报', '学习材料']);
+const SCENES = new Set(['授课培训', '技术分享', '工作汇报', '学习材料', '任职材料', '项目评审']);
 const STRUCTURE_COMMANDS = new Set([
   'update-brief', 'confirm-brief', 'propose-outline', 'confirm-outline',
   'propose-page-plan', 'confirm-page-plan', 'set-output',

@@ -55,6 +55,23 @@ class UpgradeDeckProfileTest(unittest.TestCase):
         )
         self.assertEqual(up.runtime_hash(profile_only), up.runtime_hash(self.latest))
 
+    def test_legacy_brand_markers_preserve_user_slots_without_duplication(self):
+        current = up.canonicalize_metadata(self.latest)
+        current = up._replace_slot(current, up.USER_STYLE_START, up.USER_STYLE_END,
+                                   '<style>.user-evidence{color:red}</style>')
+        legacy = current.replace('aico-ppt-version', 'huawei-deck-version').replace(
+            'aico-ppt-runtime-hash', 'huawei-deck-runtime-hash').replace(
+            'aico-ppt-template-kind', 'huawei-deck-template-kind').replace(
+            'AICO_PPT_USER_', 'HUAWEI_DECK_USER_')
+        self.assertEqual(up.runtime_hash(current), up.runtime_hash(legacy))
+        lines = list(self.latest_lines)
+        eb.set_template(lines, legacy)
+        upgraded, _, _ = up.build_upgrade(lines, self.latest_lines, 'teaching')
+        self.assertIn('.user-evidence{color:red}', upgraded)
+        self.assertEqual(upgraded.count(up.USER_STYLE_START), 1)
+        self.assertEqual(upgraded.count(up.USER_SCRIPT_START), 1)
+        self.assertEqual(up.runtime_hash(current), up.runtime_hash(upgraded))
+
     def test_recompose_preserves_page_profile_and_brand(self):
         old_lines, old, custom_profile = self.customised_deck()
         upgraded, manifest, target_hash = up.build_upgrade(
