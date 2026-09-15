@@ -4,7 +4,7 @@
 
 覆盖：
   · PDF 材料：PyMuPDF 负责读取/表格/抽图/页面操作，pypdf 仅用于保留字体填写 AcroForm
-  · 本 skill 运行时：Node ≥ 18、标准库 PPTX 打包/提取；桌面渲染服务或独立 Chrome
+  · 本 skill 运行时：Node ^18.19 或 ≥20.6、标准库 PPTX 打包/提取；桌面渲染服务或独立 Chrome
   · Editor Core：ws、html2canvas、busboy、three
   · 独立 Dev Shell：node-pty、@xterm/xterm、@xterm/headless、@xterm/addon-serialize、Agent CLI
 
@@ -76,6 +76,12 @@ INSTALL_SYMBOL = _symbol("⬇", "v")
 
 def run(cmd, **kw):
     """跑命令，返回 CompletedProcess；找不到可执行文件时返回 rc=127。"""
+    environment = kw.get("env")
+    node = (os.environ if environment is None else environment).get("AICO_NODE_EXECUTABLE")
+    if cmd and cmd[0] == "node" and node is not None:
+        if not Path(node).is_absolute() or not Path(node).is_file():
+            return subprocess.CompletedProcess(cmd, 127, "", "插件 Node 可执行文件无效")
+        cmd = [node, *cmd[1:]]
     try:
         return subprocess.run(cmd, **kw)
     except FileNotFoundError:
@@ -153,11 +159,16 @@ def probe_nodemod(mod):
 def probe_three_browser_files():
     """检查 Editor 实际加载的浏览器文件，兼容不带 CommonJS 入口的精简包。"""
     files = ("three.module.min.js", "three.core.min.js")
-    build = REPO / "node_modules" / "three" / "build"
+    script = "import {fileURLToPath} from 'node:url'; import {dirname} from 'node:path'; console.log(dirname(fileURLToPath(import.meta.resolve('three'))))"
+    result = run(["node", "--input-type=module", "-e", script],
+                 cwd=str(REPO), capture_output=True, text=True)
+    if result.returncode != 0:
+        return False, "无法按 Node 包解析规则定位 Three.js"
+    build = Path(result.stdout.strip())
     missing = [name for name in files if not (build / name).is_file()]
     if missing:
         return False, "缺少 Three.js 浏览器文件：" + "、".join(missing)
-    return True, "node_modules/three/build/：" + "、".join(files)
+    return True, "Node 包解析定位浏览器文件：" + "、".join(files)
 
 def probe_node_pty():
     """不仅检查模块存在，还真实创建一次 PTY，捕获 macOS spawn-helper 权限问题。"""
@@ -199,10 +210,10 @@ def probe_node():
         return False, "未安装 node"
     v = (cp.stdout or "").strip()
     try:
-        major = int(v.lstrip("v").split(".")[0])
+        version = tuple(int(part) for part in v.lstrip("v").split(".")[:2])
     except ValueError:
         return False, f"无法解析版本 {v!r}"
-    return major >= 18, f"{v}（需 ≥ 18）"
+    return (18, 19) <= version < (19, 0) or version >= (20, 6), f"{v}（需 ^18.19 或 ≥20.6）"
 
 def probe_playwright():
     # 三级查找，与 scripts/verify/*.mjs 口径一致
@@ -219,6 +230,8 @@ def probe_playwright():
 
 def probe_chrome():
     bundled = os.environ.get("AICO_BROWSER_EXECUTABLE")
+    if os.environ.get("AICO_RUNTIME_KIND") == "plugin" and bundled is None:
+        return False, "插件渲染缺少私有浏览器路径，请修复 PPT 资源安装"
     if bundled is not None:
         return Path(bundled).is_file(), f"AICO 内置浏览器：{bundled}"
     if sys.platform == "darwin":
@@ -394,7 +407,7 @@ CHECKS = [
          probe=probe_pymod("pypdf"), install=pip("pypdf")),
     dict(key="node", label="Node.js", why="verify 三件套 / html2pptx",
          probe=probe_node, install=None,
-         hint="安装 Node ≥ 18（nodejs.org 或 brew install node）"),
+         hint="安装 Node ^18.19 或 ≥20.6（nodejs.org 或 brew install node）"),
     dict(key="ws", label="ws", why="可视化编辑器 WebSocket 协作桥",
          probe=probe_nodemod("ws"), install=["npm", "i", "ws@8.21.1"], install_cwd=str(REPO)),
     dict(key="html2canvas", label="html2canvas", why="区域标记局部截图",

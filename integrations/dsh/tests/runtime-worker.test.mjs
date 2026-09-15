@@ -30,11 +30,16 @@ test('Worker 启动原 Editor 并在关闭后释放实际监听端口', async t 
   });
   t.after(() => worker.close());
   assert.match(worker.appUrl, /^http:\/\/127\.0\.0\.1:\d+\/app\//);
+  const views = await worker.transportViews();
+  assert.equal(views.length, 1);
+  assert.equal(views[0].origin, new URL(worker.appUrl).origin);
+  assert.equal(views[0].kind, 'app');
   const response = await fetch(worker.appUrl);
   assert.equal(response.status, 200);
   await response.arrayBuffer();
   await worker.close();
   await worker.done;
+  await assert.rejects(worker.transportViews(), /关闭/);
   await assert.rejects(fetch(worker.appUrl));
   await worker.close();
 });

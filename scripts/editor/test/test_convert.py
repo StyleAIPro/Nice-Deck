@@ -2,17 +2,34 @@
 
 from pathlib import Path
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 CONVERTER = Path(__file__).resolve().parents[2] / "html2pptx" / "convert.py"
 
 
 class ConvertTests(unittest.TestCase):
+    def test_explicit_node_does_not_require_path_lookup(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        with mock.patch.dict(os.environ, {"AICO_NODE_EXECUTABLE": node, "PATH": ""}):
+            result = self.convert("--mode", "image")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.output.read_text())["mode"], "image")
+
+    def test_invalid_explicit_node_never_falls_back_to_path(self):
+        with mock.patch.dict(os.environ, {"AICO_NODE_EXECUTABLE": str(self.root / "missing-node")}):
+            result = self.convert()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("插件 Node 可执行文件无效", result.stderr)
+        self.assertFalse(self.output.exists())
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

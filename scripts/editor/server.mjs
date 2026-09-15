@@ -133,15 +133,15 @@ const EDITOR_ASSETS = new Map([
   ['/editor/protocol.mjs', { path: join(EDITOR_DIR, 'protocol.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/attachment-protocol.mjs', { path: join(EDITOR_DIR, 'attachment-protocol.mjs'), type: 'text/javascript; charset=utf-8' }],
   ['/editor/html2canvas.min.js', {
-    path: join(PROJECT_DIR, 'node_modules/html2canvas/dist/html2canvas.min.js'),
+    get path() { return fileURLToPath(import.meta.resolve('html2canvas/dist/html2canvas.min.js')); },
     type: 'text/javascript; charset=utf-8',
   }],
   ['/editor/xterm.js', {
-    path: join(PROJECT_DIR, 'node_modules/@xterm/xterm/lib/xterm.js'),
+    get path() { return fileURLToPath(import.meta.resolve('@xterm/xterm/lib/xterm.js')); },
     type: 'text/javascript; charset=utf-8',
   }],
   ['/editor/xterm.css', {
-    path: join(PROJECT_DIR, 'node_modules/@xterm/xterm/css/xterm.css'),
+    get path() { return fileURLToPath(import.meta.resolve('@xterm/xterm/css/xterm.css')); },
     type: 'text/css; charset=utf-8',
   }],
   ['/editor/patch-runtime.js', {
@@ -3379,6 +3379,8 @@ export async function startServer({
     editorWsUrl,
     terminalWsUrl,
     port: actualPort,
+    // 仅暴露本实例仍存活时的传输地址；适配插件不得根据浏览器输入任意连接端口。
+    get transportEndpoint() { return closePromise ? null : { origin:url, token, editorToken }; },
     get deckPath() { return currentDeckPath; },
     deckId:effectiveDeckId,
     binding:bindingCoordinator,

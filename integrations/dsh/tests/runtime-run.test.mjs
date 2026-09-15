@@ -59,3 +59,13 @@ test('Python 包装器保留原有 heredoc 标准输入与项目目录', { skip:
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { cwd:project, python:runtime.paths.python });
 });
+
+test('显式运行时无效时拒绝执行，不回退包内有效描述', async t => {
+  const { runtime, entry } = await wrapperFixture(t);
+  const invalid = { ...runtime, paths:{ python:process.execPath } };
+  const encoded = Buffer.from(JSON.stringify(invalid)).toString('base64url');
+  const result = spawnSync(process.execPath, [entry, '--runtime-base64', encoded, 'node', '-e', 'console.log("不应执行")'], { encoding:'utf8' });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /必须位于插件运行时目录内/);
+  assert.equal(result.stdout, '');
+});

@@ -44,7 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     output = Path(args.output).expanduser().resolve() if args.output else source.with_suffix(".pptx")
     if not source.is_file():
         parser.error(f"找不到输入文件：{source}")
-    if shutil.which("node") is None:
+    node = os.environ.get("AICO_NODE_EXECUTABLE")
+    if node is not None and (not Path(node).is_absolute() or not Path(node).is_file()):
+        parser.error("插件 Node 可执行文件无效，请修复运行时配置")
+    node = node if node is not None else shutil.which("node")
+    if node is None:
         parser.error("找不到 Node.js，请先安装 Node ≥ 18")
     if not 1 <= args.quality <= 100 or args.scale <= 0:
         parser.error("--scale 必须为正数，--quality 必须在 1 到 100 之间")
@@ -57,14 +61,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "editable":
             print(f">> 提取可编辑内容：{source}", flush=True)
             run([
-                "node", str(HERE / "extract-editable.mjs"), str(source), str(image_dir),
+                node, str(HERE / "extract-editable.mjs"), str(source), str(image_dir),
                 str(args.scale),
             ])
             builder = "build_editable_pptx.py"
         else:
             print(f">> 截图：{source}", flush=True)
             run([
-                "node", str(HERE / "shoot.mjs"), str(source), str(image_dir),
+                node, str(HERE / "shoot.mjs"), str(source), str(image_dir),
                 str(args.scale), str(args.quality),
             ])
             builder = "build_pptx.py"

@@ -410,7 +410,7 @@ def prepare_editor_runtime(auto_install=False):
     if ready:
         return
     if "Node.js" in detail:
-        raise LauncherError(detail + "。请先安装 Node.js 18 或更高版本。")
+        raise LauncherError(detail + "。请先安装 Node.js 18.19 系列或 20.6 及以上版本。")
     if not auto_install:
         raise LauncherError(
             detail + "。请运行 python3 scripts/check_deps.py --profile dev-shell --repair。"

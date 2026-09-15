@@ -7,9 +7,9 @@
 | 文件 | 所属平面 | 责任 |
 |---|---|---|
 | `index.mjs` | Plugin Host | 注册根目录唯一 `SKILL.md`；按 `aicoRuntime` 配置选择私有 Worker 或源码 Editor；向 Client 注入带随机令牌的入口 URL 和品牌资源 |
-| `runtime-env.mjs` | 私有运行时 | 校验插件目录内的 Python，构造独立环境；Node 与 Electron 渲染复用 Host |
+| `runtime-env.mjs` | 私有运行时 | 校验插件目录内的 Python 与可选私有浏览器，构造独立环境；Node 复用 Host |
 | `runtime-host.mjs` / `runtime-worker.mjs` | Worker 生命周期 | 在独立环境中加载原 `startAppServer({ embeddedMode:'dsh' })`，报告实际 loopback URL，等待关闭并处理超时和崩溃 |
-| `runtime-run.mjs` | 模型脚本入口 | 读取本包 `.aico-runtime.json`，用同一私有环境运行 `python3` 或 `node`；保留当前工作目录、标准输入和解释器参数 |
+| `runtime-run.mjs` | 模型脚本入口 | 优先读取命令中的运行时描述，兼容旧 `.aico-runtime.json`，用同一私有环境运行 `python3` 或 `node`；保留当前工作目录、标准输入和解释器参数 |
 | `client.js` | Plugin Client | 在 `sidebar.footer.action` 注册 AICO-PPT 入口；在 `workbench.persistent-view` 注册 iframe 宿主；通过 `ctx.sessionStarts` 向 DSH 统一“新会话”入口发布一行 AICO-PPT 标签及其当前优先的确切 Deck 子菜单；提供 Workspace / Session 创建、打开、查询和精确发送命令 |
 | `../../scripts/editor/public/deck-task-coordinator.mjs` | Editor Client | 用 `workId` 协调 WorkCatalog 持久关系与 DSH 原生 Workspace / Session 副作用；处理预分配身份与 pending 恢复 |
 | `../../cordis.patch.yml` | Plugin Bundle | 安装时加入 Host/Client 插件行 |
@@ -42,13 +42,23 @@
 - Client 只嵌入原 App/Editor 页面，不复制 Editor DOM、业务状态或事务代码。
 - 会话提示词单独限制为非空白文本、最多 262144 个 UTF-16 代码单元，以容纳安装目录与页面规划；会话、路径及标题等字段仍保留原有限制。
 
+## 原装宿主中的所选后端
+
+Host 通过公开 Cordis 服务注册 `aicoPptRuntime`，提供 `appUrl`、`views()` 和 `signal`。视图目录由应用维护，包含启动器、编辑器与创建预览，已关闭实例不再列出。私有 Worker 使用关联请求读取同一目录，关闭或崩溃拒绝未完成请求；Host 卸载先撤销提供者生命周期。`apply` 可指定绝对路径 `stateRoot`，源码和 Worker 模式均将最近记录、工作历史与工作目录放在该后端的目录中，不修改全局环境。
+
+Client 检测 AICO 自有准备入口后，等待所选工作台就绪，再同时绑定 iframe 与项目/会话查询；准备失败不会退回本地，准备期间卸载会取消请求。编辑器 HTTP/WebSocket、返回工作台及异步预览地址由适配插件通过自有 Origin 转发；编辑事务和业务进程继续由 PPT 持有。完整传输配置与验证范围见 [适配插件说明](../../../AICO-Harness/plugin/README.zh.md)。这些入口、目录和生命周期绑定属于必要接入修改，不承诺业务包字节不变。
+
+Linux 与原生 Windows 已验证两个真实编辑器的连接、导航与独立关闭；Chrome 已验证真实 Deck 加载，原版 CLI 已验证后端选择、恢复和旧地址失效。完整创建预览、文件选择、导出及 Windows→WSL Desktop 组合流程仍待验收。
+
 ## 应用内插件运行时
 
-AICO-Harness 桌面安装器只安装 Host。用户从设置中的插件目录安装 AICO-PPT 后，插件管理器负责下载与校验本包及 Python，桌面渲染复用 Host 的 Electron，准备成功后再注册现有 Web profile；卸载只移除插件注册与可回收发行文件，项目和用户数据保持原位。独立 Skill 与源码安装不要求桌面运行时描述文件。
+AICO 2.0 使用原装 DSH Desktop 与配套原装 DSH，先安装 AICO-Harness 适配插件，再安装 AICO-PPT。适配层和业务插件分别发布，不再交付 AICO 修改版 Host。统一 UI/CLI 安装、Python／浏览器发行资源准备尚在实现，不能把旧桌面插件管理器描述为原装产品中已可用的入口。独立 Skill 与源码安装不要求桌面运行时描述文件。
 
-桌面管理器调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python } } })`。`root` 是当前插件发行目录，Python 路径为存在的绝对文件路径；跟随软链接后的实际文件必须位于该目录内。描述对象只接受这些字段，不接受凭据或任意环境变量。管理器将同一个 `aicoRuntime` 对象写入插件包根目录的 `.aico-runtime.json`，供模型脚本包装器读取。Node 始终使用 `process.execPath`，不在 PPT 插件内安装第二份 Node。PPTX 参考材料由标准库工具 `scripts/extract-pptx.py` 按页提取内容与原图；运行时不接受 `office` 或 `browser` 字段，也不设置相应工具路径。新发布声明 `apiVersion: 3` 和 `requires: {desktopRenderer: 1}`；桌面脚本通过 `AICO_HOME/desktop-renderer.json` 连接 Host 的私有渲染服务，Host 不可用时不回退本机浏览器。继承的 `AICO_SOFFICE_EXECUTABLE` 仍被过滤，避免旧环境污染。
+原装宿主的私有渲染模式调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python, browser } } })`。Python 和 Chromium 兼容浏览器均为绝对路径，真实普通文件须位于同一资源根目录内。描述对象不接受凭据或任意环境变量。模型命令用 `--runtime-base64` 传递该描述的 JSON 编码，避免 PowerShell 5 原生命令参数丢失 JSON 引号；这只是路径传输编码，不是加密。包装器执行前重新验证描述，不写入插件包目录。未传此参数时才读取旧 `.aico-runtime.json`；显式参数无效时直接失败。Node 使用 `process.execPath`，插件不安装第二份 Node。
 
-Host 在创建 Worker 时传入独立环境，Worker 收到环境后才导入 Editor 模块，并显式传入 `pythonExecutable`。私有 PATH 包含声明的工具、Host Node 和基本系统工具目录；继承的 Python / Node / Playwright 运行时覆盖与凭据变量被移除。`AICO_HOME`、`AICO_PPT_EDITOR_STATE_ROOT`、项目 sidecar 和工作副本仍由现有状态解析器管理，插件不修改全局 `process.env`。没有 `aicoRuntime` 时，`apply(ctx)` 沿用源码 Editor 行为。
+Electron 脚本命令在自身进程树内设置 Node 模式。PowerShell 通过管道等待 GUI 子系统的可执行文件结束，传回输出和退出码，并在 finally 中恢复调用方环境；POSIX shell 使用单命令环境。省略 browser 仅保留旧桌面渲染通道兼容，不能证明原装宿主具备该通道。旧 `aico.release.json` 的 `desktopRenderer` 要求不能作为原装发布契约。PPTX 参考材料由标准库工具 `scripts/extract-pptx.py` 提取；运行时拒绝 office 角色并过滤旧 `AICO_SOFFICE_EXECUTABLE`。
+
+Host 在创建 Worker 时传入独立环境，Worker 收到环境后才导入 Editor 模块，并显式传入 `pythonExecutable`。私有 PATH 包含声明的工具、Host Node 和基本系统工具目录；继承的 Python / Node / Playwright 运行时覆盖与凭据变量被移除。私有浏览器模式设置 `AICO_RUNTIME_KIND=plugin` 与受控 `AICO_BROWSER_EXECUTABLE`，移除旧 `AICO_HOME`；`AICO_PPT_EDITOR_STATE_ROOT`、项目 sidecar 和工作副本仍由现有状态解析器管理，插件不修改全局 `process.env`。没有 `aicoRuntime` 时，`apply(ctx)` 沿用源码 Editor 行为。
 
 只有配置桌面运行时的 Skill 定义会在规范正文后追加包装器说明，磁盘上的 `SKILL.md` 不变。包装器允许 `python3` / `node` 的普通参数、`-m` / `-c` / `-e`、stdin 和项目脚本；它只选择环境，命令审批与沙箱仍归 Harness。调用保持原工作目录，文档中的 `scripts/` 相对路径须解析到本 Skill 根目录，输出继续指向用户项目。
 
@@ -107,3 +117,7 @@ CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND
 普通查看不传 `taskId`；工作项 `workId` 不能当成区域任务 ID。固化期间读取返回明确忙碌状态，避免暴露中间副本。上下文探测的超时或断连不会终止普通问答，但本步禁止使用历史凭据操作 Deck；用户主动取消仍按 Host 的取消语义处理。这些逻辑与分块消息接收优化均为三平台共用实现。
 
 桌面区域任务使用简短说明，同轮相同编辑上下文去重，换工作项、新轮与压缩后恢复必要说明；连接与凭据即时读取。PPT 插件承载协议，Host 只提供通用工具、图片附件和隐藏渲染能力。
+
+私有渲染不修改宿主代码或服务。验证、截图和导出沿用原 PPT Playwright 调用，插件模式缺少浏览器路径时明确报错，不退回系统 Chrome。显式 Windows/Linux 验证命令为 `AICO_TEST_BROWSER_DIRECTORY=<浏览器安装目录> AICO_TEST_PYTHON_EXECUTABLE=<Python可执行文件> node --test integrations/dsh/tests/private-browser.integration.mjs`（Windows 在 PowerShell 设置同名环境变量），只复制测试安装文件到临时目录并调用真实图片导出。它不代表浏览器可再发行、Python 自包含、Windows/WSL 依赖齐全或完整桌面导出验收。
+
+运行时同时固定 `AICO_NODE_EXECUTABLE=process.execPath`；Electron 子进程环境使用 `ELECTRON_RUN_AS_NODE=1`。Python 导出与体检显式使用该可执行文件，避免依赖系统 PATH 中的 node.exe，不修改 Host 环境。

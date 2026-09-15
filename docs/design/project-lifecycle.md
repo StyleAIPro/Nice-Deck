@@ -1,5 +1,7 @@
 # AICO-PPT 项目生命周期适配
 
+> AICO 2.0 原装宿主迁移说明：客户端入口显式绑定 AICO-Harness 适配插件，不修改 DSH 或 DSH Desktop。PPT 编辑服务与业务逻辑保持原有实现，客户端通过适配服务注册工作台。下文完整项目生命周期描述仍需在原装宿主上完成适配及验收；当前安装和界面入口检查通过，不能据此认为项目归档、恢复及 Windows/WSL 流程全部可用。
+
 本实现遵循 [AICO-Harness 插件项目生命周期规范](../../../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)。发布包外部规范位于 Harness 仓库的 `docs/cookbook/plugin-project-lifecycle.zh.md`。
 
 ## 项目与文件

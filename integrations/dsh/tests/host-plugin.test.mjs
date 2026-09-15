@@ -8,7 +8,10 @@ import { runtimeFixture } from './runtime-fixture.mjs'
 test('Host 插件从仓库根目录注册唯一的 aico-ppt Skill', async (t) => {
   let createProvider
   let indexListener
-  let closeRuntime
+  const disposers = []
+  const services = new Map()
+  const closeRuntime = async () => { for (const dispose of disposers.splice(0)) await dispose() }
+  t.after(closeRuntime)
   await apply({
     skills: {
       registerProvider(factory) {
@@ -19,10 +22,14 @@ test('Host 插件从仓库根目录注册唯一的 aico-ppt Skill', async (t) =>
       if (event === 'webserver/index-inject') indexListener = listener
       else assert.equal(event, 'agent/pre-step')
     },
-    effect(effect) { closeRuntime = effect() },
+    effect(effect) { disposers.push(effect()) },
+    reflect:{ provide(name, value) { services.set(name, value); return () => services.delete(name) } },
   })
   t.after(async () => closeRuntime?.())
 
+  const viewDirectory = await services.get('aicoPptRuntime').views()
+  assert.equal(viewDirectory.length, 1)
+  assert.equal(viewDirectory[0].kind, 'app')
   assert.equal(name, 'aico-ppt')
   assert.deepEqual(inject, ['skills', 'webServer', 'tools', 'attachments'])
   assert.equal(typeof createProvider, 'function')
@@ -56,11 +63,15 @@ test('配置私有运行时时保留同一 Skill 并追加模型脚本入口，�
   const runtime = await runtimeFixture(t)
   let createProvider
   let indexListener
-  let closeRuntime
+  const disposers = []
+  const services = new Map()
+  const closeRuntime = async () => { for (const dispose of disposers.splice(0)) await dispose() }
+  t.after(closeRuntime)
   await apply({
     skills:{ registerProvider(factory) { createProvider = factory } },
     on(event, listener) { if (event === 'webserver/index-inject') indexListener = listener },
-    effect(effect) { closeRuntime = effect() },
+    effect(effect) { disposers.push(effect()) },
+    reflect:{ provide(name, value) { services.set(name, value); return () => services.delete(name) } },
     logger:{ error(error) { assert.fail(String(error)) } },
   }, { aicoRuntime:runtime })
   t.after(() => closeRuntime?.())
@@ -78,11 +89,15 @@ test('配置私有运行时时保留同一 Skill 并追加模型脚本入口，�
 
 test('Host 插件拒绝读取其他 Skill 候选', async (t) => {
   let createProvider
-  let closeRuntime
+  const disposers = []
+  const services = new Map()
+  const closeRuntime = async () => { for (const dispose of disposers.splice(0)) await dispose() }
+  t.after(closeRuntime)
   await apply({
     skills: { registerProvider: factory => { createProvider = factory } },
     on() {},
-    effect(effect) { closeRuntime = effect() },
+    effect(effect) { disposers.push(effect()) },
+    reflect:{ provide(name, value) { services.set(name, value); return () => services.delete(name) } },
   })
   t.after(async () => closeRuntime?.())
   const provider = createProvider()

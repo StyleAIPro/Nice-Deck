@@ -7,9 +7,11 @@
 
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { isAbsolute } from 'node:path'
 import {installEditingTools} from './editing-tools.mjs'
 import { installEditingContext } from './editing-context.mjs'
 import { startRuntimeWorker } from './runtime-host.mjs'
+import { runtimeCommand } from './runtime-command.mjs'
 
 const PROVIDER_NAME = 'aico-ppt-plugin'
 const PACKAGE_ROOT_URL = new URL('../../', import.meta.url)
@@ -59,17 +61,16 @@ function parseSkillDocument(source) {
   }
 }
 
-function runtimeInstructions() {
-  const wrapper = fileURLToPath(new URL('./runtime-run.mjs', import.meta.url))
+function runtimeInstructions(runtime) {
   const quote = process.platform === 'win32'
     ? value => `'${value.replaceAll("'", "''")}'`
     : value => `'${value.replaceAll("'", "'\\''")}'`
-  const command = `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(wrapper)}`
+  const command = runtimeCommand(runtime)
   const script = path => quote(fileURLToPath(new URL('../../' + path, import.meta.url)))
-  return `\n\n## 当前桌面插件的脚本运行入口\n\n本次 Skill 使用插件自带的 Python 和浏览器。执行本文或 references 中的 Python / Node 脚本时，统一使用以下包装器；不要依赖系统 Python 或修改 Host 环境。包装器读取本包的 .aico-runtime.json，Node 复用 Host 提供的可执行文件。它保留当前工作目录、标准输入、-m / -c / -e 和项目脚本参数；原 Python heredoc 在命令后保留 - 与重定向即可。\n\n\`\`\`${process.platform === 'win32' ? 'powershell' : 'sh'}\n${command} python3 ${script('scripts/check_deps.py')} --profile editor-core --check-only\n${command} node ${script('scripts/verify/shot.mjs')} <Deck绝对路径> <页label> <截图绝对路径>\n\`\`\`\n\n文档中的相对 scripts/ 路径应解析到本 Skill 根目录；项目和 Deck 参数继续指向用户项目，数据目录沿用当前 AICO_HOME / AICO_PPT_EDITOR_STATE_ROOT。不要写入插件发行目录。\n`
+  return `\n\n## 当前桌面插件的脚本运行入口\n\n本次 Skill 使用插件自带的 Python 和浏览器。执行本文或 references 中的 Python / Node 脚本时，统一使用以下包装器；不要依赖系统 Python 或修改 Host 环境。包装器从命令参数读取当前插件配置，Node 复用 Host 提供的可执行文件；Electron 的 Node 模式仅作用于该命令。它保留当前工作目录、标准输入、-m / -c / -e 和项目脚本参数；原 Python heredoc 在命令后保留 - 与重定向即可。\n\n\`\`\`${process.platform === 'win32' ? 'powershell' : 'sh'}\n${command} python3 ${script('scripts/check_deps.py')} --profile editor-core --check-only\n${command} node ${script('scripts/verify/shot.mjs')} <Deck绝对路径> <页label> <截图绝对路径>\n\`\`\`\n\n文档中的相对 scripts/ 路径应解析到本 Skill 根目录；项目和 Deck 参数继续指向用户项目，数据目录沿用当前 AICO_HOME / AICO_PPT_EDITOR_STATE_ROOT。不要写入插件发行目录。\n`
 }
 
-function createProvider(runtimeConfigured) {
+function createProvider(runtime) {
   return {
     name: PROVIDER_NAME,
     async list() {
@@ -99,7 +100,7 @@ function createProvider(runtimeConfigured) {
         resourceBase: { kind: 'directory', path: PACKAGE_ROOT },
         path: SKILL_PATH,
         metadata: skill.metadata,
-        content: skill.content + (runtimeConfigured ? runtimeInstructions() : ''),
+        content: skill.content + (runtime ? runtimeInstructions(runtime) : ''),
       }
     },
   }
@@ -113,24 +114,30 @@ export const inject = ['skills', 'webServer', 'tools', 'attachments']
 
 /** 注册唯一 Skill，启动本地 Editor 运行时，并把入口作为只读 Client 启动输入。 */
 export async function apply(ctx, config = {}) {
+  if (config.stateRoot !== undefined && (typeof config.stateRoot !== 'string' || !isAbsolute(config.stateRoot))) throw new TypeError('AICO-PPT stateRoot 必须是绝对路径')
   const logo = `data:image/png;base64,${(await readFile(BRAND_LOGO_URL)).toString('base64')}`
   const runtimeConfigured = config.aicoRuntime !== undefined
   const editor = runtimeConfigured
-    ? await startRuntimeWorker(config.aicoRuntime)
+    ? await startRuntimeWorker(config.aicoRuntime, { stateRoot:config.stateRoot })
     : await (await import('../../scripts/editor/app-server.mjs')).startAppServer({
-      host:'127.0.0.1', port:0, openBrowser:false, embeddedMode:'dsh',
+      host:'127.0.0.1', port:0, openBrowser:false, embeddedMode:'dsh', stateRoot:config.stateRoot,
     })
+  const lifetime = new AbortController()
   let runtimeFailure
   if (editor.done) void editor.done.catch(error => {
     runtimeFailure = error
+    lifetime.abort(error)
     if (ctx.logger?.error) ctx.logger.error(error)
     else console.error(error)
   })
   try {
-    ctx.effect?.(() => () => editor.close(), 'aico-ppt: DSH Editor 运行时')
+    ctx.effect(() => () => { lifetime.abort(new Error('AICO-PPT 已卸载')); return editor.close() }, 'aico-ppt: DSH Editor 运行时')
+    ctx.effect(() => ctx.reflect.provide('aicoPptRuntime', Object.freeze({
+      appUrl:editor.appUrl, views:() => editor.transportViews(), signal:lifetime.signal,
+    })), 'aico-ppt: 所属视图传输目录')
     installEditingContext(ctx, editor.appUrl)
     installEditingTools(ctx, editor.appUrl)
-    const provider = createProvider(runtimeConfigured)
+    const provider = createProvider(config.aicoRuntime)
     ctx.skills.registerProvider(() => provider)
     ctx.on('webserver/index-inject', (table) => {
       if (runtimeFailure) throw runtimeFailure

@@ -79,7 +79,7 @@ py -3 scripts\install.py install --skill-only
 
 | Profile | 用途 | 主要依赖 |
 |---|---|---|
-| `editor-core` | 启动 DSH Editor Runtime | Node ≥ 18、`ws`、`html2canvas`、`busboy`、`three`；不要求本机 Agent CLI |
+| `editor-core` | 启动 DSH Editor Runtime | Node ^18.19 或 ≥20.6、`ws`、`html2canvas`、`busboy`、`three`；不要求本机 Agent CLI |
 | `dev-shell` | 独立开发 / 调试壳 | `editor-core` + `node-pty` + xterm + 一个本机 Agent CLI |
 | `verify` | 截图、溢出、逐拍验证 | Chrome、playwright-core |
 | `pptx-export` | HTML → PPTX | `verify` 能力、随包标准库组装器；Pillow 用于可选 HTML 附件图标 |
@@ -181,7 +181,7 @@ Draft 位于 `<项目目录>/.aico-ppt-editor/drafts/<draft-id>/`，刷新页面
 
 结构、大纲和页序已经稳定后，可以在浏览器工作台做最后一轮细节修改。批量替换或结构性重构仍由 Agent 经 `scripts/edit-bundle.py` 完成；可视化编辑器专注于那些“手改一下更快”的收尾动作。
 
-macOS 上直接双击根目录中已带应用图标的 `tools/dev-shell/AICO-PPT Dev Shell.app`；Windows 首次双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 会在同目录生成带图标的 `AICO-PPT Dev Shell（Windows）.lnk`，之后可直接双击该快捷方式。两者启动同一套工作台；Windows 也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上直接打开。`.lnk` 只保存当前机器的绝对路径，因此不会进入 Git；移动仓库后删除旧快捷方式并再次运行 `.cmd` 即可重建。Windows `.cmd` 只负责启动一个隐藏的标准 Python 后台进程，随后立即退出，不会把 Python/控制台图标长期留在任务栏。打开已有 Deck 使用系统文件选择器添加一份 HTML；Agent 项目目录与区域任务附件也直接调用 macOS / Windows 的系统原生选择器，不在页面内复刻文件管理器。在进入编辑器前可返回首页废弃当前候选并重新选择，取消选择器后也可直接重试。新建 Deck 的项目目录同样可反复更改或返回首页，确认后才创建持久 Draft 并自动启动 Agent 终端。首次启动若只缺项目 Node 模块，会按 `package-lock.json` 自动安装；Node.js ≥18 与 Python 3 仍需预先安装。
+macOS 上直接双击根目录中已带应用图标的 `tools/dev-shell/AICO-PPT Dev Shell.app`；Windows 首次双击 `tools/dev-shell/AICO-PPT Dev Shell.cmd` 会在同目录生成带图标的 `AICO-PPT Dev Shell（Windows）.lnk`，之后可直接双击该快捷方式。两者启动同一套工作台；Windows 也可以把一份 deck HTML 拖到 `.cmd` 或快捷方式上直接打开。`.lnk` 只保存当前机器的绝对路径，因此不会进入 Git；移动仓库后删除旧快捷方式并再次运行 `.cmd` 即可重建。Windows `.cmd` 只负责启动一个隐藏的标准 Python 后台进程，随后立即退出，不会把 Python/控制台图标长期留在任务栏。打开已有 Deck 使用系统文件选择器添加一份 HTML；Agent 项目目录与区域任务附件也直接调用 macOS / Windows 的系统原生选择器，不在页面内复刻文件管理器。在进入编辑器前可返回首页废弃当前候选并重新选择，取消选择器后也可直接重试。新建 Deck 的项目目录同样可反复更改或返回首页，确认后才创建持久 Draft 并自动启动 Agent 终端。首次启动若只缺项目 Node 模块，会按 `package-lock.json` 自动安装；Node.js ^18.19 或 ≥20.6 与 Python 3 仍需预先安装。
 
 Windows 的 Agent 终端会把可信目录 identity 与进程 cwd 分开处理：普通 `C:` / `D:` 本地目录直接启动，映射网络盘或 Parallels 共享盘保留用户当前的任意盘符，不把 `\\server\share` UNC realpath 直接交给 CMD。若项目只有 UNC 路径且没有可验证的盘符映射，启动会明确拒绝并提示先映射盘符，避免 Agent 静默退回 `C:\Windows`。sidecar 的受控读写在 Windows 内部使用 extended-length path，因此 Draft staging 与工作副本即使超过传统 260 字符限制也能原子保存；持久化和界面仍显示普通盘符 / UNC 路径。
 
@@ -357,3 +357,5 @@ AICO-PPT 的一份 Deck 对应一个项目，可关联多段 Harness 会话。�
 ### 项目评审模板
 
 新增 `project-review`（项目评审），54 页、10 章可填写 DRB 模板。按原参考提炼评审字段，使用 AICO-PPT 外壳及白底红线表格，原始 53 页 PPTX 一并保留，详见 [项目评审模板](references/project-review-template.md)。
+
+原装 DSH Desktop 插件的导出使用显式配置的私有浏览器资源（`aicoRuntime.paths.browser`），不要求改造宿主 Electron 主进程。完整安装与发布资源仍在实现，配置和验收边界见 [DSH 集成说明](integrations/dsh/README.md)；旧桌面渲染服务描述仅适用于旧 AICO 桌面模式。

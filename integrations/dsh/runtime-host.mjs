@@ -6,7 +6,7 @@ const START_TIMEOUT_MS = 30_000;
 const CLOSE_TIMEOUT_MS = 15_000;
 
 /** 启动原 Editor Worker；done 在退出后完成或报告崩溃，close 可重复并等待实际退出。 */
-export async function startRuntimeWorker(runtime, { environment = process.env } = {}) {
+export async function startRuntimeWorker(runtime, { environment = process.env, stateRoot } = {}) {
   const resolved = await resolveRuntime(runtime, environment);
   // 文件选择能力只经 Worker 私有启动参数传递，不进入通用脚本或子进程环境。
   let desktopDialogs;
@@ -23,8 +23,10 @@ export async function startRuntimeWorker(runtime, { environment = process.env } 
     desktopDialogs = { AICO_DESKTOP_DIALOG_URL:url.href, AICO_DESKTOP_DIALOG_TOKEN:dialogToken };
   }
   const worker = new Worker(new URL('./runtime-worker.mjs', import.meta.url), {
-    env:resolved.environment, workerData:{ paths:resolved.paths, desktopDialogs }, execArgv:[],
+    env:resolved.environment, workerData:{ paths:resolved.paths, desktopDialogs, stateRoot }, execArgv:[],
   });
+  const requests = new Map();
+  let requestSequence = 0;
   let failure;
   let closing = false;
   let closePromise;
@@ -41,10 +43,19 @@ export async function startRuntimeWorker(runtime, { environment = process.env } 
   void done.catch(() => {});
   const recordFailure = error => {
     failure ??= error;
+    for (const request of requests.values()) request.reject(failure);
+    requests.clear();
     rejectReady(failure);
   };
   worker.on('message', message => {
-    if (message?.type === 'ready') {
+    if (message?.type === 'views') {
+      const request = requests.get(message.id);
+      if (!request) return;
+      requests.delete(message.id);
+      if (message.error) request.reject(new Error(message.error));
+      else if (!Array.isArray(message.views)) request.reject(new Error('Editor Worker 视图列表无效'));
+      else request.resolve(message.views);
+    } else if (message?.type === 'ready') {
       try {
         const url = new URL(message.appUrl);
         if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || !url.pathname.startsWith('/app/')) {
@@ -61,6 +72,8 @@ export async function startRuntimeWorker(runtime, { environment = process.env } 
   worker.on('error', error => recordFailure(new Error(`AICO-PPT Worker 崩溃：${error.message}`, { cause:error })));
   worker.once('exit', code => {
     exited = true;
+    for (const request of requests.values()) request.reject(new Error('Editor Worker 已退出'));
+    requests.clear();
     if ((!closing || (!terminated && (!closedAcknowledged || code !== 0))) && !failure) {
       failure = new Error(`AICO-PPT Worker 意外退出（${code}）`);
     }
@@ -78,9 +91,23 @@ export async function startRuntimeWorker(runtime, { environment = process.env } 
     return {
       appUrl,
       done,
+      /** 通过私有 Worker 协议读取所属视图，不接受调用方传入网络地址。 */
+      transportViews() {
+        if (closing || exited || failure) return Promise.reject(failure ?? new Error('Editor Worker 已关闭'));
+        const id = ++requestSequence;
+        let timer;
+        const result = new Promise((resolve, reject) => {
+          requests.set(id, { resolve, reject });
+          timer = setTimeout(() => reject(new Error('Editor Worker 视图查询超时')), START_TIMEOUT_MS);
+          worker.postMessage({ type:'views', id });
+        });
+        return result.finally(() => { clearTimeout(timer); requests.delete(id); });
+      },
       close() {
         if (closePromise) return closePromise;
         closing = true;
+        for (const request of requests.values()) request.reject(new Error('Editor Worker 正在关闭'));
+        requests.clear();
         closePromise = (async () => {
           if (exited) return done;
           worker.postMessage({ type:'close' });

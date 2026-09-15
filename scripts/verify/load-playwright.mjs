@@ -1,9 +1,12 @@
 import { connectDesktopRenderer } from './desktop-renderer.mjs';
 
-/** 桌面版复用宿主渲染服务；独立 Skill 保留本机 Chrome 默认值。 */
+/** 原装宿主的插件模式只使用私有浏览器；旧桌面模式使用其既有渲染服务。 */
 export function chromiumLaunchOptions(environment = process.env) {
   if (environment.AICO_RUNTIME_KIND === 'desktop') return {};
   const executablePath = environment.AICO_BROWSER_EXECUTABLE;
+  if (environment.AICO_RUNTIME_KIND === 'plugin' && executablePath === undefined) {
+    throw new Error('插件渲染缺少私有浏览器路径，请修复 PPT 资源安装');
+  }
   if (executablePath === undefined) return { channel:'chrome', headless:true };
   if (!executablePath.trim()) throw new Error('AICO 内置浏览器路径不能为空');
   return { executablePath, headless:true };

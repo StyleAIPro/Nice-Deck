@@ -78,11 +78,11 @@ const APP_ASSETS = new Map([
     type:'text/javascript; charset=utf-8',
   }],
   ['/app/three.module.min.js', {
-    path:join(PROJECT_DIR, 'node_modules/three/build/three.module.min.js'),
+    get path() { return join(dirname(fileURLToPath(import.meta.resolve('three'))), 'three.module.min.js'); },
     type:'text/javascript; charset=utf-8',
   }],
   ['/app/three.core.min.js', {
-    path:join(PROJECT_DIR, 'node_modules/three/build/three.core.min.js'),
+    get path() { return join(dirname(fileURLToPath(import.meta.resolve('three'))), 'three.core.min.js'); },
     type:'text/javascript; charset=utf-8',
   }],
   ['/app/native-controls.mjs', {
@@ -135,11 +135,11 @@ const APP_ASSETS = new Map([
     type:'text/javascript; charset=utf-8',
   }],
   ['/app/xterm.js', {
-    path:join(PROJECT_DIR, 'node_modules/@xterm/xterm/lib/xterm.js'),
+    get path() { return fileURLToPath(import.meta.resolve('@xterm/xterm/lib/xterm.js')); },
     type:'text/javascript; charset=utf-8',
   }],
   ['/app/xterm.css', {
-    path:join(PROJECT_DIR, 'node_modules/@xterm/xterm/css/xterm.css'),
+    get path() { return fileURLToPath(import.meta.resolve('@xterm/xterm/css/xterm.css')); },
     type:'text/css; charset=utf-8',
   }],
   ['/app/huawei-logo.png', {
@@ -272,10 +272,13 @@ export async function startAppServer({
     pythonExecutable, ...options,
   }),
   createSampleDeck = options => createOnboardingSample(options),
+  stateRoot = null,
   recentDeckStore = createRecentDeckStore({
+    ...(stateRoot ? { filePath:join(stateRoot, 'recent-decks.json') } : {}),
     discoveryRoots:[join(PROJECT_DIR, 'Deck-Projects')],
   }),
   workHistoryStore = createWorkHistoryStore({
+    ...(stateRoot ? { filePath:join(stateRoot, 'work-history.json') } : {}),
     discoveryRoots:[join(PROJECT_DIR, 'Deck-Projects')],
     recentDeckStore,
   }),
@@ -2346,6 +2349,16 @@ export async function startAppServer({
     appUrl:workspaceAppUrl(),
     port:actualPort,
     token,
+    /** 返回当前归属的视图地址；关闭中的编辑器及整个应用不再接受新连接。 */
+    transportViews() {
+      if (appClosePromise || launcherClosePromise) return [];
+      const editors = [
+        ...[...editingRuntimes.values()].map(runtime => runtime.app),
+        ...[...creationRuntimes.values()].map(runtime => runtime.workspace?.managedDeck?.editor),
+      ];
+      return [{ origin:serviceOrigin, token, kind:'app' },
+        ...editors.map(editor => editor?.transportEndpoint).filter(Boolean).map(endpoint => ({ ...endpoint, kind:'editor' }))];
+    },
     get state() { return state; },
     get editorApp() { return editorApp; },
     get creationTerminal() { return creationTerminal; },

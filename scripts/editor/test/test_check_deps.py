@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -16,6 +17,21 @@ SPEC.loader.exec_module(doctor)
 
 
 class CheckDepsTest(unittest.TestCase):
+    def test_plugin_browser_cannot_fall_back_to_system_chrome(self):
+        with mock.patch.dict(os.environ, {"AICO_RUNTIME_KIND": "plugin"}, clear=True), mock.patch.object(doctor.shutil, "which") as which:
+            ready, detail = doctor.probe_chrome()
+            self.assertFalse(ready)
+            self.assertIn("私有浏览器", detail)
+            which.assert_not_called()
+
+
+    def test_node_supports_unflagged_esm_resolution(self):
+        for version, ready in [("v18.18.0", False), ("v18.19.0", True), ("v18.20.8", True), ("v19.9.0", False), ("v20.5.0", False), ("v20.6.0", True), ("v24.19.0", True)]:
+            with self.subTest(version=version), mock.patch.object(
+                doctor, "run", return_value=doctor.subprocess.CompletedProcess(["node"], 0, version, "")
+            ):
+                self.assertEqual(doctor.probe_node()[0], ready)
+
     def test_pptx_export_reports_missing_editable_tools_without_installing_dependencies(self):
         _, checks = doctor.checks_for_profiles(["pptx-export"])
         builder = next(check for check in checks if check["key"] == "pptx-builder")
@@ -70,13 +86,16 @@ class CheckDepsTest(unittest.TestCase):
             build.mkdir(parents=True)
             for name in ("three.module.min.js", "three.core.min.js"):
                 (build / name).write_text("// 浏览器运行时", encoding="utf-8")
-            with mock.patch.object(doctor, "REPO", root), \
-                    mock.patch.object(doctor, "run") as run:
+            (build.parent / "package.json").write_text(json.dumps({
+                "name": "three", "exports": {".": {"import": "./build/three.module.js", "require": "./build/three.cjs"}}
+            }), encoding="utf-8")
+            plugin = root / "plugins" / "ppt"
+            plugin.mkdir(parents=True)
+            with mock.patch.object(doctor, "REPO", plugin):
                 ready, detail = doctor.do_probe(three)
             self.assertTrue(ready)
             self.assertIn("three.module.min.js", detail)
             self.assertIn("three.core.min.js", detail)
-            run.assert_not_called()
 
     def test_three_requires_both_browser_files_even_when_commonjs_resolves(self):
         _, checks = doctor.checks_for_profiles(["editor-core"])
@@ -91,7 +110,7 @@ class CheckDepsTest(unittest.TestCase):
                     if name != missing_name:
                         (build / name).touch()
                 (build / "three.cjs").touch()
-                success = doctor.subprocess.CompletedProcess(["node"], 0, "", "")
+                success = doctor.subprocess.CompletedProcess(["node"], 0, str(build), "")
                 with mock.patch.object(doctor, "REPO", root), \
                         mock.patch.object(doctor, "run", return_value=success):
                     ready, detail = doctor.do_probe(three)

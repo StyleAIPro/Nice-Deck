@@ -1614,7 +1614,19 @@ function renderCreationDraft() {
     if (creationPreviewKey !== nextKey) {
       creationPreviewKey = nextKey;
       workspaceStatus('正在刷新 Deck 画布…', 'working');
-      creationUi.deckPreview.src = creationDraft.previewDeck.editorUrl
+      const previewUrl = creationDraft.previewDeck.editorUrl;
+      if (previewUrl && new URLSearchParams(location.search).get('aicoTransport') === '1') {
+        const request = new URL('/_aico/ppt-view', location.href);
+        request.searchParams.set('token', token);
+        request.searchParams.set('url', previewUrl);
+        void fetch(request).then(async response => {
+          if (!response.ok) throw new Error(`预览地址解析失败：HTTP ${response.status}`);
+          const value = await response.json();
+          if (creationPreviewKey === nextKey) creationUi.deckPreview.src = value.url;
+        }).catch(error => {
+          if (creationPreviewKey === nextKey) { creationPreviewKey = null; workspaceStatus(error.message, 'error'); }
+        });
+      } else creationUi.deckPreview.src = previewUrl
         ?? '/creation-deck-preview?token='
           + encodeURIComponent(token) + '&revision='
           + encodeURIComponent(creationDraft.previewDeck.revision);

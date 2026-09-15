@@ -9,7 +9,7 @@ const ready = (async () => {
   const { pickPptxSaveWithSystemPicker } = await import('../../scripts/editor/system-picker.mjs');
   const pickerOptions = options => ({ ...options, pythonExecutable:workerData.paths.python, environment:workerData.desktopDialogs });
   app = await startAppServer({
-    host:'127.0.0.1', port:0, openBrowser:false, embeddedMode:'dsh',
+    host:'127.0.0.1', port:0, openBrowser:false, embeddedMode:'dsh', stateRoot:workerData.stateRoot,
     pythonExecutable:workerData.paths.python,
     ...(workerData.desktopDialogs ? {
       pickDeck:options => pickDeckWithSystemPicker(pickerOptions(options)),
@@ -30,6 +30,13 @@ function fail(error) {
 }
 
 parentPort.on('message', message => {
+  if (message?.type === 'views') {
+    void ready.then(() => {
+      if (closing) throw new Error('Editor 正在关闭');
+      parentPort.postMessage({ type:'views', id:message.id, views:app.transportViews() });
+    }).catch(error => parentPort.postMessage({ type:'views', id:message.id, error:error.message }));
+    return;
+  }
   if (message?.type !== 'close' || closing) return;
   closing = (async () => {
     await ready;

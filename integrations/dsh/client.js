@@ -6,6 +6,8 @@ window.__ModuleLoader__.load({
     const React = require("react");
     const h = React.createElement;
     const brand = globalThis.__AICO_PPT_BRAND__;
+    let selectedAppUrl;
+    const runtimeAppUrl = () => selectedAppUrl ?? brand?.appUrl;
     const optimisticSessionTitles = new Map();
     const sessionTitleWrites = new Map();
 
@@ -26,9 +28,9 @@ window.__ModuleLoader__.load({
 `;
 
     function embeddedEditorUrl() {
-      if (!brand || typeof brand.appUrl !== "string") return null;
+      if (typeof runtimeAppUrl() !== "string") return null;
       try {
-        const url = new URL(brand.appUrl);
+        const url = new URL(runtimeAppUrl());
         url.searchParams.set("embedded", "dsh");
         url.searchParams.set("parentOrigin", window.location.origin);
         return url.href;
@@ -49,9 +51,9 @@ window.__ModuleLoader__.load({
     }
 
     function appCommandUrl(pathname) {
-      if (!brand || typeof brand.appUrl !== "string") return null;
+      if (typeof runtimeAppUrl() !== "string") return null;
       try {
-        const appUrl = new URL(brand.appUrl);
+        const appUrl = new URL(runtimeAppUrl());
         const token = appUrl.searchParams.get("token");
         if (!token) return null;
         const endpoint = new URL(pathname, appUrl);
@@ -677,6 +679,21 @@ window.__ModuleLoader__.load({
     const inject = ["slots", "sessions", "workspaces", "conversation", "workbench", "sessionStarts"];
 
     function apply(ctx) {
+      if (globalThis.__AICO_PPT_PREPARE__) {
+        const controller = new AbortController();
+        ctx.effect(() => () => controller.abort(new Error("AICO-PPT Client 已卸载")));
+        return globalThis.__AICO_PPT_PREPARE__({ signal:controller.signal }).then(value => {
+          controller.signal.throwIfAborted();
+          selectedAppUrl = value.appUrl;
+          if (typeof selectedAppUrl !== "string") throw new Error("所选后端未提供 AICO-PPT 工作台地址");
+          return mount(ctx);
+        });
+      }
+      return mount(ctx);
+    }
+
+    function mount(ctx) {
+      ctx = ctx.get?.('aicoHarnessClient')?.bind(ctx) ?? ctx;
       const sessionStarter = createContextualSessionStart(() => {
         if (ctx.workbench.active?.() !== "aico-ppt") ctx.workbench.open("aico-ppt", 1100);
       });

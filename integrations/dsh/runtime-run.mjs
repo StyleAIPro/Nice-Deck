@@ -6,11 +6,15 @@ import { constants } from 'node:os';
 import { resolveRuntime } from './runtime-env.mjs';
 
 async function main() {
-  const [interpreter, ...args] = process.argv.slice(2);
+  const input = process.argv.slice(2);
+  const explicit = input[0] === '--runtime-base64';
+  const descriptor = explicit
+    ? JSON.parse(Buffer.from(input.splice(0, 2)[1], 'base64url').toString('utf8'))
+    : JSON.parse(await readFile(new URL('../../.aico-runtime.json', import.meta.url), 'utf8'));
+  const [interpreter, ...args] = input;
   if (!['python3', 'node'].includes(interpreter)) {
     throw new Error('用法：runtime-run.mjs <python3|node> [解释器参数、脚本或 -]');
   }
-  const descriptor = JSON.parse(await readFile(new URL('../../.aico-runtime.json', import.meta.url), 'utf8'));
   const runtime = await resolveRuntime(descriptor);
   const command = interpreter === 'node' ? process.execPath : runtime.paths.python;
   process.exitCode = await new Promise((resolve, reject) => {

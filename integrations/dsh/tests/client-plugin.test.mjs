@@ -7,7 +7,7 @@ import { buildCreationInitializationPrompt } from '../../../scripts/editor/deck-
 
 const CLIENT_URL = new URL('../client.js', import.meta.url)
 
-async function loadClientBundle({ fetchImpl, brand } = {}) {
+async function loadClientBundle({ fetchImpl, brand, prepare } = {}) {
   const source = await readFile(CLIENT_URL, 'utf8')
   let handoff
   const styles = new Map()
@@ -48,7 +48,8 @@ async function loadClientBundle({ fetchImpl, brand } = {}) {
     },
   }
   vm.runInNewContext(source, {
-    window, document, console, URL,
+    window, document, console, URL, AbortController,
+    __AICO_PPT_PREPARE__:prepare,
     fetch:fetchImpl ?? (async () => ({ ok:true, json:async () => ({ status:'unlinked' }) })),
     setTimeout, clearTimeout,
     setInterval(callback) {
@@ -951,3 +952,44 @@ test('工作区初始 pending 时不解析会话或发布项目菜单，就绪�
   assert.deepEqual(opened, [])
   assert.equal(contribution.source.getSnapshot().length, 1)
 })
+
+
+test('适配入口准备完成后，项目查询和 iframe 共用所选工作台地址', async t => {
+  const requests = [];
+  const loaded = await loadClientBundle({
+    prepare:async () => ({ appUrl:'http://127.0.0.1:5200/app/?token=selected' }),
+    fetchImpl:async url => { requests.push(String(url)); return { ok:true, json:async () => ({ creation:[], editing:[] }) }; },
+  });
+  const disposers = [], registrations = [];
+  t.after(() => { for (const dispose of disposers.reverse()) dispose?.(); });
+  const ctx = {
+    effect:effect => disposers.push(effect()), on:() => () => {},
+    sessions:{ list:{ getSnapshot:() => ({ current:null, byId:{} }) } },
+    workspaces:{ list:{ getSnapshot:() => ({ phase:'ready', archivedSessionIds:[] }) } },
+    sessionStarts:{ register:() => () => {} }, workbench:{},
+    slots:{ inject:(_name, mount) => mount(), register:(options, component) => registrations.push({ options, component }) },
+  };
+  await loaded.plugin.apply(ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(requests.length > 0);
+  assert.ok(requests.every(url => new URL(url).origin === 'http://127.0.0.1:5200'));
+  const view = registrations.find(value => value.options.name === 'workbench.persistent-view');
+  const tree = view.component(view.options.inject());
+  assert.equal(new URL(tree.children[0].props.src).origin, 'http://127.0.0.1:5200');
+});
+
+test('准备期间卸载 Client 会取消请求，迟到地址不能挂载视图或退回本地', async () => {
+  let finish, signal;
+  const loaded = await loadClientBundle({ prepare:options => {
+    signal = options.signal;
+    return new Promise(resolve => { finish = resolve; });
+  } });
+  let dispose;
+  const running = loaded.plugin.apply({ effect:effect => { dispose = effect(); } });
+  const failed = assert.rejects(running, /已卸载/);
+  dispose();
+  assert.equal(signal.aborted, true);
+  finish({ appUrl:'http://127.0.0.1:5200/app/?token=selected' });
+  await failed;
+  assert.equal(loaded.styles.size, 0);
+});
