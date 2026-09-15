@@ -54,7 +54,7 @@ Linux 与原生 Windows 已验证两个真实编辑器的连接、导航与独�
 
 AICO 2.0 使用原装 DSH Desktop 与配套原装 DSH，先安装 AICO-Harness 适配插件，再安装 AICO-PPT。适配层和业务插件分别发布，不再交付 AICO 修改版 Host。统一 UI/CLI 安装、Python／浏览器发行资源准备尚在实现，不能把旧桌面插件管理器描述为原装产品中已可用的入口。独立 Skill 与源码安装不要求桌面运行时描述文件。
 
-原装宿主的私有渲染模式调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python, browser } } })`。Python 和 Chromium 兼容浏览器均为绝对路径，真实普通文件须位于同一资源根目录内。描述对象不接受凭据或任意环境变量。模型命令用 `--runtime-base64` 传递该描述的 JSON 编码，避免 PowerShell 5 原生命令参数丢失 JSON 引号；这只是路径传输编码，不是加密。包装器执行前重新验证描述，不写入插件包目录。未传此参数时才读取旧 `.aico-runtime.json`；显式参数无效时直接失败。Node 使用 `process.execPath`，插件不安装第二份 Node。
+原装宿主的私有渲染模式调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python, browser } } })`。`aico.release.json` 同步声明这两个平台资源角色，不再依赖旧 Host 的 `desktopRenderer`。Python 和 Chromium 兼容浏览器均为绝对路径，真实普通文件须位于同一资源根目录内。描述对象不接受凭据或任意环境变量。模型命令用 `--runtime-base64` 传递该描述的 JSON 编码，避免 PowerShell 5 原生命令参数丢失 JSON 引号；这只是路径传输编码，不是加密。包装器执行前重新验证描述，不写入插件包目录。未传此参数时才读取旧 `.aico-runtime.json`；显式参数无效时直接失败。Node 使用 `process.execPath`，插件不安装第二份 Node。
 
 Electron 脚本命令在自身进程树内设置 Node 模式。PowerShell 通过管道等待 GUI 子系统的可执行文件结束，传回输出和退出码，并在 finally 中恢复调用方环境；POSIX shell 使用单命令环境。省略 browser 仅保留旧桌面渲染通道兼容，不能证明原装宿主具备该通道。旧 `aico.release.json` 的 `desktopRenderer` 要求不能作为原装发布契约。PPTX 参考材料由标准库工具 `scripts/extract-pptx.py` 提取；运行时拒绝 office 角色并过滤旧 `AICO_SOFFICE_EXECUTABLE`。
 

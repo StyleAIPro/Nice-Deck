@@ -26,7 +26,7 @@ Windows 原装 Desktop 2.0.10-beta.1 / DSH 0.1.5-rc.2 已通过真实离线 CLI 
 
 原装 Desktop 的 `desktopActions` 仅公开终端打开与重启，没有旧 AICO Electron renderer 私有通道。原装插件模式因此允许资源描述声明 `paths.browser`；它与 Python 一起通过 realpath 和普通文件校验，位于同一资源根目录。适配插件的资源配置映射接受该角色，Worker 与模型脚本包装器共同使用 `AICO_RUNTIME_KIND=plugin` 和显式浏览器路径，移除旧 `AICO_HOME`。截图、验证、导出使用现有 Playwright 路径，不加载或改写宿主原生主进程。
 
-本节替代前文“所有桌面模式只携带 Python、拒绝 browser 字段”的约定。省略 browser 的旧描述仍使用原来的桌面渲染通道，不能用于证明原装宿主具备导出能力。插件模式缺少显式浏览器路径时不回退本机 Chrome。正式原装发布需要额外构建、校验并分发匹配 Windows／Linux 的浏览器资源；旧 `aico.release.json` 的 desktopRenderer 要求不作为原装发布契约。资源版本、来源及依赖验证和完整 Windows／WSL 导出仍待交付。
+本节替代前文“所有桌面模式只携带 Python、拒绝 browser 字段”的约定。省略 browser 的旧描述仍使用原来的桌面渲染通道，不能用于证明原装宿主具备导出能力。插件模式缺少显式浏览器路径时不回退本机 Chrome。`aico.release.json` 已改为显式声明 Windows／Linux 的 Python 和浏览器文件，不再要求 `desktopRenderer`；正式原装发布仍需构建、校验并分发匹配平台的浏览器资源。资源版本、来源及依赖验证和完整 Windows／WSL 导出仍待交付。
 
 显式集成测试已在 Linux 与 Windows 用临时复制的浏览器／Python 执行真实两页图片导出，检查 PPTX ZIP 完整性、两页及两张图片，随后删除测试目录。Windows 文件占用仅有限重试，不吞掉清理失败。该测试父进程为 Node；不证明原装 Electron Utility Host 的脚本入口、导出 UI、WSL 切换或正式资源发行可用。
 
