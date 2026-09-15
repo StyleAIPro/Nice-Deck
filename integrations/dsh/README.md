@@ -52,7 +52,7 @@ Linux 与原生 Windows 已验证两个真实编辑器的连接、导航与独�
 
 ## 应用内插件运行时
 
-AICO 2.0 使用原装 DSH Desktop 与配套原装 DSH，先安装 AICO-Harness 适配插件，再安装 AICO-PPT。适配层和业务插件分别发布，不再交付 AICO 修改版 Host。统一 UI/CLI 安装、Python／浏览器发行资源准备尚在实现，不能把旧桌面插件管理器描述为原装产品中已可用的入口。独立 Skill 与源码安装不要求桌面运行时描述文件。
+AICO 2.0 使用原装 DSH Desktop 与配套原装 DSH，先用原版 `dsh plugin` 安装 AICO-Harness 适配插件，再在适配插件提供的 AICO 设置页安装 AICO-PPT。适配层和业务插件分别发布，不再交付 AICO 修改版 Host。Windows 与 Linux 的 Python／浏览器资源由适配仓库的资源准备器生成、审计并随业务发布；独立 Skill 与源码安装不要求桌面运行时描述文件。
 
 原装宿主的私有渲染模式调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python, browser } } })`。`aico.release.json` 同步声明这两个平台资源角色，不再依赖旧 Host 的 `desktopRenderer`。Python 和 Chromium 兼容浏览器均为绝对路径，真实普通文件须位于同一资源根目录内。描述对象不接受凭据或任意环境变量。模型命令用 `--runtime-base64` 传递该描述的 JSON 编码，避免 PowerShell 5 原生命令参数丢失 JSON 引号；这只是路径传输编码，不是加密。包装器执行前重新验证描述，不写入插件包目录。未传此参数时才读取旧 `.aico-runtime.json`；显式参数无效时直接失败。Node 使用 `process.execPath`，插件不安装第二份 Node。
 
@@ -63,6 +63,8 @@ Host 在创建 Worker 时传入独立环境，Worker 收到环境后才导入 Ed
 只有配置桌面运行时的 Skill 定义会在规范正文后追加包装器说明，磁盘上的 `SKILL.md` 不变。包装器允许 `python3` / `node` 的普通参数、`-m` / `-c` / `-e`、stdin 和项目脚本；它只选择环境，命令审批与沙箱仍归 Harness。调用保持原工作目录，文档中的 `scripts/` 相对路径须解析到本 Skill 根目录，输出继续指向用户项目。
 
 可信 sidecar helper 的 Python 冷启动握手单独等待最多 10 秒；握手成功后，普通文件命令仍使用原来的 1 秒预算。启动时限可显式配置，但最多 30 秒；超时仍终止并回收 helper，未得到可信 ACK 不继续打开编辑器。
+
+发行资源验收可设置 `AICO_TEST_BROWSER_DIRECTORY`，并在 `AICO_TEST_PYTHON_DIRECTORY` 与 `AICO_TEST_PYTHON_EXECUTABLE` 中二选一运行 `integrations/dsh/tests/private-browser.integration.mjs`。目录模式复制完整的自包含 Python，适用于最终资源归档；单文件模式只保留轻量开发兼容检查。来源与许可证审计、资源归档安装和 Desktop／WSL 安装流程分别由适配仓库门禁覆盖。
 
 启动失败直接拒绝插件激活；启动后的 Worker 崩溃写入 Host 日志，并使后续页面注入报告失败。移除插件时先请求 `app.close()`，随后等待 Worker 退出；超过 15 秒仍未退出时，等待强制终止完成并报告关闭超时。启动超过 30 秒也会终止并拒绝激活。
 
