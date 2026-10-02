@@ -7,8 +7,8 @@
   "entry": "plugin/integrations/dsh/index.mjs",
   "components": ["plugin", "python", "browser"],
   "paths": {
-    "python": {"kind": "file", "path": "python/bin/python3"},
-    "browser": {"kind": "file", "path": "browser/chrome"}
+    "python": {"kind": "file", "path": "python/python.exe"},
+    "browser": {"kind": "file", "path": "browser/chrome.exe"}
   },
   "targets": {
     "win32-x64": {

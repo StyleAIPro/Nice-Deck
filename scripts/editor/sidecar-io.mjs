@@ -23,6 +23,7 @@ const MUTATION_COMMIT_SCOPES = new Map([
   ['write-agent-workspace', 'agent-workspace'],
   ['write-working-deck', 'working-deck'],
   ['archive-working-deck', 'working-deck'],
+  ['prune-working-versions', 'working-versions'],
   ['restore-working-deck', 'working-deck'],
   ['rebind-deck', 'binding'],
   ['publish-working-deck', 'deck'],
@@ -43,7 +44,7 @@ const WORKING_DECK_COMMANDS = new Set([
   'read-working-deck', 'write-working-deck', 'archive-working-deck',
   'restore-working-deck', 'publish-working-deck',
   // 源文件和备份也要完整读取大 Deck，不能按轻量目录操作的 1s 预算处理。
-  'hash-deck', 'verify-backup',
+  'hash-deck', 'verify-backup', 'prune-working-versions',
 ]);
 const plainIdentity = identity => Object.fromEntries(
   ['path', 'realPath', 'dev', 'ino'].map(key => [key, identity[key]]),
@@ -446,6 +447,9 @@ class PersistentSidecarIO {
   }
   deleteTransaction({ transactionId }) {
     return this.#request('delete-transaction', { transactionId });
+  }
+  pruneWorkingVersions({ dryRun=false } = {}) {
+    return this.#request('prune-working-versions', { dryRun });
   }
   pruneTransactions({ maximum=32 } = {}) {
     return this.#request('prune-transactions', { maximum });

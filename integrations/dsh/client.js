@@ -204,6 +204,9 @@ window.__ModuleLoader__.load({
       const linked = await resolveDshSession(sessionId, true);
       const work = linked?.workItem;
       if (!work) return false;
+      if (ctx.workspaces.projectSessionCapabilities?.restore === false) {
+        throw Object.assign(new Error("当前原装宿主不支持恢复原会话；请恢复项目后新建会话"), { code:"PROJECT_RESTORE_UNSUPPORTED" });
+      }
       if (work.lifecycle === "removing") throw new Error("项目正在移除，请先完成移除后恢复会话");
       const workspace = await ctx.workspaces.create({ path:work.projectRoot });
       const response = await fetch(appCommandUrl("/api/dsh-work-items/restore-session"), {
@@ -245,7 +248,7 @@ window.__ModuleLoader__.load({
             return restoreLinkedSession(ctx, requireBridgeString(payload.sessionId, "sessionId"));
           }
           case "project-sessions": {
-            if (typeof ctx.workspaces.projectSessions !== "function") throw Object.assign(new Error("请更新 AICO-Harness 以支持项目会话管理"), { code:"HOST_LIFECYCLE_UNAVAILABLE" });
+            if (typeof ctx.workspaces.projectSessions !== "function") throw Object.assign(new Error("当前宿主尚不支持项目关联会话的批量归档与恢复；项目移除未完成，内容文件保留"), { code:"HOST_LIFECYCLE_UNAVAILABLE" });
             return ctx.workspaces.projectSessions(payload);
           }
           case "ensure-workspace": {
@@ -641,7 +644,7 @@ window.__ModuleLoader__.load({
 
       if (editorUrl === null) {
         return h("section", { className:"hwd-workbench" },
-          h("div", { className:"hwd-workbench-error", role:"alert" }, "AICO-PPT Editor 运行时没有启动。请重启 DSH Web profile。"));
+          h("div", { className:"hwd-workbench-error", role:"alert" }, brand?.error || "AICO-PPT Editor 运行时没有启动。请重启 DSH Desktop。"));
       }
       return h("section", { className:"hwd-workbench", "aria-label":"AICO-PPT Editor" },
         h("iframe", {
@@ -729,6 +732,22 @@ window.__ModuleLoader__.load({
       }, "aico-ppt: 常驻项目会话目标");
 
       ctx.effect(() => {
+        const navigation = ctx.get?.('aicoSessionNavigation');
+        if (navigation) return navigation.register({
+          id:'aico-ppt', width:1100, closeOnUnlinked:true,
+          async resolve(sessionId, signal) {
+            await waitForWorkspaceReady(ctx);
+            signal.throwIfAborted();
+            if (archivedSessionIds(ctx).has(sessionId)) return null;
+            if (appCommandUrl('/api/dsh-work-items/resolve-session') === null) throw new Error('PPT 关联查询尚未就绪');
+            const result = await resolveDshSession(sessionId);
+            signal.throwIfAborted();
+            if (!['linked', 'unlinked'].includes(result?.status)) throw new Error('PPT 关联查询状态无效');
+            if (result.status === 'linked' && !result.workItem?.workId) throw new Error('PPT 关联项目无效');
+            return result.status === 'linked' ? result.workItem : null;
+          },
+          selected:work => sessionStarter.prefer(work?.workId ?? null),
+        });
         let selectionRevision = 0;
         let disposed = false;
         const inspectSelection = (sessionId) => {

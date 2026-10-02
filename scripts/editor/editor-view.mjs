@@ -8,8 +8,8 @@ export function createEditorViews({launch=async()=> (await loadChromium()).launc
   const cache=new Map();
   const active=new Set(), pending=new Map();
   let closed=false;
-  async function render(input,{pageKey=null,query='',rect=null}={}) {
-    const key=createHash('sha256').update(input.bytes).update(JSON.stringify([input.actions,pageKey,query,rect])).digest('hex');
+  async function render(input,{pageKey=null,query='',rect=null,catalogOnly=false}={}) {
+    const key=createHash('sha256').update(input.bytes).update(JSON.stringify([input.actions,pageKey,query,rect,catalogOnly])).digest('hex');
     if(cache.has(key))return structuredClone(cache.get(key));
     const started=Date.now();
     const result=await withEffectiveDeck(input,async({path,stateId})=>{
@@ -36,10 +36,11 @@ export function createEditorViews({launch=async()=> (await loadChromium()).launc
           .stage .slide-fit{width:1920px!important;height:1080px!important}
           .stage .slide-canvas{content-visibility:visible!important;transform:none!important;width:1920px!important;height:1080px!important}
           .build{opacity:1!important;transform:none!important;filter:none!important}`});
-        const detail=await page.evaluate(({pageKey,query,rect})=>{
+        const detail=await page.evaluate(({pageKey,query,rect,catalogOnly})=>{
           const rt=window.HuaweiDeckPatchRuntime;
           const canvases=[...document.querySelectorAll('.stage .slide-canvas')];
           const pages=canvases.map((c,i)=>({pageKey:rt.pageKey(c),index:i+1,label:c.querySelector('section')?.dataset.label??''}));
+          if(catalogOnly)return {pages,index:-1};
           const index=pageKey?pages.findIndex(p=>p.pageKey===pageKey||p.label===pageKey||String(p.index)===String(pageKey)):0;
           if(index<0)throw new Error('找不到目标页面');
           const canvas=canvases[index],origin=canvas.getBoundingClientRect();
@@ -61,7 +62,8 @@ export function createEditorViews({launch=async()=> (await loadChromium()).launc
           }
           rows.sort((a,b)=>b.score-a.score);
           return {page:pages[index],pages,targets:rows.slice(0,16),index};
-        },{pageKey,query,rect});
+        },{pageKey,query,rect,catalogOnly});
+        if(catalogOnly)return {pages:detail.pages,stateId,mode:'page-directory',message:'请根据页面目录指定 pageKey；当前没有可用的右侧视图'};
         const canvas=(await page.$$('.stage .slide-canvas'))[detail.index];
         await canvas.scrollIntoViewIfNeeded();
         const image=await canvas.screenshot({type:'png'});

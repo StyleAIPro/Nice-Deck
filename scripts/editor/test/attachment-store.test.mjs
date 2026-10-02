@@ -192,6 +192,10 @@ async function waitForPath(path) {
 
 function hangingChild({ closeOnKill=true, exitCode=0, output=null } = {}) {
   const child = new EventEmitter();
+  // EventEmitter 替身没有真实子进程句柄；保留事件循环直到 close/unref，
+  // 否则被测代码的 unref 超时器尚未触发，测试进程就提前退出。
+  const keepAlive = setInterval(() => {}, 1000);
+  child.once('close', () => clearInterval(keepAlive));
   child.stdin = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -202,7 +206,7 @@ function hangingChild({ closeOnKill=true, exitCode=0, output=null } = {}) {
     if (closeOnKill) queueMicrotask(() => child.emit('close', null, signal));
     return true;
   };
-  child.unref = () => { child.unrefs += 1; };
+  child.unref = () => { child.unrefs += 1; keepAlive.unref(); };
   if (output !== null) queueMicrotask(() => {
     child.stdout.end(output);
     child.stderr.end();

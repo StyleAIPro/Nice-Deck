@@ -81,7 +81,7 @@ Codex 的标准用户级注册位置是 `~/.agents/skills/aico-ppt`。开发时�
 
 ## 插件项目与会话生命周期
 
-新增或修改项目导入、移除、恢复、会话绑定、工作区登记时，必须遵循 Harness 的[插件项目生命周期规范](../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)。发布包不包含相邻仓库时，到 AICO-Harness 仓库读取 `docs/cookbook/plugin-project-lifecycle.zh.md`。PPT 的适配细节与验证记录见 [项目生命周期](docs/design/project-lifecycle.md)。不要根据目录相同推断会话归属，不要以隐藏首页记录代替归档关联会话。
+新增或修改项目导入、移除、恢复、会话绑定、工作区登记时，必须遵循 Harness 的[插件项目生命周期规范](../upstream-old/AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)。发布包不包含相邻仓库时，到 AICO-Harness 仓库读取 `docs/cookbook/plugin-project-lifecycle.zh.md`。PPT 的适配细节与验证记录见 [项目生命周期](docs/design/project-lifecycle.md)。不要根据目录相同推断会话归属，不要以隐藏首页记录代替归档关联会话。
 
 任职材料模板新增 `assets/qualification-deck.html`（22 页通用占位模板），目录 ID 为 `qualification`，使用边界和页型索引见 `references/qualification-template.md`。运行时升级必须按此模板类型解析，不能误判为授课模板。新模板不包含个人案例图片或历史编辑补丁，使用当前公共运行时。
 

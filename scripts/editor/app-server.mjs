@@ -8,8 +8,6 @@ import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { buildOpenCommand, startServer } from './server.mjs';
 import { isMainModule } from './main-module.mjs';
-import { prewarmAgentTerminalRuntime } from './agent-terminal-runtime.mjs';
-import { createAgentTerminalSession } from './agent-terminal-loader.mjs';
 import {
   DraftAgentConversationStore,
   discoverTerminalConversation,
@@ -130,6 +128,7 @@ const APP_ASSETS = new Map([
     path:join(EDITOR_DIR, 'public/dsh-work-bridge.mjs'),
     type:'text/javascript; charset=utf-8',
   }],
+  ['/app/dsh-project-choice.mjs', { path:join(EDITOR_DIR, 'public/dsh-project-choice.mjs'), type:'text/javascript; charset=utf-8' }],
   ['/app/deck-task-coordinator.mjs', {
     path:join(EDITOR_DIR, 'public/deck-task-coordinator.mjs'),
     type:'text/javascript; charset=utf-8',
@@ -262,8 +261,8 @@ export async function startAppServer({
   resolveCreationProject = options => resolveSelectedProjectRoot(options),
   createCreationWorkspace = options => DeckCreationWorkspace.create(options),
   openCreationWorkspace = options => DeckCreationWorkspace.open(options),
-  createAgentTerminal = createAgentTerminalSession,
-  prewarmAgentRuntime = prewarmAgentTerminalRuntime,
+  createAgentTerminal = null,
+  prewarmAgentRuntime = null,
   loadHelpCatalog = () => buildHelpCatalog({ projectRoot:PROJECT_DIR }),
   inspectEnvironment = options => inspectEnvironmentWithPython({
     pythonExecutable, ...options,
@@ -303,6 +302,18 @@ export async function startAppServer({
   }
   if (!isAgentProviderId(agentProvider)) {
     throw new TypeError(`Agent provider 不受支持：${agentProvider}`);
+  }
+  if (embeddedMode === 'dsh') {
+    // 正式 DSH 插件不装载 PTY、xterm 或 WSL Agent 运行时。
+    createAgentTerminal ??= async () => { throw new Error('DSH 嵌入模式由 Windows DSH 会话执行 Agent'); };
+    prewarmAgentRuntime ??= () => {};
+  } else if (createAgentTerminal === null || prewarmAgentRuntime === null) {
+    const [{ createAgentTerminalSession }, { prewarmAgentTerminalRuntime }] = await Promise.all([
+      import('./agent-terminal-loader.mjs'),
+      import('./agent-terminal-runtime.mjs'),
+    ]);
+    createAgentTerminal ??= createAgentTerminalSession;
+    prewarmAgentRuntime ??= prewarmAgentTerminalRuntime;
   }
   if (typeof prewarmAgentRuntime !== 'function') {
     throw new TypeError('prewarmAgentRuntime 必须是函数');
@@ -1484,6 +1495,7 @@ export async function startAppServer({
         const { sessionId } = await readJson(request);
         const result = await resolveEditingContext({
           sessionId, workCatalog:activeWorkCatalog, findEditingRuntime,
+          findCreationRuntime:workItem => creationRuntimes.get(creationRuntimeKey(workItem)),
         });
         sendJson(response, 200, result);
         return;

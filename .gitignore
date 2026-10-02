@@ -33,3 +33,6 @@ steps_*/
 .artifacts/
 test-recode/
 /tmp/
+
+# 本机构建产物不提交到源码仓库
+/dist/

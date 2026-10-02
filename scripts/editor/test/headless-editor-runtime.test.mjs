@@ -33,7 +33,7 @@ test('headless runtime 复用 Editor 页面并在关闭时跳过 beforeunload', 
       waitUntil:'domcontentloaded', timeout:1234,
     }],
     ['wait', '#deck-frame', { timeout:1234 }],
-    ['wait', '[data-page-key]', { timeout:1234 }],
+    ['wait', '[data-page-key]', { state:'attached', timeout:1234 }],
   ]);
   let accepted = false;
   handlers.get('dialog')({

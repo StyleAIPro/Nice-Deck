@@ -1,3 +1,4 @@
+import { confirmProjectSession, linkedProjectSession } from './dsh-project-choice.mjs';
 import {
   renderTaskDrawer, setTaskDrawerOpen, taskHistoryControl,
 } from './task-drawer.mjs';
@@ -323,17 +324,28 @@ if (workspaceUrl && !embeddedCreation) {
       switchWorkspaceButton.disabled = true;
       workspaceHomeButton.disabled = true;
       exitEditorButton.disabled = true;
-      if (embeddedDsh && entry.dshBinding?.activeSessionId) {
-        try { await activateDshWorkItem(entry); }
-        catch (error) {
+      let createProjectSession = false;
+      if (embeddedDsh) {
+        const sessionId = linkedProjectSession(entry);
+        dshSessionBusy = true;
+        try {
+          if (sessionId) await activateDshWorkItem(entry, sessionId);
+          else {
+            createProjectSession = await confirmProjectSession(entry);
+            if (!createProjectSession) return false;
+          }
+        } catch (error) {
           showHistoryNotice(`无法切换任务会话：${error.message}`, 'error');
+          return false;
+        } finally {
+          dshSessionBusy = false;
           switchWorkspaceButton.disabled = false;
           workspaceHomeButton.disabled = false;
           exitEditorButton.disabled = false;
-          return;
         }
       }
       const target = new URL(workspaceUrl);
+      if (createProjectSession) target.searchParams.set('createProjectSession', '1');
       target.searchParams.set('view', kind);
       target.searchParams.set('leaveWorkspace', '1');
       if (embeddedDsh) {
@@ -1679,7 +1691,9 @@ async function solidifyChanges() {
             ? '原 Deck 已被外部修改，为避免覆盖已停止固化'
             : error.message?.trim().startsWith('{')
               ? `固化验证失败（${error.code ?? 'UNKNOWN'}），原 Deck 未被改动`
-              : `固化失败：${error.message}`;
+              : error.message === '服务内部错误'
+                ? `固化失败：服务内部错误（${/^[A-Z][A-Z0-9_]{0,79}$/.test(error.code ?? '') ? error.code : 'UNKNOWN'}）`
+                : `固化失败：${error.message}`;
     showHistoryNotice(failureMessage, 'error');
     setSolidifyProgress({
       state:'error',
@@ -1912,7 +1926,7 @@ async function deleteTask(task) {
     const result = await requestJson(`/api/tasks/${encodeURIComponent(task.id)}`, {
       method:'DELETE',
       headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ expectedRevision:revision }),
+      body:JSON.stringify({ expectedRevision:revision, cancelActiveBatch:true }),
     });
     updateRevision(result.revision);
     tasks = tasks.filter(candidate => candidate.id !== task.id);
@@ -1941,6 +1955,12 @@ function renderTasks() {
     onHistory: (task, control) => { void changeTaskHistory(task, control); },
     onEdit:editTask,
     onDelete:deleteTask,
+    onCancelBatch:async batch => {
+      const result = await requestJson('/api/agent-runs/cancel',{method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({expectedRevision:revision,batchId:batch.id})});
+      updateRevision(result.revision); adoptAgentRun(result.run); renderTasks();
+    },
   });
   renderAgentStatus();
   updatePageBadges();
@@ -2008,12 +2028,42 @@ function ensureSessionRevision(targetRevision) {
   return loadSession(targetRevision);
 }
 
+let viewContextSending = false;
+let lastViewContext = '';
+let lastViewContextAt = 0;
+async function publishViewContext() {
+  if (!deckReady || viewContextSending || !currentKey.textContent) return;
+  const active = pageList.querySelector('[aria-current="page"]');
+  const stage = deckFrame.contentDocument?.querySelector('.stage');
+  const stageScrolls = stage && ['auto','scroll','overlay'].includes(deckFrame.contentWindow.getComputedStyle(stage).overflowY)
+    && stage.scrollHeight > stage.clientHeight;
+  const scrolling = stageScrolls ? stage : deckFrame.contentDocument?.scrollingElement;
+  const selected = inspectorSelection;
+  const value = {pageKey:currentKey.textContent,pageLabel:currentPage.textContent,
+    pageIndex:Number(active?.dataset.pageIndex),revision,
+    selection:selected?.target?.pageKey === currentKey.textContent ? {
+      target:selected.target, text:String(selected.textPreview ?? '').slice(0,500),
+      textRange:selected.textRange ?? null, scope:selected.scope,
+    } : null,
+    scroll:{x:scrolling?.scrollLeft ?? 0,y:scrolling?.scrollTop ?? 0}};
+  const body = JSON.stringify(value);
+  if (body === lastViewContext && Date.now()-lastViewContextAt < 5000) return;
+  viewContextSending = true;
+  try {
+    await requestJson(`/api/view-context?editorToken=${encodeURIComponent(editorToken)}`,{method:'POST',headers:{'content-type':'application/json'},body});
+    lastViewContext = body; lastViewContextAt = Date.now();
+  } catch { /* 下次重新发布；服务端会让过期视图失效。 */ }
+  finally { viewContextSending = false; }
+}
+const viewContextTimer = setInterval(() => void publishViewContext(),400);
+window.addEventListener('pagehide',()=>clearInterval(viewContextTimer),{once:true});
 function confirmPage(button) {
   for (const item of pageList.querySelectorAll('[data-page-key]')) {
     item.setAttribute('aria-current', item === button ? 'page' : 'false');
   }
   currentPage.textContent = button.dataset.pageTitle;
   currentKey.textContent = button.dataset.pageKey;
+  void publishViewContext();
 }
 
 function requestPage(button) {
@@ -2610,6 +2660,12 @@ const eventsUrl = new URL('/events', location.href);
 eventsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 eventsUrl.searchParams.set('editorToken', editorToken);
 eventsClient = connectEvents({
+  onDiagnostic: record => {
+    const endpoint = new URL('/api/connection-diagnostics', location.origin);
+    endpoint.searchParams.set('token', token);
+    endpoint.searchParams.set('editorToken', editorToken);
+    void fetch(endpoint, {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(record), keepalive:true}).catch(() => {});
+  },
   url: eventsUrl,
   token,
   onEvent: event => {

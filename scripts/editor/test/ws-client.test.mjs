@@ -119,3 +119,19 @@ test('connectEvents close 幂等清理 timer、关闭 socket 且永不重连', (
   timer.callback();
   assert.equal(FakeWebSocket.instances.length, 1);
 });
+
+test('连接诊断区分握手、断线和重连且不泄露 URL 或关闭文本', () => {
+  resetSockets();
+  const scheduler = fakeScheduler(), records = [];
+  const client = connectEvents({ url:'ws://localhost/events?editorToken=secret', token:'secret',
+    onDiagnostic:record => records.push(record), WebSocketImpl:FakeWebSocket,
+    setTimer:scheduler.setTimer, clearTimer:scheduler.clearTimer });
+  FakeWebSocket.instances.at(-1).emit('open');
+  FakeWebSocket.instances.at(-1).emit('close', {code:1006, reason:'secret', wasClean:false});
+  scheduler.run(scheduler.timers.at(-1));
+  assert.deepEqual(records.map(x => x.event), ['connecting','open','close','reconnect-scheduled','connecting']);
+  assert.equal(records.find(x => x.event === 'close').code,1006);
+  assert.equal(records.find(x => x.event === 'reconnect-scheduled').delayMs,250);
+  assert.ok(!JSON.stringify(records).includes('secret'));
+  client.close();
+});

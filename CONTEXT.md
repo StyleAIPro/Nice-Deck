@@ -147,4 +147,4 @@ _Avoid_：PPTX 渲染、版式预览、转 PDF
 
 **工作区登记修复（Workspace Registration Repair）**：每次明确创建或打开项目会话，按原项目规范目录确保登记存在；修复登记保留原会话与预留的会话创建身份。多个 Deck 共用目录时不能连带移除其他项目或会话。
 
-跨插件的权威规则见 [Harness 插件项目生命周期规范](../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)，本适配器实现记录见 [项目生命周期](docs/design/project-lifecycle.md)。
+跨插件的权威规则见 [Harness 插件项目生命周期规范](../upstream-old/AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)，本适配器实现记录见 [项目生命周期](docs/design/project-lifecycle.md)。

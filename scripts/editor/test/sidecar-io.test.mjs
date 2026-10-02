@@ -11,6 +11,13 @@ import { join } from 'node:path';
 // windows-sidecar-io.test.mjs 覆盖原生 handle/映射盘闭环。
 const test = process.platform === 'win32' ? nodeTest.skip : nodeTest;
 
+// 模拟真实子进程的活动句柄，避免 unref 请求超时器使测试提前退出。
+function keepMockProcessAlive(child, t) {
+  const timer = setInterval(() => {}, 1000);
+  child.once('close', () => clearInterval(timer));
+  t.after(() => clearInterval(timer));
+}
+
 async function identity(path) {
   const { lstat } = await import('node:fs/promises');
   const info = await lstat(path, { bigint:true });
@@ -587,6 +594,7 @@ test('持久 helper 对超时、输出上限和 close 都只 settle 一次并回
 
   const fakeChild = (onWrite, { closesOnKill=true } = {}) => {
     const child = new EventEmitter();
+    keepMockProcessAlive(child, t);
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdout.setEncoding = () => {};
@@ -775,6 +783,7 @@ test('附件 publish 使用专用有界超时且未知 ACK 一律保守标记已
 
   const fakeChild = onWrite => {
     const child = new EventEmitter();
+    keepMockProcessAlive(child, t);
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdout.setEncoding = () => {};
@@ -943,6 +952,7 @@ test('持久 helper 以 FIFO 单活动请求隔离排队预算与提交状态', 
 
   const fakeChild = onWrite => {
     const child = new EventEmitter();
+    keepMockProcessAlive(child, t);
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdout.setEncoding = () => {};

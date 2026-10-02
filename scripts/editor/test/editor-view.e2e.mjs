@@ -25,4 +25,8 @@ test('页面图包含未固化动作和父容器；重复查看复用缓存，�
  assert.equal(Buffer.from(changed.image,'base64').subarray(1,4).toString(),'PNG');
  assert.deepEqual(await view({bytes,actions:[action]},{query:'修改后的标题'}),changed);
  assert.equal(launches,2);
+ const directory=await view({bytes,actions:[action]},{catalogOnly:true});
+ assert.equal(directory.mode,'page-directory');
+ assert.equal(directory.pages.length,2);
+ assert.equal(directory.image,undefined);
 });

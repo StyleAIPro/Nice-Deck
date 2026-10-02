@@ -1,25 +1,32 @@
 # AICO-PPT 安装指南
 
-## 普通用户：安装 AICO 应用与 PPT 插件
+## 普通用户：原装 DSH Desktop 与 AICO 插件
 
-正式用户入口只有 AICO 独立软件。先安装 AICO-Harness 应用：Windows 使用 `.exe` 安装器，macOS 将 DMG 中的 AICO 拖入“应用程序”，之后从应用图标启动。应用先安装 Harness，PPT 与所需运行时由插件商店按需安装。实际可下载平台以发布者提供并验证过的安装包为准；公开下载源、签名和 notarization 尚待发布者完成。
+更新：2026-09-19。AICO 2.0 使用原装 DSH Desktop 和配套原装 DSH，不提供修改版 AICO Desktop 安装器。当前桌面业务交付只准备 Windows，macOS 暂缓；独立 Skill 的跨平台安装见下文。
 
-首次打开后，在“设置 → 插件 → 插件商店”选择 AICO-PPT 并安装。没有可用来源时，填写发布者提供的 HTTPS 目录地址；该目录应包含 `catalog.json` 和目录记录引用的归档文件。管理器启动时刷新已配置来源，网络不可用时保留缓存目录。安装会下载并校验 PPT 包及其 Python 组件，截图与验证复用 AICO 的 Electron，可取消并重试。新发布要求兼容的桌面渲染能力；旧 Host 需先升级 AICO。激活后页面自动刷新一次以载入插件界面，Host 会话继续运行。在“设置 → 模型”配置模型服务或完成所选服务的登录后，从侧边栏进入 AICO-PPT。此流程无需执行下方源码命令，也无需安装 Codex 或系统 Chrome。
+1. 安装已验证兼容的原装 DSH Desktop。
+2. 在 Desktop 托盘的 DSH Terminal 中，用发布页给出的真实附件名执行 `dsh plugin add "<Harness 归档绝对路径>" --ignore-scripts`。
+3. 保存工作并重启，进入“设置 → AICO 插件下载”，选择 PPT，由安装流程准备业务 bundle 与 Windows Python／浏览器资源。
+4. 按提示重启并检查激活，在原装“模型”页配置模型，从侧边栏进入 AICO-PPT。
 
-正式插件归档不包含 `docs/showcase/` 展示媒体与独立 Dev Shell 的 PTY / xterm 依赖。Three.js 保留编辑器加载的两个浏览器文件、包信息与许可证；Python 的文档依赖仅为 PyMuPDF、pypdf 和 Pillow，并清除可重新生成的 `__pycache__`，保留源码及独立字节码。PPTX 截图打包和参考内容提取只用标准库；Pillow 用于可选 HTML 附件图标。这些裁剪仅作用于发布准备目录；完整源码中的模板、演示和 Dev Shell 保留，开发调试依赖继续按下文准备。已安装版本的磁盘占用以实际更新后的产物为准。
+生产附件、签名索引和公网下载尚未确认就绪；本机开发包不能等同官网下载版。详细前提与原装 Profile 边界见[Harness 安装流程](../AICO-Harness-Plugin/docs/extension-design/installation-flow.md)。资源归档不能直接用 `dsh plugin add` 当作业务 bundle 安装。
 
-桌面版的“安装与诊断”显示插件私有能力；缺少资源时报告安装故障，不在应用资源目录运行 npm/pip 修复。移除插件会撤销注册并保留项目及用户数据。桌面冷启动按当前版本、上一版本及会话租约保留产物，并回收能够确认归属的旧产物；旧的仅含 identity 标记的安装保持原位，不自动回收。已验证组件可从缓存复用。更新 Host 前关闭 AICO，再安装替换包，`~/.aico-harness` 数据和 Deck 项目文件保留。已安装原生 DSH 或独立 AICO-PPT Skill 的用户可保留原安装。Harness 网页启动器已收纳到源码仓库的 `tools/dev-web/`，只供维护者调试；普通用户无需运行它。私有描述、Worker 与脚本包装器见 [ADR-0007](docs/adr/0007-plugin-private-runtime.md)，工具与原生对话框接口见 [ADR-0006](docs/adr/0006-desktop-runtime-capabilities.md)。
+WSL 只负责模型通信和所选用户授权。PPT Editor、Deck、Agent、工具及资源始终在 Windows；不因选择 WSL 模型而安装 Linux 业务运行时。插件不要求 Codex／Claude Code CLI，不加载 Dev Shell 的 PTY／xterm，也不假定原装 Desktop 提供旧 AICO 的专用渲染服务。
+
+正式插件准备会排除展示媒体、独立 Dev Shell 终端依赖和可再生成缓存；源码与开发工具保留。PPTX 截图打包和参考内容提取使用标准库，其他材料能力按发布声明准备私有依赖。资源缺失作为安装问题报告，不直接在宿主目录运行 npm／pip 修复。卸载释放插件自有服务与进程，保留 Deck 和用户数据。
+
+当前私有 Worker 与运行时参数见[DSH 接入说明](integrations/dsh/README.md)。历史 ADR 中依赖旧桌面渲染接口的内容不能作为原装宿主已具备能力的证明。
 
 ## 独立 Skill 安装（按需）
 
 AICO-PPT 的产品定位是独立 Skill 与 AICO-Harness 编辑器插件：
 
 - **Skill**：让 Codex、Claude Code 等 Agent 能发现 AICO-PPT 的工作流；
-- **AICO-Harness Plugin**：所有用户可视化编辑入口位于 AICO-Harness，提供左侧原生对话与右侧 Editor。
+- **AICO-Harness Plugin**：桌面可视化编辑入口位于原装 DSH Desktop 中的 AICO 工作台，提供左侧原生对话与右侧 Editor。
 
-只想在 Codex、Claude Code 等 Agent 中直接使用制作能力时，可以按本节注册独立 Skill。Skill 不依赖 AICO-Harness，可独立使用；默认安装不检查或修复本机 Agent PTY。需要可视化编辑时仍从 AICO 应用进入。开发者的网页联调、源码安装和独立 Dev Shell 见[开发调试](#开发调试)。
+只想在 Codex、Claude Code 等 Agent 中直接使用制作能力时，可以按本节注册独立 Skill。Skill 不依赖 AICO-Harness，可独立使用；默认安装不检查或修复本机 Agent PTY。需要可视化编辑时仍从原装 DSH Desktop 的 AICO-PPT 入口进入。开发者的网页联调、源码安装和独立 Dev Shell 见[开发调试](#开发调试)。
 
-插件与独立 Skill 共用同一份 `SKILL.md`，编辑路径复用 Editor Core 和 Managed Workspace。AICO-Harness 插件不要求本机 Codex / Claude Code / OpenCode CLI，也不会加载 `node-pty`；独立 Skill 的导出和材料解析能力按任务准备；应用内插件由插件商店准备相应私有能力。
+插件与独立 Skill 共用同一份 `SKILL.md`，编辑路径复用 Editor Core 和 Managed Workspace。AICO-Harness 插件不要求本机 Codex / Claude Code / OpenCode CLI，也不会加载 `node-pty`；独立 Skill 的导出和材料解析能力按任务准备；应用内插件由 AICO 安装流程准备相应私有能力。
 
 ### 准备仓库
 
@@ -201,49 +208,13 @@ python3 scripts/install.py uninstall
 
 ## 开发调试
 
-以下仅供维护者开发、回归与故障排查，不作为普通用户的并列安装方式。底层 DSH Web 与 Editor Core 继续保留；AICO 的正式入口仍是已安装的独立应用。
+以下仅供维护者开发、回归与故障排查，不作为普通用户的并列安装方式。底层 DSH Web 与 Editor Core 继续保留；当前桌面入口为原装 DSH Desktop 中的 AICO-PPT 插件。
 
-### Harness 网页联调
+### 当前原装宿主联调
 
-Harness 网页启动器位于相邻 AICO-Harness 仓库的 `tools/dev-web/`，包括 `start.mjs` 与各平台 `launch-aico.*`；仓库根目录不再提供网页启动器。在 AICO-PPT 仓库根目录运行：
+使用固定原装 Desktop、当前 AICO-Harness 适配插件和 PPT 的 DSH 入口，在隔离的 Windows Profile／测试数据中检查真实 Editor 与会话流程。依赖与命令入口见[Harness 本地开发](../AICO-Harness-Plugin/docs/extension-design/local-development.md)和[DSH 集成](integrations/dsh/README.md)。不要用旧修改版 Harness 启动结果证明兼容原装宿主。
 
-```bash
-node ../AICO-Harness/tools/dev-web/start.mjs --ppt "$(pwd)"
-node ../AICO-Harness/tools/dev-web/start.mjs --help
-```
-
-默认开发数据目录为 `~/.aico-harness-dev-web`，其中 `ppt/` 保存 PPT 全局状态；显式设置 `AICO_HOME` 可选择另一个开发目录。不要用正式应用的 `~/.aico-harness` 启动调试实例，也不要同时从两个实例打开同一个 Deck 工作副本。PPT 原独立 Editor 调试壳位于本仓库的 [`tools/dev-shell/`](tools/dev-shell/README.md)，两者用途不同。
-
-### 源码配套安装（高级）
-
-仅用于配套版本、安装过程与回退回归。将 AICO-Harness 与 AICO-PPT 两个完整仓库并列放置，准备 Node.js 22.19 或 24+、npm、Python 3.9+，然后在 AICO-PPT 仓库根目录执行。以下显式指定开发数据目录，避免使用正式应用的 `~/.aico-harness`：
-
-```bash
-AICO_HOME="$HOME/.aico-harness-dev-web" node ../AICO-Harness/scripts/aico.mjs install --ppt .
-```
-
-Windows PowerShell：
-
-```powershell
-$env:AICO_HOME = Join-Path $HOME ".aico-harness-dev-web"
-node ..\AICO-Harness\scripts\aico.mjs install --ppt .
-```
-
-安装器将两个仓库的源码快照、锁定依赖和构建结果放入 `~/.aico-harness-dev-web/releases/`，缺少指定版本的 pnpm 时在 AICO 目录内准备；不会更新或覆盖这两个开发仓库。随后用 `~/.aico-harness-dev-web/bin/aico` 启动（Windows：`%USERPROFILE%\.aico-harness-dev-web\bin\aico.cmd`）。左侧边栏的 `AICO-PPT` 打开右侧 Editor，右侧不创建本机 Agent PTY。首次源码安装需要网络和本机构建；生成的 `aico` 命令只用于开发验收。普通用户安装应用并通过插件商店使用 PPT，不执行本小节命令。
-
-### 开发数据、共存与历史导入
-
-无需卸载原 DSH，也无需重装全局 Skill。上述开发安装使用独立 `aico` 入口和 `~/.aico-harness-dev-web`，PPT 全局状态位于其 `ppt/` 子目录；启动器覆盖继承的 `DSH_HOME` / `AICO_PPT_EDITOR_STATE_ROOT`，不会使用原生 DSH 的默认 3080 端口，而是绑定系统分配的空闲端口。PPT 编辑器自己的端口也由系统分配。已有 `.agents/skills/aico-ppt`、`.codex/skills/aico-ppt` 等注册、原 DSH 配置与会话、项目 sidecar 和工作副本都保留。
-
-需要测试旧首页历史导入时，先关闭相关开发实例，在目标开发目录首次启动前执行：
-
-```bash
-~/.aico-harness-dev-web/bin/aico import-ppt --from "$HOME/.aico-ppt-editor"
-```
-
-旧状态实际位于 `.huawei-deck-editor` 时使用该目录。导入只复制受支持的工作目录 / 最近历史索引，保留 workId、deckId 和项目路径，清空属于旧 DSH 的工作区与会话关联；原来源和项目文件不变。打开工作后新建关联的 AICO 会话。目标必须不存在或为空；同一快照重复导入不会覆盖新工作，来源变化后再次导入会拒绝。已有工作的开发目录保持原样，改用另一个 `AICO_HOME` 执行安装与导入。不要将正式应用的数据目录当作测试目标。
-
-关闭开发实例后重复安装另一配套版本即可升级；安装失败保留当前版本。`~/.aico-harness-dev-web/bin/aico rollback` 切回上个源码版本，`~/.aico-harness-dev-web/bin/aico doctor` 检查依赖。回退不回退数据格式。独立 Skill 注册仍使用上文的所有权管理流程。
+旧网页启动器、配套源码安装及 dev-web 数据步骤保存在[历史说明](docs/history/2026-09-19-old-harness-development.md)，不再是当前执行入口。以下独立 Dev Shell 只验证 Editor 自身，不代表桌面插件整机验收。
 
 ### 启动 PPT 独立 Dev Shell
 
@@ -311,13 +282,13 @@ Codex、Node、HOME 与 Windows→WSL 路径映射。任务终端依次显示“
 
 ### Editor 能打开，但验证或导出不可用
 
-AICO 应用用户先查看插件内“安装与诊断”：渲染服务不可用时启动或升级支持 `desktopRenderer: 1` 的 Host，缺少插件私有资源时从插件商店重新安装或重试，不在应用资源目录运行 npm/pip。独立 Skill 或源码开发者才按本机依赖检查结果修复 `verify`、`pptx-export` 等能力。
+桌面插件用户先查看插件内“安装与诊断”，核对 AICO 安装流程登记的 Windows 私有 Python／浏览器资源；缺失时检查资源安装回执并通过原装支持的插件流程修复，不在宿主目录运行 npm／pip。旧 `desktopRenderer: 1` 不属于当前原装交付前提。独立 Skill 或源码开发者按本机依赖检查结果修复 `verify`、`pptx-export` 等能力。
 
 ### 开发调试：macOS 已安装 Python 包，Editor 却显示未就绪
 
 本仓库最新版 `tools/dev-shell/AICO-PPT Dev Shell.app` 会在 Apple Silicon 上显式使用 arm64，避免 Rosetta Python 无法载入 arm64 扩展。更新后请彻底退出旧工作台并重新双击；“安装与诊断”会把真正的架构冲突显示为“已安装但架构不兼容”，不会再笼统写成缺少。
 
-PPTX 读取不依赖 LibreOffice 或 PDF 库；`pptx-read` 若提示提取工具缺失，应恢复完整 Skill 文件，桌面版从插件商店重新安装 AICO-PPT。
+PPTX 读取不依赖 LibreOffice 或 PDF 库；`pptx-read` 若提示提取工具缺失，应恢复完整 Skill 文件，桌面版通过 AICO 安装入口检查并修复 AICO-PPT。
 
 ### 开发调试：macOS 阻止打开 Dev Shell `.app`
 
@@ -340,3 +311,51 @@ PPTX 读取不依赖 LibreOffice 或 PDF 库；`pptx-read` 若提示提取工具
 ```powershell
 wsl.exe -d Ubuntu-26.04 -u root --exec bash -lic "curl -I --max-time 12 https://chatgpt.com"
 ```
+
+## 本机测试：0.1.12 离线插件包（2026-09-19）
+
+旧 `.migration/desktop-business-packages/aico-ppt-skill-0.1.11.tgz` 未携带 npm 运行依赖，并包含独立终端可选依赖；在当前 Windows registry 请求返回 `EACCES` 的环境中会反复重试。不要继续使用该旧包做桌面安装测试。
+
+`0.1.12` 将五项直接运行依赖及其依赖闭包随插件打包，不携带独立终端依赖。在原装 DSH Terminal 中执行：
+
+```powershell
+dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\.migration\ppt-offline-r1\aico-ppt-skill-0.1.12.tgz" --ignore-scripts --offline
+```
+
+原装 Windows Desktop CLI 在隔离 Profile、空 pnpm store 下已完成安装并登记 bundle，约 9 秒。插件接口测试 34 通过、1 跳过。本次修复不代表 Python／浏览器资源或完整 PPT 业务已验收；这些资源仍由 AICO 资源安装流程管理。无需修改 DSH Desktop，也不需要关闭 TLS 证书校验。`--offline` 会在其他依赖缺失时立即报错，不进行网络重试。
+
+### 0.1.20 开发插件包
+
+本版新增右侧当前页/选区上下文、项目资料索引，以及活动任务的取消等待与删除入口。仅修改 PPT 插件，配合 AICO-Harness dev.19，使用原装 DSH Desktop。
+
+```powershell
+dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\AICO-PPT\dist\aico-ppt-skill-0.1.20.tgz" --ignore-scripts --offline
+```
+
+安装后重启 Desktop。浏览器夹具和工具协议测试不等于用户日常 Desktop、真实模型及 WSL 模型链路的完整验收。
+
+### 0.1.21 Editor 连接诊断
+
+插件自动记录服务启停、Editor 握手拒绝、WebSocket 建立/关闭及浏览器重连事件。日志位于运行 PPT 服务用户的 `~/.aico/diagnostics/ppt-editor-*.jsonl`（Windows 通常为 `%USERPROFILE%\.aico\diagnostics`），时间使用 UTC。日志只保存白名单字段，不保存令牌、URL、关闭文本或 Deck 内容；单文件约 1 MiB 轮转，启动新记录器时清理较旧的同类日志。写入失败不阻断编辑。
+
+此版本用于定位连接中断，并不代表此前 `EDITOR_OFFLINE` 的触发原因已经确认。出现问题时保留故障时间及该目录下 `ppt-editor-*.jsonl*`。浏览器若不能连接后台，事件上报也可能失败，需结合服务端连接记录；此时不能仅凭缺少浏览器日志断言没有重连。当前 Windows 业务直连模式不需要更新 Harness。
+
+### 0.1.22 项目切换菜单
+
+修复嵌入 DSH 时顶部工具栏横向滚动容器裁切“切换项目”列表。菜单挂载到页面顶层，继续锚定入口，并在窗口缩放或滚动时调整位置，限制在可视区域内；保留菜单内滚动、Escape 关闭及原有项目/会话关联逻辑。无需修改或重新安装宿主与 Harness。
+
+### 0.1.23 创建项目后台发布
+
+创建项目准备发布时，如果 Managed Editor 没有浏览器连接，临时使用插件私有浏览器挂载同一 Editor，沿用原有 flush、就绪确认、固化和后续验证流程，结束后释放临时浏览器。无需保持该项目在前台；不会跳过验证或自动重放模型指令。未安装私有浏览器或真正的验证失败仍会明确报错。
+
+`aico_ppt` 上下文支持按持久会话关联定位创建项目已经存在的 Managed Editor；未生成 Deck 的创建项目仍不提供编辑能力，不会借用其他项目。后台发布挂载是临时的，不代表所有编辑工具在关闭可见画布后都有常驻后台写入能力。
+
+## 0.1.24：工作版本缓存回收
+
+`.huawei-deck-editor`（旧目录）和 `.aico-ppt-editor`（新目录）包含工作副本、恢复数据与历史，不能整目录删除。此前每次源码变化都会按 SHA-256 保存完整 HTML，缺少孤立版本回收；大型单文件 Deck 的中间版本会持续积累。
+
+从 0.1.24 开始，Editor 在启动恢复完成后及正常关闭、写入队列排空后回收 `working/versions` 中超过 24 小时的无引用版本，额外保留最新 8 份。当前工作副本、撤销/重做、时间线、固化检查点、历史归档、命令回执及备份仍引用的版本全部保留。源 Deck、附件、备份、会话、任务列表和其他项目不在删除范围内；必要历史仍可能占用较多空间，回收规则不是总容量上限。
+
+存在未完成源码/固化事务、尚未登记的工作副本变化或元数据异常时跳过回收。Windows 使用现有原生独占锁，其他编辑服务占用项目时不清理。只更新 PPT 插件即可，不需要修改或更新 DSH Desktop、DSH 或 Harness。
+
+需要手动清理指定会话时，先正常退出占用该项目的编辑服务。用 Windows Python 执行随包的 `scripts/editor/prune-working-versions.py "<包含 session.json 的会话目录>"` 默认只预览；增加 `--apply --report "<sidecar 之外的新报告文件.json>"` 才删除已确认无引用的版本并保存清单。该命令不会强制解除编辑锁，也不提供清空历史选项。

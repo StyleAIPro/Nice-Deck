@@ -1,18 +1,16 @@
 # AICO-PPT
 
-正式用户入口是 **AICO 独立软件**：安装 AICO-Harness 应用，在“设置 → 插件 → 插件商店”安装 AICO-PPT，再配置模型服务并进入 PPT 工作台。普通用户无需下载源码或启动网页版；安装包与插件来源以发布者实际提供的地址为准，详见[安装指南](INSTALL.md)。
+AICO 2.0 的桌面入口为**原装 DSH Desktop + AICO-Harness 适配插件 + AICO-PPT 业务插件**。先用原装 DSH Terminal 安装 Harness，再通过 AICO 设置页准备 PPT 与 Windows 私有 Python／浏览器资源。正式附件与支持矩阵尚待发布验证，详见[安装指南](INSTALL.md)。不再交付 AICO 修改版桌面宿主；macOS 插件暂缓。
 
-产品定位：**独立 Skill + AICO-Harness 编辑器插件**。独立 Skill 可在没有 AICO-Harness 的环境正常创建、修改、验证和导出 Deck；所有用户可视化编辑入口统一位于 AICO-Harness 应用。源码配套安装、Harness 网页启动器和独立 Editor 均仅用于开发、回归与故障排查，见[开发调试说明](INSTALL.md#开发调试)。
+产品定位：**独立 Skill + DSH 可视化插件**。独立 Skill 可在没有 Harness 的环境创建、修改、验证与导出 Deck。桌面插件提供左侧原装对话和右侧 Editor；原独立 Editor／Dev Shell 保留作开发、回归与故障排查，见[开发调试](INSTALL.md#开发调试)。
 
-华为红品牌 **单文件 HTML 演示（网页 PPT）Agent Skill + DSH 可视化插件**。一套 1920×1080、离线可拷走的幻灯片系统：五套场景模板、点击 / 方向键放映、刷新续播，并可按需转成 PPTX。正式窗口入口是 AICO-Harness（内部沿用 DSH 协议）中的“左侧对话 + 右侧 Editor”；原独立 Editor 仅作为开发、回归和故障排查用的 Dev Shell 保留。
-
-Skill 让 Codex、Claude Code 等 Agent 掌握 AICO-PPT 的工作流；Editor Core 提供新建、预览、区域任务、直接编辑、撤销和安全固化。没有任何窗口时，Skill 仍可独立创建和修改 Deck；需要可视化编辑时，打开 AICO 应用并使用插件商店安装的 AICO-PPT。
+华为红品牌单文件 HTML 演示系统采用 1920×1080 画布，提供五套场景模板、放映与刷新续播，并可导出 PPTX。Editor Core 提供新建、预览、区域任务、直接编辑、撤销和安全固化。Windows 运行 Editor、Agent、工具与工作区；WSL 仅影响模型连接，不安装 Linux PPT 运行时。下文独立 Skill 或 Dev Shell 的跨平台说明不代表桌面插件平台已经交付。
 
 ## DSH 插件
 
 左侧对话可以补充右侧标注，也可以提出独立新修改；Agent 结合上下文判断归属，歧义时澄清。补充修改保留原任务身份并同步完成状态，新修改不会误关已有待办，详见[简洁编辑与视觉确认](integrations/dsh/README.md#简洁编辑与视觉确认)。
 
-仓库根目录同时是一个可由 DSH 本地安装的 Host/Client 双面插件包，但 **Skill 仍只有根目录 `SKILL.md` 一份**。插件在左侧边栏底部注册 AICO-PPT 入口，并在 DSH 原生对话右侧打开可缩放、跨会话常驻的通用 workbench；右边直接运行原 App Server 与 Editor Runtime，不复制 Editor UI 或事务代码。DSH 版不会导入或创建 `node-pty` / xterm 终端。每个 Deck 工作项以稳定 `workId` 关联项目目录、一个 DSH Workspace 和一个或多个原生 Session；Harness 左侧“新会话”中的 AICO-PPT 项目子菜单显式建立关联，普通新会话不关联 Deck；Editor 顶部选择器只展示和切换关联会话。任务会话的首条可见指令以 `/aico-ppt` 开头；恢复、切换任务或切换会话不发送“继续”命令。“交给 Agent”固定发送到该工作项的活动 Session，而不是临时选中的普通 Session。切换普通会话不会改变任务或打开 Editor；点击已关联 Session 才打开或恢复 workbench、同步切换对应工作项，并在内部路由恢复期间隐藏启动初始页。`$aico-ppt` 只保留给使用该语法的独立 Codex 流程。
+仓库根目录同时是一个可由 DSH 本地安装的 Host/Client 双面插件包，但 **Skill 仍只有根目录 `SKILL.md` 一份**。插件在左侧边栏底部注册 AICO-PPT 入口，并在 DSH 原生对话右侧打开可缩放、跨会话常驻的通用 workbench；右边直接运行原 App Server 与 Editor Runtime，不复制 Editor UI 或事务代码。DSH 版不会导入或创建 `node-pty` / xterm 终端。每个 Deck 工作项以稳定 `workId` 关联项目目录、一个 DSH Workspace 和一个或多个原生 Session；Harness 左侧“新会话”进入空白页后，通过“选择业务项目”中的 AICO-PPT 项目显式建立关联；直接输入则开始普通对话，不关联 Deck；Editor 顶部选择器只展示和切换关联会话。任务会话的首条可见指令以 `/aico-ppt` 开头；恢复、切换任务或切换会话不发送“继续”命令。“交给 Agent”固定发送到该工作项的活动 Session，而不是临时选中的普通 Session。切换普通会话不会改变任务或打开 Editor；点击已关联 Session 才打开或恢复 workbench、同步切换对应工作项，并在内部路由恢复期间隐藏启动初始页。`$aico-ppt` 只保留给使用该语法的独立 Codex 流程。
 
 DSH 嵌入态完整复用原 Editor 的页面栏、预览 / 编辑 / 区域标记、直接文字和富文本、拖移 / 缩放 / 删除、顶部属性栏、右下悬浮任务 drawer、统一撤销 / 重做、Managed Workspace 固化与 PPTX 导出；窄工作台隐藏 pageKey、画布尺寸、缩放与 revision 等只读内部状态，只保留页面标题、模式和可操作按钮。DSH 只接管对话、模型、审批和计划；Editor 继续拥有 Deck、工作项、反馈任务、revision 与发布状态。新建 Deck 会先让用户选择项目目录，再创建独立任务会话；发布后同一 `workId` 原位从 Creation 转为 Editing，保留工作区和会话关系。边界和消息桥见 [`ADR-0001`](docs/adr/0001-dsh-plugin-skill-seam.md)、[`ADR-0002`](docs/adr/0002-dsh-primary-and-standalone-dev-shell.md)、[`ADR-0004`](docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md) 与 [`integrations/dsh/README.md`](integrations/dsh/README.md)。
 
@@ -348,7 +346,7 @@ Editor 的源码事务通过归档快照对账已被覆盖的静态文字动作�
 
 AICO-PPT 的一份 Deck 对应一个项目，可关联多段 Harness 会话。在项目首页移除项目会归档绑定会话，保留源文件、工作副本和历史；“已移除项目”提供恢复入口。重新打开文件恢复原项目身份，旧会话继续归档。运行中或排队的会话会阻止移除，避免后台继续修改已移除项目。
 
-所有 AICO 插件遵循 [Harness 插件项目生命周期规范](../AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)；PPT 的适配与测试见 [项目生命周期](docs/design/project-lifecycle.md)。上述宿主能力需要配套支持项目会话管理的 Harness 版本，旧宿主会给出更新提示。
+所有 AICO 插件遵循 [Harness 插件项目生命周期规范](../upstream-old/AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)；PPT 的适配与测试见 [项目生命周期](docs/design/project-lifecycle.md)。上述宿主能力需要配套支持项目会话管理的 Harness 版本，旧宿主会给出更新提示。
 
 ### 任职材料模板
 

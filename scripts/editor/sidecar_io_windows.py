@@ -1061,6 +1061,24 @@ class WindowsPersistentHelper:
         value = _require_uuid(payload.get("transactionId"), "transactionId")
         return _safe_unlink(self.transactions, f"{value}.json")
 
+    def prune_working_versions(self, payload):
+        try:
+            from working_version_gc import collect_working_versions
+        except ModuleNotFoundError:
+            from scripts.editor.working_version_gc import collect_working_versions
+        self.assert_bound({})
+        return collect_working_versions(
+            payload, session_id=self.session_id, deck_name=self.deck_name, error_type=SidecarIOError,
+            directories={"project": self.project, "session": self.session,
+                         "working": self.working, "versions": self.working_versions,
+                         "backups": self.backups, "transactions": self.transactions,
+                         "writeErrors": self.write_errors},
+            list_names=lambda directory: _listdir(directory["path"]),
+            file_stat=lambda directory, name: _lstat(_safe_file_path(directory, name)),
+            read_file=lambda directory, name, maximum: _read_file(directory, name, maximum=maximum),
+            unlink=_safe_unlink, guard=lambda: self.assert_bound({}),
+        )
+
     def prune_transactions(self, payload):
         maximum = payload.get("maximum", 32)
         names = sorted(
@@ -1135,6 +1153,7 @@ class WindowsPersistentHelper:
             "delete-snapshot": self.delete_snapshot,
             "delete-transaction": self.delete_transaction,
             "prune-transactions": self.prune_transactions,
+            "prune-working-versions": self.prune_working_versions,
             "restore-deck": self.restore_bound_deck,
             "activate-session": self.activate_session,
             "publish-attachments": self.publish_attachments,

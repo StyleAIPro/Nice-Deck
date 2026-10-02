@@ -18,7 +18,7 @@ async function main() {
   const runtime = await resolveRuntime(descriptor);
   const command = interpreter === 'node' ? process.execPath : runtime.paths.python;
   process.exitCode = await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env:runtime.environment, stdio:'inherit', windowsHide:true });
+    const child = spawn(command, interpreter === 'python3' ? ['-B', ...args] : args, { env:runtime.environment, stdio:'inherit', windowsHide:true });
     const interrupt = () => child.kill('SIGINT');
     const terminate = () => child.kill('SIGTERM');
     process.on('SIGINT', interrupt);

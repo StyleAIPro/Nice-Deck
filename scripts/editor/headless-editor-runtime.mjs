@@ -55,7 +55,7 @@ export async function startHeadlessEditorRuntime({
     });
     await page.goto(editorUrl, { waitUntil:'domcontentloaded', timeout:readyTimeoutMs });
     await page.waitForSelector('#deck-frame', { timeout:readyTimeoutMs });
-    await page.waitForSelector('[data-page-key]', { timeout:readyTimeoutMs });
+    await page.waitForSelector('[data-page-key]', { state:'attached', timeout:readyTimeoutMs });
     return { browser, page, close };
   } catch (error) {
     await close();

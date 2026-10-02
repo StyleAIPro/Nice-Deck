@@ -1948,6 +1948,24 @@ class PersistentHelper:
             raise SidecarIOError("transactionId 不是规范 UUID v4")
         return self._unlink_bound(self.transactions_fd, f"{transaction_id}.json")
 
+    def prune_working_versions(self, payload):
+        try:
+            from working_version_gc import collect_working_versions
+        except ModuleNotFoundError:
+            from scripts.editor.working_version_gc import collect_working_versions
+        self.assert_bound({})
+        return collect_working_versions(
+            payload, session_id=self.session_id, deck_name=self.deck_name, error_type=SidecarIOError,
+            directories={"project": self.project_fd, "session": self.session_fd,
+                         "working": self.working_fd, "versions": self.working_versions_fd,
+                         "backups": self.backups_fd, "transactions": self.transactions_fd,
+                         "writeErrors": self.write_errors_fd},
+            list_names=os.listdir,
+            file_stat=lambda fd, name: os.stat(_require_name(name), dir_fd=fd, follow_symlinks=False),
+            read_file=lambda fd, name, maximum: _read_fd_file(fd, _require_name(name), max_bytes=maximum),
+            unlink=self._unlink_bound, guard=lambda: self.assert_bound({}),
+        )
+
     def prune_transactions(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"maximum"}:
             raise SidecarIOError("prune-transactions payload 格式无效")
@@ -2412,6 +2430,8 @@ class PersistentHelper:
             return self.delete_snapshot(request["payload"])
         if command == "delete-transaction":
             return self.delete_transaction(request["payload"])
+        if command == "prune-working-versions":
+            return self.prune_working_versions(request["payload"])
         if command == "prune-transactions":
             return self.prune_transactions(request["payload"])
         if command == "restore-deck":

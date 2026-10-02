@@ -15,6 +15,7 @@ export function pythonUtf8Environment(environment = process.env) {
   return {
     ...environment,
     PYTHONUTF8:'1',
+    PYTHONDONTWRITEBYTECODE:'1',
     PYTHONIOENCODING:'utf-8',
   };
 }

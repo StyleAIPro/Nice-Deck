@@ -1,3 +1,4 @@
+import { startHeadlessEditorRuntime } from './headless-editor-runtime.mjs';
 import { startServer } from './server.mjs';
 
 function managedError(code, message, details = {}) {
@@ -107,7 +108,23 @@ export class CreationManagedDeck {
     await this.editor.waitUntilReady?.(options);
   }
 
-  async preparePublish() {
+  preparePublish() {
+    if (this.closed) return Promise.reject(managedError('SERVICE_CLOSED', 'Creation Managed Deck 已关闭'));
+    this.publishing ??= this.#publishWithRenderer().finally(() => { this.publishing = null; });
+    return this.publishing;
+  }
+
+  async #publishWithRenderer() {
+    let renderer;
+    try {
+      if (this.editor.hasEditorConnection?.() === false) {
+        renderer = await startHeadlessEditorRuntime({ editorUrl:this.snapshot().editorUrl });
+      }
+      return await this.#preparePublish();
+    } finally { await renderer?.close(); }
+  }
+
+  async #preparePublish() {
     if (this.closed) throw managedError('SERVICE_CLOSED', 'Creation Managed Deck 已关闭');
     await this.editor.flushWorkingDeckChanges?.();
     await this.waitUntilReady({ timeoutMs:20_000 });
@@ -141,6 +158,7 @@ export class CreationManagedDeck {
   }
 
   transfer() {
+    if (this.publishing) throw managedError('PUBLISH_BUSY', '发布准备尚未结束，不能交接 Editor');
     if (this.closed || !this.editor) {
       throw managedError('SERVICE_CLOSED', 'Creation Managed Deck 已关闭或已经交接');
     }
@@ -153,6 +171,7 @@ export class CreationManagedDeck {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    await this.publishing?.catch(() => {});
     await this.editor?.close?.();
     this.editor = null;
   }

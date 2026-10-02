@@ -151,6 +151,10 @@ export function verifyWorkingPatchReplay(path, {
       PATCH_VERIFIER, resolve(path), ...(repairMissing ? ['--repair-missing'] : []),
     ], {
       stdio:[repairMissing ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      // 打包宿主的 execPath 指向 Desktop.exe；只为本次 Node 验证子进程
+      // 指定运行模式，不依赖宿主保留该环境变量，也不改写宿主 process.env。
+      ...(process.versions.electron ? { env:{...process.env,ELECTRON_RUN_AS_NODE:'1'} } : {}),
+      windowsHide:true,
     });
     let stdout = '';
     let stderr = '';
@@ -269,8 +273,12 @@ export async function writeVerifiedPatches(store, patches, {
     try {
       await store.restore(written.previousFingerprint, written.fingerprint);
     } catch (restoreError) {
+      // 仅显示稳定错误码，不把子进程输出、环境变量或令牌带进界面。
+      const errorCode = error => /^[A-Z][A-Z0-9_]{0,79}$/.test(error?.code ?? '')
+        ? error.code : 'UNKNOWN';
+      const verifyCode = verificationError ? errorCode(verificationError) : 'PATCH_REPAIR';
       throw Object.assign(new Error(
-        '补丁验证失败且工作副本无法恢复，请重启 Editor 完成对账',
+        `补丁验证失败且工作副本无法恢复（验证：${verifyCode}；恢复：${errorCode(restoreError)}），请重启 Editor 完成对账`,
       ), {
         code:'RECOVERY_REQUIRED', statusCode:503,
         committed:true, commitScope:'working-deck',

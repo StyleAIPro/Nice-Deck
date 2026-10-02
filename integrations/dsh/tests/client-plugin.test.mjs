@@ -212,6 +212,15 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
   assert.deepEqual(toggled, [['aico-ppt', 1100]])
   const face = workbench.options.inject()
   await assert.rejects(
+    () => face.executeDshCommand('project-sessions', {
+      operationId:'remove-test', action:'archive', sessionIds:['session-1'],
+    }),
+    error => error.code === 'HOST_LIFECYCLE_UNAVAILABLE'
+      && /当前宿主尚不支持项目关联会话的批量归档与恢复/u.test(error.message)
+      && !/请更新/u.test(error.message),
+    '缺少旧生命周期接口时应如实说明能力缺口，不误导用户升级',
+  )
+  await assert.rejects(
     () => face.sendTask('/aico-ppt\n缺少会话的任务'),
     /sessionId 无效/u,
   )
@@ -993,3 +1002,50 @@ test('准备期间卸载 Client 会取消请求，迟到地址不能挂载视图
   await failed;
   assert.equal(loaded.styles.size, 0);
 });
+
+test('新版 Harness 导航服务解析显式关联，不订阅旧宿主点击事件', async () => {
+  let provider
+  const work = { workId:'deck-a', revision:1, kind:'editing', deckName:'a.html', deckPath:'/project/a.html', projectRoot:'/project' }
+  const loaded = await loadClientBundle({ fetchImpl:async (_url, options) => ({ ok:true, json:async () => options?.body
+    ? { status:'linked', workItem:work } : { creation:[], editing:[work] } }) })
+  const cleanup=[]
+  const ctx={
+    get:name=>name==='aicoSessionNavigation'?{register:p=>{provider=p;return()=>{provider=null}}}:undefined,
+    effect:fn=>{const off=fn();cleanup.push(off);return off},
+    on:type=>{assert.notEqual(type,'session/open-requested');return()=>{}},
+    slots:{inject:(_n,fn)=>fn(),register:()=>()=>{}},
+    sessions:{list:{getSnapshot:()=>({current:'s'})}},
+    workspaces:{list:{getSnapshot:()=>({phase:'ready',archivedSessionIds:[]})}},
+    workbench:{open(){throw new Error('关联查询不得直接打开工作台')},active:()=>null},
+    sessionStarts:{register:()=>()=>{}},
+  }
+  loaded.plugin.apply(ctx)
+  assert.equal(provider.id,'aico-ppt')
+  const result=await provider.resolve('s',new AbortController().signal)
+  assert.equal(result.workId,'deck-a')
+  for(const off of cleanup.reverse()) off?.()
+  assert.equal(provider,null)
+})
+
+test('原装宿主不支持恢复原会话时，在写入项目恢复状态前拒绝', async () => {
+  const requests = []
+  const loaded = await loadClientBundle({fetchImpl:async url => {
+    requests.push(new URL(url).pathname)
+    return {ok:true,json:async () => ({workItem:{workId:'project',projectRoot:'/project',lifecycle:'removed'}})}
+  }})
+  const registrations=[]
+  const ctx={
+    effect(fn){return fn()},on(){return ()=>{}},
+    slots:{inject(_name,fn){return fn()},register(options,component){registrations.push({options,component});return ()=>{}}},
+    conversation:{registerMessageContext(){return ()=>{}}},
+    sessions:{list:{getSnapshot:()=>({current:null,byId:{}}),subscribe:()=>()=>{}}},
+    workspaces:{projectSessionCapabilities:{restore:false},
+      list:{getSnapshot:()=>({phase:'ready',archivedSessionIds:['archived']}),subscribe:()=>()=>{}},
+      create(){throw Error('不应创建工作区')}},
+    workbench:{toggle(){}},sessionStarts:{register(){return ()=>{}}},
+  }
+  loaded.plugin.apply(ctx)
+  const face=registrations.find(row=>row.options.name==='workbench.persistent-view').options.inject()
+  await assert.rejects(face.executeDshCommand('restore-linked-session',{sessionId:'archived'}),{code:'PROJECT_RESTORE_UNSUPPORTED'})
+  assert.deepEqual(requests,['/api/work-history','/api/dsh-work-items/resolve-session'])
+})

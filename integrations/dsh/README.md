@@ -1,6 +1,6 @@
 # DSH 插件集成
 
-这里是 AICO-PPT 在 DeepSeek Harness（DSH）中的适配层，不是第二份 Skill，也不是第二套 Editor。普通用户安装 AICO-Harness 独立应用，再通过“设置 → 插件 → 插件商店”安装 AICO-PPT；正式步骤见[安装指南](../../INSTALL.md)。本文的 Web profile 与本地安装命令只用于开发调试。
+这里是 AICO-PPT 在 DeepSeek Harness（DSH）中的适配层，不是第二份 Skill，也不是第二套 Editor。普通用户安装原装 DSH Desktop 和 AICO-Harness 适配插件，再通过“设置 → AICO 插件下载”安装 AICO-PPT 及 Windows 资源；正式步骤见[安装指南](../../INSTALL.md)。本文的 Web profile 与本地安装命令只用于开发调试。
 
 插件把 DSH 原生对话与原 AICO-PPT Editor 并排组合：左边始终是当前 DSH 会话，右边是可缩放的通用 workbench；AICO-PPT 使用跨 Session 常驻的 `workbench.persistent-view`。Editor 的页面栏、画布、属性栏、区域任务、时间线、固化和导出全部继续运行仓库内原有实现。
 
@@ -10,7 +10,7 @@
 | `runtime-env.mjs` | 私有运行时 | 校验插件目录内的 Python 与可选私有浏览器，构造独立环境；Node 复用 Host |
 | `runtime-host.mjs` / `runtime-worker.mjs` | Worker 生命周期 | 在独立环境中加载原 `startAppServer({ embeddedMode:'dsh' })`，报告实际 loopback URL，等待关闭并处理超时和崩溃 |
 | `runtime-run.mjs` | 模型脚本入口 | 优先读取命令中的运行时描述，兼容旧 `.aico-runtime.json`，用同一私有环境运行 `python3` 或 `node`；保留当前工作目录、标准输入和解释器参数 |
-| `client.js` | Plugin Client | 在 `sidebar.footer.action` 注册 AICO-PPT 入口；在 `workbench.persistent-view` 注册 iframe 宿主；通过 `ctx.sessionStarts` 向 DSH 统一“新会话”入口发布一行 AICO-PPT 标签及其当前优先的确切 Deck 子菜单；提供 Workspace / Session 创建、打开、查询和精确发送命令 |
+| `client.js` | Plugin Client | 在 `sidebar.footer.action` 注册 AICO-PPT 入口；在 `workbench.persistent-view` 注册 iframe 宿主；通过 `ctx.sessionStarts` 向 Harness 的空白会话项目选择器发布 AICO-PPT 分组及其当前优先的确切 Deck 项目；提供 Workspace / Session 创建、打开、查询和精确发送命令 |
 | `../../scripts/editor/public/deck-task-coordinator.mjs` | Editor Client | 用 `workId` 协调 WorkCatalog 持久关系与 DSH 原生 Workspace / Session 副作用；处理预分配身份与 pending 恢复 |
 | `../../cordis.patch.yml` | Plugin Bundle | 安装时加入 Host/Client 插件行 |
 | `brand-spec.md` | UI 设计源 | 记录 Logo、颜色、字体、间距、圆角、阴影与动效来源 |
@@ -21,7 +21,7 @@
 2. DSH 保留左侧原生对话，在右侧打开可拖动宽度的 workbench；再次点击关闭，切换 Session 不销毁 Editor iframe。
 3. 如果已有活动 Deck，原 App Server 直接恢复该 Editor；否则显示原工作台的“新建 Deck / 修改 Deck”入口和最近任务。
 4. 新建 Deck 先用系统目录选择器确定 `projectRoot`；修改 Deck 使用已确认或恢复的项目根。插件按规范目录幂等解析 DSH Workspace，再为工作项创建独立 Session。
-5. DSH 左侧“新会话”是唯一入口。只要 WorkCatalog 中存在可用 Deck，菜单就显示一行 `AICO-PPT` 专属标签；右侧箭头打开项目子菜单，当前关联项目或最近项目位于首项，Editor 关闭或当前会话未关联也不会隐藏该入口。“新建普通会话”保留在页脚。每个项目选项显式携带自己的 `workId` 和绑定 revision key；选择项目后按需打开 workbench，先导航到目标页面，目标页面发布同一 key 后才创建，避免旧页面误接请求。已有 `workspaceId` 时直接复用持久关联，不重复等待远端 Workspace 创建。新 Session 在打开前写入“创建/修改 Deck：任务名”的持久中文标题，多会话追加“会话 2/3”序号，并预加载历史窗口；不能根据目录、标题或 `/aico-ppt` 文本猜测关联。
+5. 原装 DSH 左侧“新会话”进入空白页，由 Harness 在公开 `conversation.input.dock` 插槽提供“选择业务项目”。项目选择器按 AICO-PPT 等业务分组；普通对话直接在原装输入框输入。顶部按钮不是下拉菜单，左下角不再增加创建会话入口。Editor 关闭或当前会话未关联时，已登记项目仍可出现在选择器。每个项目选项显式携带自己的 `workId` 和绑定 revision key；选择项目后按需打开 workbench，先导航到目标页面，目标页面发布同一 key 后才创建，避免旧页面误接请求。已有 `workspaceId` 时直接复用持久关联，不重复等待远端 Workspace 创建。新 Session 在打开前写入“创建/修改 Deck：任务名”的持久中文标题，多会话追加“会话 2/3”序号，并预加载历史窗口；不能根据目录、标题或 `/aico-ppt` 文本猜测关联。
 6. 打开已有 Deck 后进入原 Editor Runtime。预览、编辑、区域标记三种一级模式，以及页序、富文本、拖移、缩放、删除、属性、任务、撤销 / 重做、固化和 PPTX 导出均走原来的 Managed Workspace 与 frame bridge。
 7. 区域任务点击“交给 Agent”时，Editor Server 在捕获执行批次时固定 `assignedSessionId`，生成带任务 ID、托管工作副本和受控 CLI 备用入口的简洁编辑提示词，并精确提交到该工作项的活动 DSH Session。Agent 先用原生 `aico_ppt` 工具 inspect 获取 revision，再按该版本 edit；区域任务不重复加载完整 Skill。后续切换页面或会话不会迁移在途批次。
 8. 点击已关联 Session 会反向找到 `workId` 并切换对应 Editor 工作项；Editor 已关闭时会先重新打开 workbench，Editor 已经显示 AICO-PPT 时重复事件不会再次调用打开或重载 iframe。点击普通 Session 会自动收起 AICO-PPT Workbench，但不改变任何工作项，也不会把后续请求误投到普通 Session。
@@ -42,17 +42,17 @@
 - Client 只嵌入原 App/Editor 页面，不复制 Editor DOM、业务状态或事务代码。
 - 会话提示词单独限制为非空白文本、最多 262144 个 UTF-16 代码单元，以容纳安装目录与页面规划；会话、路径及标题等字段仍保留原有限制。
 
-## 原装宿主中的所选后端
+## 原装宿主中的 Windows 业务运行时
 
 Host 通过公开 Cordis 服务注册 `aicoPptRuntime`，提供 `appUrl`、`views()` 和 `signal`。视图目录由应用维护，包含启动器、编辑器与创建预览，已关闭实例不再列出。私有 Worker 使用关联请求读取同一目录，关闭或崩溃拒绝未完成请求；Host 卸载先撤销提供者生命周期。`apply` 可指定绝对路径 `stateRoot`，源码和 Worker 模式均将最近记录、工作历史与工作目录放在该后端的目录中，不修改全局环境。
 
-Client 检测 AICO 自有准备入口后，等待所选工作台就绪，再同时绑定 iframe 与项目/会话查询；准备失败不会退回本地，准备期间卸载会取消请求。编辑器 HTTP/WebSocket、返回工作台及异步预览地址由适配插件通过自有 Origin 转发；编辑事务和业务进程继续由 PPT 持有。完整传输配置与验证范围见 [适配插件说明](../../../AICO-Harness/plugin/README.zh.md)。这些入口、目录和生命周期绑定属于必要接入修改，不承诺业务包字节不变。
+Client 检测 AICO 自有准备入口后，等待所选工作台就绪，再同时绑定 iframe 与项目/会话查询；准备失败不会退回本地，准备期间卸载会取消请求。编辑器 HTTP/WebSocket、返回工作台及异步预览地址由适配插件通过自有 Origin 转发；编辑事务和业务进程继续由 PPT 持有。完整传输配置与验证范围见 [适配插件说明](../../../AICO-Harness-Plugin/README.zh.md)。这些入口、目录和生命周期绑定属于必要接入修改，不承诺业务包字节不变。
 
-Linux 与原生 Windows 已验证两个真实编辑器的连接、导航与独立关闭；Chrome 已验证真实 Deck 加载，原版 CLI 已验证后端选择、恢复和旧地址失效。完整创建预览、文件选择、导出及 Windows→WSL Desktop 组合流程仍待验收。
+业务运行时固定在 Windows；工作区路径不转换为 Linux 路径。WSL 模型网关只影响原装模型请求，不承载 Editor、Deck、Agent 工具或插件资源。Chrome 已验证真实 Deck 加载；完整创建预览、文件选择和 Windows 导出仍按独立门禁验收。
 
 ## 应用内插件运行时
 
-AICO 2.0 使用原装 DSH Desktop 与配套原装 DSH，先用原版 `dsh plugin` 安装 AICO-Harness 适配插件，再在适配插件提供的 AICO 设置页安装 AICO-PPT。适配层和业务插件分别发布，不再交付 AICO 修改版 Host。Windows 与 Linux 的 Python／浏览器资源由适配仓库的资源准备器生成、审计并随业务发布；独立 Skill 与源码安装不要求桌面运行时描述文件。
+AICO 2.0 使用原装 DSH Desktop 与配套原装 DSH，先用原版 `dsh plugin` 安装 AICO-Harness 适配插件，再在适配插件提供的 AICO 设置页安装 AICO-PPT。适配层和业务插件分别发布，不再交付 AICO 修改版 Host。当前业务包只发布 Windows Python／浏览器资源；WSL 不安装 AICO-PPT 或其运行时。独立 Skill 与源码安装不要求桌面运行时描述文件。
 
 原装宿主的私有渲染模式调用 `apply(ctx, { aicoRuntime:{ root, paths:{ python, browser } } })`。`aico.release.json` 同步声明这两个平台资源角色，不再依赖旧 Host 的 `desktopRenderer`。Python 和 Chromium 兼容浏览器均为绝对路径，真实普通文件须位于同一资源根目录内。描述对象不接受凭据或任意环境变量。模型命令用 `--runtime-base64` 传递该描述的 JSON 编码，避免 PowerShell 5 原生命令参数丢失 JSON 引号；这只是路径传输编码，不是加密。包装器执行前重新验证描述，不写入插件包目录。未传此参数时才读取旧 `.aico-runtime.json`；显式参数无效时直接失败。Node 使用 `process.execPath`，插件不安装第二份 Node。
 
@@ -123,3 +123,16 @@ CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND
 私有渲染不修改宿主代码或服务。验证、截图和导出沿用原 PPT Playwright 调用，插件模式缺少浏览器路径时明确报错，不退回系统 Chrome。显式 Windows/Linux 验证命令为 `AICO_TEST_BROWSER_DIRECTORY=<浏览器安装目录> AICO_TEST_PYTHON_EXECUTABLE=<Python可执行文件> node --test integrations/dsh/tests/private-browser.integration.mjs`（Windows 在 PowerShell 设置同名环境变量），只复制测试安装文件到临时目录并调用真实图片导出。它不代表浏览器可再发行、Python 自包含、Windows/WSL 依赖齐全或完整桌面导出验收。
 
 运行时同时固定 `AICO_NODE_EXECUTABLE=process.execPath`；Electron 子进程环境使用 `ELECTRON_RUN_AS_NODE=1`。Python 导出与体检显式使用该可执行文件，避免依赖系统 PATH 中的 node.exe，不修改 Host 环境。
+
+
+## 2026-09-19：未关联历史项目的显式选择
+
+首页历史项目及 Editor 的“切换项目”先检查同一 Workspace 内的可用会话关联。存在关联则恢复；不存在时显示“此项目尚未关联会话”，取消保持原项目及会话，确认后通过协调器确保 Workspace、创建并持久绑定 Session，再打开项目。初始上下文只发一次。不把正在选中的普通会话当成项目会话。
+
+Editor 的确认意图携带精确 workId 进入启动页，由全局 WorkCatalog 创建目标项目会话。显式导航完成之前忽略旧会话 ready 重放，防止刚选中的目标被旧页面覆盖。顶部空白页主动创建专属会话的导航协议继续单独处理，不弹第二次确认或重复创建。
+
+### 0.1.20：当前视图上下文与任务取消
+
+Editor 将当前页、选区与滚动位置上报到自身服务（变化时更新，空闲时保活；15 秒未更新失效）。`agent/pre-step` 按持久会话绑定注入工作项的最新视图，以及 Creation 交接中的需求摘要、章节与资料路径。显式页码和任务目标优先于当前页；视图不可用且未指定目标时仅返回页面目录，不默认读取第一页。选区在编辑 revision 变化后失效，需重新 inspect。这里提供执行时的最新状态，不承诺原装输入框发送瞬间的快照；不会扫描或全文注入项目。
+
+活动批次的待处理任务仍可点击删除。确认后取消 PPT 本批等待，保留其余任务及现有 Deck 修改，再删除指定记录。面板也提供“取消本批等待”。`aico_ppt` 新增 `tasks`、`delete_task` 和 `cancel_batch`，支持左侧对话执行同样操作。删除必须携带最新 revision，活动任务还需 `cancelActiveBatch:true`。取消不会停止整个 DSH 会话；携带已删除 taskId 的迟到修改会被拒绝。源码事务未结束或任务已有可撤销修改时仍保留原保护，不能以删记录代替撤销修改。

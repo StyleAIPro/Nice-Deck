@@ -361,3 +361,39 @@ test('重启活动源码事务时保留 session 起始指纹并把磁盘候选�
   assert.equal(change.beforeFingerprint, beforeFingerprint);
   assert.equal(change.afterFingerprint, fingerprint(current));
 });
+
+test('验证与恢复同时失败时保留两阶段错误码供界面诊断', async () => {
+  const store = {
+    path:'/tmp/working.html',
+    async writePatches() { return { previousFingerprint:'before', fingerprint:'after' }; },
+    async restore() { throw Object.assign(new Error('超时'), { code:'SIDECAR_HELPER_TIMEOUT' }); },
+  };
+  await assert.rejects(writeVerifiedPatches(store, [], {
+    verify:async () => { throw Object.assign(new Error('验证不可用'), { code:'PATCH_REPLAY_UNAVAILABLE' }); },
+  }), error => {
+    assert.equal(error.code, 'RECOVERY_REQUIRED');
+    assert.match(error.message, /PATCH_REPLAY_UNAVAILABLE/);
+    assert.match(error.message, /SIDECAR_HELPER_TIMEOUT/);
+    assert.equal(error.committed, true);
+    return true;
+  });
+});
+
+test('Electron 宿主清除运行标记后验证子进程仍使用 Node 模式', {skip:!process.versions.electron}, async () => {
+  const previous = process.env.ELECTRON_RUN_AS_NODE;
+  delete process.env.ELECTRON_RUN_AS_NODE;
+  try {
+    await verifyWorkingPatchReplay('unused.html', {spawnProcess:(_executable,_args,options)=>{
+      assert.equal(options.env.ELECTRON_RUN_AS_NODE, '1');
+      assert.equal(process.env.ELECTRON_RUN_AS_NODE, undefined, '不能改写宿主环境');
+      assert.equal(options.windowsHide, true);
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();child.stderr = new PassThrough();child.kill=()=>{};
+      queueMicrotask(()=>{child.stdout.end('{"ok":true}');child.emit('close',0)});
+      return child;
+    }});
+  } finally {
+    if(previous===undefined)delete process.env.ELECTRON_RUN_AS_NODE;
+    else process.env.ELECTRON_RUN_AS_NODE=previous;
+  }
+});

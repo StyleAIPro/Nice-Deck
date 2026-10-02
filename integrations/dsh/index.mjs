@@ -12,6 +12,7 @@ import {installEditingTools} from './editing-tools.mjs'
 import { installEditingContext } from './editing-context.mjs'
 import { startRuntimeWorker } from './runtime-host.mjs'
 import { runtimeCommand } from './runtime-command.mjs'
+import { resolveBundledRuntime } from './bundled-runtime.mjs'
 
 const PROVIDER_NAME = 'aico-ppt-plugin'
 const PACKAGE_ROOT_URL = new URL('../../', import.meta.url)
@@ -114,14 +115,25 @@ export const inject = ['skills', 'webServer', 'tools', 'attachments']
 
 /** 注册唯一 Skill，启动本地 Editor 运行时，并把入口作为只读 Client 启动输入。 */
 export async function apply(ctx, config = {}) {
+  let desktop, editor, logo
+  const unavailable = error => ({status:'unavailable',error:`AICO-PPT 暂不可用：${error.message}。请检查资源与目录权限，必要时通过 dsh plugin add 重新安装完整插件包，然后重启 Desktop。Deck 数据不会自动删除。`})
+  try {
   if (config.stateRoot !== undefined && (typeof config.stateRoot !== 'string' || !isAbsolute(config.stateRoot))) throw new TypeError('AICO-PPT stateRoot 必须是绝对路径')
-  const logo = `data:image/png;base64,${(await readFile(BRAND_LOGO_URL)).toString('base64')}`
-  const runtimeConfigured = config.aicoRuntime !== undefined
-  const editor = runtimeConfigured
-    ? await startRuntimeWorker(config.aicoRuntime, { stateRoot:config.stateRoot })
+  logo = `data:image/png;base64,${(await readFile(BRAND_LOGO_URL)).toString('base64')}`
+  const explicitRuntime = config.aicoRuntime !== undefined
+  desktop = explicitRuntime ? config.aicoRuntime : await resolveBundledRuntime(PACKAGE_ROOT)
+  editor = explicitRuntime || desktop
+    ? await startRuntimeWorker(explicitRuntime ? desktop : {root:desktop.root,paths:desktop.paths}, { stateRoot:config.stateRoot })
     : await (await import('../../scripts/editor/app-server.mjs')).startAppServer({
       host:'127.0.0.1', port:0, openBrowser:false, embeddedMode:'dsh', stateRoot:config.stateRoot,
     })
+  } catch(error) {
+    await desktop?.release?.().catch(cleanup=>ctx.logger?.warn?.(cleanup))
+    ctx.logger?.warn?.(error)
+    ctx.on('webserver/index-inject',table=>table.push({kind:'global',name:'__AICO_PPT_BRAND__',value:{logo,...unavailable(error)}}))
+    return
+  }
+  const close = async () => {try {await editor.close()} finally {await desktop?.release?.()}}
   const lifetime = new AbortController()
   let runtimeFailure
   if (editor.done) void editor.done.catch(error => {
@@ -131,24 +143,23 @@ export async function apply(ctx, config = {}) {
     else console.error(error)
   })
   try {
-    ctx.effect(() => () => { lifetime.abort(new Error('AICO-PPT 已卸载')); return editor.close() }, 'aico-ppt: DSH Editor 运行时')
+    ctx.effect(() => () => { lifetime.abort(new Error('AICO-PPT 已卸载')); return close() }, 'aico-ppt: DSH Editor 运行时')
     ctx.effect(() => ctx.reflect.provide('aicoPptRuntime', Object.freeze({
       appUrl:editor.appUrl, views:() => editor.transportViews(), signal:lifetime.signal,
     })), 'aico-ppt: 所属视图传输目录')
     installEditingContext(ctx, editor.appUrl)
     installEditingTools(ctx, editor.appUrl)
-    const provider = createProvider(config.aicoRuntime)
+    const provider = createProvider(desktop && {root:desktop.root,paths:desktop.paths})
     ctx.skills.registerProvider(() => provider)
     ctx.on('webserver/index-inject', (table) => {
-      if (runtimeFailure) throw runtimeFailure
       table.push({
         kind:'global',
         name:'__AICO_PPT_BRAND__',
-        value:{ logo, appUrl:editor.appUrl },
+        value:runtimeFailure ? {logo,...unavailable(runtimeFailure)} : { logo, appUrl:editor.appUrl },
       })
     })
   } catch (error) {
-    await editor.close()
+    await close()
     throw error
   }
 }

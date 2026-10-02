@@ -57,18 +57,35 @@ export class WorkspaceSwitcher {
     this.panel.setAttribute('role', 'dialog');
     this.panel.setAttribute('aria-label', '切换到其他项目');
     this.panel.hidden = true;
-    this.root.append(this.panel);
+    // 菜单脱离工具栏滚动裁切区域，坐标仍锚定入口。
+    document.body.append(this.panel);
+    this.panel.style.position = 'fixed';
+    this.panel.style.zIndex = '1000';
+    window.addEventListener('resize', () => this.position());
+    document.addEventListener('scroll', () => this.position(), true);
     this.trigger.setAttribute('aria-haspopup', 'dialog');
     this.trigger.setAttribute('aria-expanded', 'false');
     this.trigger.addEventListener('click', () => void this.toggle());
     document.addEventListener('pointerdown', event => {
-      if (!this.panel.hidden && !this.root.contains(event.target)) this.close();
+      if (!this.panel.hidden && !this.root.contains(event.target) && !this.panel.contains(event.target)) this.close();
     });
     document.addEventListener('keydown', event => {
       if (event.key !== 'Escape' || this.panel.hidden) return;
       this.close();
       this.trigger.focus();
     });
+  }
+
+  position() {
+    if (this.panel.hidden) return;
+    const anchor = this.trigger.getBoundingClientRect();
+    const margin = 12;
+    const width = Math.max(0, Math.min(430, innerWidth - margin * 2));
+    const top = Math.max(margin, Math.min(anchor.bottom + 10, innerHeight - 100));
+    this.panel.style.width = `${width}px`;
+    this.panel.style.left = `${Math.max(margin, Math.min(anchor.left, innerWidth - width - margin))}px`;
+    this.panel.style.top = `${top}px`;
+    this.panel.style.maxHeight = `${Math.max(0, innerHeight - top - margin)}px`;
   }
 
   close() {
@@ -82,6 +99,7 @@ export class WorkspaceSwitcher {
       return;
     }
     this.panel.hidden = false;
+    this.position();
     this.trigger.setAttribute('aria-expanded', 'true');
     const requestId = this.requestId += 1;
     this.renderStatus('正在读取项目…', true);
@@ -217,7 +235,13 @@ export class WorkspaceSwitcher {
       this.loading = true;
       this.panel.dataset.busy = 'true';
       for (const item of this.panel.querySelectorAll('button')) item.disabled = true;
-      try { await this.onSelect(kind, entry); }
+      try {
+        if (await this.onSelect(kind, entry) === false) {
+          this.loading = false;
+          this.panel.dataset.busy = 'false';
+          this.close();
+        }
+      }
       catch (error) {
         this.loading = false;
         this.panel.dataset.busy = 'false';

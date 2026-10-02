@@ -138,6 +138,7 @@ select {
 
 .editor-shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--toolbar-height) auto minmax(0, 1fr);
   width: 100%;
   height: 100%;
@@ -5077,6 +5078,41 @@ input[type="range"]::-moz-range-thumb {
   .editor-shell[data-inspector-state="expanded"][data-inspector-dock="right"] .workspace {
     grid-template-columns: var(--page-panel-width) minmax(480px, 1fr) var(--inspector-width);
   }
+}
+
+/* 嵌入工作台宽度由宿主分栏决定，画布不能撑出 iframe。
+   画布随可用空间缩放，工具条保留控件宽度并允许横向滚动。 */
+html[data-embedded="dsh"] .editor-shell .workspace {
+  min-width: 0;
+  grid-template-columns: var(--page-panel-width) minmax(0, 1fr);
+}
+html[data-embedded="dsh"] .topbar {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+html[data-embedded="dsh"] .topbar > *,
+html[data-embedded="dsh"] .topbar-actions > * { flex-shrink: 0; }
+html[data-embedded="dsh"] .topbar-actions { flex: 0 0 auto; }
+@media (max-width: 720px) {
+  html[data-embedded="dsh"] .canvas-column { grid-template-rows: 64px minmax(0, 1fr); }
+  html[data-embedded="dsh"] .canvas-toolbar {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  html[data-embedded="dsh"] .canvas-toolbar > * { flex-shrink: 0; }
+  html[data-embedded="dsh"] .canvas-context { max-width: 90px; }
+  html[data-embedded="dsh"] .canvas-tools { margin-left: auto; }
+}
+
+/* 隐藏滚动轨道，保留触控板、Shift + 滚轮及键盘聚焦的横向滚动。 */
+html[data-embedded="dsh"] .topbar::-webkit-scrollbar,
+html[data-embedded="dsh"] .canvas-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

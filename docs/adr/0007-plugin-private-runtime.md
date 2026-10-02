@@ -2,6 +2,8 @@
 
 状态：已实现。
 
+2026-09-27（0.1.25）：Editor 公共 Python 启动环境强制设置 `PYTHONDONTWRITEBYTECODE=1`，模型运行包装器对 Python 显式追加 `-B`。避免辅助模块在安装目录生成 `__pycache__`，造成归档严格比对不一致。此变更不删除已有缓存，不放宽完整性核验；用户绕过这些入口自行执行 Python 不在此保护范围内。
+
 用户选择将 AICO-Harness 与 AICO-PPT 分开发行。Host 安装器不包含 PPT 模板、插件 Python 或额外浏览器；桌面插件管理器下载并校验本插件的准备产物，再通过既有 DSH Web profile 注册它。此决策替代完整应用首次启动时下载整套 PPT 运行时的方案。
 
 PPT Host 入口接受显式 `aicoRuntime:{ root, paths:{ python } }`。描述中只允许工具路径，实际文件经 realpath 校验后必须位于该插件发行根目录。管理器向插件包根目录写入相同 JSON 的 `.aico-runtime.json`；该文件不含凭据、用户配置或自定义环境。Node 复用 Host 的 `process.execPath`。
@@ -26,7 +28,7 @@ Windows 原装 Desktop 2.0.10-beta.1 / DSH 0.1.5-rc.2 已通过真实离线 CLI 
 
 原装 Desktop 的 `desktopActions` 仅公开终端打开与重启，没有旧 AICO Electron renderer 私有通道。原装插件模式因此允许资源描述声明 `paths.browser`；它与 Python 一起通过 realpath 和普通文件校验，位于同一资源根目录。适配插件的资源配置映射接受该角色，Worker 与模型脚本包装器共同使用 `AICO_RUNTIME_KIND=plugin` 和显式浏览器路径，移除旧 `AICO_HOME`。截图、验证、导出使用现有 Playwright 路径，不加载或改写宿主原生主进程。
 
-本节替代前文“所有桌面模式只携带 Python、拒绝 browser 字段”的约定。省略 browser 的旧描述仍使用原来的桌面渲染通道，不能用于证明原装宿主具备导出能力。插件模式缺少显式浏览器路径时不回退本机 Chrome。`aico.release.json` 已改为显式声明 Windows／Linux 的 Python 和浏览器文件，不再要求 `desktopRenderer`；正式原装发布仍需构建、校验并分发匹配平台的浏览器资源。资源版本、来源及依赖验证和完整 Windows／WSL 导出仍待交付。
+本节替代前文“所有桌面模式只携带 Python、拒绝 browser 字段”的约定。省略 browser 的旧描述仍使用原来的桌面渲染通道，不能用于证明原装宿主具备导出能力。插件模式缺少显式浏览器路径时不回退本机 Chrome。`aico.release.json` 只声明 Windows 的 Python 和浏览器文件，不再要求 `desktopRenderer`；WSL 仅承担模型通信，不安装 PPT 业务运行时。正式原装发布仍需构建、校验并分发匹配 Windows 平台的浏览器资源。
 
 显式集成测试已在 Linux 与 Windows 用临时复制的浏览器／Python 执行真实两页图片导出，检查 PPTX ZIP 完整性、两页及两张图片，随后删除测试目录。Windows 文件占用仅有限重试，不吞掉清理失败。该测试父进程为 Node；不证明原装 Electron Utility Host 的脚本入口、导出 UI、WSL 切换或正式资源发行可用。
 

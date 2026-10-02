@@ -60,7 +60,9 @@ function firstLine(stream, child) {
   stream.setEncoding('utf8');
   return new Promise((resolvePromise, reject) => {
     let buffered = '';
-    const timer = setTimeout(() => reject(new Error('等待 server ready JSON 超时')), 5_000);
+    // 首次 Python/侧车初始化在 Windows 挂载盘上可能超过 5 秒；
+    // 与运行时启动预算一致，仍保留有界失败和监听器清理。
+    const timer = setTimeout(() => { cleanup(); reject(new Error('等待 server ready JSON 超时')); }, 30_000);
     const cleanup = () => {
       clearTimeout(timer);
       stream.off('data', onData);

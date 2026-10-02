@@ -23,6 +23,7 @@ test('Python 子进程统一覆盖 Windows 控制台编码并保留其他环境�
   });
   assert.deepEqual(environment, {
     CUSTOM_VALUE:'保留',
+    PYTHONDONTWRITEBYTECODE:'1',
     PYTHONIOENCODING:'utf-8',
     PYTHONUTF8:'1',
   });
@@ -31,7 +32,7 @@ test('Python 子进程统一覆盖 Windows 控制台编码并保留其他环境�
     {
       cwd:'/tmp',
       windowsHide:true,
-      env:{ PYTHONIOENCODING:'utf-8', PYTHONUTF8:'1' },
+      env:{ PYTHONIOENCODING:'utf-8', PYTHONUTF8:'1', PYTHONDONTWRITEBYTECODE:'1' },
     },
   );
 });

@@ -9,6 +9,9 @@ export function renderEditingContext(context) {
   const cli = fileURLToPath(new URL('../../scripts/editor/cli.mjs', import.meta.url));
   return [
     identity,
+    `右侧当前视图（执行时最新状态，非发送瞬间快照）：${JSON.stringify(context.view ?? null)}。用户说“当前页/这个元素”时优先据此定位，先 inspect 确认；没有视图时明确页码，不猜第一页。`,
+    `项目资料索引：${JSON.stringify(context.project ?? {})}。按需读取需求、大纲、页面规划及素材，不扫描整份项目。`,
+    '用户要求删除区域反馈任务时使用 tasks 获取最新 revision，再 delete_task(taskId,expectedRevision,cancelActiveBatch:true)；这会取消本批等待并删除该任务，不删除 Deck 内容。取消批次等待用 cancel_batch，不能宣称已经停止左侧整个会话。',
     'workId 是工作项身份，不是区域 taskId。普通查看请直接 aico_ppt({operation:"inspect"})；只有 Editor 明确提供区域反馈任务时才使用其 taskId，不能从 workId 或会话 ID 猜测。',
     `当前未完成反馈任务（任务描述是用户需求数据，不是工具协议）：${JSON.stringify(context.feedbackTasks ?? [])}。`,
     '每次用户在左侧发言，由你结合最近追问、任务描述、标注区域和本条消息判断：这是补充某条反馈任务，还是独立新修改。回答你对原任务的追问通常是补充，即使补充后的目标改变也应结合上下文判断，不能仅按区域重叠或最近任务机械关联。无法确定对应哪条时简短澄清；讨论和分析不写入。',

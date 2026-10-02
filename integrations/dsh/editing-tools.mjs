@@ -8,12 +8,12 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
   endpoint.searchParams.set('token',new URL(appUrl).searchParams.get('token'));
   ctx.tools.register({
     name:'aico_ppt',
-    description:'操作当前会话关联的 PPT。先 inspect 读取 taskId 或 pageKey/query 的目标、父容器和当前截图，再 edit 原样使用目标提交。普通编辑无需读取完整 Skill、源码或协议，不要额外改版式。edit 返回提交结果及同版本截图；已提交但检查未完成时用 view/result，禁止重交。setText payload={text}; setStyle={property,value}; translate={x,y}; resize={width,height} 或 {scale}; hide/show={}; hide 是隐藏、不补位。复杂 DOM/整页修改仍走源码事务。',
+    description:'操作当前会话关联的 PPT。任务列表用 tasks；用户明确要求删除任务时用 delete_task(taskId,expectedRevision,cancelActiveBatch:true)，只删除反馈记录不删除页面；取消批次等待用 cancel_batch。先 inspect 读取 taskId 或 pageKey/query 的目标、父容器和当前截图，再 edit 原样使用目标提交。普通编辑无需读取完整 Skill、源码或协议，不要额外改版式。edit 返回提交结果及同版本截图；已提交但检查未完成时用 view/result，禁止重交。setText payload={text}; setStyle={property,value}; translate={x,y}; resize={width,height} 或 {scale}; hide/show={}; hide 是隐藏、不补位。复杂 DOM/整页修改仍走源码事务。',
     parameters:{type:'object',additionalProperties:false,properties:{
-      operation:{type:'string',enum:['inspect','edit','view','result','verify']},
+      operation:{type:'string',enum:['inspect','edit','view','result','verify','tasks','delete_task','cancel_batch']},
       taskId:{type:'string',description:'区域反馈任务 ID，不是 workId 或会话 ID。左侧对原任务的补充仍传原 taskId；独立新修改不传。'},
       taskRelation:{type:'string',enum:['supplement','new'],description:'由 Agent 根据用户意图判断。supplement 需原 taskId；new 不传 taskId，不完成已有任务。有未完成标注时必须明确选择，歧义先澄清。'},pageKey:{type:'string'},query:{type:'string'},
-      expectedRevision:{type:'integer',minimum:0},commandId:{type:'string'},
+      expectedRevision:{type:'integer',minimum:0},commandId:{type:'string'},cancelActiveBatch:{type:'boolean'},
       actions:{type:'array',items:{type:'object',properties:{
         target:{type:'object'},kind:{type:'string',enum:['setText','setStyle','translate','resize','hide','show']},payload:{type:'object'},
       },required:['target','kind','payload']}}
@@ -23,7 +23,7 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
       return [{type:'text',text:JSON.stringify(text)},...(imageRef?[{type:'image',attachment:imageRef}]:[])];
     }},
     async execute(args,exec) {
-      if(!args||!['inspect','edit','view','result','verify'].includes(args.operation))throw new Error('无效的 PPT 操作');
+      if(!args||!['inspect','edit','view','result','verify','tasks','delete_task','cancel_batch'].includes(args.operation))throw new Error('无效的 PPT 操作');
       const linked=await request(endpoint,{method:'POST',headers:{'content-type':'application/json',origin:endpoint.origin},
         body:JSON.stringify({sessionId:exec.agent?.session.id}),signal:exec.signal});
       if(!linked.ok)throw new Error('无法取得当前 PPT 工作区');
@@ -35,14 +35,25 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
         recovery:'普通查看请调用 inspect 不传 taskId；指定页面用 pageKey/query。只有明确的区域反馈任务才传它自己的 taskId。',
       };
       const capability=await readWorkspaceCapability(context.capabilityPath);
-      const call=async(path,body)=>{
-        const response=await request(new URL(path,capability.url),{method:body?'POST':'GET',
+      const call=async(path,body,method)=>{
+        const response=await request(new URL(path,capability.url),{method:method??(body?'POST':'GET'),
           headers:{authorization:`Bearer ${capability.token}`,'content-type':'application/json'},
           ...(body?{body:JSON.stringify(body)}:{}),signal:exec.signal});
         const value=await response.json();
         if(!response.ok)throw Object.assign(new Error(value.message??value.code),{code:value.code});
         return value;
       };
+      if(args.operation==='tasks') return {revision:context.revision,tasks:context.feedbackTasks,
+        activeBatch:context.agentRun?.activeBatch ?? null};
+      if(args.operation==='delete_task') {
+        if(!args.taskId || !Number.isSafeInteger(args.expectedRevision)) throw new Error('删除任务需要 taskId 和最新 expectedRevision');
+        return call(`/api/tasks/${encodeURIComponent(args.taskId)}`,{
+          expectedRevision:args.expectedRevision,cancelActiveBatch:args.cancelActiveBatch===true},'DELETE');
+      }
+      if(args.operation==='cancel_batch') {
+        if(!Number.isSafeInteger(args.expectedRevision)) throw new Error('取消批次需要最新 expectedRevision');
+        return call('/api/agent-runs/cancel',{expectedRevision:args.expectedRevision,batchId:context.agentRun?.activeBatch?.id});
+      }
       const picture=async body=>{
         let result;
         for(let attempt=0;attempt<2;attempt++) {
@@ -50,6 +61,7 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
           catch(error){if(attempt||!['SNAPSHOT_STALE','REVISION_CONFLICT'].includes(error.code))throw error;}
         }
         const {image,...metadata}=result;
+        if(!image)return {...metadata,visualStatus:'not-requested'};
         const attachments=ctx.get?.('attachments')??ctx.attachments;
         if(!attachments)return {...metadata,visualStatus:'unavailable',message:'Host 未提供图片附件服务'};
         const imageRef=await attachments.saveImage({data:Buffer.from(image,'base64'),mediaType:'image/png',name:'aico-ppt-page.png'});

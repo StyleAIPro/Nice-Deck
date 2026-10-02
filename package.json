@@ -1,6 +1,6 @@
 {
   "name": "aico-ppt-skill",
-  "version": "0.1.11",
+  "version": "0.1.26",
   "description": "AICO-PPT Agent Skill 与 DeepSeek Harness 可视化 Editor 插件",
   "private": true,
   "type": "module",
@@ -10,6 +10,33 @@
     "./client": "./integrations/dsh/client.js",
     "./package.json": "./package.json"
   },
+  "files": [
+    "SKILL.md",
+    "INSTALL.md",
+    "README.md",
+    "LICENSE",
+    "cordis.patch.yml",
+    "aico.release.json",
+    "references/",
+    "assets/",
+    "docs/user-guide/",
+    "integrations/dsh/",
+    "scripts/",
+    "!integrations/dsh/tests/**",
+    "!scripts/**/__pycache__/**",
+    "!scripts/**/*.pyc",
+    "!scripts/editor/test/**",
+    "!scripts/editor/prototypes/**",
+    "!scripts/editor/wsl-*",
+    "!scripts/editor/wsl_*",
+    "!scripts/editor/agent-terminal-loader.mjs",
+    "!scripts/editor/agent-terminal-projection.mjs",
+    "!scripts/editor/agent-terminal-runtime.mjs",
+    "!scripts/editor/agent-terminal-session.mjs",
+    "!scripts/run-editor-tests.mjs",
+    "!scripts/test_*.py",
+    "!scripts/verify/*.test.mjs"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -37,14 +64,15 @@
   "dependencies": {
     "busboy": "1.6.0",
     "html2canvas": "1.4.1",
-    "playwright-core": "^1.62.1",
-    "three": "^0.185.1",
+    "playwright-core": "1.62.1",
+    "three": "0.185.1",
     "ws": "8.21.1"
   },
-  "optionalDependencies": {
-    "@xterm/addon-serialize": "^0.13.0",
-    "@xterm/headless": "^5.5.0",
-    "@xterm/xterm": "^5.5.0",
-    "node-pty": "1.2.0-beta.15"
-  }
+  "bundledDependencies": [
+    "busboy",
+    "html2canvas",
+    "playwright-core",
+    "three",
+    "ws"
+  ]
 }

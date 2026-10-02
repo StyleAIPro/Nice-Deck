@@ -145,7 +145,7 @@ export function setTaskDrawerOpen(root, open) {
 export function renderTaskDrawer(root, {
   tasks, groups = [], agentRun = { status:'idle' },
   submissionBlocked = false, submissionBlockedMessage = '',
-  onLocate, onProcessAll, onHistory, onEdit, onDelete,
+  onLocate, onProcessAll, onHistory, onEdit, onDelete, onCancelBatch,
 }) {
   const completedCount = tasks.filter(task => task.status === 'completed').length;
   const pendingCount = tasks.length - completedCount;
@@ -401,7 +401,7 @@ export function renderTaskDrawer(root, {
         const remove = element('button', 'task-delete', solidified ? '删除记录' : '删除');
         remove.type = 'button';
         remove.dataset.taskDelete = task.id;
-        remove.disabled = activeIds.has(task.id);
+        remove.title = activeIds.has(task.id) ? '取消本批等待并删除此任务' : '删除此任务';
         applyPill(remove, { variant:'danger', size:'sm', kind:'action' });
         remove.addEventListener('click', () => {
           if (row.querySelector('[data-task-delete-confirmation]')) return;
@@ -409,7 +409,7 @@ export function renderTaskDrawer(root, {
           confirmation.dataset.taskDeleteConfirmation = task.id;
           confirmation.append(element('p', '', solidified
             ? '确定删除这条已固化任务记录？Deck 中已固化的修改不会改变，区域截图和附件会一并清理。'
-            : '确定删除这条任务？区域截图和附件也会一并清理。'));
+            : activeIds.has(task.id) ? '取消本批等待并删除此任务？其余任务保留，已完成的 Deck 修改不会撤销。' : '确定删除这条任务？区域截图和附件也会一并清理。'));
           const controls = element('div', 'task-delete-controls');
           const cancel = element('button', 'task-delete-cancel', '取消');
           cancel.type = 'button';
@@ -672,6 +672,18 @@ export function renderTaskDrawer(root, {
       process.disabled = false;
     });
   });
+  if (activeRun && onCancelBatch) {
+    const cancelBatch = element('button','task-cancel-batch','取消本批等待');
+    cancelBatch.type = 'button';
+    cancelBatch.dataset.cancelBatch = '';
+    applyPill(cancelBatch,{variant:'secondary',size:'md',kind:'action'});
+    cancelBatch.addEventListener('click',async () => {
+      cancelBatch.disabled = true;
+      try { await onCancelBatch(activeBatch); }
+      catch(error) { note.textContent = `取消失败：${error.message}`; cancelBatch.disabled = false; }
+    });
+    footer.append(cancelBatch);
+  }
   footer.append(process, note);
   panel.append(footer);
   root.append(panel);

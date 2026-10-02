@@ -117,6 +117,7 @@ if (!embeddedDsh) {
     `/app/agent-terminal-panel.mjs?token=${encodeURIComponent(token)}`
   ));
 }
+const { confirmProjectSession, linkedProjectSession } = await import(`/app/dsh-project-choice.mjs?token=${encodeURIComponent(token)}`);
 const { WorkspaceSwitcher } = await import(
   `/app/workspace-switcher.mjs?token=${encodeURIComponent(token)}`
 );
@@ -161,6 +162,8 @@ let dshSessionNavigationBusy = false;
 let creationDshSessionBusy = false;
 let creationDshSessionRenderVersion = 0;
 let suppressDshSessionNavigation = 0;
+// 显式项目导航尚未就绪时，旧会话的 ready 重放不能覆盖用户选定的目标。
+let requestedProjectNavigationPending = ['creation', 'editing'].includes(launchParams.get('switchKind'));
 let ignoredHomeSessionId;
 let holdExplicitHome = isLeavingWorkspace && requestedWorkspaceView === 'home';
 
@@ -496,9 +499,10 @@ if (dshBridge) {
       if (sessionId === ignoredHomeSessionId) return;
       holdExplicitHome = false;
     }
-    if (!session?.sessionId || suppressDshSessionNavigation > 0 || dshSessionNavigationBusy) return;
+    if (!session?.sessionId || requestedProjectNavigationPending || suppressDshSessionNavigation > 0 || dshSessionNavigationBusy) return;
     dshSessionNavigationBusy = true;
     void deckTaskCoordinator.resolveBySession(session.sessionId).then(async result => {
+      if (requestedProjectNavigationPending || suppressDshSessionNavigation > 0 || dshCurrentSession?.sessionId !== session.sessionId) return;
       let workItem = result?.workItem ?? null;
       if (!workItem) return;
       if (workItem.dshBinding.activeSessionId !== session.sessionId) {
@@ -795,9 +799,8 @@ function renderWorkList(kind, entries) {
     time.dateTime = creation ? entry.updatedAt : entry.modifiedAt;
     time.textContent = formatModifiedAt(time.dateTime);
     button.append(copy, time);
-    button.addEventListener('click', () => void (creation
-      ? resumeCreationTask(entry)
-      : resumeDeckTask(entry)));
+    button.addEventListener('click', () => void openSelectedProject(entry, linked => creation
+      ? resumeCreationTask(linked) : resumeDeckTask(linked)));
     const actions = document.createElement('span');
     actions.className = 'work-item-actions';
     if (needsRebind) {
@@ -878,7 +881,7 @@ async function rebindWorkTask(entry, button) {
 
 async function dismissWorkTask(kind, entry, button) {
   if (state !== 'idle') return;
-  if (entry.lifecycle !== 'removing' && !window.confirm(`移除项目“${entry.displayName}”？\n将归档关联的 ${entry.dshBinding?.sessions?.length ?? 0} 段会话，并移除项目入口。内容文件和历史记录保留。`)) return;
+  if (entry.lifecycle !== 'removing' && !window.confirm(`移除项目“${entry.displayName}”？\n将归档关联的 ${entry.dshBinding?.sessions?.length ?? 0} 段会话，并移除项目入口。内容文件和历史记录保留。原装宿主按会话逐项归档，失败可重试；恢复项目后需新建会话。`)) return;
   button.disabled = true;
   historyStatus(kind, '正在移除项目并归档会话…', 'working');
   let pending;
@@ -993,6 +996,38 @@ function renderCandidate(value) {
   addButton.hidden = true;
   showExistingFlow();
   setState('deck-selected', '确认项目目录后打开编辑器');
+}
+
+let projectSelectionBusy = false;
+async function openSelectedProject(entry, navigate, { confirmed = false } = {}) {
+  if (projectSelectionBusy) return false;
+  projectSelectionBusy = true;
+  try {
+    return await withDshNavigationSuppressed(async () => {
+      if (embeddedDsh && deckTaskCoordinator) {
+        const sessionId = linkedProjectSession(entry);
+        if (sessionId) {
+          if (dshCurrentSession?.sessionId !== sessionId || entry.dshBinding.activeSessionId !== sessionId) {
+            entry = (await deckTaskCoordinator.activate({workItem:entry, sessionId})).workItem;
+          }
+        }
+        else {
+          if (!confirmed && !await confirmProjectSession(entry)) return false;
+          entry = await createDshWorkSession(entry, [
+            '/aico-ppt', '', '这是用户明确选择项目并确认创建的独立任务会话。',
+            `Work Item：${entry.workId}`, `项目目录：${entry.projectRoot}`,
+            entry.kind === 'editing' ? `Deck：${entry.deckPath}` : `Draft：${entry.draftId}`,
+            '后续仅处理此工作项，不沿用其他项目或普通会话的上下文。',
+          ].join('\n'));
+        }
+      }
+      await navigate(entry);
+      return true;
+    });
+  } catch (error) {
+    historyStatus(entry.kind, `无法打开项目：${error.message}`, 'error');
+    return false;
+  } finally { projectSelectionBusy = false; }
 }
 
 async function resumeDeckTask(entry) {
@@ -1380,16 +1415,12 @@ new WorkspaceSwitcher({
   onSelect:async (kind, entry) => {
     creationUi.switchWorkspace.disabled = true;
     creationUi.home.disabled = true;
-    if (embeddedDsh && entry.dshBinding?.activeSessionId) {
-      try { entry = await activateLinkedDshSession(entry); }
-      catch (error) {
-        workspaceStatus(`无法切换任务会话：${error.message}`, 'error');
-        creationUi.switchWorkspace.disabled = false;
-        creationUi.home.disabled = false;
-        return;
-      }
+    const moved = await openSelectedProject(entry, linked => location.replace(workspaceTaskNavigationUrl(kind, linked)));
+    if (!moved) {
+      creationUi.switchWorkspace.disabled = false;
+      creationUi.home.disabled = false;
     }
-    location.replace(workspaceTaskNavigationUrl(kind, entry));
+    return moved;
   },
 });
 creationUi.home.addEventListener('click', () => navigateFromCreation('home'));
@@ -1692,6 +1723,7 @@ const requestedWorkspaceTask = launchParams.get('switchKind') === 'creation'
   && launchParams.get('projectRoot') && launchParams.get('draftId')
   ? {
       kind:'creation',
+      workId:launchParams.get('workId'),
       projectRoot:launchParams.get('projectRoot'),
       draftId:launchParams.get('draftId'),
     }
@@ -1725,11 +1757,13 @@ const connectedState = await launcherLeasePromise ?? await post('/api/client-con
 });
 if (requestedWorkspaceTask && !navigationError) {
   showLanding();
-  if (requestedWorkspaceTask.kind === 'creation') {
-    await resumeCreationTask(requestedWorkspaceTask);
-  } else {
-    await resumeDeckTask(requestedWorkspaceTask);
-  }
+  const resume = entry => entry.kind === 'creation' ? resumeCreationTask(entry) : resumeDeckTask(entry);
+  if (embeddedDsh && launchParams.get('createProjectSession') === '1') {
+    const history = await requestJson('/api/work-history');
+    const entry = [...history.creation, ...history.editing].find(item => item.workId === requestedWorkspaceTask.workId);
+    if (entry) await openSelectedProject(entry, resume, {confirmed:true});
+    else historyStatus(requestedWorkspaceTask.kind, '项目已变化，请重新选择。', 'error');
+  } else await resume(requestedWorkspaceTask);
 } else if (!isLeavingWorkspace
   && connectedState.status === 'selected' && connectedState.editorUrl) {
   releaseStartupVisuals();
@@ -1755,6 +1789,7 @@ if (requestedWorkspaceTask && !navigationError) {
   }
   void loadWorkHistory();
 }
+requestedProjectNavigationPending = false;
 startStartupVisuals();
 const { createSupportCenter } = await import(
   `/app/support-center.mjs?token=${encodeURIComponent(token)}`

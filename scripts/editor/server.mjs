@@ -1,6 +1,8 @@
+import { connectionDiagnostics } from './connection-diagnostics.mjs';
+import {recoverStagedPatches} from './staged-patch-recovery.mjs';
 import {EditTimeline} from './edit-timeline.mjs';
 import {createEditorViews} from './editor-view.mjs';
-import {verifyEffectiveDeck,withEffectiveDeck} from './effective-deck.mjs';
+import {verifyEffectiveDeck,withEffectiveDeck,writeVerifiedWorkingPatches} from './effective-deck.mjs';
 import {actionKey,compileActionGroups,sourceRebaseActionIds} from './action-compiler.mjs';
 import { reconcileSourceActions, reconcileLegacySourceHistory } from './source-action-reconciliation.mjs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -17,7 +19,6 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
   AgentBatchCoordinator, buildAgentPrompt, buildSessionInitializationPrompt,
 } from './agent-runner.mjs';
-import { createAgentTerminalSession } from './agent-terminal-loader.mjs';
 import {
   createTerminalConversation,
   discoverTerminalConversation,
@@ -50,7 +51,7 @@ import { validateAction, validateTask } from './protocol.mjs';
 import { RevisionConflict, SessionStore } from './session-store.mjs';
 import { createPersistentSidecarIO } from './sidecar-io.mjs';
 import {
-  WorkingDeckStore, verifyWorkingPatchReplay, writeVerifiedPatches,
+  WorkingDeckStore, verifyWorkingPatchReplay,
 } from './working-deck-store.mjs';
 import { startHeadlessEditorRuntime } from './headless-editor-runtime.mjs';
 import {
@@ -103,6 +104,7 @@ const EDITOR_ASSETS = new Map([
   ['/editor/dsh-work-bridge.mjs', {
     path: join(PUBLIC_DIR, 'dsh-work-bridge.mjs'), type: 'text/javascript; charset=utf-8',
   }],
+  ['/editor/dsh-project-choice.mjs', { path:join(PUBLIC_DIR, 'dsh-project-choice.mjs'), type:'text/javascript; charset=utf-8' }],
   ['/editor/deck-task-coordinator.mjs', {
     path: join(PUBLIC_DIR, 'deck-task-coordinator.mjs'), type: 'text/javascript; charset=utf-8',
   }],
@@ -1388,7 +1390,7 @@ export async function startServer({
   agentRunAdapter = null,
   dshAgentBridge = false,
   spawnAgentTerminal = null,
-  createAgentTerminal = createAgentTerminalSession,
+  createAgentTerminal = null,
   createAgentTerminalConversation = createTerminalConversation,
   discoverAgentTerminalConversation = discoverTerminalConversation,
   resumeAgentTerminalConversation = resumeTerminalConversation,
@@ -1433,6 +1435,12 @@ export async function startServer({
   }
   if (dshAgentBridge && typeof dshWorkItemCommand !== 'function') {
     throw new TypeError('DSH bridge 必须提供 dshWorkItemCommand');
+  }
+  if (createAgentTerminal === null && !dshAgentBridge) {
+    ({ createAgentTerminalSession:createAgentTerminal } = await import('./agent-terminal-loader.mjs'));
+  }
+  if (createAgentTerminal === null && dshAgentBridge) {
+    createAgentTerminal = async () => { throw new Error('DSH bridge 不启动独立 Agent Terminal'); };
   }
   if (typeof createAgentTerminal !== 'function') {
     throw new TypeError('createAgentTerminal 必须是函数');
@@ -1534,6 +1542,10 @@ export async function startServer({
       reservedBeforeFingerprint:sessionStore.state.sourceEdit?.beforeFingerprint ?? null,
     });
     workingDeckStore = openedWorkingDeck.store;
+    const stagedRecovery = await recoverStagedPatches(sessionStore.state, workingDeckStore, {
+      verify:workingPatchVerifier, pythonExecutable,
+    });
+    if (stagedRecovery) openedWorkingDeck.recovery = stagedRecovery;
     let migratedSession = migrateSessionToPersistentPageIds(
       sessionStore.state, workingDeckStore, openedWorkingDeck.fingerprintMap,
     );
@@ -1658,6 +1670,7 @@ export async function startServer({
     await sidecarBoundary.io.close();
     throw httpError('AGENT_TERMINAL_HANDOFF_FAILED', 409, 'Agent 终端与 Editor 项目目录不一致');
   }
+  let viewContext = null;
   let creationHandoffState = null;
   try {
     creationHandoffState = creationHandoff
@@ -2190,10 +2203,30 @@ export async function startServer({
     convert:input => pptxExporter({ ...input, pythonExecutable, timeoutMs:pptxExportTimeoutMs }),
   });
 
+  const connectionLog = connectionDiagnostics('ppt-editor');
+  const connectionRecord = (event, details = {}) => connectionLog.record(event, {sessionId:sessionStore.state.sessionId, ...details});
+  connectionRecord('service-start');
+  // 仅在启动恢复完成、或关闭时全部写入队列已排空后回收；不与编辑事务并发。
+  const collectUnusedWorkingVersions = async () => {
+    if (!workingDeckStore.managed) return;
+    try {
+      const result = await sidecarBoundary.io.pruneWorkingVersions();
+      connectionRecord('working-version-gc', {
+        removed:result.removed, removedBytes:result.removedBytes,
+        kept:result.kept, skipped:result.skipped ?? null,
+      });
+    } catch (error) {
+      // 缓存维护失败不改变原有恢复/发布结果，保留快照并记录诊断。
+      connectionRecord('working-version-gc-skipped', {code:error?.code ?? 'UNKNOWN'});
+    }
+  };
+  await collectUnusedWorkingVersions();
+  let diagnosticWindow = 0, diagnosticCount = 0;
   let solidifying = false;
   const server = createServer(async (request, response) => {
     let ownsSolidification = false;
     response.once('finish', () => {
+      if (response.statusCode >= 400 && request.url?.startsWith('/api/actions')) connectionRecord('action-rejected', {status:response.statusCode});
       if (watcherClosed) server.closeIdleConnections?.();
     });
     try {
@@ -2208,6 +2241,41 @@ export async function startServer({
         return;
       }
 
+      if (request.method === 'POST' && pathname === '/api/connection-diagnostics') {
+        if (url.searchParams.get('editorToken') !== editorToken) throw httpError('EDITOR_CAPABILITY_REQUIRED',403,'连接诊断需要编辑器能力令牌');
+        const body = await readJson(request);
+        if (Date.now() - diagnosticWindow > 60000) { diagnosticWindow = Date.now(); diagnosticCount = 0; }
+        if (++diagnosticCount > 120) { json(response,429,{accepted:false}); return; }
+        if (!['connecting','open','close','reconnect-scheduled','socket-error'].includes(body.event)) throw httpError('INVALID_INPUT',400,'无效连接事件');
+        connectionRecord('browser-' + body.event, body);
+        json(response,200,{accepted:true}); return;
+      }
+      if (request.method === 'POST' && pathname === '/api/view-context') {
+        if (url.searchParams.get('editorToken') !== editorToken) throw httpError('EDITOR_CAPABILITY_REQUIRED',403,'视图上报需要编辑器能力令牌');
+        const body = await readJson(request);
+        if (typeof body.pageKey !== 'string' || body.pageKey.length > 200
+          || JSON.stringify(body).length > 16000 || !Number.isSafeInteger(body.revision)
+          || body.revision < 0 || body.revision > sessionStore.state.revision) {
+          throw httpError('INVALID_VIEW_CONTEXT', 400, '当前视图信息无效');
+        }
+        viewContext = { pageKey:body.pageKey, pageIndex:Number.isSafeInteger(body.pageIndex) ? body.pageIndex : null,
+          pageLabel:String(body.pageLabel ?? '').slice(0,200),
+          selection:body.selection ?? null, scroll:body.scroll ?? null,
+          revision:body.revision, observedAt:Date.now() };
+        json(response,200,{accepted:true});
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/agent-runs/cancel') {
+        const body = await readJson(request);
+        requireRevision(body.expectedRevision);
+        if (body.batchId !== agentRuns.snapshot().activeBatch?.id) {
+          throw httpError('AGENT_BATCH_CHANGED',409,'当前批次已变化，请重新读取任务列表');
+        }
+        agentRuns.cancel('用户取消了本批任务等待；未完成任务可删除或重新提交');
+        await agentRuns.activePromise;
+        json(response,200,{revision:sessionStore.state.revision,run:agentRuns.snapshot()});
+        return;
+      }
       if (request.method === 'POST' && ['/api/inspect','/api/verify'].includes(pathname)) {
         const body=await readJson(request);
         if(solidifying)throw httpError('EDITOR_SOLIDIFYING',409,'Deck 正在固化，请在完成后读取稳定版本');
@@ -2227,8 +2295,9 @@ export async function startServer({
           result={...result,scope:'full-history-replay'};
         } else {
           if(body.query!==undefined&&(typeof body.query!=='string'||body.query.length>500))throw httpError('INVALID_INPUT',400,'检索文字无效');
+          const targetPage=body.pageKey??task?.pageKey??(viewContext && Date.now()-viewContext.observedAt<15000 ? viewContext.pageKey : undefined);
           result=await editorView({bytes,actions,pythonExecutable},
-            {pageKey:body.pageKey??task?.pageKey,query:body.query??'',rect:task?.rect??null});
+            {pageKey:targetPage,catalogOnly:!targetPage,query:body.query??'',rect:task?.rect??null});
           result={...result,task:task?structuredClone(task):null};
         }
         if(sessionStore.state.revision!==revision)throw httpError('SNAPSHOT_STALE',409,'检查期间编辑版本变化，请读取最新结果');
@@ -2530,12 +2599,22 @@ export async function startServer({
       const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
       if (taskMatch && ['PATCH', 'DELETE'].includes(request.method)) {
         const id = decodeURIComponent(taskMatch[1]);
-        if (agentRuns.snapshot().activeBatch?.taskIds?.includes(id)) {
-          throw httpError('AGENT_BATCH_TASK_LOCKED', 409, '这个任务已经属于正在执行的批次，完成后才能修改');
-        }
         const body = await readJson(request);
         requireRevision(body.expectedRevision);
         await guardWorkingRevision(body.expectedRevision);
+        const activeBatch = agentRuns.snapshot().activeBatch;
+        if (activeBatch?.taskIds?.includes(id)) {
+          if (request.method !== 'DELETE' || body.cancelActiveBatch !== true) {
+            throw httpError('AGENT_BATCH_TASK_LOCKED',409,'此任务属于活动批次；删除时需明确取消本批等待');
+          }
+          if (bridge.sourceEditSnapshot()) throw httpError('SOURCE_EDIT_ACTIVE',409,'源码事务尚未结束，请先完成或取消源码事务');
+          agentRuns.cancel('用户删除任务，已取消本批等待；其余未完成任务可重新提交');
+          await agentRuns.activePromise;
+          // 只接受取消结算造成的一次 revision 变化，不能吞掉并发编辑。
+          requireRevision(body.expectedRevision + 1);
+          if (agentRuns.snapshot().activeBatch) throw httpError('AGENT_BATCH_CHANGED',409,'已有新的批次，请重新确认');
+          body.expectedRevision = sessionStore.state.revision;
+        }
         if (request.method === 'PATCH') {
           const result = await bridge.updateTask(id, body.instruction, body.expectedRevision);
           const task = await serializeTaskOutput(result.task, result.revision, { committed:true });
@@ -2766,7 +2845,7 @@ export async function startServer({
                       previousFingerprint:workingDeckStore.fingerprint,
                     };
                   }
-                  const workingResult = await writeVerifiedPatches(
+                  const workingResult = await writeVerifiedWorkingPatches(
                     workingDeckStore, patches, {
                       verify:workingPatchVerifier,
                       droppableActionIds:bridge.sourceRebaseActionIds(patches),
@@ -2930,15 +3009,19 @@ export async function startServer({
   });
 
   server.on('upgrade', (request, socket, head) => {
+    const connectionId = randomUUID();
     let url;
+    const rejectConnection = status => connectionRecord('handshake-rejected', {connectionId,status});
     try {
       url = new URL(request.url ?? '/', `http://${urlHost}`);
     } catch {
+      rejectConnection(400);
       socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
       return;
     }
     if (!['/events', '/agent-terminal'].includes(url.pathname)
       || url.searchParams.get('token') !== token) {
+      rejectConnection(403);
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -2947,19 +3030,22 @@ export async function startServer({
       try { suppliedOrigin = new URL(request.headers.origin).origin; }
       catch { suppliedOrigin = null; }
       if (suppliedOrigin !== serviceOrigin) {
-        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        rejectConnection(403);
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
         return;
       }
     }
     const suppliedEditorToken = url.searchParams.get('editorToken');
     const isEditor = suppliedEditorToken === editorToken;
     if (suppliedEditorToken !== null && !isEditor) {
+      rejectConnection(403);
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
     if (url.pathname === '/agent-terminal') {
       if (!isEditor) {
-        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        rejectConnection(403);
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
         return;
       }
       terminalSockets.handleUpgrade(request, socket, head, client => {
@@ -2968,10 +3054,12 @@ export async function startServer({
       return;
     }
     if (isEditor && bridge.hasEditorSocket()) {
+      rejectConnection(409);
       socket.end('HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n');
       return;
     }
     webSockets.handleUpgrade(request, socket, head, client => {
+      client.connectionId = connectionId;
       client.isEditor = isEditor;
       webSockets.emit('connection', client, request);
     });
@@ -2979,14 +3067,17 @@ export async function startServer({
 
   webSockets.on('connection', socket => {
     if (socket.isEditor) {
+      connectionRecord('editor-connected', {connectionId:socket.connectionId});
       editorConnectedOnce = true;
       clearTimeout(editorCloseTimer);
       editorCloseTimer = undefined;
       bridge.setEditorSocket(socket);
     }
     socket.on('message', data => bridge.handleMessage(socket, data));
-    socket.on('close', () => {
+    socket.on('error', () => { if (socket.isEditor) connectionRecord('editor-socket-error', {connectionId:socket.connectionId}); });
+    socket.on('close', code => {
       if (!socket.isEditor) return;
+      connectionRecord('editor-disconnected', {connectionId:socket.connectionId,code});
       bridge.clearEditorSocket(socket);
       if (!exitWhenEditorCloses || !editorConnectedOnce || watcherClosed) return;
       clearTimeout(editorCloseTimer);
@@ -3285,6 +3376,8 @@ export async function startServer({
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
+      connectionRecord('service-stopping');
+      await connectionLog.flush();
       const finalWorkingCheckpoint = workingDeckStore.managed
         ? await Promise.allSettled([queueWorkingDeckCheckpoint()])
         : [];
@@ -3349,6 +3442,11 @@ export async function startServer({
         bindingPersistenceQueue,
         bindingCoordinator.close(),
       ]);
+      if ([...finalWorkingCheckpoint, ...shutdown, ...await writersSettled, ...await exportsSettled]
+        .every(result => result.status === 'fulfilled')) {
+        await collectUnusedWorkingVersions();
+      }
+      await connectionLog.flush();
       const helperResult = await Promise.allSettled([sidecarBoundary.io.close()]);
       const failures = [...finalWorkingCheckpoint, ...shutdown, ...helperResult]
         .filter(result => result.status === 'rejected')
@@ -3388,9 +3486,15 @@ export async function startServer({
     sessionDir: sessionStore.sessionDir,
     session: sessionStore.state,
     creationHandoff:creationHandoffState,
+    get viewContext() {
+      if (!viewContext || Date.now()-viewContext.observedAt > 15000) return null;
+      const {observedAt,...value} = viewContext;
+      return {...value,selection:value.revision === sessionStore.state.revision ? value.selection : null};
+    },
     agentWorkspace:agentWorkspaceStore,
     agentRuns,
     agentTerminal,
+    hasEditorConnection:() => bridge.hasEditorSocket(),
     waitUntilReady:options => bridge.waitUntilReady(options),
     flushWorkingDeckChanges:() => (
       workingDeckStore.managed ? queueWorkingDeckCheckpoint() : Promise.resolve()
