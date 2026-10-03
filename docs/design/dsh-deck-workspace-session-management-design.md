@@ -1,6 +1,6 @@
 # AICO-PPT × DSH 工作项、工作区与会话管理设计
 
-> 状态：Fresh Session 主链路已实施；Fork 与丢失会话修复入口留待下一阶段
+> 当前维护契约：Fresh Session 主链路已实施；Fork 与丢失会话修复入口仍未交付。已完成的阶段计划和旧故障描述已删除。
 > 日期：2026-09-03
 > 范围：DSH 正式窗口壳中的新建 Deck、修改 Deck、工作项切换、DSH 工作区与多会话管理，以及跨会话常驻 Editor
 
@@ -18,55 +18,6 @@
 8. AICO-PPT Workbench 在关联 DSH Session 之间必须复用同一挂载实例；重复选中事件不得再次打开或重建 Editor iframe。
 
 创建工作项发布出 Deck 后直接转为编辑工作项，保留同一个 `workId`，不再创建一条重复的编辑记录。发布项目根不变时保留 DSH 会话关联；若发布时显式更换项目根，则历史化旧 Link，并清空旧 Workspace 与活动指针。
-
-## 1. 当前实现与问题
-
-### 1.1 已有能力
-
-AICO-PPT 已经具备：
-
-- `WorkCatalog`，为创建和编辑记录分配稳定 `workId`；
-- Creation Draft 的显式 `projectRoot`；
-- 已有 Deck 的 `projectRoot` 恢复与确认逻辑；
-- Editor Managed Workspace、工作副本、时间线、固化和恢复；
-- DSH iframe 消息桥，把 Editor 请求发送给当前原生会话。
-
-DSH 已经具备：
-
-- `workspaces.create({ path })`：按规范目录幂等创建或解析 Workspace；
-- `sessions.create({ workspaceId, cwd, sessionId })`：在指定 Workspace 创建 Session，并支持预分配身份；
-- `sessions.open(sessionId)`：切换当前 Session；
-- `sessions.fork({ sessionId })`：从已有 Session 分叉；
-- Workspace 对 Session 的持久归组。
-
-因此缺失的不是底层创建能力，而是 Work Item、DSH Workspace、DSH Session 和 Editor 导航之间的协调层。
-
-### 1.2 当前关联错误
-
-当前 DSH Client Adapter 在 `workbench.view` 的当前 Session scope 中解析 `conversation.send()`。Editor 发出请求时，插件把它直接发送到“此刻左侧选中的会话”。这会造成：
-
-- Deck 工作项没有持久 Session 身份；
-- 用户临时切到普通会话后，Deck 请求可能进入错误会话；
-- 同一 Deck 无法可靠维护多个会话和一个明确的活动会话；
-- 无法从 Session 反向定位 Work Item；
-- 创建或修改 Deck 时不能可靠确保 Session 运行在正确目录。
-
-### 1.3 当前 Editor 重载的确定原因
-
-当前通用 `workbench.view` 被声明为 `session-maybe` scope。DSH 的该 scope 有意规定：第一次从空白状态接入 Session 时保留挂载；之后只要 Session ID 改变，就重新挂载视图，避免普通会话局部状态泄漏。
-
-AICO-PPT 的 `AicoPptWorkbench` 在这个视图内直接持有 iframe。因此 DSH Session 切换会依次发生：
-
-```text
-Session ID 改变
-  → session-maybe incarnation 改变
-  → AicoPptWorkbench 卸载
-  → iframe 被销毁
-  → AicoPptWorkbench 重新挂载
-  → iframe 重新加载 Editor
-```
-
-这不是 Editor 主动刷新，而是 DSH workbench scope 与 AICO-PPT“跨会话工具”定位不匹配。
 
 ## 2. 统一领域模型
 
@@ -169,7 +120,7 @@ flowchart LR
 | DSH 左侧“新会话”→`AICO-PPT`→选择默认 Deck | Fresh Work Session | 是 |
 | DSH 左侧“新会话”→`AICO-PPT`→选择其他 Deck | 按需打开并导航后创建 Fresh Work Session | 是 |
 | DSH Workspace 行上的“新会话” | 普通 DSH Session | 否 |
-| Editor 会话菜单“从当前会话分叉” | Forked Work Session | 是 |
+| 显式“从当前会话分叉”（待实现） | Forked Work Session | 是 |
 | 已关联 DSH 会话的上下文菜单“为此 Deck 新建会话” | Fresh Work Session | 从当前 `sessionId` 反查 |
 | 普通会话中输入 `/aico-ppt` | 仍是普通会话 | 否 |
 
@@ -185,7 +136,7 @@ flowchart LR
 - 包含 `workId`、`projectRoot`、`deckId` / `draftId`、Managed Workspace capability 和当前阶段；
 - 复用同一份 AICO-PPT 质量契约初始化指令。
 
-“从当前会话分叉”调用 DSH 原生 fork：
+待实现的“从当前会话分叉”目标是调用 DSH 原生 fork：
 
 - 保留截至分叉点的对话上下文；
 - 子 Session 关联同一 `workId`；
@@ -423,39 +374,11 @@ Workspace 和 Session 属于 DSH，Work Item 属于 Editor，无法依赖单个�
 
 跨 iframe 消息必须校验 `event.source`、Origin、Editor capability、命令白名单和 `requestId`，不得接受任意路径或任意会话操作。
 
-## 12. 分阶段实施
+## 12. 未完成增强
 
-### 阶段 A：先修复跨会话重载（已完成）
-
-- DSH 增加 root-scope persistent workbench slot；
-- AICO-PPT 改用 persistent slot；
-- Session 变化只更新轻量 current-session 状态；
-- 增加 iframe mount-count 回归测试。
-
-这一阶段不改变 WorkCatalog 和 Agent 路由，先消除最明显的体验与状态丢失风险。
-
-### 阶段 B：持久关联与协调模块（已完成）
-
-- WorkCatalog schema 增加 DSH Binding 与反向唯一性；
-- 实现 `DeckTaskCoordinator` 和可恢复操作日志；
-- 扩展 DSH Client 注入 `workspaces`，实现结构化 `DshWorkBridge`；
-- 把 Agent 请求从“当前会话”改为“Work Item 的 assigned Session”。
-
-### 阶段 C：创建与修改入口（已完成）
-
-- 新建 Deck：选项目根、ensure Workspace、创建首个任务 Session；
-- 修改 Deck：解析或确认项目根、ensure Workspace、创建首个任务 Session；
-- Creation → Editing 保留同一个 `workId` 和会话关联；
-- 旧工作项首次恢复提供显式创建任务会话入口。
-
-### 阶段 D：多会话与双向导航（主链路已完成）
-
-- Editor 任务会话选择器和 Fresh 已完成；显式 Fork 菜单留待下一阶段，因为 DSH 原生 fork 当前不接受预分配子 Session ID，必须先补可恢复身份协议；
-- 创建页和修改页已统一在顶栏展示同形态的多会话选择器；
-- Editor Work Item → DSH Active Session 自动切换；
-- DSH linked Session → Editor Work Item 自动切换；
-- 普通 Session 收起 AICO-PPT，但不改变 Work Item；
-- 根变化的持久模型已完成；Session 丢失与 Workspace 重建的显式修复交互留待下一阶段。
+- 显式 Fork 菜单：原装 fork 不接受预分配子会话 ID，须先有可恢复身份协议；不得把下文目标交互当作已交付。
+- 会话丢失与工作区重建的显式修复交互：保留已有 pending、missing 和稳定身份语义，不重复建会话或借用其他项目。
+- 固定原装宿主的完整恢复与并发输入屏障仍受公开接口限制，按 [项目生命周期](project-lifecycle.md) 验收，不改宿主。
 
 ## 13. 验收标准
 

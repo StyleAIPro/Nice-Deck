@@ -1,7 +1,7 @@
 # aico-ppt · 设计原则、工作流与代码架构梳理
 
 > 本文是对本 skill 的系统性梳理：它按什么原则设计、用户与 Agent 按什么流程协作、代码分几层各干什么。
-> 与 `docs/design/` 的关系：`design-spec.md` / `implementation-plan.md` 是**构建时**的规格与计划（记录「当初怎么做出来的」）；本文描述**现状**（现在的结构是什么、为什么这样设计）。改动仓库时若行为与本文不符，以 `SKILL.md` 与 `references/` 为准并回来同步本文。
+> 与 `docs/design/` 的关系：`design-system.md` / `architecture.md` 是**构建时**的规格与计划（记录「当初怎么做出来的」）；本文描述**现状**（现在的结构是什么、为什么这样设计）。改动仓库时若行为与本文不符，以 `SKILL.md` 与 `references/` 为准并回来同步本文。
 
 ---
 
@@ -11,7 +11,7 @@
 
 配套发行和启动隔离由 AICO-Harness 的 `scripts/aico.mjs` 负责，继续通过 DSH Web profile 加载本包。AICO 全局状态位于 `~/.aico-harness/ppt`，独立 Skill 的默认状态解析不变；项目 sidecar 继续原位复用。`scripts/editor/import-history.mjs` 只在停止目标运行时后，将受支持索引原子导入空目标，清空旧 DSH 关联；它不接管安装器、全局 Skill 注册、凭据或项目文件。接口决策见 [ADR-0005](adr/0005-aico-installation-and-history-import.md)。
 
-AICO 桌面包通过环境接口提供私有运行时和原生文件选择，PPT 不依赖 Electron，也不拥有安装器或进程监督。诊断显示内置能力，桌面验证、导出和 headless Editor 共用 Host 的 Electron 渲染服务；独立 Skill 继续使用 Playwright 与本机 Chrome。详见 [ADR-0006](adr/0006-desktop-runtime-capabilities.md)。
+当前原装 DSH 插件通过完整 Windows 包携带私有 Python/浏览器，由 Worker 与运行时包装器使用显式资源路径。截图、验证与导出使用插件 Playwright 通道，不复用旧修改版 Host 的 Electron 专用渲染服务。Node 仍取宿主匹配版本；独立 Skill 按任务准备本机依赖。详见 [ADR-0007](adr/0007-plugin-private-runtime.md)。
 
 独立 Skill 使用 `python3 scripts/deck-editor.py <deck.html> --headless-workspace` 启动后台 Managed Workspace；该入口复用 Editor Core 的受控 frame、Mutation、验证和固化，不打开可见窗口或本机 Agent PTY。
 
@@ -26,7 +26,7 @@ aico-ppt 是一个符合 `SKILL.md` 目录约定的 **Agent Skill**，不是普�
 | `references/` | 9 份使用文档（流程 / 页型索引 / 设计系统 / 动画 / 片段 / 编辑 / 配图 / 品牌 / 官方风格） | 按需加载的知识库，SKILL.md 每条铁律指向对应 reference |
 | `scripts/` | install.py（Skill 注册）、check_deps.py（Profile 诊断）、edit-bundle.py（编辑）、deck-editor.py + editor/（新建编排与后期微调）、verify 三件套（验证）、html2pptx（导出）、apply_bg.py（品牌图替换） | 工具链：安装、诊断、新建、编辑、微调、验证、导出均由脚本完成状态闸门、结构同步与检查 |
 
-一个关键的产品决策（见 `docs/design/design-spec.md`）：模板不是「最小空壳」也不是「生成器」，而是**页型画廊**——从一份 77 页真实课件**做减法**产出。每一页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」，即「**画廊即文档**」；另保留 10 页真实课件成品作对照。
+一个关键的产品决策（见[设计规范](../references/design-system.md)）：模板不是「最小空壳」也不是「生成器」，而是**页型画廊**——从一份 77 页真实课件**做减法**产出。每一页既是可复制的版式，占位文案本身又在讲解「这一栏该怎么写」，即「**画廊即文档**」；另保留 10 页真实课件成品作对照。
 
 ---
 
@@ -209,7 +209,7 @@ Editor 启动后真实 source deck 只读，预览读取 sidecar 托管工作副
 
 任务删除权限以 canonical history 为边界：仍有 `groupId` 的未固化完成任务永久保留在“已完成”，只能切换修改效果，不能编辑或删除；已固化任务清除历史关联后可删除记录，且不会改变 Deck 中已经固化的修改。删除仍先提交权威 session，再清理任务的局部截图与附件。
 
-产品壳的优先级由 `docs/adr/0002-dsh-primary-and-standalone-dev-shell.md` 固定：DSH 是正式窗口入口，独立 Editor 只作为开发、回归和故障排查用 Dev Shell。两者共用本章的 Editor Core；DSH 通过 `dshAgentBridge` 使用当前工作项显式关联的活动原生会话，并在服务端跳过 Agent Terminal 构造、xterm 资源快照和浏览器资源下发。工作项与 DSH 会话的关系由 `docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md` 固定：全局新会话保持普通会话，只有携带 `workId` 的 Deck 入口建立关联；普通会话切换不改变工作项或重载 Editor。`agent-terminal-loader.mjs` 是可选 PTY 能力的唯一加载门，`server.mjs` / `app-server.mjs` 不得顶层导入原生终端实现。
+产品壳的优先级由 `docs/adr/0010-dsh-primary-and-standalone-dev-shell.md` 固定：DSH 是正式窗口入口，独立 Editor 只作为开发、回归和故障排查用 Dev Shell。两者共用本章的 Editor Core；DSH 通过 `dshAgentBridge` 使用当前工作项显式关联的活动原生会话，并在服务端跳过 Agent Terminal 构造、xterm 资源快照和浏览器资源下发。工作项与 DSH 会话的关系由 `docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md` 固定：全局新会话保持普通会话，只有携带 `workId` 的 Deck 入口建立关联；普通会话切换不改变工作项或重载 Editor。`agent-terminal-loader.mjs` 是可选 PTY 能力的唯一加载门，`server.mjs` / `app-server.mjs` 不得顶层导入原生终端实现。
 
 ### 4.1 单文件 bundle 格式与浏览器端 loader
 

@@ -1,6 +1,6 @@
 # DSH 插件集成
 
-这里是 AICO-PPT 在 DeepSeek Harness（DSH）中的适配层，不是第二份 Skill，也不是第二套 Editor。普通用户安装原装 DSH Desktop 和 AICO-Harness 适配插件，再通过“设置 → AICO 插件下载”安装 AICO-PPT 及 Windows 资源；正式步骤见[安装指南](../../INSTALL.md)。本文的 Web profile 与本地安装命令只用于开发调试。
+这里是 AICO-PPT 在 DeepSeek Harness（DSH）中的适配层，不是第二份 Skill，也不是第二套 Editor。普通用户安装原装 DSH Desktop 和 AICO-Harness 适配插件，再通过原装 DSH Terminal 安装完整的 AICO-PPT Windows Beta 包；正式步骤见[安装指南](../../INSTALL.md)。本文的 Web profile 与本地安装命令只用于开发调试。
 
 插件把 DSH 原生对话与原 AICO-PPT Editor 并排组合：左边始终是当前 DSH 会话，右边是可缩放的通用 workbench；AICO-PPT 使用跨 Session 常驻的 `workbench.persistent-view`。Editor 的页面栏、画布、属性栏、区域任务、时间线、固化和导出全部继续运行仓库内原有实现。
 
@@ -82,7 +82,7 @@ DSH_HOME="$HOME/.aico-ppt-dsh-dev" dsh plugin --profile web add .
 
 当前适配只支持浏览器与 Editor 都位于同一台机器的 loopback DSH Web；Editor 服务不会暴露到局域网。
 
-DSH 运行时对应 `editor-core` 依赖 Profile；它不因本机缺少 Agent CLI、`node-pty` 或 xterm 而失败。原桌面入口对应 `dev-shell` Profile，仅供开发、回归和故障排查。两者的定位决策见 `../../docs/adr/0002-dsh-primary-and-standalone-dev-shell.md`；Work Item / Workspace / Session 关系见 `../../docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md`。
+DSH 运行时对应 `editor-core` 依赖 Profile；它不因本机缺少 Agent CLI、`node-pty` 或 xterm 而失败。原桌面入口对应 `dev-shell` Profile，仅供开发、回归和故障排查。两者的定位决策见 `../../docs/adr/0010-dsh-primary-and-standalone-dev-shell.md`；Work Item / Workspace / Session 关系见 `../../docs/adr/0004-explicit-dsh-session-links-and-persistent-workbench.md`。
 
 ## 验证
 

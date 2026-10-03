@@ -1,4 +1,4 @@
-# ADR-0001：DSH 插件与 AICO-PPT Skill 的边界
+# ADR-0009：DSH 插件与 AICO-PPT Skill 的边界
 
 - 状态：已接受并实现
 - 日期：2026-09-02

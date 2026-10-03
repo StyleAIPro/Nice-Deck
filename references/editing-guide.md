@@ -475,7 +475,7 @@ macOS / Linux 仍可使用 `bash scripts/html2pptx/convert.sh ...`；该脚本�
 
 ## 10. AICO 桌面运行环境
 
-桌面 Host 提供 Node 和 Electron 渲染能力，PPT 插件提供私有 Python；Agent 沿用启动环境，不修改应用资源中的依赖。截图、验证和导出通过运行时包装器及私有 `AICO_HOME/desktop-renderer.json` 连接隐藏沙箱页面，Host 不可用时报告启动或升级要求。参考 PPTX 用 `scripts/extract-pptx.py` 按页提取内容和内嵌原图供 AI 直接阅读，仅用标准库；`pptx-read` 与 PDF 的 `materials` 分开诊断。打开 Deck、选择目录由桌面原生对话框处理。独立 Skill 继续使用原有宿主环境。接口与诊断行为见 [ADR-0006](../docs/adr/0006-desktop-runtime-capabilities.md)。
+当前原装宿主提供匹配的 Node，PPT 完整 Windows 包提供私有 Python 与浏览器。截图、验证和导出通过 Worker 与运行时包装器使用显式资源路径，不依赖旧 `AICO_HOME/desktop-renderer.json`，不改动宿主目录或全局依赖。参考 PPTX 用 `scripts/extract-pptx.py` 按页提取内容与原图，只需标准库；PDF 的 materials 依赖单独检查。独立 Skill 按本机任务准备依赖。运行时约束见 [ADR-0007](../docs/adr/0007-plugin-private-runtime.md)。
 
 
 ### Harness 会话直接编辑

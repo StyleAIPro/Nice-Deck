@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## 项目是什么
 
-本仓库是一个 **Codex skill**（华为红品牌单文件 HTML 演示模板），不是普通应用代码库。交付物 = `SKILL.md`（skill 入口）+ `references/`（使用文档）+ `scripts/`（编辑/验证/导出工具）+ `assets/` 下五套模板 deck（授课 34 页 / 技术分享 37 页 / 工作汇报 46 页 / 任职材料 22 页 / 项目评审 54 页，均为离线单文件）。改动本仓库时，多数工作是维护这套文档与脚本的一致性；`docs/design/` 是本 skill 自身的设计规格与实现计划，仅供参考。
+本仓库交付 **独立 Skill + 原装 DSH Desktop 的 PPT 业务插件**，两者共用根目录 `SKILL.md`。交付物 = `SKILL.md`（skill 入口）+ `references/`（使用文档）+ `scripts/`（编辑/验证/导出工具）+ `assets/` 下五套模板 deck（授课 34 页 / 技术分享 37 页 / 工作汇报 46 页 / 任职材料 22 页 / 项目评审 54 页，均为离线单文件）。改动本仓库时，多数工作是维护这套文档与脚本的一致性；当前安装见 `INSTALL.md`，编辑架构见 `docs/architecture.md`；`docs/design/` 仅保留当前契约和未完成增强项。
 
 所有文档、注释、报错信息均为中文，新增内容保持中文。
 
@@ -36,7 +36,7 @@ npm run test:editor:e2e     # 真实 Chrome E2E
 npm run test:editor         # 全部串行执行
 ```
 
-依赖：独立 Skill 使用 Node ^18.19 或 ≥20.6 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；桌面版复用 Host 的 Electron 渲染服务，只携带插件包与私有 Python。edit-bundle.py、extract-pptx.py 与 PPTX 截图组装器只用 Python 标准库，HTML 附件图标另用 Pillow。参考 PPTX 运行 `python3 scripts/extract-pptx.py 参考.pptx 输出目录`，按页提取标题、正文、备注、表格与内嵌原图，供 AI 阅读；不生成版式预览、不转 PDF。`pptx-read` 检查随包提取器；`materials` 仅检查 PyMuPDF 与 pypdf，普通 PDF 操作用 PyMuPDF，AcroForm 字段填写用 pypdf。随包 `.agents/skills/pdf/` 已适配此依赖集，不用上游重装覆盖。桌面接口见 [ADR-0006](docs/adr/0006-desktop-runtime-capabilities.md)。
+依赖：独立 Skill 使用 Node ^18.19 或 ≥20.6 + 本机 Google Chrome + playwright-core（查找顺序：`PLAYWRIGHT_CORE` 环境变量 → `import('playwright-core')` → openclaw 内置路径）；当前 Windows 桌面完整包携带私有 Python 和浏览器，不依赖旧修改版 Host 的专用渲染服务。edit-bundle.py、extract-pptx.py 与 PPTX 截图组装器只用 Python 标准库，HTML 附件图标另用 Pillow。参考 PPTX 运行 `python3 scripts/extract-pptx.py 参考.pptx 输出目录`，按页提取标题、正文、备注、表格与内嵌原图，供 AI 阅读；不生成版式预览、不转 PDF。`pptx-read` 检查随包提取器；`materials` 仅检查 PyMuPDF 与 pypdf，普通 PDF 操作用 PyMuPDF，AcroForm 字段填写用 pypdf。随包 `.agents/skills/pdf/` 已适配此依赖集，不用上游重装覆盖。当前桌面接口见 [DSH 接入](integrations/dsh/README.md)与 [私有运行时约束](docs/adr/0007-plugin-private-runtime.md)。
 
 仓库没有独立 lint 或构建步骤。Editor 回归测试由 Node 内置 test runner、Python unittest 与真实 Chrome E2E 组成，通过 `package.json` 的 `test:editor:*` 命令统一运行；模板 Deck 改动还必须跑 verify 三件套以及 `eb.verify(path)` 的结构一致性检查。
 
@@ -81,7 +81,7 @@ Codex 的标准用户级注册位置是 `~/.agents/skills/aico-ppt`。开发时�
 
 ## 插件项目与会话生命周期
 
-新增或修改项目导入、移除、恢复、会话绑定、工作区登记时，必须遵循 Harness 的[插件项目生命周期规范](../upstream-old/AICO-Harness/docs/cookbook/plugin-project-lifecycle.zh.md)。发布包不包含相邻仓库时，到 AICO-Harness 仓库读取 `docs/cookbook/plugin-project-lifecycle.zh.md`。PPT 的适配细节与验证记录见 [项目生命周期](docs/design/project-lifecycle.md)。不要根据目录相同推断会话归属，不要以隐藏首页记录代替归档关联会话。
+新增或修改项目导入、移除、恢复、会话绑定、工作区登记时，必须遵循 Harness 的[插件项目生命周期规范](../AICO-Harness-Plugin/docs/extension-design/project-lifecycle.md)。发布包不包含相邻仓库时，到 AICO-Harness-Plugin 仓库读取 `docs/extension-design/project-lifecycle.md`。PPT 的适配细节与验证记录见 [项目生命周期](docs/design/project-lifecycle.md)。不要根据目录相同推断会话归属，不要以隐藏首页记录代替归档关联会话。
 
 任职材料模板新增 `assets/qualification-deck.html`（22 页通用占位模板），目录 ID 为 `qualification`，使用边界和页型索引见 `references/qualification-template.md`。运行时升级必须按此模板类型解析，不能误判为授课模板。新模板不包含个人案例图片或历史编辑补丁，使用当前公共运行时。
 

@@ -1,4 +1,4 @@
-# ADR-0002：DSH 是正式窗口壳，独立 Editor 降级为 Dev Shell
+# ADR-0010：DSH 是正式窗口壳，独立 Editor 降级为 Dev Shell
 
 - 状态：已接受并实现
 - 日期：2026-09-02
