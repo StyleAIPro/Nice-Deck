@@ -1642,3 +1642,69 @@ test('runtime 重放冲突会从 frame 明确投影到全局历史提示', async
   assert.deepEqual(browserProblems, []);
   assert.deepEqual(resourceProblems, []);
 });
+
+test('跨页撤销和重做会定位到修改所在页', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(5_000);
+  await createManualTextAction(page, '跨页修改标题');
+  await waitForRevision(page, 1);
+  await waitForHistoryReady(page);
+  for (const [method, revision, title] of [
+    ['undo', 2, '第一页标题'], ['redo', 3, '跨页修改标题'],
+    ['undo', 4, '第一页标题'], ['redo', 5, '跨页修改标题'],
+  ]) {
+    await page.locator('.page-item[data-page-index="2"]').click();
+    await page.waitForFunction(() => document.querySelector('.page-item[aria-current="page"]')?.dataset.pageIndex === '2');
+    if (revision < 4) await page.locator(`[data-history-${method}]`).click();
+    else await page.keyboard.press(method === 'undo' ? 'Control+z' : 'Control+Shift+z');
+    await waitForRevision(page, revision);
+    await waitForHistoryReady(page);
+    assert.equal(await page.frameLocator('#deck-frame').locator('h2').first().textContent(), title);
+    await page.waitForFunction(() => document.querySelector('.page-item[aria-current="page"]')?.dataset.pageIndex === '1');
+  }
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});
+
+
+test('任务行跨页撤销和重做会定位到任务页', async t => {
+  const app = await startFixtureServer();
+  t.after(() => app.close());
+  const { browser, page, browserProblems, resourceProblems } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(5_000);
+  const target = await page.locator('#deck-frame').evaluate(frame => (
+    frame.contentWindow.HuaweiDeckPatchRuntime.makeLocator(frame.contentDocument.querySelector('h2'))
+  ));
+  const created = await postJson(app, '/api/tasks', {
+    expectedRevision:0, pageKey:target.pageKey, pageIndex:1, pageLabel:'目录页',
+    rect:{ x:20, y:20, w:400, h:180 }, instruction:'跨页任务修改',
+  });
+  assert.equal(created.response.status, 201);
+  const taskId = created.body.task.id;
+  const applied = await postJson(app, '/api/actions', {
+    expectedRevision:1, taskId,
+    actions:[{ id:'cross-page-task', taskId, target, kind:'setText', payload:{ text:'任务修改标题' } }],
+  });
+  assert.equal(applied.response.status, 200);
+  await waitForRevision(page, 2);
+  await openCompletedTasks(page);
+  for (const [method, revision, title] of [
+    ['undo', 3, '第一页标题'], ['redo', 4, '任务修改标题'],
+  ]) {
+    await waitForHistoryReady(page);
+    await page.locator('.page-item[data-page-index="2"]').click();
+    await page.waitForFunction(() => document.querySelector('.page-item[aria-current="page"]')?.dataset.pageIndex === '2');
+    await openCompletedTasks(page);
+    await page.locator(`[data-task-${method}="${taskId}"]`).click();
+    await waitForRevision(page, revision);
+    await waitForHistoryReady(page);
+    assert.equal(await page.frameLocator('#deck-frame').locator('h2').first().textContent(), title);
+    await page.waitForFunction(() => document.querySelector('.page-item[aria-current="page"]')?.dataset.pageIndex === '1');
+  }
+  assert.deepEqual(browserProblems, []);
+  assert.deepEqual(resourceProblems, []);
+});

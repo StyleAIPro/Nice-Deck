@@ -368,6 +368,7 @@ export class BridgeService {
     this.journal = new PatchJournal(sessionStore.state);
     this.closed = false;
     this.mutationQueue = Promise.resolve();
+    this.pendingMutations = 0;
     this.editorReady = false;
     this.editorPageKeys = [];
     this.readyPromise = null;
@@ -413,12 +414,15 @@ export class BridgeService {
   }
 
   async #persistCandidate(candidate, recoveryDetails = {}) {
+    let persisted;
     try {
-      await this.sessionStore.persistState(candidate);
+      persisted = await this.sessionStore.persistState(candidate);
     } catch (error) {
       this.#throwIfClosed();
       if (isCommittedSession(error)) {
-        this.#publishSessionCandidate(candidate);
+        this.#publishSessionCandidate({...candidate,
+          ...(this.sessionStore.state.editScope ? {editScope:this.sessionStore.state.editScope} : {}),
+        });
         throw this.#enterRecoveryRequired({
           ...recoveryDetails,
           committed:true,
@@ -429,7 +433,7 @@ export class BridgeService {
       throw error;
     }
     this.#throwIfClosed();
-    this.#publishSessionCandidate(candidate);
+    this.#publishSessionCandidate(persisted ?? candidate);
     return this.sessionStore.state;
   }
 
@@ -439,6 +443,22 @@ export class BridgeService {
         `版本号 ${expectedRevision} 与当前版本 ${this.sessionStore.state.revision} 不一致`,
       );
     }
+  }
+
+  assertEditRevision(expectedRevision, taskId = null) {
+    const state = this.sessionStore.state;
+    if (taskId !== null && !taskById(state, taskId)) {
+      throw serviceError('TASK_NOT_FOUND', 404, '目标任务已删除；未修改 Deck，请核对任务后重新读取目标');
+    }
+    const contentRevision = state.editScope?.contentRevision ?? state.revision;
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < contentRevision
+      || expectedRevision > state.revision) {
+      throw new RevisionConflict(`Deck 编辑状态已变化（读取版本 ${expectedRevision}，内容边界 ${contentRevision}，当前版本 ${state.revision}），未提交修改，请重新 inspect`);
+    }
+    if (taskId !== null && expectedRevision < (state.editScope?.taskRevisions?.[taskId] ?? state.revision)) {
+      throw serviceError('TASK_CHANGED', 409, '目标任务已修改；未提交修改，请重新 inspect 该任务');
+    }
+    return state.revision;
   }
 
   #assertSourceEditInactive() {
@@ -467,10 +487,10 @@ export class BridgeService {
       ? structuredClone(this.sessionStore.state.sourceEdit) : null;
   }
 
-  beginSourceEdit({ expectedRevision, taskId = null, beforeFingerprint }) {
+  beginSourceEdit({ expectedRevision, taskId = null, beforeFingerprint, commandId=null, requestDigest=null }) {
     return this.#enqueue(async () => {
       this.#assertMutable();
-      this.assertRevision(expectedRevision);
+      this.assertEditRevision(expectedRevision, taskId);
       this.#assertSourceEditInactive();
       if (typeof beforeFingerprint !== 'string'
         || beforeFingerprint !== this.sessionStore.state.workingDeckFingerprint) {
@@ -485,6 +505,7 @@ export class BridgeService {
       }
       const sourceEdit = {
         id:randomUUID(), taskId, beforeFingerprint,
+        ...(commandId ? {commandId,requestDigest} : {}),
         startedAt:new Date().toISOString(),
       };
       const candidate = structuredClone(this.sessionStore.state);
@@ -604,7 +625,7 @@ export class BridgeService {
       return true;
     }
     if (message.type === 'actions-rejected' && pending.expectedType === 'actions-prepared') {
-      const allowed = new Set(['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND', 'TARGET_AMBIGUOUS', 'INVALID_ACTION']);
+      const allowed = new Set(['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND', 'TARGET_AMBIGUOUS', 'INVALID_ACTION', 'EDITOR_INTERACTION_ACTIVE']);
       const code = allowed.has(message.code) ? message.code : 'ACTION_REJECTED';
       this.#settle(message.commandId, 'reject', serviceError(
         code, 409, '编辑器拒绝动作批次', {
@@ -666,6 +687,7 @@ export class BridgeService {
       return true;
     }
     const booleanFields = {
+      'restart-status-result': 'busy',
       'actions-committed': 'committed',
       'actions-rolled-back': 'rolledBack',
     };
@@ -825,6 +847,19 @@ export class BridgeService {
     );
   }
 
+  replayLocalEdit(commandId, requestDigest) {
+    const result=completedCommand(this.sessionStore.state,commandId,requestDigest);
+    return result ? {...result,committed:true,idempotent:true,commandRevision:result.revision} : null;
+  }
+
+  async reserveEditorMutation(owner, release=false, targets=[]) {
+    await this.#waitForEditorSocket();
+    const commandId=randomUUID();
+    const result=await this.#send(commandId,{type:'editor-lock',commandId,owner,release,targets}, {expectedType:'editor-lock-result'});
+    if(result.accepted!==true)throw serviceError('EDITOR_INTERACTION_ACTIVE',409,'右侧正在输入或拖拽，请完成当前操作后重试');
+    return result;
+  }
+
   replayCompletedAction({ taskId, actions, coalesceKey=null, commandId=null }) {
     if (commandId === null) return null;
     const requestDigest = commandDigest({ taskId, actions, coalesceKey });
@@ -844,8 +879,9 @@ export class BridgeService {
     };
   }
 
-  applyActions({ taskId, actions, expectedRevision, coalesceKey = null, commandId = null }) {
+  applyActions({ taskId, actions, expectedRevision, coalesceKey = null, commandId = null, signal }) {
     return this.#enqueue(async () => {
+      signal?.throwIfAborted();
       const started=Date.now();
       let preparedAt=started,journalAt=started,syncedAt=started;
       this.#assertMutable();
@@ -870,7 +906,7 @@ export class BridgeService {
         return duplicate;
       }
       this.#assertSourceEditInactive();
-      this.assertRevision(expectedRevision);
+      const editRevision = this.assertEditRevision(expectedRevision, taskId);
       const linkedTask = taskId === null ? undefined : taskById(this.sessionStore.state, taskId);
       if (taskId !== null && !linkedTask) {
         throw serviceError('TASK_NOT_FOUND', 404, '找不到任务');
@@ -880,7 +916,7 @@ export class BridgeService {
       }
       let prepared;
       try {
-        prepared = await this.#prepare(actions, expectedRevision);
+        prepared = await this.#prepare(actions, editRevision);
         preparedAt=Date.now();
       } catch (error) {
         if (taskId === null || error?.code !== 'TARGET_AMBIGUOUS') throw error;
@@ -890,6 +926,11 @@ export class BridgeService {
         throw error;
       }
       let group;
+      // 提交日志之前取消可以回滚；日志落盘以后以回执为准，不能伪称未提交。
+      if(signal?.aborted) {
+        await this.#rollbackOrSync(prepared.commandId);
+        signal.throwIfAborted();
+      }
       const coalesceNow = Date.now();
       const previousCoalesce = this.manualCoalesce;
       const canCoalesce = coalesceKey !== null
@@ -1098,6 +1139,7 @@ export class BridgeService {
         clearSourceEditId:active.id,
         finalize,
         solidifiedPatchRepair,
+        command:active.commandId ? {commandId:active.commandId,requestDigest:active.requestDigest} : null,
       });
     });
   }
@@ -1122,7 +1164,7 @@ export class BridgeService {
 
   async #recordSourceMutation(source, {
     restore, taskId = null, clearSourceEditId = null, finalize = async () => {},
-    solidifiedPatchRepair = null,
+    solidifiedPatchRepair = null, command=null,
   } = {}) {
     const state = this.sessionStore.state;
     if (state.workingDeckFingerprint !== source?.beforeFingerprint) {
@@ -1159,6 +1201,7 @@ export class BridgeService {
     }
     completeTask(candidate, taskId, group);
     candidate.revision += 1;
+    if(command)recordCompletedCommand(candidate,command.commandId,command.requestDigest,{groupId:group.id,taskId,revision:candidate.revision,applied:1});
     candidate.workingDeckFingerprint = source.afterFingerprint;
     candidate.diagnosticsBaseline = {};
     candidate.diagnosticsCurrent = {};
@@ -1541,7 +1584,16 @@ export class BridgeService {
     this.socketWaiters.clear();
   }
 
+  /** 只读浏览器瞬态状态，不锁住画布，也不进入写队列。 */
+  async inspectRestartStatus() {
+    if(!this.editorReady)throw serviceError('EDITOR_OFFLINE',409,'画布尚未就绪');
+    const commandId=randomUUID();
+    const result=await this.#send(commandId,{type:'restart-status',commandId},{expectedType:'restart-status-result',timeoutMs:1500});
+    return {busy:result.busy};
+  }
+
   #enqueue(operation) {
+    this.pendingMutations += 1;
     const guarded = async () => {
       this.#throwIfClosed();
       try {
@@ -1554,7 +1606,7 @@ export class BridgeService {
         throw error;
       }
     };
-    const result = this.mutationQueue.then(guarded, guarded);
+    const result = this.mutationQueue.then(guarded, guarded).finally(()=>{this.pendingMutations -= 1;});
     this.mutationQueue = result.catch(() => {});
     return result;
   }
@@ -1702,7 +1754,7 @@ export class BridgeService {
     } catch (error) {
       this.#throwIfClosed();
       if (['PAGE_NOT_FOUND', 'TARGET_NOT_FOUND', 'TARGET_AMBIGUOUS',
-        'INVALID_ACTION', 'ACTION_REJECTED', 'EDITOR_OFFLINE',
+        'INVALID_ACTION', 'ACTION_REJECTED', 'EDITOR_INTERACTION_ACTIVE', 'EDITOR_OFFLINE',
         'SERVICE_CLOSED', 'REVISION_CONFLICT'].includes(error.code)) throw error;
       await this.#rollbackOrSync(commandId).catch(syncError => { throw syncError; });
       throw error;
@@ -1865,7 +1917,7 @@ export class BridgeService {
   }
 
   #send(commandId, message, {
-    expectedType, actions = [], revision = undefined, pageKeys = [],
+    expectedType, actions = [], revision = undefined, pageKeys = [], timeoutMs = this.timeoutMs,
   }) {
     if (this.closed) return Promise.reject(this.#closedError());
     const socket = this.editorSocket;
@@ -1875,7 +1927,7 @@ export class BridgeService {
     const acknowledgement = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#settle(commandId, 'reject', serviceError('COMMAND_TIMEOUT', 504, '编辑器动作回执超时'));
-      }, this.timeoutMs);
+      }, timeoutMs);
       timer.unref?.();
       this.pending.set(commandId, {
         resolve, reject, timer, socket, expectedType, actions, revision, pageKeys,

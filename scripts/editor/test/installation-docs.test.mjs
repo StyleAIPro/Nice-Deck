@@ -7,7 +7,7 @@ const ROOT = new URL('../../../', import.meta.url);
 
 
 test('安装入口文档统一使用跨平台安装器和 Codex 标准 Skill 路径', async () => {
-  const files = ['README.md', 'INSTALL.md', 'SKILL.md', 'AGENTS.md', 'docs/architecture.md'];
+  const files = ['INSTALL.md', 'SKILL.md', 'AGENTS.md', 'docs/architecture.md'];
   for (const file of files) {
     const contents = await readFile(new URL(file, ROOT), 'utf8');
     assert.match(contents, /scripts[\\/]install\.py/, `${file} 缺少统一安装器入口`);
@@ -17,7 +17,7 @@ test('安装入口文档统一使用跨平台安装器和 Codex 标准 Skill 路
 
 test('依赖文档按 editor-core、dev-shell、verify、pptx-export、pptx-read、materials 分层', async () => {
   const files = [
-    'README.md', 'INSTALL.md', 'SKILL.md',
+    'INSTALL.md', 'SKILL.md',
     'references/editing-guide.md', 'docs/architecture.md',
   ];
   for (const file of files) {
@@ -44,4 +44,9 @@ test('Editor 用户指南覆盖首用、创建、修改、任务、验证、快�
     assert.match(contents, /^# /, `${file} 缺少一级标题`);
     assert.ok(contents.length > 180, `${file} 内容过短`);
   }
+});
+
+test('仓库首页将安装和依赖明细交给安装指南',async()=>{
+ const text=await readFile(new URL('README.md',ROOT),'utf8');
+ assert.match(text,/\(INSTALL\.md\)/);assert.match(text,/scripts\/install\.py install --skill-only/);
 });

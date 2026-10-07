@@ -6,6 +6,27 @@ import {tmpdir} from 'node:os';
 import {installEditingTools} from '../editing-tools.mjs';
 import {writeWorkspaceCapability} from '../../../scripts/editor/workspace-capability.mjs';
 
+test('明确拒绝不要求查回执；断线和执行中的命令仍保留未知提交保护',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'aico-tool-rejection-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const capabilityPath=await writeWorkspaceCapability(root,{url:'http://localhost:1235',token:'private'});
+ let tool,failure;const calls=[];
+ installEditingTools({tools:{register:value=>{tool=value;}}},'http://localhost:1234/?token=x',{
+  request:async url=>{
+   const path=new URL(url).pathname;calls.push(path);
+   if(path.includes('editing-context'))return {ok:true,json:async()=>({status:'ready',capabilityPath})};
+   if(failure===null)throw new Error('连接中断');
+   return {ok:false,status:409,json:async()=>({code:failure,message:'模拟编辑拒绝'})};
+  }});
+ const exec={agent:{session:{id:'s'}},signal:new AbortController().signal};
+ for(failure of ['REVISION_CONFLICT','TASK_CHANGED','TASK_NOT_FOUND','COMMAND_IN_PROGRESS',null]) {
+  const result=await tool.execute({operation:'structure',expectedRevision:0,operations:[{target:{pageKey:'p',editorId:'e'},kind:'setShape',payload:{shape:'rectangle'}}]},exec);
+  const rejected=failure!==null&&failure!=='COMMAND_IN_PROGRESS';
+  assert.equal(result.committed,rejected?false:null);assert.equal(result.commitStatus,rejected?'rejected':'unknown');
+  assert.match(result.recovery,rejected?/无需 result 查询/:/result 查询同一 commandId/);
+ }
+ assert.equal(calls.filter(path=>path.startsWith('/api/commands/')).length,0);
+});
+
 test('编辑工具合并检查和图片、稳定命令重试，截图失败不冒充提交失败',async t=>{
  const root=await mkdtemp(join(tmpdir(),'aico-tool-test-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const capabilityPath=await writeWorkspaceCapability(root,{url:'http://127.0.0.1:1234',token:'private'});
@@ -16,10 +37,10 @@ test('编辑工具合并检查和图片、稳定命令重试，截图失败不�
    let value;
    if(path.includes('editing-context'))value={status:'ready',capabilityPath};
    else if(path==='/api/actions'){edits.push(JSON.parse(options.body));value={committed:true,revision:4,diagnosticsPending:false};}
-   else if(path==='/api/inspect'){
+   else if(path==='/api/inspect'||path==='/api/view'){
     if(badPicture)return {ok:false,json:async()=>({code:'VIEW_FAILED',message:'截图失败'})};
     value={image:Buffer.from('png').toString('base64'),revision:4,page:{pageKey:'p'},stateId:'state'};
-   }else value={committed:true};
+   }else value={committed:null};
    return {ok:true,json:async()=>value};
   }});
  const exec={agent:{session:{id:'s'}},signal:new AbortController().signal};
@@ -58,7 +79,7 @@ test('有标注时未判断归属不得写入；补充显式绑定一条，新�
    if(path==='/api/actions'){writes.push(JSON.parse(options.body));return {ok:true,json:async()=>({revision:4})};}
    return {ok:true,json:async()=>({image:'',revision:4})};}});
  const exec={agent:{session:{id:'s'}},signal:new AbortController().signal};
- const edit={operation:'edit',expectedRevision:3,actions:[{target:{pageKey:'p'},kind:'setText',payload:{text:'补充的姓名'}}]};
+ const edit={operation:'edit',workId:'w',expectedRevision:3,actions:[{target:{pageKey:'p'},kind:'setText',payload:{text:'补充的姓名'}}]};
  assert.equal((await tool.execute(edit,exec)).code,'TASK_RELATION_REQUIRED');assert.equal(writes.length,0);
  assert.equal((await tool.execute({...edit,taskRelation:'supplement'},exec)).code,'TASK_RELATION_REQUIRED');assert.equal(writes.length,0);
  assert.equal((await tool.execute({...edit,taskRelation:'new',taskId:'a'},exec)).code,'TASK_RELATION_CONFLICT');assert.equal(writes.length,0);
@@ -66,4 +87,45 @@ test('有标注时未判断归属不得写入；补充显式绑定一条，新�
  assert.equal(writes[0].taskId,'a');assert.equal(writes[0].actions[0].taskId,'a');
  await tool.execute({...edit,taskRelation:'new'},exec);assert.equal(writes[1].taskId,null);
  assert.equal((await tool.execute({...edit,taskRelation:'supplement',taskId:'removed'},exec)).code,'TASK_RELATION_STALE');assert.equal(writes.length,2);
+});
+
+test('本轮首次视图固定目标，翻页不漂移；换工作项后拒绝旧目标写入',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'aico-anchor-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const capabilityPath=await writeWorkspaceCapability(root,{url:'http://localhost:1235',token:'private'});
+ const events=[{type:'turn/start',seq:1}],bodies=[];
+ let tool,workId='a',pageKey='p8';
+ installEditingTools({tools:{register:t=>{tool=t;}}},'http://localhost:1234/?token=x',{
+  request:async(url,options)=>{
+   if(new URL(url).pathname.includes('editing-context'))return {ok:true,json:async()=>({status:'ready',workId,capabilityPath,view:{pageKey}})};
+   bodies.push(JSON.parse(options.body??'{}'));return {ok:true,json:async()=>({revision:1,page:{pageKey}})};
+  }});
+ const exec={agent:{session:{id:'s',snapshotEvents:()=>events}},signal:new AbortController().signal};
+ await tool.execute({operation:'inspect'},exec);pageKey='p9';
+ await tool.execute({operation:'inspect'},exec);
+ assert.equal(bodies[1].pageKey,'p8');
+ events.push({type:'turn/start',seq:2});await tool.execute({operation:'inspect'},exec);
+ assert.equal(bodies[2].pageKey,'p9');
+ workId='b';const result=await tool.execute({operation:'edit',workId:'a',expectedRevision:1,actions:[{target:{pageKey:'p8'},kind:'hide',payload:{}}]},exec);
+ assert.equal(result.code,'WORKSPACE_CHANGED');assert.equal(bodies.length,3);
+});
+
+test('局部结构走融合提交并返回全部受影响页的预览，停止信号向下传递',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'aico-structure-tool-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const capabilityPath=await writeWorkspaceCapability(root,{url:'http://localhost:1235',token:'private'});
+ const calls=[];let tool;
+ installEditingTools({tools:{register:t=>{tool=t;}},attachments:{saveImage:async()=>({id:'image'})}},'http://localhost:1234/?token=x',{
+  request:async(url,options)=>{
+   const path=new URL(url).pathname;calls.push({path,body:JSON.parse(options.body??'{}'),signal:options.signal});
+   const value=path.includes('editing-context')?{status:'ready',workId:'w',capabilityPath,feedbackTasks:[]}
+    :path==='/api/local-edits'?{committed:true,revision:3,validation:{status:'passed'}}
+    :{image:Buffer.from('png').toString('base64'),revision:3};
+   return {ok:true,json:async()=>value};
+  }});
+ const signal=new AbortController().signal;
+ const result=await tool.execute({operation:'structure',workId:'w',expectedRevision:1,operations:['p1','p2'].map(pageKey=>({target:{pageKey,editorId:'e'},kind:'setShape',payload:{shape:'triangle'}}))},{agent:{session:{id:'s'}},signal});
+ assert.equal(calls.filter(x=>x.path==='/api/local-edits').length,1);
+ assert.equal(calls.filter(x=>x.path==='/api/view').length,2);
+ assert.ok(calls.every(x=>x.signal===signal));assert.equal(result.imageRefs.length,2);
+ assert.equal(result.currentViewMatchesCommit,true);
+ assert.deepEqual(result.affectedPages,['p1','p2']);
 });

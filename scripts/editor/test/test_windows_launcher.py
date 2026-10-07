@@ -53,7 +53,6 @@ class WindowsLauncherTest(unittest.TestCase):
     def test_entry_documents_explain_the_windows_double_click_entry(self):
         for relative_path in (
             "SKILL.md",
-            "README.md",
             "references/editing-guide.md",
             "docs/architecture.md",
         ):

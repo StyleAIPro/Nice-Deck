@@ -48,11 +48,16 @@ export async function startRuntimeWorker(runtime, { environment = process.env, s
     rejectReady(failure);
   };
   worker.on('message', message => {
-    if (message?.type === 'views') {
+    if (message?.type === 'views' || message?.type === 'restart-status') {
       const request = requests.get(message.id);
       if (!request) return;
       requests.delete(message.id);
       if (message.error) request.reject(new Error(message.error));
+      else if (message.type === 'restart-status') {
+        const value=message.status;
+        if(typeof value?.version!=='string'||typeof value.safe!=='boolean'||!Array.isArray(value.reasons))request.reject(new Error('PPT 重启状态无效'));
+        else request.resolve(value);
+      }
       else if (!Array.isArray(message.views)) request.reject(new Error('Editor Worker 视图列表无效'));
       else request.resolve(message.views);
     } else if (message?.type === 'ready') {
@@ -102,6 +107,18 @@ export async function startRuntimeWorker(runtime, { environment = process.env, s
           worker.postMessage({ type:'views', id });
         });
         return result.finally(() => { clearTimeout(timer); requests.delete(id); });
+      },
+      /** 私有只读 RPC；超时或 Worker 退出不能被解释为空闲。 */
+      restartStatus() {
+        if (closing || exited || failure) return Promise.reject(failure ?? new Error('Editor Worker 已关闭'));
+        const id=++requestSequence;
+        let timer;
+        const result=new Promise((resolve,reject)=>{
+          requests.set(id,{resolve,reject});
+          timer=setTimeout(()=>reject(new Error('PPT 重启状态查询超时')),2500);
+          worker.postMessage({type:'restart-status',id});
+        });
+        return result.finally(()=>{clearTimeout(timer);requests.delete(id);});
       },
       close() {
         if (closePromise) return closePromise;

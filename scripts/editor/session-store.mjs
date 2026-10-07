@@ -1,6 +1,7 @@
 import { createHash, randomUUID as systemRandomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join, parse } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { validateTask } from './protocol.mjs';
 import { EditTimeline } from './edit-timeline.mjs';
 import { localDurableIO } from './sidecar-io.mjs';
@@ -15,6 +16,17 @@ const FINGERPRINT = /^[0-9a-f]{64}$/;
 export const MAX_SNAPSHOT_BYTES = 512 * 1024;
 const MUTABLE_TASK_STATUSES = new Set(['pending', 'failed', 'needs-confirmation']);
 const MAX_TASK_INSTRUCTION_LENGTH = 10_000;
+
+function normalizeEditScope(state) {
+  const valid = revision => Number.isSafeInteger(revision) && revision >= 0 && revision <= state.revision;
+  const scope = state.editScope;
+  if (!valid(scope?.contentRevision)) return {contentRevision:state.revision, taskRevisions:{}};
+  return {
+    contentRevision:scope.contentRevision,
+    taskRevisions:Object.fromEntries((state.tasks ?? []).map(task => [task.id,
+      valid(scope.taskRevisions?.[task.id]) ? scope.taskRevisions[task.id] : state.revision])),
+  };
+}
 
 function portableDeckName(path) {
   return String(path ?? '').replaceAll('\\', '/').split('/').at(-1);
@@ -132,8 +144,10 @@ function normalizePersistedSourceEdit(value) {
   if (value === undefined || value === null) return undefined;
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype
+    || ((value.commandId !== undefined || value.requestDigest !== undefined)
+      && (!UUID_V4.test(value.commandId) || !FINGERPRINT.test(value.requestDigest)))
     || Object.keys(value).some(key => ![
-      'id', 'taskId', 'beforeFingerprint', 'startedAt',
+      'id', 'taskId', 'beforeFingerprint', 'startedAt', 'commandId', 'requestDigest',
     ].includes(key))
     || !UUID_V4.test(value.id)
     || (value.taskId !== null && !UUID_V4.test(value.taskId))
@@ -286,6 +300,8 @@ export class SessionStore {
       store.state = {
         ...store.state,
         ...persisted,
+        // 旧会话缺少分域版本，迁移时保守地以当前版本作为内容边界。
+        editScope:normalizeEditScope({...persisted, revision:persisted.revision ?? 0}),
         deckPath,
         sessionId,
         tasks:normalizePersistedTasks(persisted.tasks),
@@ -331,6 +347,7 @@ export class SessionStore {
       deckPath,
       deckFingerprint,
       revision: 0,
+      editScope:{contentRevision:0, taskRevisions:{}},
       tasks: [],
       groups: [],
       redo: [],
@@ -385,7 +402,7 @@ export class SessionStore {
     return this.state;
   }
 
-  async persistState(state = this.state) {
+  async persistState(state = this.state, { taskMetadataOnly=false } = {}) {
     const candidate = structuredClone(state);
     candidate.tasks = normalizePersistedTasks(candidate.tasks);
     candidate.agentBatches = normalizePersistedAgentBatches(candidate.agentBatches);
@@ -393,6 +410,20 @@ export class SessionStore {
     const sourceEdit = normalizePersistedSourceEdit(candidate.sourceEdit);
     if (sourceEdit) candidate.sourceEdit = sourceEdit;
     else delete candidate.sourceEdit;
+    // 仅任务增删改可以沿用内容边界；其他持久化默认关闭旧编辑窗口。
+    // 不让调用方自行声明“内容未变”，同时保留每个任务的独立变更边界。
+    const previous = this.state;
+    const scope = previous.editScope;
+    const withoutTasks = value => Object.fromEntries(Object.entries(value)
+      .filter(([key, item]) => !['tasks', 'revision', 'editScope'].includes(key) && item !== undefined));
+    const metadataOnly = taskMetadataOnly && isDeepStrictEqual(withoutTasks(previous), withoutTasks(state));
+    const previousTasks = new Map((previous.tasks ?? []).map(task => [task.id, task]));
+    candidate.editScope = {
+      contentRevision:metadataOnly ? scope?.contentRevision ?? previous.revision : candidate.revision,
+      taskRevisions:Object.fromEntries(candidate.tasks.map(task => [task.id,
+        isDeepStrictEqual(previousTasks.get(task.id), task)
+          ? scope?.taskRevisions?.[task.id] ?? previous.revision : candidate.revision])),
+    };
     try {
       await this.#persist(candidate);
     } catch (error) {
@@ -497,7 +528,7 @@ export class SessionStore {
       const candidate = structuredClone(this.state);
       candidate.tasks.push(task);
       candidate.revision += 1;
-      await this.persistState(candidate);
+      await this.persistState(candidate, {taskMetadataOnly:true});
       return { task, revision: this.state.revision };
     } catch (error) {
       if (isCommittedSession(error)) throw error;
@@ -569,7 +600,7 @@ export class SessionStore {
     task.candidates = [];
     task.updatedAt = new Date().toISOString();
     candidate.revision += 1;
-    await this.persistState(candidate);
+    await this.persistState(candidate, {taskMetadataOnly:true});
     return {
       task:structuredClone(this.state.tasks.find(item => item.id === taskId)),
       revision:this.state.revision,
@@ -586,7 +617,7 @@ export class SessionStore {
       throw snapshotError('TASK_LOCKED', 409, '处理中或仍可撤销的已完成任务不能删除；请先撤销或固化修改');
     }
     candidate.revision += 1;
-    await this.persistState(candidate);
+    await this.persistState(candidate, {taskMetadataOnly:true});
 
     // session.json 是权威状态。先持久化删除，再清理旁路资源；清理失败只会留下孤儿文件，
     // 不会让已删除任务重新出现或让存量任务引用缺失文件。

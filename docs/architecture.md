@@ -172,6 +172,8 @@ Editor 的 `/api/export/pptx/job` 把选择保存位置、快照转换和原子�
 
 `TARGET_AMBIGUOUS` 会把关联任务置为 `needs-confirmation`。drawer 必须显示“目标定位不唯一”的原因、支持 `prefers-reduced-motion` 的间歇醒目提醒和“补充说明”入口，不得提供没有后端确认语义的假按钮；`PATCH /api/tasks/<TASK_ID>` 保存补充说明后把任务恢复为 `pending`。
 
+顶栏、快捷键与任务行撤销 / 重做成功并取得权威会话快照后，按任务关联页或动作目标的 `pageKey` 定位到修改页，同时把页栏对应按钮滚入可见区域；多页动作定位到首个仍存在的目标页，没有可定位目标时保持当前页。跳转不按页面标题匹配，避免同名页面误定位。
+
 若撤销 / 重做快捷键到达时初始 `sessionRefreshPromise` 或后续权威快照仍在进行，parent 最多保留一个 `pendingHistoryShortcut`，待刷新成功后重新走候选与 busy 校验再执行；事务进行中的重复按键仍拒绝，加载失败则清空待执行意图并提示。临时 `R` 快捷键由 parent 与 frame 共用的 `isRegionShortcutKey()` 按物理 `KeyR` 识别，因此中文输入法组合态把 `key` 报为 `Process` 时仍生效；直接文字编辑和其他真实输入控件继续保留输入语义。
 
 新建 deck 由桌面工作台的 CreationDraft 文件状态机编排。创建页左侧只投影“需求已收敛 / 大纲已形成 / 页面已规划 / Deck 已出现”四个只读里程碑，节点不可点击；前三段没有表单、章节卡片、页面卡片或确认按钮，用户只通过右侧真实 PTY 对话。`draft.json` 是完整状态的权威记录，`brief.json`、`outline.json`、`page-plan.json` 与 `deck-ready.json` 是耐久回执；浏览器只从 Draft 与这些文件派生进度，绝不解析终端文本。合法 Deck 出现前 PTY 占据主区域；模板副本首次成为合法 staging Deck 后，中间画布才展开，`CreationManagedDeck` 同时复用 `server.mjs` 启动临时 Managed Workspace。创建页嵌入完整 Editor Runtime 的纯画布模式，因此结构制作、ActionMutation / SourceMutation、working watcher、诊断、revision、自动刷新和固化与已有 Deck 共用同一条底层路径。实际 bundle 结构制作、批量重构和增删移页仍由右侧 PTY 中的 Agent 经 `scripts/edit-bundle.py` 修改托管工作副本；已有元素细节可经 Editor CLI action 提交。`generation-ready` 先 flush 并固化回 staging，再执行验证和不覆盖发布；随后关闭 staging Editor，并立即用最终 Deck 启动标准 Managed Workspace。创建页嵌入该最终运行时，点击“进入微调编辑器”时通过 `takePublishedEditor()` 转移运行时所有权，页面跳转不再调用第二次 `startServer()`。因此新建页与修改页从最终 Deck 发布起共享同一个 working Deck、WebSocket、revision、编辑时间线和 PTY。`creation-handoff-context.mjs` 是 Creation→Editing 的唯一交接 Interface：它在最终 Editor session 中原子写入 `creation-context.json`，集中保存来源 Draft ID、已确认 brief / outline / pagePlan、发布 plan、素材与诊断目录；短期 capability 和 Editor token 不进入持久文件。同一 PTY 只接收一次带新 Editor CLI 地址的阶段切换提示，不重复加载 Skill；Editor 重开、旧会话失效后新建会话以及后续 Agent 批次都从同一清单恢复关键上下文：
@@ -512,3 +514,37 @@ Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begi
 | 10 | 退出码契约 0/1/2 全脚本一致 | CI / 上层判断失灵 |
 | 11 | manifest 条目与 template 引用一一对应（嵌图走 embed_image，换图走 apply_bg） | manifest 残留无引用的数据白占体积，或 template 引用了不存在的条目导致图片加载失败 |
 | 12 | 三套模板缩放运行时一致；倍率持久化、四角复位控件、模式按钮复位规则一致；ResizeObserver 不同步写布局，滚动态缩放同帧锁定当前页 | 缩放告警、倍率丢失、模式切换尺寸错误、自动适配抵消、跳页或闪烁 |
+
+
+## 0.1.28 局部编辑和窗口协作
+
+普通编辑的理解范围、修改范围、验证范围独立：inspect 返回目标页中有界候选和父容器，catalog 按需返回页面目录；structure 对稳定元素执行内置局部操作。局部理解不缩小结构提交的完整历史重放和固化校验。setShape 保留原内容、持久身份、外部 CSS 的定位方式；本次支持 div 容器的三角形、椭圆、矩形和菱形，其他结构走片段替换或既有源码事务。
+
+`POST /api/local-edits` 将身份／revision 检查、编辑锁、候选生成、源码事务、重放验证、提交回执合并为一个工具调用。commandId 与请求摘要持久化，完成命令先重放回执；同号异参数拒绝。在途命令不重复执行；验证失败和提交前取消恢复开始前工作副本。真正提交后断线按回执恢复，不重做写入。局部候选不写真实 Deck；固化仍是发布边界。
+
+frame-bridge 的临时编辑锁不会强行结束 directEdit 或 transformDrag；预留前有交互直接报 EDITOR_INTERACTION_ACTIVE，提交前重新确认连接。锁绑定命令 owner，错误释放不会解锁其他事务。原生动作在 tentative prepare 后、日志提交前检查取消并回滚；日志落盘后不因请求断开删除历史。服务关闭中止候选转换，原有持久化恢复协议继续处理在途源码事务。
+
+首次执行快照固定本轮隐式页面目标，原装公开接口逐步核对 workId；同一 Agent 轮中的静态指令去重，压缩后补发。当前实现不提供发送瞬间的原子选区快照，也没有改变原装 DSH 核心。页面渲染缓存按完整工作副本与动作摘要隔离，浏览器复用、页面上下文独立；同版本 query/rect/view 共用像素结果，工作副本改变后保守失效，不做未经证明的跨版本复用。
+
+
+### 0.1.28 本地验证记录（2026-10-05）
+
+Node 单元测试 765 通过／3 按环境跳过，Python 226 通过／9 跳过，DSH 插件 46 通过／2 跳过。浏览器完整回归共 273 个场景；首轮 10 个失败已全部修复并重跑对应整组，最终覆盖 266 个通过、7 个环境跳过；最终 UI 整组 49 通过，任务归属整组 3 通过。Windows 原生 Node、私有 Python／浏览器专项 36 项全部通过。
+
+使用用户 35,148,282 字节 Deck 的隔离副本验证圆形改三角形：完整历史校验和提交约 15–20 秒，首次 inspect／提交／结果图合计约 30–37 秒，同版本检索缓存约 0.5 秒；结果图已检查，真实源文件未改动。该数据只反映本机工具链，不含模型思考和真实会话往返，不能直接与旧会话的 269 秒作倍数比较。
+
+Windows 完整包 0.1.28 已经由原装 Desktop 2.0.13 自带 CLI 在隔离 DSH_HOME 中完成安装、0.1.27 → 0.1.28 升级及卸载，原装 profile bundles 与测试数据保留。归档内源码、版本、运行时载荷摘要和 3,900 个资源条目已核对；未改用户运行中的 Desktop 配置。真实模型的左侧自然语言全流程、本机／WSL 模型连接联合验收仍需装包后单独复测，组件和安装测试不代表整机联合验收完成。
+
+## 0.1.29 标注并发与版本边界
+
+`revision` 继续用于事件同步、任务 CRUD、历史和固化的严格版本检查。`SessionStore.persistState` 另行持久化 `editScope.contentRevision` 与 `taskRevisions`：只有真实任务增删改且候选除 tasks/revision/editScope 外与原状态一致时，沿用内容边界；其他持久化默认关闭旧编辑窗口。新增或变化的任务记录本次 revision，删除任务移除其边界。旧会话或无效边界按已有 revision 保守迁移。历史审计的派生时间不参与任务候选判定。
+
+`inspect/view/verify`、普通动作和源码事务开始先登记未捕获的工作副本变化，再按内容与目标任务的边界检查 expectedRevision。修改队列内二次检查后才使用当前 revision 准备动作；结构候选准备后仍在 begin 时复核。任务变化不能覆盖其他任务，也不能放宽真实内容、历史游标、源码事务、固化和取消的边界。当前任务变化返回 TASK_CHANGED，删除返回 TASK_NOT_FOUND；真实版本失效保持 REVISION_CONFLICT。检查返回原读取 revision，若只有无关标注变化，同一内容的截图仍有效。
+
+工具将明确未提交的拒绝返回为 `commitStatus:rejected`，提示按错误核对目标并重新 inspect。断线、服务端不确定错误与 COMMAND_IN_PROGRESS 仍为 unknown，须查询同一 commandId，不能换号重放。
+
+### 0.1.29 本地验证记录（2026-10-05）
+
+先复现“读取后新增再删除无关标注，Deck 字节和历史未变却返回 409”，再修复。最终 Node 单元测试 767 通过、3 跳过；完整浏览器回归 273 通过、7 跳过；DSH 适配及 SessionStore 共 78 通过、2 跳过；Windows 原生测试 75 通过。新增覆盖普通／结构编辑、目标任务修改／删除、内容修改后再撤销、检查过程中的标注与内容并发、旧会话迁移和提交不确定性分类。
+
+用户 35,148,282 字节 Deck 的 Windows 隔离副本上，inspect 版本 1 后新增并删除无关标注使会话版本到 3，使用原版本完成 Remote Expert 圆形改方形，提交版本 5；完整历史验证、结果图和原任务完成状态均通过，真实 Deck 文件摘要未变。原装 Desktop 2.0.13 CLI 在隔离 DSH_HOME 中完成 0.1.28 → 0.1.29 升级及卸载，原装插件和测试数据保留。完整包 246,873,411 字节，3,900 个运行时资源，SHA-256 为 `e9e2faa52998567f03063ff4bdf58485e4f4f0d3cf5d05964a4138a78cae43de`。未替换用户正在运行的插件；真实模型自然语言会话与本机／WSL 模型连接联合验收未执行。

@@ -65,6 +65,37 @@ test('跨页任务写入后可恢复且 revision 单调递增', async () => {
   assert.match(await readFile(reopened.sessionPath, 'utf8'), /改 B/);
 });
 
+test('任务版本独立持久化，其他任务增删不改变内容边界；真正内容改变仍推进边界', async () => {
+  const {store, deck, sessionDir} = await injectedStore('deck-edit-scope-', undefined);
+  const original = await store.createTask(TASK_INPUT, 0);
+  const extra = await store.createTask({...TASK_INPUT, instruction:'其他标注'}, 1);
+  await store.updateTask(extra.task.id, '更改其他标注', 2);
+  await store.deleteTask(extra.task.id, 3);
+  assert.deepEqual(store.state.editScope, {contentRevision:0, taskRevisions:{[original.task.id]:1}});
+  const reopened = await SessionStore.open({deckPath:deck, sessionDir});
+  assert.deepEqual(reopened.state.editScope, store.state.editScope);
+  await reopened.updateTask(original.task.id, '新的要求', 4);
+  assert.equal(reopened.state.editScope.taskRevisions[original.task.id], 5);
+  const changed = structuredClone(reopened.state);
+  changed.revision = 6; changed.workingDeckFingerprint = WORKING_FINGERPRINT;
+  await reopened.persistState(changed, {taskMetadataOnly:true});
+  assert.equal(reopened.state.editScope.contentRevision, 6, '携带内容变化不能谎报为任务元数据');
+  await reopened.createTask({...TASK_INPUT, instruction:'又一标注'}, 6);
+  assert.equal(reopened.state.editScope.contentRevision, 6);
+});
+
+test('旧会话或损坏的分域版本采用保守边界，任务增删不能重新放行旧内容', async () => {
+  const {store, deck, sessionDir} = await injectedStore('deck-legacy-edit-scope-', undefined);
+  for (const editScope of [undefined, {contentRevision:-1}, {contentRevision:99}]) {
+    const legacy = {...structuredClone(store.state), revision:12, editScope};
+    await writeFile(store.sessionPath, JSON.stringify(legacy));
+    const reopened = await SessionStore.open({deckPath:deck, sessionDir});
+    assert.equal(reopened.state.editScope.contentRevision, 12);
+    await reopened.createTask(TASK_INPUT, 12);
+    assert.equal(reopened.state.editScope.contentRevision, 12);
+  }
+});
+
 test('旧版撤销记录重开后恢复为永久完成且不会重新进入 Agent 队列', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deck-session-completed-task-migration-'));
   const deck = join(root, 'deck.html');
@@ -111,6 +142,7 @@ test('活动源码事务严格持久化并在重开后恢复', async () => {
     taskId:null,
     beforeFingerprint:WORKING_FINGERPRINT,
     startedAt:'2026-08-16T00:00:00.000Z',
+    commandId:SOURCE_EDIT_ID,requestDigest:WORKING_FINGERPRINT,
   };
   candidate.revision = 1;
   await store.persistState(candidate);
@@ -170,6 +202,9 @@ test('持久化源码事务拒绝未知字段和无效身份', async () => {
     { ...valid, id:'not-a-uuid' },
     { ...valid, beforeFingerprint:'bad' },
     { ...valid, unexpected:true },
+    { ...valid, commandId:'invalid',requestDigest:WORKING_FINGERPRINT },
+    { ...valid, commandId:SOURCE_EDIT_ID,requestDigest:'invalid' },
+    { ...valid, requestDigest:WORKING_FINGERPRINT },
   ]) {
     await assert.rejects(
       SessionStore.open({

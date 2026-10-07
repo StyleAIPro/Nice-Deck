@@ -1,5 +1,22 @@
 # editing-guide.md — 独立版结构、edit-bundle.py 用法与验证工作流
 
+## DSH 普通修改的短路径
+
+已关联的右侧 Editor 就绪时，用 `aico_ppt` 读取和修改。一次本轮目标快照固定首次执行时的页面；右侧后续翻页只影响浏览。用户明确指定的新目标仍按指令检查。写操作带回 inspect 的 `workId`、`expectedRevision` 和稳定 target，会话切换、旧 revision 或人工正在输入时拒绝写入。
+
+| 任务 | 理解范围 | 工具路径 |
+| --- | --- | --- |
+| 改文字、颜色、位置、尺寸、显隐 | 目标元素及父容器；仅需本页 | inspect → edit |
+| 改形状、换图、插入／复制／删除模块 | 目标与直接关联元素；通常本页 | inspect → structure |
+| 替换局部 HTML | 有界目标源码；保留原 data-editor-id | inspect(detail:"source",target) → structure |
+| 多页一致化或引用衔接 | catalog + 相关页；按依赖决定邻页 | 分页 inspect → 批量 edit／structure |
+| 整页增删排序、共享样式／脚本、复杂动画 | 涉及页面、导航和共享依赖 | 下述源码事务与编辑脚本 |
+
+`structure` 支持 setShape、replaceImage、replaceFragment、insertFragment、duplicateElement、deleteElement，整个 operations 数组成为一个可撤销事务。候选校验、完整历史重放、提交、回执由服务完成；失败或提交前取消恢复工作副本。右侧文字输入／拖拽冲突时等待完成，不能通过刷新消除用户草稿。提交回执为成功且结果图对应相同 revision 时结束；无需再 task／verify。回执不明用 result(commandId)，图片待检查用 view；不要重新执行已提交命令。结果图最多自动返回前三个受影响页，其余由 remainingViewPages 指示。
+
+默认 inspect 只返回 4 个目标候选，必要时通过 query／limit／offset 展开；view 只返回图及版本信息。同一内容版本的检索与看图复用渲染缓存。这里缩小的是 Agent 的读取范围，结构提交仍校验完整有效历史，固化仍执行完整发布校验。
+
+
 deck 是一个「独立版」单文件 HTML：React 运行时、字体、全部图片都内联在文件里，真离线可用。代价是**不能用普通文本编辑器直接改 bundle 那两行超长 JSON**——结构编辑要经 `scripts/edit-bundle.py`，结构稳定后的细节修改走统一 action。所有命令均在 skill 根目录（`aico-ppt/`）执行。Managed Workspace 自动维护工作副本、版本和发布备份；只有经典直改 fallback 才需要调用者自己先备份目标文件。
 
 ## 0. 从零新建与后期可视化微调
@@ -499,3 +516,7 @@ CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND
 普通会话查看使用 `aico_ppt({operation:"inspect"})`，不要把工作项 `workId` 填成区域任务 `taskId`；误填会返回 `WORK_ID_NOT_TASK_ID` 和重试说明。固化期间查看或验证返回 `EDITOR_SOLIDIFYING`，工具会说明稍后读取稳定版本，不自动重复固化。插件上下文暂不可达时仍可普通问答，但不得复用旧端口或凭据执行 Deck 操作。
 
 桌面区域任务使用简短说明，同轮相同编辑上下文去重，换工作项、新轮与压缩后恢复必要说明；连接与凭据即时读取。PPT 插件承载协议，Host 只提供通用工具、图片附件和隐藏渲染能力。
+
+### 标注与内容版本
+
+Agent 原样使用 inspect 的 expectedRevision。其他反馈任务的新增、说明修改和删除只更新会话同步版本，不使当前编辑过期；当前目标任务改写返回 TASK_CHANGED，删除返回 TASK_NOT_FOUND。Deck 内容、撤销重做、源码事务或其他控制状态改变仍保留版本检查，不能直接把请求改成最新版本重交。明确 commitStatus:rejected 时本次未提交，按错误重新检查目标；只有提交结果未知才用 result 查同一 commandId。

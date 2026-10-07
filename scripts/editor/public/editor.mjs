@@ -218,6 +218,11 @@ let pptxExportStarting = false;
 let pptxExportAnnouncement = '';
 const createRequests = new Set();
 const manualRequests = new Set();
+const restartDraftInputs=new WeakSet();
+// 只记录用户输入；属性面板程序赋值不能误判为未保存草稿。
+document.addEventListener('input',event=>{
+  if(event.target instanceof HTMLInputElement||event.target instanceof HTMLTextAreaElement)restartDraftInputs.add(event.target);
+});
 const commandReplies = new Map();
 const pendingFrameCommands = new Map();
 const MAX_SNAPSHOT_BYTES = 512 * 1024;
@@ -1730,9 +1735,23 @@ function requireHistoryRefresh(targetRevision) {
   renderHistory();
 }
 
+// 等权威快照更新后再定位，避免会话刷新用旧的当前页覆盖跳转。
+function locateHistoryGroup(group, task) {
+  task ??= tasks.find(candidate => candidate.id === (group?.taskId ?? group?.compensation?.taskId));
+  const pageKeys = [task?.pageKey, ...(group?.actions ?? []).map(action => action.target?.pageKey),
+    ...(group?.source?.impact?.pageKeys ?? [])];
+  const buttons = [...pageList.querySelectorAll('[data-page-key]')];
+  const button = pageKeys.map(key => buttons.find(item => item.dataset.pageKey === key)).find(Boolean);
+  if (button) {
+    requestPage(button);
+    button.scrollIntoView({ block:'nearest' });
+  }
+}
+
 async function changeHistory(method, button) {
   if (historyBusy || solidifyBusy || button.disabled || !button.dataset.groupId) return;
   const groupId = button.dataset.groupId;
+  const group = sessionGroups.find(candidate => candidate.id === groupId);
   historyBusy = true;
   renderHistory();
   try {
@@ -1770,6 +1789,7 @@ async function changeHistory(method, button) {
       showHistoryNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、会话同步待重试`);
       return;
     }
+    locateHistoryGroup(group);
     if (result.syncPending) {
       showHistoryNotice(`${method === 'undo' ? '撤销' : '重做'}已保存、浏览器同步待重试`);
     }
@@ -1891,6 +1911,7 @@ async function changeTaskHistory(task, control) {
       showTaskNotice(`${verb()}已保存、会话同步待重试`);
       return;
     }
+    locateHistoryGroup(sessionGroups.find(candidate => candidate.id === groupId), task);
     if (result.syncPending) showTaskNotice(`${verb()}已保存、浏览器同步待重试`);
   } catch (error) {
     await loadSession(error.revision).catch(() => {});
@@ -2068,6 +2089,10 @@ function confirmPage(button) {
 
 function requestPage(button) {
   pendingPageKey = button.dataset.pageKey;
+  if(authoritativeReloadPending) {
+    authoritativeReloadPending.pageKey=pendingPageKey;
+    authoritativeReloadPending.pageIndex=Number(button.dataset.pageIndex);
+  }
   deckFrame.contentWindow?.postMessage({
     type: 'show-page',
     pageKey: pendingPageKey,
@@ -2472,9 +2497,19 @@ function onFrameMessage(event) {
     void submitManualActions(event.data);
     return;
   }
+  if(event.data?.type==='restart-status-result' && typeof event.data.commandId==='string') {
+    // 属性输入、任务草稿与导出等在外层窗口；合并后才能判断整个编辑器。
+    const inputs=[...document.querySelectorAll('input:not([type=hidden]),textarea')];
+    const draft=inputs.some(input=>input.getClientRects().length>0&&!input.disabled
+      && restartDraftInputs.has(input) && !input.closest('[data-agent-terminal-host]'));
+    eventsClient?.send({...event.data,busy:event.data.busy!==false||draft||Boolean(document.querySelector('[data-task-edit-form]'))||!deckReady||tornDown
+      ||Boolean(historyBusy||solidifyBusy||deckBindingBusy||inspectorBusy||pptxExportBusy||pptxExportStarting
+        ||authoritativeReloadPending||createRequests.size||manualRequests.size||pendingInspectorRequest)});
+    return;
+  }
   if (['actions-applied', 'actions-rejected', 'actions-prepared', 'actions-committed',
     'actions-rolled-back', 'actions-synced', 'diagnostics-result',
-    'diagnostics-rejected', 'text-locations', 'text-locations-rejected']
+    'diagnostics-rejected', 'text-locations', 'text-locations-rejected', 'editor-lock-result']
     .includes(event.data?.type)
     && typeof event.data.commandId === 'string') {
     commandReplies.set(`${event.data.type}:${event.data.commandId}`, event.data);
@@ -2669,6 +2704,10 @@ eventsClient = connectEvents({
   url: eventsUrl,
   token,
   onEvent: event => {
+    if(event?.type==='restart-status' && typeof event.commandId==='string' && !deckReady) {
+      eventsClient?.send({type:'restart-status-result',commandId:event.commandId,busy:true});
+      return;
+    }
     const replyTypes = {
       'apply-actions': event?.tentative === true ? 'actions-prepared' : 'actions-applied',
       'commit-actions': 'actions-committed',
@@ -2676,6 +2715,8 @@ eventsClient = connectEvents({
       'sync-actions': 'actions-synced',
       'diagnose-pages': 'diagnostics-result',
       'locate-text': 'text-locations',
+      'editor-lock': 'editor-lock-result',
+      'restart-status': 'restart-status-result',
     };
     if (replyTypes[event?.type] && typeof event.commandId === 'string') {
       const reply = commandReplies.get(`${replyTypes[event.type]}:${event.commandId}`);

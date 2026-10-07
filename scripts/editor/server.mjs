@@ -2,6 +2,7 @@ import { connectionDiagnostics } from './connection-diagnostics.mjs';
 import {recoverStagedPatches} from './staged-patch-recovery.mjs';
 import {EditTimeline} from './edit-timeline.mjs';
 import {createEditorViews} from './editor-view.mjs';
+import {prepareLocalEdit,inspectLocalSource,LOCAL_EDIT_KINDS} from './local-edit.mjs';
 import {verifyEffectiveDeck,withEffectiveDeck,writeVerifiedWorkingPatches} from './effective-deck.mjs';
 import {actionKey,compileActionGroups,sourceRebaseActionIds} from './action-compiler.mjs';
 import { reconcileSourceActions, reconcileLegacySourceHistory } from './source-action-reconciliation.mjs';
@@ -1722,6 +1723,7 @@ export async function startServer({
   let watcherGeneration = 0;
   let watcherQueue = Promise.resolve();
   let workingWatcherQueue = Promise.resolve();
+  let pendingWorkingCheckpoints = 0;
   let serviceOrigin;
   let editorConnectedOnce = false;
   let editorCloseTimer;
@@ -2041,6 +2043,7 @@ export async function startServer({
     allowSourceEdit=false,
     sourceEditId=null,
     expectedRevision=sessionStore.state.revision,
+    beforePublish=async()=>{},
   } = {}) => {
     if (!workingDeckStore.managed) return;
     const generation = watcherGeneration;
@@ -2087,6 +2090,7 @@ export async function startServer({
       const missing=new Set(checked.droppedActionIds ?? []);
       actionReconciliation.supersededKeys=[...new Set([...actionReconciliation.supersededKeys,
         ...actions.filter(a=>missing.has(a.id)).map(actionKey)])];
+      await beforePublish();
     } catch (error) {
       try {
         await workingDeckStore.discardExternalChange(change.beforeFingerprint);
@@ -2132,7 +2136,8 @@ export async function startServer({
 
   const queueWorkingDeckCheckpoint = () => {
     const generation = watcherGeneration;
-    const operation = workingWatcherQueue.then(checkpointWorkingDeckChange);
+    pendingWorkingCheckpoints += 1;
+    const operation = workingWatcherQueue.then(checkpointWorkingDeckChange).finally(()=>{pendingWorkingCheckpoints -= 1;});
     workingWatcherQueue = operation.catch(error => {
       if (!watcherClosed && generation === watcherGeneration) {
         broadcast('source-mutation-failed', sessionStore.state.revision, {
@@ -2148,32 +2153,37 @@ export async function startServer({
   // 所有带 revision 的写操作先穿过同一个检查点 seam：若 Agent 已经写盘，
   // SourceMutation 必须先增加 revision，随后旧请求以 REVISION_CONFLICT 安全重试。
   const editorView = createEditorViews();
+  const localEdits=new Map();
   const guardWorkingRevision = async expectedRevision => {
     if (workingDeckStore.managed) await queueWorkingDeckCheckpoint();
     bridge.assertRevision(expectedRevision);
   };
+  const guardEditRevision = async (expectedRevision, taskId=null) => {
+    if (workingDeckStore.managed) await queueWorkingDeckCheckpoint();
+    return bridge.assertEditRevision(expectedRevision, taskId);
+  };
 
-  const beginSourceEdit = async ({ expectedRevision, taskId=null }) => {
+  const beginSourceEdit = async ({ expectedRevision, taskId=null, commandId=null, requestDigest=null }) => {
     if (!workingDeckStore.managed) {
       throw httpError('SOURCE_EDIT_UNAVAILABLE', 409, '当前 Deck 没有托管工作副本');
     }
-    await guardWorkingRevision(expectedRevision);
+    await guardEditRevision(expectedRevision, taskId);
     const result = await bridge.beginSourceEdit({
       expectedRevision,
       taskId,
-      beforeFingerprint:workingDeckStore.fingerprint,
+      beforeFingerprint:workingDeckStore.fingerprint, commandId, requestDigest,
     });
     return { ...result, workingDeckPath:workingDeckStore.path };
   };
 
-  const commitSourceEdit = async ({ sourceEditId, expectedRevision }) => {
+  const commitSourceEdit = async ({ sourceEditId, expectedRevision, beforePublish }) => {
     const active = bridge.sourceEditSnapshot();
     if (!active || active.id !== sourceEditId) {
       // 让 Bridge 生成稳定的 NOT_FOUND / MISMATCH 错误，同时不读取或改写工作副本。
       return bridge.commitSourceEdit({ sourceEditId, expectedRevision, source:null });
     }
     const result = await checkpointWorkingDeckChange({
-      allowSourceEdit:true, sourceEditId, expectedRevision,
+      allowSourceEdit:true, sourceEditId, expectedRevision, beforePublish,
     });
     if (!result) {
       throw httpError('SOURCE_EDIT_NO_CHANGE', 409, '源码事务尚未写入工作副本');
@@ -2271,23 +2281,25 @@ export async function startServer({
         if (body.batchId !== agentRuns.snapshot().activeBatch?.id) {
           throw httpError('AGENT_BATCH_CHANGED',409,'当前批次已变化，请重新读取任务列表');
         }
+        const cancelledTasks=new Set(agentRuns.snapshot().activeBatch?.taskIds??[]);
+        for(const {abort,taskId} of localEdits.values())if(cancelledTasks.has(taskId))abort.abort(new Error('反馈批次已取消'));
         agentRuns.cancel('用户取消了本批任务等待；未完成任务可删除或重新提交');
         await agentRuns.activePromise;
         json(response,200,{revision:sessionStore.state.revision,run:agentRuns.snapshot()});
         return;
       }
-      if (request.method === 'POST' && ['/api/inspect','/api/verify'].includes(pathname)) {
+      if (request.method === 'POST' && ['/api/inspect','/api/view','/api/verify'].includes(pathname)) {
         const body=await readJson(request);
         if(solidifying)throw httpError('EDITOR_SOLIDIFYING',409,'Deck 正在固化，请在完成后读取稳定版本');
         const task=body.taskId ? sessionStore.state.tasks.find(t=>t.id===body.taskId) : null;
         if(body.taskId&&!task)throw httpError('TASK_NOT_FOUND',404,'找不到区域反馈任务；普通查看不传 taskId，Work Item ID 不是 taskId');
         const revision=body.expectedRevision ?? sessionStore.state.revision;
         requireRevision(revision);
-        await guardWorkingRevision(revision);
+        await guardEditRevision(revision, body.taskId ?? null);
         if(bridge.sourceEditSnapshot())throw httpError('SOURCE_EDIT_ACTIVE',409,'源码事务尚未完成');
         const actions=bridge.compiledRuntimeWriteActions();
         const bytes=await workingDeckStore.read();
-        bridge.assertRevision(revision);
+        bridge.assertEditRevision(revision, body.taskId ?? null);
         let result;
         if(pathname==='/api/verify') {
           result=await verifyEffectiveDeck({bytes,actions,pythonExecutable},
@@ -2297,11 +2309,15 @@ export async function startServer({
           if(body.query!==undefined&&(typeof body.query!=='string'||body.query.length>500))throw httpError('INVALID_INPUT',400,'检索文字无效');
           const targetPage=body.pageKey??task?.pageKey??(viewContext && Date.now()-viewContext.observedAt<15000 ? viewContext.pageKey : undefined);
           result=await editorView({bytes,actions,pythonExecutable},
-            {pageKey:targetPage,catalogOnly:!targetPage,query:body.query??'',rect:task?.rect??null});
+            {pageKey:targetPage,catalogOnly:body.catalogOnly===true||!targetPage,query:body.query??'',rect:task?.rect??null,mode:pathname==='/api/view'?'view':'inspect',limit:body.limit,offset:body.offset,includePages:body.includePages===true});
           result={...result,task:task?structuredClone(task):null};
+          if(body.detail==='source'){
+            if(!body.target?.editorId||!body.target?.pageKey)throw httpError('INVALID_INPUT',400,'源码检查需要明确 target');
+            result={...result,...await inspectLocalSource(bytes,body.target,{pythonExecutable})};
+          }
         }
-        if(sessionStore.state.revision!==revision)throw httpError('SNAPSHOT_STALE',409,'检查期间编辑版本变化，请读取最新结果');
-        json(response,200,{...result,revision});
+        bridge.assertEditRevision(revision, body.taskId ?? null);
+        json(response,200,{...result,revision,contentRevision:sessionStore.state.editScope?.contentRevision ?? revision});
         return;
       }
       const commandMatch=pathname.match(/^\/api\/commands\/([a-f0-9-]+)$/);
@@ -2693,6 +2709,54 @@ export async function startServer({
         json(response, 200, result);
         return;
       }
+      if(request.method==='POST' && pathname==='/api/local-edits') {
+        if(solidifying)throw httpError('EDITOR_SOLIDIFYING',409,'正在固化，请稍后重试');
+        const {expectedRevision,taskId=null,commandId,operations}=await readJson(request);
+        requireRevision(expectedRevision);requireTaskId(taskId);
+        if(typeof commandId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(commandId)
+          || !Array.isArray(operations)||!operations.length||operations.length>32
+          ||operations.some(op=>!LOCAL_EDIT_KINDS.includes(op?.kind)||!op.target?.pageKey||!op.target?.editorId))
+          throw httpError('INVALID_INPUT',400,'局部修改需要稳定命令号和有效目标操作');
+        const digest=createHash('sha256').update(JSON.stringify({taskId,operations})).digest('hex');
+        const duplicate=bridge.replayLocalEdit(commandId,digest);
+        if(duplicate){json(response,200,duplicate);return;}
+        if(localEdits.has(commandId))throw httpError('COMMAND_IN_PROGRESS',409,'同一修改正在执行，请查询回执');
+        if(localEdits.size>=2)throw httpError('LOCAL_EDIT_BUSY',409,'其他局部修改正在准备，请稍后重试');
+        const abort=new AbortController();
+        const onClose=()=>{if(!response.writableEnded)abort.abort(new Error('局部修改请求已取消'));};
+        response.on('close',onClose);localEdits.set(commandId,{abort,taskId});
+        let transaction,locked=false,committed=false;
+        const started=Date.now();
+        try {
+          await guardEditRevision(expectedRevision, taskId);
+          if(bridge.sourceEditSnapshot())throw httpError('SOURCE_EDIT_ACTIVE',409,'已有结构事务');
+          const reserved=await bridge.reserveEditorMutation(commandId,false,operations.map(op=>op.target));locked=true;
+          const candidate=await prepareLocalEdit(await workingDeckStore.read(),operations,{pythonExecutable,signal:abort.signal,styles:reserved.styles});
+          abort.signal.throwIfAborted();
+          transaction=await beginSourceEdit({expectedRevision,taskId,commandId,requestDigest:digest});
+          broadcast('source-edit-begun',transaction.revision,transaction);
+          await sidecarBoundary.io.writeWorkingDeck({sessionId:sessionStore.state.sessionId,bytes:candidate,expectedFingerprint:workingDeckStore.fingerprint});
+          const result=await commitSourceEdit({...transaction,beforePublish:async()=>{
+            abort.signal.throwIfAborted();
+            await bridge.reserveEditorMutation(commandId);
+            abort.signal.throwIfAborted();
+          },expectedRevision:transaction.revision});
+          committed=true;
+          json(response,200,{...result,committed:true,commandId,
+            validation:{status:'passed',scope:'full-history-replay'},
+            affectedPages:[...new Set(operations.map(op=>op.target.pageKey))],timings:{totalMs:Date.now()-started}});
+        } catch(error) {
+          if(!committed && error.committed!==true && transaction && bridge.sourceEditSnapshot()?.id===transaction.sourceEditId) {
+            await cancelSourceEdit({sourceEditId:transaction.sourceEditId,expectedRevision:sessionStore.state.revision});
+            broadcast('source-edit-cancelled',sessionStore.state.revision,{sourceEditId:transaction.sourceEditId});
+          }
+          throw error;
+        } finally {
+          if(locked)await bridge.reserveEditorMutation(commandId,true).catch(()=>{});
+          response.off('close',onClose);localEdits.delete(commandId);
+        }
+        return;
+      }
       if (request.method === 'POST' && pathname === '/api/actions') {
         const {
           expectedRevision, taskId, actions, coalesceKey, commandId=null,
@@ -2722,12 +2786,15 @@ export async function startServer({
           json(response, 200, await serializeTaskResult(duplicate, { committed:true }));
           return;
         }
-        await guardWorkingRevision(expectedRevision);
+        const abort=new AbortController();
+        const onClose=()=>{if(!response.writableEnded)abort.abort(new Error('动作请求已取消'));};
+        response.on('close',onClose);
         let result;
         try {
+          await guardEditRevision(expectedRevision, taskId);
           result = await bridge.applyActions({
             taskId, actions, expectedRevision,
-            commandId,
+            commandId,signal:abort.signal,
             ...(coalesceKey === undefined ? {} : { coalesceKey }),
           });
         } catch (error) {
@@ -2738,6 +2805,8 @@ export async function startServer({
             broadcast('task-updated', error.revision, task);
           }
           throw error;
+        } finally {
+          response.off('close',onClose);
         }
         const serializedResult = await serializeTaskResult(result, { committed:true });
         broadcast('actions-recorded', result.revision, serializedResult);
@@ -3390,6 +3459,7 @@ export async function startServer({
         unwatchFile(workingDeckStore.path, workingWatchListener);
       }
       bridge.close();
+      for(const {abort} of localEdits.values())abort.abort(new Error('编辑器已关闭'));
       await editorView.close();
       detachTerminalState?.();
       detachTerminalProvider?.();
@@ -3494,6 +3564,20 @@ export async function startServer({
     agentWorkspace:agentWorkspaceStore,
     agentRuns,
     agentTerminal,
+    /** 已持久化的未固化历史不阻止重启；输入、事务及状态未知才阻止。 */
+    async restartStatus() {
+      const busy=()=>Boolean(closePromise||solidifying||activeWriters.size||activePptxExports.size
+        ||localEdits.size||pendingWorkingCheckpoints||bridge.pendingMutations||bridge.sourceEditSnapshot()
+        ||bridge.recoveryRequired||agentRuns.snapshot().activeBatch
+        ||['active','submitting'].includes(agentTerminal?.snapshot()?.turnState));
+      if(busy())return {safe:false,reasons:['PPT 正在执行、保存、导出或恢复修改，请等待完成。']};
+      const revision=sessionStore.state.revision;
+      try {
+        const frame=await bridge.inspectRestartStatus();
+        if(frame.busy||busy()||revision!==sessionStore.state.revision)return {safe:false,reasons:['PPT 有尚未提交的输入或正在处理修改，请完成或取消后再重启。']};
+        return {safe:true,reasons:[]};
+      }catch{return {safe:false,reasons:['无法确认 PPT 画布状态，请返回工作页检查并保存后再重启。']};}
+    },
     hasEditorConnection:() => bridge.hasEditorSocket(),
     waitUntilReady:options => bridge.waitUntilReady(options),
     flushWorkingDeckChanges:() => (

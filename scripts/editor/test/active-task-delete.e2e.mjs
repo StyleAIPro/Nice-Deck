@@ -39,7 +39,7 @@ test('已提交的 DSH 批次可从右侧取消等待并删除任务，不改变
  const exec={agent:{session:{id:'s'}},signal:AbortSignal.timeout(30000)};
  const listed=await tool.execute({operation:'tasks'},exec);
  assert.equal(listed.activeBatch.taskIds[0],created.task.id);
- const deleted=await tool.execute({operation:'delete_task',taskId:created.task.id,expectedRevision:listed.revision,cancelActiveBatch:true},exec);
+ const deleted=await tool.execute({operation:'delete_task',workId:listed.workId,taskId:created.task.id,expectedRevision:listed.revision,cancelActiveBatch:true},exec);
  assert.equal(deleted.revision,app.session.revision);
  assert.equal(app.session.tasks.length,0);
  const late=await post('/api/actions',{expectedRevision:app.session.revision,taskId:created.task.id,actions:[{id:crypto.randomUUID(),taskId:created.task.id,target,kind:'setText',payload:{text:'迟到写入'}}]});

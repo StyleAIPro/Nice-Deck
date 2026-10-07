@@ -5,6 +5,7 @@
  * 可视化入口复用原 Editor，不在 Host 内启动第二套 Agent。
  */
 
+import {runtimeVersion} from '../../scripts/editor/runtime-version.mjs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { isAbsolute } from 'node:path'
@@ -146,6 +147,11 @@ export async function apply(ctx, config = {}) {
     ctx.effect(() => () => { lifetime.abort(new Error('AICO-PPT 已卸载')); return close() }, 'aico-ppt: DSH Editor 运行时')
     ctx.effect(() => ctx.reflect.provide('aicoPptRuntime', Object.freeze({
       appUrl:editor.appUrl, views:() => editor.transportViews(), signal:lifetime.signal,
+      version:runtimeVersion,
+      restartStatus:() => {
+        if(runtimeFailure || lifetime.signal.aborted)throw new Error('PPT 运行时不可用');
+        return editor.restartStatus();
+      },
     })), 'aico-ppt: 所属视图传输目录')
     installEditingContext(ctx, editor.appUrl)
     installEditingTools(ctx, editor.appUrl)

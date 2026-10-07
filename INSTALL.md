@@ -1,10 +1,23 @@
 # AICO-PPT 安装指南
 
-## 普通用户：安装 beta0.1
+## 本地优化包：0.1.30
+
+2026-10-05：新增配合 Harness dev.62 的只读重启检查与固定运行版本。未提交输入、正在执行或保存的修改会阻止自动重启；已持久化的未固化历史可以保留到重启后。修复无关标注增删改使 Agent 编辑误报版本冲突；保留当前任务变化和真实 Deck 修改的冲突保护。明确未提交的拒绝不再要求查询回执。包含此前局部结构编辑、按需上下文、截图复用与跨页撤销／重做修复。Windows 完整包为 `dist/aico-ppt-skill-0.1.30-win32-x64.tgz`，包含私有 Python、浏览器和运行依赖；本地构建不代表官网已发布，也不代表已完成 Windows 整机验收。
+
+在原装 Desktop 的 DSH Terminal 依次安装本地新包（替换为实际路径）：
+
+```powershell
+dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\AICO-Harness-Plugin\dist\aico-harness-2.0.0-dev.62.tgz" --ignore-scripts
+dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\AICO-PPT\dist\aico-ppt-skill-0.1.30-win32-x64.tgz" --ignore-scripts
+```
+
+保存工作，从系统托盘完全退出 DSH Desktop，再重新打开一次以加载新的提醒逻辑。
+
+## 普通用户：已发布 beta0.1
 
 更新：2026-10-03。固定原装社区版 DSH Desktop 2.0.13 + DSH 0.1.5-rc.2。当前只发布 Windows x64 桌面插件，macOS 暂缓。
 
-1. 从[官网安装页](https://styleaipro.github.io/AICO-Website/install.html)下载 Harness 与 PPT，核对大小和 SHA-256。
+1. 从[官网安装页](https://openx.huawei.com/project/7665/AICO-Plugin-Web_master/install.html)下载 Harness 与 PPT，核对大小和 SHA-256。
 2. 在原装 Desktop 托盘打开 DSH Terminal，使用实际下载目录依次执行：
 
 ```powershell

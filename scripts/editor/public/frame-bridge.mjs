@@ -346,6 +346,14 @@ function createActivePageMonitor(nextCanvases, signal) {
   return { stop };
 }
 
+let sourceMutationOwner=null, sourceMutationTimer;
+let previousBodyInert=false;
+function releaseSourceMutation() {
+  clearTimeout(sourceMutationTimer);
+  if(sourceMutationOwner)document.body.inert=previousBodyInert;
+  sourceMutationOwner=null;
+}
+
 function hasTransientInteraction() {
   return Boolean(directEdit || transformDrag || pendingManual.size > 0 || tentativeCommands.size > 0);
 }
@@ -1230,7 +1238,7 @@ function showStatus(message, state = 'info') {
 
 function submitManualActions(actions, onResult = () => {}, { coalesceKey = '' } = {}) {
   const requestId = crypto.randomUUID();
-  pendingManual.set(requestId, onResult);
+  pendingManual.set(requestId, {onResult,actionIds:actions.map(action=>action.id)});
   parent.postMessage({
     type:'submit-manual-actions', requestId, actions,
     ...(coalesceKey ? { coalesceKey } : {}),
@@ -2678,6 +2686,32 @@ function onParentMessage(event) {
     }, { coalesceKey });
     return;
   }
+  if(event.data?.type==='restart-status' && typeof event.data.commandId==='string') {
+    parent.postMessage({type:'restart-status-result',commandId:event.data.commandId,
+      busy:Boolean(hasTransientInteraction()||dragging||activePopover||sourceMutationOwner)},location.origin);
+    return;
+  }
+  if(event.data?.type==='editor-lock' && typeof event.data.commandId==='string') {
+    const {owner,release}=event.data;
+    let accepted=false;
+    const styles={};
+    if(release){if(sourceMutationOwner===owner)releaseSourceMutation();accepted=true;}
+    else if(typeof owner==='string' && !hasTransientInteraction() && (!sourceMutationOwner||sourceMutationOwner===owner)) {
+      if(!sourceMutationOwner)previousBodyInert=document.body.inert;
+      sourceMutationOwner=owner;document.body.inert=true;accepted=true;
+      clearTimeout(sourceMutationTimer);
+      sourceMutationTimer=setTimeout(releaseSourceMutation,180_000);
+      for(const target of (event.data.targets??[]).slice(0,32)) {
+        try {
+          const element=runtime.resolve(target),css=getComputedStyle(element);
+          styles[target.editorId]={position:css.position,display:css.display,flexDirection:css.flexDirection,
+            boxSizing:css.boxSizing,height:css.height,paddingBottom:css.paddingBottom};
+        } catch { /* 不猜测失效目标的样式，由结构校验拒绝。 */ }
+      }
+    }
+    parent.postMessage({type:'editor-lock-result',commandId:event.data.commandId,accepted,styles},location.origin);
+    return;
+  }
   if (event.data?.type === 'apply-actions' && typeof event.data.commandId === 'string') {
     const existing = tentativeCommands.get(event.data.commandId);
     if (existing) {
@@ -2686,6 +2720,12 @@ function onParentMessage(event) {
     }
     try {
       if (event.data.tentative === true) {
+        const ownManual=[...pendingManual.values()].some(pending=>pending.actionIds.length===event.data.actions?.length
+          && pending.actionIds.every((id,index)=>id===event.data.actions[index].id));
+        // 用户撤销已提交格式时可保留文字选区；输入草稿仍须阻止历史覆盖。
+        const cleanHistory=event.data.replace===true && directEdit
+          && (directEdit.element.textContent??'')===directEdit.originalText;
+        if(sourceMutationOwner || ((transformDrag || (directEdit && !cleanHistory)) && !ownManual))throw Object.assign(new Error('右侧正在编辑'),{code:'EDITOR_INTERACTION_ACTIVE'});
         const transaction = runtime.beginTransaction(event.data.actions, {
           replace:event.data.replace === true,
           rebaseActionIds:event.data.rebaseActionIds,
@@ -2806,10 +2846,10 @@ function onParentMessage(event) {
   }
   if (event.data?.type === 'manual-actions-result'
     && typeof event.data.requestId === 'string') {
-    const callback = pendingManual.get(event.data.requestId);
-    if (!callback) return;
+    const pending = pendingManual.get(event.data.requestId);
+    if (!pending) return;
     pendingManual.delete(event.data.requestId);
-    callback(event.data);
+    pending.onResult(event.data);
     requestAuthoritativeReloadIfSettled();
     return;
   }

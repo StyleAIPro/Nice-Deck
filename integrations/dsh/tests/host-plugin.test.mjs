@@ -27,6 +27,9 @@ test('Host 插件从仓库根目录注册唯一的 aico-ppt Skill', async (t) =>
   })
   t.after(async () => closeRuntime?.())
 
+  const lifecycle = await services.get('aicoPptRuntime').restartStatus()
+  assert.equal(lifecycle.version,services.get('aicoPptRuntime').version)
+  assert.equal(lifecycle.safe,true)
   const viewDirectory = await services.get('aicoPptRuntime').views()
   assert.equal(viewDirectory.length, 1)
   assert.equal(viewDirectory[0].kind, 'app')

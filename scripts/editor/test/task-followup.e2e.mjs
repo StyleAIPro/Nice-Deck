@@ -30,7 +30,7 @@ test('真实编辑器：追问后独立修改不关旧任务，补充携带任�
    ? {ok:true,json:()=>resolveEditingContext({sessionId:'session-a',workCatalog:catalog,findEditingRuntime:()=>({app})})}
    : fetch(url,options)});
  const exec={agent:{session:{id:'session-a'}},signal:AbortSignal.timeout(30000)};
- const edit=async(text,extra={})=>tool.execute({operation:'edit',expectedRevision:app.session.revision,
+ const edit=async(text,extra={})=>tool.execute({operation:'edit',workId:'work-a',expectedRevision:app.session.revision,
   actions:[{target:await locate(),kind:'setText',payload:{text}}],...extra},exec);
  const unchanged=app.session.revision;
  assert.equal((await edit('不应执行')).code,'TASK_RELATION_REQUIRED');assert.equal(app.session.revision,unchanged);
@@ -94,7 +94,7 @@ test('真实编辑器：批次失败后左侧补充原任务，右侧任务显�
  const context = await resolveEditingContext({sessionId:'session-a',
   workCatalog:catalog,findEditingRuntime:() => ({app})});
  assert.equal(context.feedbackTasks[0].batchSettled,true);
- const result = await tool.execute({operation:'edit',expectedRevision:app.session.revision,
+ const result = await tool.execute({operation:'edit',workId:'work-a',expectedRevision:app.session.revision,
   taskRelation:'supplement',taskId,
   actions:[{target,kind:'setText',payload:{text:'补充后完成的标题'}}]},
   {agent:{session:{id:'session-a'}},signal:AbortSignal.timeout(30000)});

@@ -5,7 +5,6 @@ import { readFile } from 'node:fs/promises';
 const ROOT = new URL('../../../', import.meta.url);
 const FILES = [
   'SKILL.md',
-  'README.md',
   'references/editing-guide.md',
   'docs/architecture.md',
 ];
@@ -23,7 +22,7 @@ function requireClaims(file, contents, claims) {
   }
 }
 
-test('四份入口文档共享后期微调、安全写回与结构编辑边界', async () => {
+test('三份编辑协议文档共享后期微调、安全写回与结构编辑边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -54,8 +53,7 @@ test('四份入口文档共享后期微调、安全写回与结构编辑边界',
 test('模板选择文档统一为场景外壳、共享页型目录和受控导入', async () => {
   const files = [
     'SKILL.md',
-    'README.md',
-    'references/workflow.md',
+      'references/workflow.md',
     'references/template-pages.md',
     'references/editing-guide.md',
     'docs/architecture.md',
@@ -78,10 +76,7 @@ test('入口文档明确质量规范不按新建与修改分支', async () => {
     'Skill 只有一份质量契约': /不按新建 Deck 和修改 Deck 维护两套规范/,
     '入口差异只表示当前状态': /入口差异只决定当前状态/,
   });
-  requireClaims('README.md', documents['README.md'], {
-    '所有入口原样加载同一契约': /Skill 只有一份质量契约[^。\n]{0,120}全部原样加载/,
-    '入口只表示是否已有 Deck': /两条入口只表示当前是否已有合法 Deck/,
-  });
+  // README 负责产品入口；质量契约由 Skill 与编辑指南维护，避免强制复制长协议。
   requireClaims('references/editing-guide.md', documents['references/editing-guide.md'], {
     '双入口不是双规范': /两条只是\*\*初始状态入口\*\*，不是两套 Skill 规范/,
     '全部质量要求不得分支': /任何设计、文案、字体、卡片、动画、配图和验收要求都不得按“新建 \/ 修改”分支维护/,
@@ -162,7 +157,7 @@ test('入口文档统一使用文件驱动里程碑、分层页面身份与当�
 test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 sidecar 生命周期', async () => {
   const documents = await loadDocuments();
   const corpus = Object.values(documents).join('\n');
-  requireClaims('四份文档合集', corpus, {
+  requireClaims('三份编辑协议文档合集', corpus, {
     '真实 renzhi 启动示例': /python3 scripts\/deck-editor\.py Deck-Projects\/renzhi\/renzhi-deck\.html/,
     '区域拉框旁侧输入': /区域拉框[\s\S]{0,100}旁侧输入/,
     '跨页任务 drawer': /跨页[\s\S]{0,100}(?:task drawer|任务 drawer|Agent drawer)/i,
@@ -186,7 +181,7 @@ test('用户入口文档覆盖真实启动示例、交互闭环、恢复与 side
   });
 });
 
-test('四份入口文档共享红框文字盒统一编辑契约', async () => {
+test('三份编辑协议文档共享红框文字盒统一编辑契约', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -199,7 +194,7 @@ test('四份入口文档共享红框文字盒统一编辑契约', async () => {
   }
 });
 
-test('四份入口文档共享全选删除与固化修改契约', async () => {
+test('三份编辑协议文档共享全选删除与固化修改契约', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -217,7 +212,7 @@ test('四份入口文档共享全选删除与固化修改契约', async () => {
   }
 });
 
-test('四份入口文档共享单一 bypass PTY 与自动 CLI 会话契约', async () => {
+test('三份编辑协议文档共享单一 bypass PTY 与自动 CLI 会话契约', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -236,7 +231,7 @@ test('四份入口文档共享单一 bypass PTY 与自动 CLI 会话契约', asy
   }
 });
 
-test('四份入口文档共享区域临时预览与任务交互画面绑定契约', async () => {
+test('三份编辑协议文档共享区域临时预览与任务交互画面绑定契约', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -249,7 +244,7 @@ test('四份入口文档共享区域临时预览与任务交互画面绑定契�
   }
 });
 
-test('四份入口文档共享中文输入法 R 键与终端复制边界', async () => {
+test('三份编辑协议文档共享中文输入法 R 键与终端复制边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -260,7 +255,7 @@ test('四份入口文档共享中文输入法 R 键与终端复制边界', async
   }
 });
 
-test('四份入口文档共享未完成 badge、完成任务折叠和实时终端边界', async () => {
+test('三份编辑协议文档共享未完成 badge、完成任务折叠和实时终端边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -285,10 +280,11 @@ test('Skill、README 与架构文档各自承担入口、仓库和开发者职�
     '编辑器目录文件导航': /`scripts\/editor\/`/,
     '批量重构仍由 Agent 完成': /(?:新建|批量重构)[\s\S]{0,180}Agent[\s\S]{0,120}edit-bundle/,
   });
-  requireClaims('README.md', documents['README.md'], {
+  requireClaims('README.md', await readFile(new URL('README.md',ROOT),'utf8'), {
     '依赖体检': /python3 scripts\/check_deps\.py/,
-    '回环地址': /(?:loopback|回环地址|127\.0\.0\.1)/i,
-    '浏览器工作台': /浏览器工作台/,
+    '安装指引': /\(INSTALL\.md\)/,
+    '架构指引': /\(docs\/architecture\.md\)/,
+    '编辑用户指南': /\(docs\/user-guide\/edit-deck\.md\)/,
   });
   requireClaims('docs/architecture.md', documents['docs/architecture.md'], {
     '浏览器双层': /browser parent[\s\S]{0,100}frame/i,
@@ -301,7 +297,7 @@ test('Skill、README 与架构文档各自承担入口、仓库和开发者职�
   });
 });
 
-test('四份文档统一声明 Windows Python 子进程的 UTF-8 编码边界', async () => {
+test('三份编辑协议文档统一声明 Windows Python 子进程的 UTF-8 编码边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -312,7 +308,7 @@ test('四份文档统一声明 Windows Python 子进程的 UTF-8 编码边界', 
   }
 });
 
-test('四份文档统一声明三种 Agent 的可靠 Prompt 提交边界', async () => {
+test('三份编辑协议文档统一声明三种 Agent 的可靠 Prompt 提交边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -336,7 +332,7 @@ test('四份文档统一声明三种 Agent 的可靠 Prompt 提交边界', async
   }
 });
 
-test('四份文档统一声明 Codex 与 Claude Code 失效会话自动替换边界', async () => {
+test('三份编辑协议文档统一声明 Codex 与 Claude Code 失效会话自动替换边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -348,7 +344,7 @@ test('四份文档统一声明 Codex 与 Claude Code 失效会话自动替换边
   }
 });
 
-test('四份文档统一声明 bypass 目录信任交互闸门', async () => {
+test('三份编辑协议文档统一声明 bypass 目录信任交互闸门', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -360,7 +356,7 @@ test('四份文档统一声明 bypass 目录信任交互闸门', async () => {
   }
 });
 
-test('四份文档准确区分 Agent HTTP、observer WS、editor capability 与写回职责', async () => {
+test('三份编辑协议文档准确区分 Agent HTTP、observer WS、editor capability 与写回职责', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -400,7 +396,7 @@ test('editing guide 准确说明 drawer 切换完成任务效果且不承诺缩�
   assert.doesNotMatch(guide, /页缩略图/, 'references/editing-guide.md 左栏不是页缩略图');
 });
 
-test('四份入口文档与 steps 无动画页行为一致', async () => {
+test('三份编辑协议文档与 steps 无动画页行为一致', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     assert.doesNotMatch(
@@ -414,7 +410,7 @@ test('四份入口文档与 steps 无动画页行为一致', async () => {
   }
 });
 
-test('四份入口文档完整说明全局历史与任务附件边界', async () => {
+test('三份编辑协议文档完整说明全局历史与任务附件边界', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -436,7 +432,7 @@ test('四份入口文档完整说明全局历史与任务附件边界', async ()
   }
 });
 
-test('四份入口文档共享 Agent 与人工交错修改的安全重放契约', async () => {
+test('三份编辑协议文档共享 Agent 与人工交错修改的安全重放契约', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {
@@ -452,7 +448,7 @@ test('四份入口文档共享 Agent 与人工交错修改的安全重放契约'
   }
 });
 
-test('四份入口文档共享持久元素身份与冲突关闭契约', async () => {
+test('三份编辑协议文档共享持久元素身份与冲突关闭契约', async () => {
   const documents = await loadDocuments();
   for (const [file, contents] of Object.entries(documents)) {
     requireClaims(file, contents, {

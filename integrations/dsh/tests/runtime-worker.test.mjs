@@ -34,12 +34,17 @@ test('Worker 启动原 Editor 并在关闭后释放实际监听端口', async t 
   assert.equal(views.length, 1);
   assert.equal(views[0].origin, new URL(worker.appUrl).origin);
   assert.equal(views[0].kind, 'app');
+  const lifecycle=await worker.restartStatus();
+  assert.equal(lifecycle.safe,true);
+  assert.match(lifecycle.version,/^0\.1\./);
+  assert.deepEqual(lifecycle.reasons,[]);
   const response = await fetch(worker.appUrl);
   assert.equal(response.status, 200);
   await response.arrayBuffer();
   await worker.close();
   await worker.done;
   await assert.rejects(worker.transportViews(), /关闭/);
+  await assert.rejects(worker.restartStatus(), /关闭/);
   await assert.rejects(fetch(worker.appUrl));
   await worker.close();
 });

@@ -1,3 +1,4 @@
+import {runtimeVersion} from './runtime-version.mjs';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -2370,6 +2371,17 @@ export async function startAppServer({
       ];
       return [{ origin:serviceOrigin, token, kind:'app' },
         ...editors.map(editor => editor?.transportEndpoint).filter(Boolean).map(endpoint => ({ ...endpoint, kind:'editor' }))];
+    },
+    /** 查询自身生命周期及全部编辑工作项，不暴露工作区地址或认证信息。 */
+    async restartStatus() {
+      const busy=()=>Boolean(appClosePromise||launcherClosePromise||activePicker||creationRuntimes.size
+        ||!['idle','selected'].includes(state));
+      if(busy())return {version:runtimeVersion,safe:false,reasons:['PPT 正在导入、创建或切换工作项。请先保存并结束操作；创建流程尚未确认可退出时，请手动完全退出并重开 Desktop。']};
+      const editors=[...editingRuntimes.values()].map(runtime=>runtime.app);
+      const states=await Promise.all(editors.map(editor=>editor.restartStatus()));
+      if(busy()||editors.length!==editingRuntimes.size||editors.some(editor=>![...editingRuntimes.values()].some(runtime=>runtime.app===editor)))return {version:runtimeVersion,safe:false,reasons:['PPT 工作项状态发生变化，请重新检查。']};
+      const reasons=[...new Set(states.flatMap(value=>value.reasons))].slice(0,5);
+      return {version:runtimeVersion,safe:states.every(value=>value.safe),reasons};
     },
     get state() { return state; },
     get editorApp() { return editorApp; },

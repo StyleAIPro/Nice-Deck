@@ -30,6 +30,13 @@ function fail(error) {
 }
 
 parentPort.on('message', message => {
+  if(message?.type==='restart-status') {
+    void ready.then(async()=>{
+      if(closing)throw new Error('Editor 正在关闭');
+      parentPort.postMessage({type:'restart-status',id:message.id,status:await app.restartStatus()});
+    }).catch(error=>parentPort.postMessage({type:'restart-status',id:message.id,error:error.message}));
+    return;
+  }
   if (message?.type === 'views') {
     void ready.then(() => {
       if (closing) throw new Error('Editor 正在关闭');
