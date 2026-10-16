@@ -8,6 +8,21 @@ import json
 from pathlib import Path
 import tarfile
 import tempfile
+from importlib.util import source_from_cache
+
+
+def regenerable_python_cache(path, runtime):
+    """只排除 Python 目录内有对应源码的缓存，保留无源码字节码。"""
+    if not path.is_relative_to(runtime / 'python') or path.suffix != '.pyc':
+        return False
+    if path.parent.name == '__pycache__':
+        try:
+            source = Path(source_from_cache(str(path)))
+        except ValueError:
+            return False
+    else:
+        source = path.with_suffix('.py')
+    return source.is_file() and not source.is_symlink()
 
 
 def main():
@@ -31,7 +46,8 @@ def main():
             if path.is_symlink():
                 parser.error(f'Runtime symlink is unsupported: {path}')
             if path.is_file():
-                files.append(path)
+                if not regenerable_python_cache(path, runtime):
+                    files.append(path)
             elif not path.is_dir():
                 parser.error(f'Runtime entry is unsupported: {path}')
     with tarfile.open(args.plugin_tgz, 'r:gz') as source:
@@ -99,4 +115,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

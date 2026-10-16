@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { buildSkillContractInstructions } from './deck-quality-contract.mjs';
+import {LOCAL_FRAGMENT_GUIDANCE} from './local-edit-guidance.mjs';
 
 const EDITOR_DIR = dirname(fileURLToPath(import.meta.url));
 const SKILL_ROOT = resolve(EDITOR_DIR, '../..');
@@ -399,6 +400,7 @@ export function buildEditorBatchPrompt({taskIds,deckPath,serviceUrl,token}) {
   return [
     'AICO-PPT 区域编辑任务：'+JSON.stringify(taskIds),
     '托管工作副本：'+deckPath,
+    LOCAL_FRAGMENT_GUIDANCE,
     '先用 aico_ppt({operation:"inspect",taskId}) 读取任务、当前 revision、目标与父容器和截图。已有文字/样式/位置/尺寸/显隐用 operation:"edit"，workId 和 expectedRevision 使用 inspect 返回值，target 原样使用，actions 为 {target,kind,payload} 数组。',
     '区域任务的 edit 必须带原 taskId 和 taskRelation:"supplement"，否则修改不能回写该任务。若用户随后在左侧补充，结合最近追问和任务语义自主判断；属于原任务则继续携带原 taskId，独立新修改用 taskRelation:"new" 且不传 taskId，不结束原任务；多个任务无法区分时才澄清。',
     '形状替换、图片替换、模块增删和局部 HTML 优先 aico_ppt structure，operations 为 {target,kind,payload} 数组，携带 workId、expectedRevision、taskId、taskRelation。插件自动事务、完整重放验证和结果图，不调用 CLI 或写临时 Python；页面整体增删排序、共享样式与脚本才走源码事务。',

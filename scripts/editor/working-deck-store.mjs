@@ -200,6 +200,15 @@ export function verifyWorkingPatchReplay(path, {
       const replayCode = typeof report?.error?.code === 'string'
         && report.error.code ? report.error.code : undefined;
       const replayFailed = code === 1;
+      if(replayFailed&&replayCode==='RESOURCE_LOAD_FAILED'){
+        reject(Object.assign(new Error(report.error.message),{
+          code:'RESOURCE_LOAD_FAILED',statusCode:409,stage:'resource-validation',
+          resources:Array.isArray(report.resources)?report.resources:[],
+          recovery:'候选图片无法加载，已拒绝发布。按 resources 定位页面与图片，使用当前 Deck 已上传附件的 attachmentPath 重新内嵌，或修复图片数据，再读取最新 revision 重试。',
+          ...(diagnostic?{diagnostic}:{}),
+        }));
+        return;
+      }
       reject(Object.assign(new Error(replayFailed
         ? '历史修改无法安全重放，已拒绝当前候选且原 Deck 未被改动'
         : diagnostic || '补丁重放验证基础设施不可用'), {

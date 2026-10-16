@@ -1,0 +1,3 @@
+/** 局部片段约束与可恢复拒绝的统一说明，供工具和 Agent 上下文共用。 */
+export const LOCAL_FRAGMENT_GUIDANCE='replaceFragment 前用 inspect(detail:"source",target) 读取原片段；保留目标及所有子元素的 data-editor-id，编号继续对应原有内容，不仅保留容器编号。新增节点不填编号，确需删除原节点用 deleteElement。本地图片用当前 Deck 已上传附件的 path：replaceImage 传 attachmentPath，insertFragment/replaceFragment 的 img.src 可填该路径，工具自动内嵌，禁止用 file URL 或 Windows 路径充当浏览器外链；其他本地图片先上传为附件。元素编号或图片验证拒绝时按 recovery 修复再提交；单项失败后继续无依赖的剩余任务。';
+export const LOCAL_IDENTITY_RECOVERY='本次明确未提交，无需 result 查询。这是 HTML 元素编号校验。用 inspect(detail:"source",target) 重新读取原片段和 revision，保留目标及所有子元素的 data-editor-id，按原有内容对应编号并消除重复，再提交修复后的操作；不要用空节点占位保号。确需删除原节点时用 deleteElement。若该项仍无法修复，继续无依赖的剩余任务并准确报告未完成项。';

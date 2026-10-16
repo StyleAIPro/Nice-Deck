@@ -42,7 +42,7 @@ class UpgradeDeckProfileTest(unittest.TestCase):
         brand = up._profile_element(
             old, r'<button\b[^>]*\bid="brandbtn"[^>]*>.*?</button>'
         )
-        old = old.replace(brand, brand.replace("大模型训练与微调", "用户课程标题"), 1)
+        old = old.replace(brand, brand.replace(">开始</button>", ">用户课程标题</button>"), 1)
         old = old.replace(".railpage-current {", ".railpage-current-legacy {", 1)
         lines = list(self.latest_lines)
         eb.set_template(lines, old)

@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
 """在内存中生成有界局部结构候选；不执行模型脚本、不接触真实文件。"""
 import base64
+from collections import Counter
 import html
 import importlib.util
 import json
 from pathlib import Path
 import re
 import sys
+import uuid
 from html.parser import HTMLParser
 
 spec = importlib.util.spec_from_file_location('eb', Path(__file__).resolve().parents[1] / 'edit-bundle.py')
 eb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(eb)
 VOID = set('area base br col embed hr img input link meta param source track wbr'.split())
+
+class IdentityMismatch(ValueError):
+    def __init__(self, old_ids, new_ids, operation_index, target):
+        missing = sorted(old_ids - set(new_ids))
+        duplicates = sorted(key for key, count in Counter(new_ids).items() if count > 1)
+        super().__init__(f'元素编号不匹配：缺失 {len(missing)} 个，重复 {len(duplicates)} 个；须保留目标及所有子元素的 data-editor-id')
+        self.identity = {'operationIndex': operation_index, 'targetEditorId': target['editorId'][:160],
+            'requiredCount': len(old_ids), 'providedCount': len(new_ids),
+            'missingCount': len(missing), 'duplicateCount': len(duplicates),
+            'missingIds': [value[:160] for value in missing[:20]],
+            'duplicateIds': [value[:160] for value in duplicates[:20]]}
 
 class Tree(HTMLParser):
     def __init__(self, source):
@@ -72,10 +85,41 @@ def fragment(value):
     return tree
 
 
-def apply(source, operations, computed=None):
+def image_sources(operations, manifest):
+    """只收集待插入资源，不根据模型路径直接读取文件。"""
+    sources = []
+    for op in operations:
+        payload = op.get('payload', {})
+        if op.get('kind') in {'replaceFragment', 'insertFragment'}:
+            value = payload.get('html')
+            if not isinstance(value, str) or len(value) > 100000:
+                raise ValueError('局部片段为空或过大')
+            for node in Tree(value).nodes:
+                if 'srcset' in node['attrs']:
+                    raise ValueError('局部图片请使用单一 img.src，不支持 srcset')
+                if node['tag'] == 'img':
+                    sources.append(node['attrs'].get('src', ''))
+        elif op.get('kind') == 'replaceImage':
+            if 'attachmentPath' in payload and 'src' in payload:
+                raise ValueError('图片替换只提供 attachmentPath 或 src 其中一个')
+            sources.append(payload.get('attachmentPath', payload.get('src', '')))
+    return list(dict.fromkeys(value for value in sources if not (
+        isinstance(value, str) and (value in manifest or re.match(r'^(https?://|data:image/(?:png|jpeg|webp|gif);base64,)', value, re.I))
+    )))
+
+
+def replace_image_sources(value, image_ids):
+    for node in reversed(Tree(value).nodes):
+        if node['tag'] == 'img' and node['attrs'].get('src') in image_ids:
+            value = value[:node['start']] + opening(node, {'src': image_ids[node['attrs']['src']]}) + value[node['openEnd']:]
+    return value
+
+
+def apply(source, operations, computed=None, image_ids=None, manifest=None):
+    image_ids = image_ids or {}
     if not isinstance(operations, list) or not 1 <= len(operations) <= 32:
         raise ValueError('局部操作数量必须为 1 到 32')
-    for op in operations:
+    for operation_index, op in enumerate(operations):
         target, payload = op.get('target', {}), op.get('payload', {})
         tree = Tree(source)
         matches = [n for n in tree.nodes if n['attrs'].get('data-editor-id') == target.get('editorId') and target.get('editorId')]
@@ -125,14 +169,14 @@ def apply(source, operations, computed=None):
             new = opening(node, {'style': ';'.join(k + ':' + v for k, v in styles.items()), 'data-aico-shape': shape,
                 'data-aico-shape-style': node['attrs'].get('data-aico-shape-style', node['attrs'].get('style', ''))}) + svg + content + '</div>'
         elif kind == 'replaceFragment':
-            new = payload.get('html')
+            new = replace_image_sources(payload.get('html'), image_ids)
             parsed = fragment(new)
             old_ids = {n['attrs']['data-editor-id'] for n in Tree(old).nodes if n['attrs'].get('data-editor-id')}
             new_ids = [n['attrs']['data-editor-id'] for n in parsed.nodes if n['attrs'].get('data-editor-id')]
             if not old_ids.issubset(set(new_ids)) or len(new_ids) != len(set(new_ids)):
-                raise ValueError('替换片段必须保留原元素身份；删除请用 deleteElement')
+                raise IdentityMismatch(old_ids, new_ids, operation_index, target)
         elif kind == 'insertFragment':
-            inserted = payload.get('html')
+            inserted = replace_image_sources(payload.get('html'), image_ids)
             parsed = fragment(inserted)
             if any('data-editor-id' in n['attrs'] for n in parsed.nodes):
                 raise ValueError('新增片段不要指定持久身份，由编辑器分配')
@@ -144,9 +188,10 @@ def apply(source, operations, computed=None):
             duplicate = re.sub(r'\sdata-editor-id=(?:"[^"]*"|\x27[^\x27]*\x27)', '', old)
             new = old + duplicate
         elif kind == 'replaceImage':
-            src = payload.get('src')
-            if node['tag'] != 'img' or not isinstance(src, str) or not re.match(r'^(https?://|data:image/(?:png|jpeg|webp|gif);base64,)', src):
-                raise ValueError('图片替换需要 img 目标和 HTTP(S) 或受支持的图片 data URL')
+            src = payload.get('attachmentPath', payload.get('src'))
+            src = image_ids.get(src, src)
+            if node['tag'] != 'img' or not isinstance(src, str) or not (src in (manifest or {}) or re.match(r'^(https?://|data:image/(?:png|jpeg|webp|gif);base64,)', src, re.I)):
+                raise ValueError('图片替换需要 img 目标和已登记附件、内嵌资源、HTTP(S) 或受支持的图片 data URL')
             new = opening(node, {'src': src})
         else:
             raise ValueError('不支持的局部操作')
@@ -159,6 +204,10 @@ def main():
     # 模板 JSON 可包含 U+2028/U+2029；仅物理换行分隔 bundle，不能用 splitlines。
     lines = base64.b64decode(data['bytes']).decode('utf-8').split('\n')
     source = eb.get_template(lines)
+    manifest = eb.get_manifest(lines) if any(line.strip() == '<script type="__bundler/manifest">' for line in lines) else {}
+    if data.get('mode') == 'resources':
+        sys.stdout.write(json.dumps({'sources': image_sources(data['operations'], manifest)}))
+        return
     if data.get('mode') == 'inspect':
         target = data['target']
         nodes = [n for n in Tree(source).nodes if n['attrs'].get('data-editor-id') == target.get('editorId') and target.get('editorId')]
@@ -169,15 +218,27 @@ def main():
         if not parent or parent['attrs']['data-page-id'] != target.get('pageKey') or 'end' not in node: raise ValueError('源码目标不属于指定页面')
         snippet = source[node['start']:node['end']]
         if len(snippet) > 100000: raise ValueError('目标片段过大，请选择更小的区域')
-        sys.stdout.write(json.dumps({'sourceHtml': snippet, 'sourceMode': '工作副本源码，未固化动作继续独立重放；保留原元素身份'}))
+        required_ids = {n['attrs']['data-editor-id'] for n in Tree(snippet).nodes if n['attrs'].get('data-editor-id')}
+        sys.stdout.write(json.dumps({'sourceHtml': snippet,
+            'sourceMode': '工作副本源码，未固化动作继续独立重放；替换须保留目标及所有子元素的 data-editor-id，编号继续对应原有内容',
+            'sourceIdentity': {'rootEditorId': target['editorId'], 'requiredCount': len(required_ids)}}))
         return
-    changed = apply(source, data['operations'], data.get('styles'))
+    image_ids = {}
+    for path, resource in data.get('images', {}).items():
+        image_ids[path] = 'img-' + uuid.uuid4().hex
+        manifest[image_ids[path]] = resource
+    changed = apply(source, data['operations'], data.get('styles'), image_ids, manifest)
     if source == changed: raise ValueError('操作没有产生修改')
     eb.set_template(lines, changed)
+    if image_ids:
+        eb.set_manifest(lines, manifest)
     sys.stdout.write(json.dumps({'bytes': base64.b64encode(('\n'.join(lines) + '\n').encode()).decode()}))
 
 if __name__ == '__main__':
     try: main()
+    except IdentityMismatch as error:
+        sys.stdout.write(json.dumps({'code': 'LOCAL_EDIT_IDENTITY_MISMATCH', 'message': str(error), 'identity': error.identity}))
+        sys.exit(2)
     except Exception as error:
         print(str(error), file=sys.stderr)
         sys.exit(2)

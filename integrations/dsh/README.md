@@ -1,5 +1,7 @@
 # DSH 插件集成
 
+`0.1.32` 的 Creation CLI 使用 Draft capability 鉴权。`start-generation` / `retry-generation` 把 `{mode:"current-turn", draftId, runId, instructions}` 放在返回值的 `continuation` 中，由调用 Agent 在当前轮制作；不再向同一会话排队第二条初稿任务。调用来源由服务端鉴权判断，命令 JSON 不能改写调度方式。独立浏览器入口仍可提交一次会话任务。已有 generation 时拒绝重复 `start-generation`；验证失败可用 `generation-ready` 原位再验，取消或失败后明确重做才用 `retry-generation`。回执不写入 Draft，发布继续经过原有固化和质量闸门。
+
 这里是 AICO-PPT 在 DeepSeek Harness（DSH）中的适配层，不是第二份 Skill，也不是第二套 Editor。普通用户安装原装 DSH Desktop 和 AICO-Harness 适配插件，再通过原装 DSH Terminal 安装完整的 AICO-PPT Windows Beta 包；正式步骤见[安装指南](../../INSTALL.md)。本文的 Web profile 与本地安装命令只用于开发调试。
 
 插件把 DSH 原生对话与原 AICO-PPT Editor 并排组合：左边始终是当前 DSH 会话，右边是可缩放的通用 workbench；AICO-PPT 使用跨 Session 常驻的 `workbench.persistent-view`。Editor 的页面栏、画布、属性栏、区域任务、时间线、固化和导出全部继续运行仓库内原有实现。
@@ -156,3 +158,14 @@ Editor 将当前页、选区与滚动位置上报到自身服务（变化时更�
 检查不锁画布、不提交输入、不写历史。外层编辑器与画布合并输入、框选说明、属性修改、暂存事务状态；后端检查 Agent 批次、写入、源码事务、固化、导出与恢复。已持久化而未固化的历史允许重启，连接中断或超时则不能确认安全。创建或导入流程暂按整个工作项保守拦截。
 
 该查询是点击前的状态检查；原装系统确认框弹出后发生的新任务不受此查询锁定。仍需先保存、结束任务，再确认重启。
+
+
+### 创建前期的会话上下文（2026-10-12）
+
+按当前会话显式关联分别投影三种状态：创建草稿有效且尚未生成 Deck 时返回 `creating`，允许继续需求、大纲和页面规划，并提供当前草稿的 creation CLI capability 路径；托管 Editor 存在时返回 `ready`；关联运行时断开、已关闭或已有 Deck 却缺失 Editor 时返回 `unavailable`。不再把创建前期正常缺少 Editor 解释为工作区未打开。`creating` 状态下调用页面编辑工具返回 `DECK_NOT_CREATED`，不执行页面操作，也不要求用户重复打开 Editor。会话切换不借用前台其他工作项的能力；不向模型投影凭据内容。
+
+回归覆盖真实浏览器创建草稿、初始上下文、真实 creation status CLI、编辑器切换与会话隔离，见 `integrations/dsh/tests/editing-context.test.mjs`、`editing-tools.test.mjs` 和 `scripts/editor/test/dsh-session-navigation.e2e.mjs`。
+
+### 0.1.34 局部片段拒绝恢复
+
+`replaceFragment` 必须保留目标及全部子元素编号。准备阶段失败明确返回 `committed:false`，编号不匹配使用 `LOCAL_EDIT_IDENTITY_MISMATCH` 并透传缺失／重复编号及恢复步骤。Agent 重新 inspect 修复后继续，单项失败不结束无依赖的其他任务；网络断开仍查询同一 commandId。完整协议见[编辑指南](../../references/editing-guide.md#简洁编辑与视觉确认)。

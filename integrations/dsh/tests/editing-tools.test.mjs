@@ -129,3 +129,15 @@ test('局部结构走融合提交并返回全部受影响页的预览，停止�
  assert.equal(result.currentViewMatchesCommit,true);
  assert.deepEqual(result.affectedPages,['p1','p2']);
 });
+
+test('创建前期误调用编辑工具时引导创建，不请求重新打开 Editor 或执行写入',async()=>{
+ let tool,calls=0;
+ installEditingTools({tools:{register:value=>{tool=value;}}},'http://localhost:1234/?token=private',{
+  request:async url=>{calls++;assert.equal(new URL(url).pathname,'/api/dsh-work-items/editing-context');
+   return {ok:true,json:async()=>({status:'creating',workId:'creation-work'})};}});
+ for(const operation of ['inspect','edit','structure','view','catalog','result','verify','tasks','delete_task','cancel_batch']) {
+  const result=await tool.execute({operation},{agent:{session:{id:'s'}},signal:new AbortController().signal});
+  assert.equal(result.code,'DECK_NOT_CREATED');assert.equal(result.committed,false);assert.match(result.recovery,/creation CLI/);
+ }
+ assert.equal(calls,10);
+});

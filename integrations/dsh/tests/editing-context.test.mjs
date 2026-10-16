@@ -89,3 +89,32 @@ test('每轮提供当前待办的精简关联信息，补充与新指令由 Agen
  const text=renderEditingContext(context);assert.match(text,/supplement/);assert.match(text,/taskRelation.*new/);assert.match(text,/澄清/);assert.match(text,/task-a/);
  state.tasks[0].status='completed';assert.deepEqual((await resolve()).feedbackTasks.map(t=>t.taskId),['task-b']);
 });
+
+test('创建草稿无需 Deck Editor，生成后切换编辑上下文，断开仍保护',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'aico-creation-context-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ let draft={draftId:'d',phase:'brief',revision:0,generation:null};
+ let workspace={closed:false,capabilityPath:join(root,'agent-capability.json'),capabilityToken:'不得泄露',snapshot:()=>draft,managedDeck:null};
+ const workCatalog={resolveByDshSession:async id=>id==='s'?{kind:'creation',workId:'w',draftId:'d',projectRoot:root}:null};
+ const resolveContext=sessionId=>resolveEditingContext({sessionId,workCatalog,findCreationRuntime:()=>workspace?{workspace}:null,
+  findEditingRuntime:()=>{throw Error('不得借用其他编辑器')}});
+ for(const phase of ['brief','outline','page-plan']) {
+  draft={...draft,phase,revision:draft.revision+1};
+  const context=await resolveContext('s');assert.equal(context.status,'creating');assert.equal(context.creation.phase,phase);
+  const text=renderEditingContext(context);assert.match(text,/创建草稿工作区可用/);assert.match(text,/creation status/);
+  assert.doesNotMatch(text,/工作区当前不可用|请.*打开.*Editor|undefined|不得泄露/);
+ }
+ let handler;installEditingContext({on(_event,fn){handler=fn;}},'http://localhost:1234/?token=private',{
+  fetchContext:async(_url,options)=>({ok:true,json:()=>resolveContext(JSON.parse(options.body).sessionId)})});
+ const decision={kind:'continue',messages:[]};
+ const invoke=id=>handler({agent:{session:{id}},signal:new AbortController().signal},async()=>decision);
+ assert.match((await invoke('s')).messages[0].content[0].text,/创建草稿工作区可用/);
+ assert.equal(await invoke('other'),decision);
+ draft.draftId='other';assert.equal((await resolveContext('s')).status,'unavailable');draft.draftId='d';
+ workspace.managedDeck={editor:{sessionDir:root,workingDeckPath:join(root,'working.html'),deckPath:join(root,'deck.html'),url:'http://localhost:1234',token:'private'}};
+ assert.equal((await resolveContext('s')).status,'ready');
+ workspace.managedDeck=null;draft.generation={stagingDeck:'staging/deck.html'};
+ assert.equal((await resolveContext('s')).status,'unavailable');
+ draft.generation=null;workspace.closed=true;assert.equal((await resolveContext('s')).status,'unavailable');
+ workspace.closed=false;workspace.capabilityPath=null;assert.equal((await resolveContext('s')).status,'unavailable');
+ workspace=null;assert.equal((await resolveContext('s')).status,'unavailable');
+});

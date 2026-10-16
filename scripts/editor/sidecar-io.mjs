@@ -31,6 +31,7 @@ const MUTATION_COMMIT_SCOPES = new Map([
 const ATTACHMENT_LONG_COMMANDS = new Set([
   ...ATTACHMENT_MUTATION_COMMANDS,
   'verify-task-attachments',
+  'read-attachment',
 ]);
 // 最坏 8×25MiB 需要前后两轮 SHA-256 和 fsync；90s 允许约 5MiB/s 的保守吞吐。
 const DEFAULT_ATTACHMENT_TIMEOUT_MS = 90_000;
@@ -199,7 +200,7 @@ class PersistentSidecarIO {
     while (offset < chunk.length) {
       const newline = chunk.indexOf('\n', offset);
       const part = chunk.slice(offset, newline < 0 ? chunk.length : newline);
-      const activeLimit = this.active?.command === 'read-working-deck'
+      const activeLimit = ['read-working-deck','read-attachment'].includes(this.active?.command)
         ? this.maxWorkingDeckOutputBytes
         : this.active?.command === 'read-session'
           ? this.maxSessionOutputBytes
@@ -233,7 +234,7 @@ class PersistentSidecarIO {
         ));
         return;
       }
-      const responseLimit = active.command === 'read-working-deck'
+      const responseLimit = ['read-working-deck','read-attachment'].includes(active.command)
         ? this.maxWorkingDeckOutputBytes
         : active.command === 'read-session'
           ? this.maxSessionOutputBytes
@@ -392,6 +393,9 @@ class PersistentSidecarIO {
   }
   verifyTaskAttachments({ taskId, files }) {
     return this.#request('verify-task-attachments', { taskId, files });
+  }
+  readAttachment({ taskId, file }) {
+    return this.#request('read-attachment', { taskId, file });
   }
   reconcileAttachments({ referencedTaskIds }) {
     return this.#request('reconcile-attachments', { referencedTaskIds });

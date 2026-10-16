@@ -7,6 +7,8 @@
 
 ## 1. 这是什么
 
+Creation 生成调度（`0.1.32`）：服务端以 Draft capability 鉴权识别 Agent 发起的命令；`start-generation` 和 `retry-generation` 返回当前轮的 `continuation`（Draft / run 身份及制作指令），由现有 Agent 接续执行，不再追加会话消息。独立浏览器入口保留单次任务投递。两条入口使用相同的模板、规划、固化和发布检查；当前轮只省去重复拼接完整 Skill 规范。已存在 generation 时拒绝再次 start，失败验证可原位再验，显式 retry 才创建新 run。此变更仅在 PPT 插件中实现。
+
 产品定位为独立 Skill 与 AICO-Harness 编辑器插件。所有用户可视化编辑入口统一位于 AICO-Harness（内部继续使用 DSH 插件协议）。独立 Skill 无需 Harness 或本机 Agent PTY；PPT 自身安装器默认只注册 Skill，创建、修改、验证和导出依赖按任务准备。维护者桌面启动器集中于 `tools/dev-shell/`，显式 `scripts/install.py install --dev-shell` 才准备调试依赖；Skill 交付第一版后不自动打开桌面应用。
 
 配套发行和启动隔离由 AICO-Harness 的 `scripts/aico.mjs` 负责，继续通过 DSH Web profile 加载本包。AICO 全局状态位于 `~/.aico-harness/ppt`，独立 Skill 的默认状态解析不变；项目 sidecar 继续原位复用。`scripts/editor/import-history.mjs` 只在停止目标运行时后，将受支持索引原子导入空目标，清空旧 DSH 关联；它不接管安装器、全局 Skill 注册、凭据或项目文件。接口决策见 [ADR-0005](adr/0005-aico-installation-and-history-import.md)。
@@ -548,3 +550,11 @@ Windows 完整包 0.1.28 已经由原装 Desktop 2.0.13 自带 CLI 在隔离 DSH
 先复现“读取后新增再删除无关标注，Deck 字节和历史未变却返回 409”，再修复。最终 Node 单元测试 767 通过、3 跳过；完整浏览器回归 273 通过、7 跳过；DSH 适配及 SessionStore 共 78 通过、2 跳过；Windows 原生测试 75 通过。新增覆盖普通／结构编辑、目标任务修改／删除、内容修改后再撤销、检查过程中的标注与内容并发、旧会话迁移和提交不确定性分类。
 
 用户 35,148,282 字节 Deck 的 Windows 隔离副本上，inspect 版本 1 后新增并删除无关标注使会话版本到 3，使用原版本完成 Remote Expert 圆形改方形，提交版本 5；完整历史验证、结果图和原任务完成状态均通过，真实 Deck 文件摘要未变。原装 Desktop 2.0.13 CLI 在隔离 DSH_HOME 中完成 0.1.28 → 0.1.29 升级及卸载，原装插件和测试数据保留。完整包 246,873,411 字节，3,900 个运行时资源，SHA-256 为 `e9e2faa52998567f03063ff4bdf58485e4f4f0d3cf5d05964a4138a78cae43de`。未替换用户正在运行的插件；真实模型自然语言会话与本机／WSL 模型连接联合验收未执行。
+
+### 局部片段准备失败的提交状态
+
+`prepareLocalEdit` 只在内存中生成候选，位于 `beginSourceEdit` 和工作副本写入之前。此边界捕获的错误明确标注 `committed:false`、`stage:prepare`；不能将事务建立后的任意异常同样归类。Python 返回有界的元素编号诊断，HTTP 与原生工具保留诊断和 recovery，提示源码检查与重试。编号约束覆盖根节点及全部后代，防止旧反馈定位和撤销历史丢失；不通过删除校验或静默重新分配编号规避错误。
+
+### 删字动作的运行时重放证据（0.1.37）
+
+原生富文本编辑恢复 `innerHTML` 会移除空文本节点。运行时在动作成功提交后，以动作对象为弱引用键记录已应用目标的完整 `innerHTML`；多动作提交后记录最终状态，未提交或回滚事务不更新证据。重放仅在同一节点或同一页持久 `editorId` 对应的唯一节点、完整内容完全一致时识别为已应用；证据不写入会话，也不信任外部提供的 `after`。目标真正发生变化、编号重复／丢失或没有运行时证据时继续按原有定位与冲突校验执行。固化和撤销／重做仍使用持久历史，不因前端提示删除动作。

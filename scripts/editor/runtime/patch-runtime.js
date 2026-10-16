@@ -81,6 +81,9 @@
     return output;
   };
   const pageKeys = new WeakMap(), locators = new WeakMap(), resolved = new Map();
+  // 仅记录本运行时成功提交的细粒度文字动作，不信任会话传入的 after 值。
+  // 原生编辑恢复 innerHTML 会丢弃空文本节点；完整内容仍相同时应当幂等跳过。
+  const textReplaySnapshots = new WeakMap();
   const suspendedTargets = new Set();
   let activeActions = [], activeBaselines = new Map(), replayTimer = 0, tentativeCount = 0;
   const pageKey = canvas => {
@@ -227,6 +230,7 @@
   };
   const sourceRebaseCurrentValue = (action,el) => {
     if (action.kind==='setText') {
+      if (matchesAppliedText(action,el)) return action.payload.text;
       const textTarget=textEditTarget(action,el);
       return textTarget ? (el.textContent ?? '').slice(textTarget.start,textTarget.end) : el.textContent;
     }
@@ -386,6 +390,22 @@
     }
     return nodes;
   };
+  const matchesAppliedText = (action,el) => {
+    const snapshot=textReplaySnapshots.get(action);
+    return Boolean(snapshot && snapshot.target===stableTargetKey(action.target)
+      && snapshot.text===action.payload.text && snapshot.html===el.innerHTML
+      && (snapshot.el===el || (action.target.editorId
+        && el.getAttribute('data-editor-id')===action.target.editorId)));
+  };
+  function rememberAppliedText() {
+    for (const action of activeActions) {
+      if (action.kind!=='setText' || action.target.textPath===undefined) continue;
+      const el=resolved.get(locatorKey(action.target));
+      if (el?.isConnected) textReplaySnapshots.set(action,{
+        el,html:el.innerHTML,target:stableTargetKey(action.target),text:action.payload.text,
+      });
+    }
+  }
   const textOffsetOf = (el,target) => {
     let offset=0;
     for (const node of textNodesOf(el)) {
@@ -500,12 +520,15 @@
     validatePayload(action);
     let before, after;
     if (action.kind === 'setText') {
-      const textTarget=textEditTarget(action,el);
-      before=textTarget ? (el.textContent ?? '').slice(textTarget.start,textTarget.end) : el.textContent;
       after=action.payload.text;
-      if (before !== after) {
-        if (textTarget) replaceTextRange(el,textTarget.start,textTarget.end,after);
-        else el.textContent=after;
+      if (matchesAppliedText(action,el)) before=after;
+      else {
+        const textTarget=textEditTarget(action,el);
+        before=textTarget ? (el.textContent ?? '').slice(textTarget.start,textTarget.end) : el.textContent;
+        if (before !== after) {
+          if (textTarget) replaceTextRange(el,textTarget.start,textTarget.end,after);
+          else el.textContent=after;
+        }
       }
     }
     if (action.kind === 'translate') {
@@ -618,7 +641,10 @@
   function applyAction(action) {
     const el=resolve(action.target),key=actionKey(action);
     const baseline=activeBaselines.get(key) ?? { ...captureBaseline(action,el),el };
-    const applied=applyOne(action,el); recordActive(applied,baseline); return applied;
+    const applied=applyOne(action,el);
+    recordActive(applied,baseline);
+    rememberAppliedText();
+    return applied;
   }
   const snapshotElement = el => ({ html:el.innerHTML,style:el.getAttribute('style') });
   const restoreElementSnapshot = (el,snapshot) => {
@@ -708,6 +734,7 @@
         for (const [index,result] of results.entries()) {
           recordActive(result,nextBaselines.get(actionKey(actions[index])));
         }
+        rememberAppliedText();
       } else {
         for (const [el,snapshot] of snapshots) restoreElementSnapshot(el,snapshot);
         activeActions=oldActions;
@@ -770,6 +797,7 @@
         for (const [index,action] of results.entries()) {
           recordActive(action,transactionBaselines.get(actionKey(actions[index])));
         }
+        rememberAppliedText();
       } else {
         for (const [el,snapshot] of [...snapshots].reverse()) {
           restoreElementSnapshot(el,snapshot);

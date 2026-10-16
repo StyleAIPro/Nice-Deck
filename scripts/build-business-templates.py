@@ -148,7 +148,6 @@ class Deck:
         self.s=up._replace_slot(self.s,up.USER_STYLE_START,up.USER_STYLE_END,'\n<style>\n'+CSS+'</style>\n')
         self.s=up._replace_slot(self.s,up.USER_SCRIPT_START,up.USER_SCRIPT_END,'\n')
         self.s=re.sub(r'<title>.*?</title>',f'<title>{"任职材料" if kind=="qualification" else "项目评审"}通用模板</title>',self.s,count=1,flags=re.S)
-        self.s=self.s.replace('>工作汇报模板</button>',f'>{"任职材料" if kind=="qualification" else "项目评审"}通用模板</button>')
     def separator(self,label):
         start,_=eb._slide_bounds(self.s,label)
         if self.s[start-len(eb.SEP):start]!=eb.SEP:self.s=self.s[:start]+eb.SEP+self.s[start:]

@@ -27,7 +27,20 @@ class LocalEditTests(unittest.TestCase):
     def test_fragment_preserves_identity(self):
         result=self.apply('replaceFragment',{'html':'<div data-editor-id="e"><b data-editor-id="b">新内容</b></div>'})
         self.assertIn('新内容',result)
-        with self.assertRaises(ValueError): self.apply('replaceFragment',{'html':'<div data-editor-id="e">丢失子元素</div>'})
+        with self.assertRaises(local.IdentityMismatch) as caught:
+            self.apply('replaceFragment',{'html':'<div data-editor-id="e">丢失子元素</div>'})
+        self.assertEqual(caught.exception.identity['missingIds'], ['b'])
+        self.assertEqual(caught.exception.identity['requiredCount'], 2)
+    def test_identity_diagnostics_cover_duplicates_and_bound_large_fragments(self):
+        with self.assertRaises(local.IdentityMismatch) as caught:
+            self.apply('replaceFragment',{'html':'<div data-editor-id="e"><b data-editor-id="b"></b><i data-editor-id="b"></i></div>'})
+        self.assertEqual(caught.exception.identity['missingCount'], 0)
+        self.assertEqual(caught.exception.identity['duplicateIds'], ['b'])
+        self.html=self.html.replace('<b data-editor-id="b">内容不丢</b>', ''.join(f'<b data-editor-id="n{i}">节点</b>' for i in range(48)))
+        with self.assertRaises(local.IdentityMismatch) as caught:
+            self.apply('replaceFragment',{'html':'<div data-editor-id="e">新内容</div>'})
+        self.assertEqual(caught.exception.identity['missingCount'], 48)
+        self.assertEqual(len(caught.exception.identity['missingIds']), 20)
     def test_rejects_code_and_wrong_page(self):
         for code in ['<script>alert(1)</script>','<img onerror="x()">','<iframe src="x">','<a href="javascript:alert(1)">x</a>']:
             with self.assertRaises(ValueError): self.apply('insertFragment',{'html':code})

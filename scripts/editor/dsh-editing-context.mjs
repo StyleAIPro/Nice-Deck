@@ -7,11 +7,25 @@ export async function resolveEditingContext({ sessionId, workCatalog, findEditin
   }
   const workItem = await workCatalog.resolveByDshSession(sessionId);
   if (!workItem || !['editing','creation'].includes(workItem.kind)) return { status:'unlinked' };
+  const workspace = workItem.kind === 'creation' ? findCreationRuntime?.(workItem)?.workspace : null;
   const app = workItem.kind === 'creation'
-    ? findCreationRuntime?.(workItem)?.workspace?.managedDeck?.editor
+    ? (workspace?.closed ? null : workspace?.managedDeck?.editor)
     : findEditingRuntime({ deckId:workItem.deckId, deckPath:workItem.deckPath })?.app;
   const identity = { workId:workItem.workId, deckPath:app?.deckPath ?? workItem.deckPath, kind:workItem.kind };
-  if (!app?.sessionDir || !app.workingDeckPath) return { status:'unavailable', ...identity };
+  if (!app?.sessionDir || !app.workingDeckPath) {
+    // 创建前期没有 Deck 和 Editor 是正常状态，不能据此阻断需求与规划。
+    // 已有产物却丢失 Editor 时仍拒绝编辑，不能降级绕过托管工作副本。
+    const draft = workspace && !workspace.closed ? workspace.snapshot() : null;
+    if (draft && draft.draftId === workItem.draftId && workspace.capabilityPath
+      && !workspace.managedDeck && !draft.generation?.stagingDeck
+      && !draft.generation?.publishedDeck && !draft.previewDeck) {
+      return { status:'creating', ...identity, creation:{
+        draftId:draft.draftId, phase:draft.phase, revision:draft.revision,
+        capabilityPath:workspace.capabilityPath,
+      }, project:{projectRoot:workItem.projectRoot} };
+    }
+    return { status:'unavailable', ...identity };
+  }
   const capabilityPath = await writeWorkspaceCapability(app.sessionDir, {
     url:app.url, token:app.token, mode:'visible',
     deckPath:app.deckPath, workingDeckPath:app.workingDeckPath,

@@ -56,6 +56,8 @@ try {
   await page.goto(pathToFileURL(deckFile).href, {
     waitUntil:'load', timeout:180_000,
   });
+  // 外层 load 可能早于单文件资源解包，须等真实 Deck 挂载后再检查。
+  await page.waitForFunction(()=>!document.querySelector('script[type="__bundler/template"]'),undefined,{timeout:90_000});
   const initial = await page.evaluate(() => ({
     hasPatches:Boolean(document.getElementById('huawei-deck-editor-patches')),
     hasStatus:Boolean(window.HuaweiDeckEditorPatchStatus),
@@ -153,8 +155,38 @@ try {
     && result.applied === result.expected
     && result.adopted === result.expected
   );
+  const resourceReport = await page.evaluate(async()=>{
+    const safeSource=value=>{
+      if(/^data:/i.test(value))return value.split(',',1)[0]+',[内嵌数据]';
+      try{const url=new URL(value,location.href);url.search='';url.hash='';url.username='';url.password='';return url.href.slice(0,240);}catch{return value.slice(0,240);}
+    };
+    const pages=[...document.querySelectorAll('section[data-label]')];
+    const failures=await Promise.all([...document.images].map(async img=>{
+      let timer;
+      img.loading='eager';
+      const loaded=await Promise.race([
+        img.decode().then(()=>img.naturalWidth>0,()=>false),
+        new Promise(resolve=>{timer=setTimeout(()=>resolve(false),10_000);}),
+      ]);
+      clearTimeout(timer);
+      if(loaded)return null;
+      const slide=img.closest('section[data-label]');
+      return {pageKey:slide?.getAttribute('data-page-id')??null,
+        pageIndex:slide?pages.indexOf(slide)+1:null,pageLabel:(slide?.getAttribute('data-label')??'').slice(0,80),
+        editorId:img.getAttribute('data-editor-id'),alt:(img.getAttribute('alt')??'').slice(0,120),
+        source:safeSource(img.currentSrc||img.getAttribute('src')||''),reason:'图片加载或解码失败'};
+    }));
+    const unique=[...new Map(failures.filter(Boolean).map(item=>[JSON.stringify(item),item])).values()];
+    return {resourceFailureCount:unique.length,resources:unique.slice(0,20)};
+  });
+  if(valid&&resourceReport.resourceFailureCount){
+    const first=resourceReport.resources[0];
+    result={...result,error:{code:'RESOURCE_LOAD_FAILED',message:`图片加载失败：${first.pageIndex?'第 '+first.pageIndex+' 页 '+first.pageLabel:'页面公共区域'}，${first.alt||first.source}；共 ${resourceReport.resourceFailureCount} 处`}};
+    exitCode=1;
+  }
   console.log(JSON.stringify({
     ...result,
+    ...resourceReport,
     droppedActionIds:Array.isArray(result.droppedActionIds) ? result.droppedActionIds : [],
     pageErrors,
   }, null, 2));

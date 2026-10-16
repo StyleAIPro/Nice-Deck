@@ -1,39 +1,28 @@
 # AICO-PPT 安装指南
 
-## 本地优化包：0.1.30
+## 普通用户：beta0.2
 
-2026-10-05：新增配合 Harness dev.62 的只读重启检查与固定运行版本。未提交输入、正在执行或保存的修改会阻止自动重启；已持久化的未固化历史可以保留到重启后。修复无关标注增删改使 Agent 编辑误报版本冲突；保留当前任务变化和真实 Deck 修改的冲突保护。明确未提交的拒绝不再要求查询回执。包含此前局部结构编辑、按需上下文、截图复用与跨页撤销／重做修复。Windows 完整包为 `dist/aico-ppt-skill-0.1.30-win32-x64.tgz`，包含私有 Python、浏览器和运行依赖；本地构建不代表官网已发布，也不代表已完成 Windows 整机验收。
-
-在原装 Desktop 的 DSH Terminal 依次安装本地新包（替换为实际路径）：
-
-```powershell
-dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\AICO-Harness-Plugin\dist\aico-harness-2.0.0-dev.62.tgz" --ignore-scripts
-dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\AICO-PPT\dist\aico-ppt-skill-0.1.30-win32-x64.tgz" --ignore-scripts
-```
-
-保存工作，从系统托盘完全退出 DSH Desktop，再重新打开一次以加载新的提醒逻辑。
-
-## 普通用户：已发布 beta0.1
-
-更新：2026-10-03。固定原装社区版 DSH Desktop 2.0.13 + DSH 0.1.5-rc.2。当前只发布 Windows x64 桌面插件，macOS 暂缓。
+更新：2026-10-16。固定原装社区版 DSH Desktop 2.0.13 + DSH 0.1.5-rc.2。当前只发布 Windows x64 桌面插件，macOS 暂缓。
 
 1. 从[官网安装页](https://openx.huawei.com/project/7665/AICO-Plugin-Web_master/install.html)下载 Harness 与 PPT，核对大小和 SHA-256。
 2. 在原装 Desktop 托盘打开 DSH Terminal，使用实际下载目录依次执行：
 
 ```powershell
-dsh plugin add "C:\Downloads\aico-harness-beta0.1-win32-x64.tgz" --ignore-scripts
-dsh plugin add "C:\Downloads\aico-ppt-skill-beta0.1-win32-x64.tgz" --ignore-scripts
+dsh plugin add "C:\Downloads\aico-harness-beta0.2-win32-x64.tgz" --ignore-scripts
+dsh plugin add "C:\Downloads\aico-ppt-skill-beta0.2-win32-x64.tgz" --ignore-scripts
 ```
 
 3. 保存工作并重启，在原装模型页配置模型，从侧边栏打开 AICO-PPT。
 
-PPT 包内版本为 `0.1.26`。完整包包含私有 Windows Python、浏览器及运行依赖，不需要另装资源包，不要求 Agent CLI、PTY 或旧宿主的专用渲染接口。手动 Beta 已公开发布；签名自动安装渠道及最终包两种模型连接联合验收仍未完成。
+PPT 包内版本为 `0.1.37`，配套 Harness 为 `2.0.0-dev.73`。完整包包含私有 Windows Python、浏览器及运行依赖，不需要另装资源包，不要求 Agent CLI、PTY 或旧宿主的专用渲染接口。手动 Beta 已公开发布；签名自动安装渠道及最终包两种模型连接联合验收仍未完成。
 
 业务、文件和工具始终留在 Windows；WSL 只提供可选模型通信。升级、卸载均使用原装插件机制，先保存工作；`dsh plugin remove aico-ppt-skill` 移除插件后重启，保留 Deck 与业务数据。不能整目录删除 `.aico-ppt-editor` 或旧 `.huawei-deck-editor`，其中包含工作副本与恢复历史。
 
 插件诊断日志位于运行用户的 `~/.aico/diagnostics/ppt-editor-*.jsonl`，按大小轮转，只记白名单连接状态。反馈故障时保留时间和对应日志；浏览器断线时可能无法上报，不能仅凭没有日志认定没有重连。
 
 当前运行时与工具接口见[DSH 接入](integrations/dsh/README.md)，初次使用见[快速开始](docs/user-guide/quick-start.md)。
+
+本次性能、并发编辑、撤销重做、图片与富文本修复见 [beta0.2 发行说明](docs/release-beta0.2.md)。安装不会自动修改已有 Deck；历史图片错误路径须重新选择对应附件，重新内嵌后保存。新建 Deck 使用新版模板，已有自定义导航在模板升级时保留。[发布前开发记录](docs/release-history-20261016.md)仅作追溯。
 
 ## 独立 Skill 安装（按需）
 

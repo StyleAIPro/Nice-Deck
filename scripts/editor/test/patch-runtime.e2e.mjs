@@ -14,6 +14,33 @@ const RUNTIME_CONTRACT = {
   features:'textPath,textRangeStyle',
 };
 
+test('删除富文本片段后重建编辑容器不会误报历史重放冲突', async t => {
+  const browser = await (await loadChromium()).launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  await page.evaluate(() => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    heading.setAttribute('data-editor-id', 'element-11111111111111111111111111111111');
+    heading.innerHTML = '<span>保留</span><strong>删除</strong>';
+    window.replayFailures = [];
+    document.addEventListener('huawei-deck-patch-replay-error', event => {
+      window.replayFailures.push(event.detail.code);
+    });
+    const target = { ...runtime.makeLocator(heading), textPath:'1/0' };
+    runtime.applyAction({
+      id:'delete-fragment', target, kind:'setText', before:'删除', after:'',
+      payload:{ text:'', sourceRange:{ start:2, end:4 } },
+    });
+    // 模拟祖先文本框结束直接编辑：恢复 innerHTML 会移除空文本节点。
+    heading.parentElement.innerHTML = heading.parentElement.innerHTML;
+  });
+  await page.waitForTimeout(100);
+  assert.deepEqual(await page.evaluate(() => window.replayFailures), []);
+  assert.equal(await page.locator('h2').first().innerHTML(), '<span>保留</span><strong></strong>');
+});
+
 test('细粒度 setText 的目标值包含原文时 MutationObserver 重放仍保持幂等', async t => {
   const chromium = await loadChromium();
   const browser = await chromium.launch({ channel:'chrome', headless:true });
@@ -39,6 +66,68 @@ test('细粒度 setText 的目标值包含原文时 MutationObserver 重放仍�
     await page.locator('h2').first().evaluate(element => element.innerHTML),
     '更新后的普通文字 <strong>加粗文字</strong>',
   );
+});
+
+test('多段删字后的 DOM 重建支持撤销重做，事务回滚不收养未提交文字', async t => {
+  const browser = await (await loadChromium()).launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(async () => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    let heading = document.querySelector('h2');
+    heading.setAttribute('data-editor-id', 'element-11111111111111111111111111111111');
+    heading.innerHTML = '<span>保留</span><b>甲</b><i>乙</i>';
+    const target = runtime.makeLocator(heading);
+    const actions = ['1/0', '2/0'].map((textPath, index) => ({
+      id:`delete-${index}`, kind:'setText', target:{ ...target, textPath }, payload:{ text:'' },
+    }));
+    const errors = [];
+    document.addEventListener('huawei-deck-patch-replay-error', event => errors.push(event.detail.code));
+    runtime.applyAll(actions);
+    const transaction = runtime.beginTransaction([{
+      id:'tentative', kind:'setText', target:{ ...target, textPath:'0/0' }, payload:{ text:'未提交' },
+    }]);
+    transaction.rollback();
+    heading.parentElement.innerHTML = heading.parentElement.innerHTML;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    heading = document.querySelector('h2');
+    const afterRollback = heading.innerHTML;
+    runtime.applyAll([]);
+    const undone = heading.textContent;
+    runtime.applyAll(actions);
+    heading.parentElement.innerHTML = heading.parentElement.innerHTML;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    return { errors, afterRollback, undone, redone:document.querySelector('h2').textContent };
+  });
+  assert.deepEqual(result, {
+    errors:[], afterRollback:'<span>保留</span><b></b><i></i>', undone:'保留甲乙', redone:'保留',
+  });
+});
+
+test('删字后的真实内容冲突仍须拒绝，不能凭相同编号或空 after 放行', async t => {
+  const browser = await (await loadChromium()).launch({ channel:'chrome', headless:true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(pathToFileURL(resolve('scripts/editor/test/fixtures/minimal-deck.html')).href);
+  const result = await page.evaluate(async () => {
+    const runtime = window.HuaweiDeckPatchRuntime;
+    const heading = document.querySelector('h2');
+    heading.setAttribute('data-editor-id', 'element-11111111111111111111111111111111');
+    heading.innerHTML = '<span>保留</span><b>删除</b>';
+    const action = runtime.applyAction({
+      id:'deleted', kind:'setText', target:{ ...runtime.makeLocator(heading), textPath:'1/0' }, payload:{ text:'' },
+    });
+    const errors = [];
+    document.addEventListener('huawei-deck-patch-replay-error', event => errors.push(event.detail.code));
+    heading.parentElement.innerHTML = heading.parentElement.innerHTML.replace('保留', '外部修改');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    let unproven;
+    try { runtime.applyTransaction([{ ...action, id:'unproven' }], { rebaseActionIds:['unproven'] }); }
+    catch (error) { unproven = error.code; }
+    return { errors, unproven, text:document.querySelector('h2').textContent };
+  });
+  assert.deepEqual(result, { errors:['TARGET_AMBIGUOUS'], unproven:'TARGET_AMBIGUOUS', text:'外部修改' });
 });
 
 test('固化后的 active action 被收养为新基线，空同步不会恢复旧内容', async t => {

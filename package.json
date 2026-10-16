@@ -1,6 +1,6 @@
 {
   "name": "aico-ppt-skill",
-  "version": "0.1.30",
+  "version": "0.1.37",
   "description": "AICO-PPT Agent Skill 与 DeepSeek Harness 可视化 Editor 插件",
   "private": true,
   "type": "module",
@@ -35,7 +35,9 @@
     "!scripts/editor/agent-terminal-session.mjs",
     "!scripts/run-editor-tests.mjs",
     "!scripts/test_*.py",
-    "!scripts/verify/*.test.mjs"
+    "!scripts/verify/*.test.mjs",
+    "docs/release-beta0.2.md",
+    "docs/release-history-20261016.md"
   ],
   "dsh": {
     "bundle": {

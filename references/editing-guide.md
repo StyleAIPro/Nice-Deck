@@ -14,6 +14,8 @@
 
 `structure` 支持 setShape、replaceImage、replaceFragment、insertFragment、duplicateElement、deleteElement，整个 operations 数组成为一个可撤销事务。候选校验、完整历史重放、提交、回执由服务完成；失败或提交前取消恢复工作副本。右侧文字输入／拖拽冲突时等待完成，不能通过刷新消除用户草稿。提交回执为成功且结果图对应相同 revision 时结束；无需再 task／verify。回执不明用 result(commandId)，图片待检查用 view；不要重新执行已提交命令。结果图最多自动返回前三个受影响页，其余由 remainingViewPages 指示。
 
+本地图片使用当前 Deck 已上传任务附件返回的 `path`：换图传 `replaceImage` 的 `payload:{attachmentPath:"..."}`；片段内的 `<img src="附件路径">` 会自动写入 bundle manifest。支持 PNG、JPEG、GIF、WebP，每批内嵌总量不超过 25 MiB；其他本地文件先上传为任务附件。已经内嵌的资源编号继续保留，HTTP(S) 与受支持的 data URL 仍可使用。完整候选检查逐张验证图片加载和解码，失败返回 `RESOURCE_LOAD_FAILED` 及 `resources` 中的页码、页标识和图片信息，局部事务回滚确认后返回 `committed:false`；按诊断修复图片并读取最新 revision 重试。外层错误栏同样显示失败图片及所属页，重复资源错误去重。
+
 默认 inspect 只返回 4 个目标候选，必要时通过 query／limit／offset 展开；view 只返回图及版本信息。同一内容版本的检索与看图复用渲染缓存。这里缩小的是 Agent 的读取范围，结构提交仍校验完整有效历史，固化仍执行完整发布校验。
 
 
@@ -507,6 +509,8 @@ macOS / Linux 仍可使用 `bash scripts/html2pptx/convert.sh ...`；该脚本�
 
 ## 简洁编辑与视觉确认
 
+局部片段 `replaceFragment` 前用 `inspect(detail:"source",target)` 读取原片段。`sourceIdentity.requiredCount` 包括根节点与全部子元素编号；全部旧 `data-editor-id` 必须保留且继续对应原有内容，新增节点不填编号，确需删除用 `deleteElement`。`LOCAL_EDIT_IDENTITY_MISMATCH` 是元素编号不匹配，不是账号认证：响应提供缺失／重复数量、最多各 20 个编号和操作下标；准备阶段明确 `committed:false`、`stage:"prepare"`，无须查回执。按 recovery 重新 inspect、修复后提交，不用空节点占位保号；单项仍失败时继续无依赖的剩余任务。网络断开或事务建立后的未确认错误仍按原 commandId 查询结果。
+
 Harness 中使用原生 `aico_ppt` 工具：`inspect` 返回当前版本、任务、目标、父容器和页面图；`edit` 原样使用 locator、expectedRevision 与稳定 commandId，返回提交状态、受影响页诊断及结果图。普通修改不重读完整 Skill，不额外扩宽或重排版式。`hide` 只隐藏、不补位；DOM 删除与补位走源码事务。
 
 `view` 提供包含未固化动作的 1920×1080、build 全显标准图，不改变用户画布的页码或缩放。它不是现场窗口截图，返回 stateId、revision、renderMode；内容变化使缓存失效。多页提交先返回首个受影响页，其余页按需 view。截图失败时保留已提交状态；使用 `result` 查询原 commandId 后补充 view，不用新命令重交。
@@ -520,3 +524,7 @@ CLI 对应 `inspect TASK_ID OUT.png`、`view PAGE_KEY OUT.png`、`result COMMAND
 ### 标注与内容版本
 
 Agent 原样使用 inspect 的 expectedRevision。其他反馈任务的新增、说明修改和删除只更新会话同步版本，不使当前编辑过期；当前目标任务改写返回 TASK_CHANGED，删除返回 TASK_NOT_FOUND。Deck 内容、撤销重做、源码事务或其他控制状态改变仍保留版本检查，不能直接把请求改成最新版本重交。明确 commitStatus:rejected 时本次未提交，按错误重新检查目标；只有提交结果未知才用 result 查同一 commandId。
+
+### 编辑态删字与历史重放
+
+`0.1.37` 修复删空富文本片段后再次编辑产生的伪 `TARGET_AMBIGUOUS`／`TARGET_NOT_FOUND`。若已经固化成功，无需为消除旧提示重复固化或撤销修改；重新打开工作项核对结果。真实内容冲突仍会拒绝重放，不能通过清空历史绕过。安装更新本身不改写已有 Deck。

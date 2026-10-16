@@ -35,6 +35,7 @@ import {
   resolveProjectRoot,
 } from './agent-workspace/project-root.mjs';
 import { AttachmentStore } from './attachment-store.mjs';
+import { resolveLocalImages } from './local-image-resources.mjs';
 import { BridgeService } from './bridge-service.mjs';
 import {
   buildCreationHandoffPrompt,
@@ -707,6 +708,8 @@ function errorResponse(response, error) {
   if (Number.isSafeInteger(error?.revision)) details.revision = error.revision;
   if (typeof error?.groupId === 'string') details.groupId = error.groupId;
   if (typeof error?.stage === 'string') details.stage = error.stage;
+  if (error?.code === 'LOCAL_EDIT_IDENTITY_MISMATCH' && error.identity) details.identity = error.identity;
+  if (error?.code === 'RESOURCE_LOAD_FAILED' && Array.isArray(error.resources)) details.resources = error.resources;
   if (typeof error?.recovery === 'string') details.recovery = error.recovery;
   if (typeof error?.diagnostic === 'string') details.diagnostic = error.diagnostic;
   if ((process.env.AICO_PPT_DEBUG_ERRORS ?? process.env.HUAWEI_DECK_DEBUG_ERRORS) === '1'
@@ -2731,7 +2734,16 @@ export async function startServer({
           await guardEditRevision(expectedRevision, taskId);
           if(bridge.sourceEditSnapshot())throw httpError('SOURCE_EDIT_ACTIVE',409,'已有结构事务');
           const reserved=await bridge.reserveEditorMutation(commandId,false,operations.map(op=>op.target));locked=true;
-          const candidate=await prepareLocalEdit(await workingDeckStore.read(),operations,{pythonExecutable,signal:abort.signal,styles:reserved.styles});
+          let candidate;
+          try {
+            candidate=await prepareLocalEdit(await workingDeckStore.read(),operations,{
+              pythonExecutable,signal:abort.signal,styles:reserved.styles,
+              resolveImages:sources=>resolveLocalImages(sources,{tasks:sessionStore.state.tasks,sessionDir:sessionStore.sessionDir,realSessionDir:sidecarBoundary.session.realPath,io:sidecarBoundary.io}),
+            });
+          } catch(error) {
+            // 此阶段仅生成内存候选，尚未建立事务或写入工作副本，能确定本次未提交。
+            error.committed=false;error.stage='prepare';throw error;
+          }
           abort.signal.throwIfAborted();
           transaction=await beginSourceEdit({expectedRevision,taskId,commandId,requestDigest:digest});
           broadcast('source-edit-begun',transaction.revision,transaction);
@@ -2749,6 +2761,8 @@ export async function startServer({
           if(!committed && error.committed!==true && transaction && bridge.sourceEditSnapshot()?.id===transaction.sourceEditId) {
             await cancelSourceEdit({sourceEditId:transaction.sourceEditId,expectedRevision:sessionStore.state.revision});
             broadcast('source-edit-cancelled',sessionStore.state.revision,{sourceEditId:transaction.sourceEditId});
+            // 验证拒绝且回滚已确认，才报告明确未提交；持久化状态不明时仍保留未知状态。
+            if(error.code==='RESOURCE_LOAD_FAILED')error.committed=false;
           }
           throw error;
         } finally {

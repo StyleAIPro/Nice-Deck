@@ -1660,6 +1660,22 @@ class PersistentHelper:
             return {"safe": True}
         return _verify_task_attachment_directory(self.attachments_fd, task_id, files)
 
+    @_with_attachment_lifecycle_lock
+    def read_attachment(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"taskId", "file"}:
+            raise SidecarIOError("read-attachment payload 格式无效")
+        self.assert_bound({})
+        task_id = _require_uuid(payload["taskId"], "taskId")
+        item = _validate_verify_files(task_id, [payload["file"]])[0]
+        directory = _open_managed_attachment_directory(self.attachments_fd, task_id)
+        try:
+            contents = _read_fd_file(directory, item["name"], max_bytes=item["size"])
+            if len(contents) != item["size"]:
+                raise SidecarIOError("附件大小与登记信息不一致")
+            return {"bytes": base64.b64encode(contents).decode("ascii")}
+        finally:
+            os.close(directory)
+
     @staticmethod
     def _preflight_managed_directories(parent_fd):
         records = []
@@ -2400,6 +2416,8 @@ class PersistentHelper:
             return self.delete_task_attachments(request["payload"])
         if command == "verify-task-attachments":
             return self.verify_task_attachments(request["payload"])
+        if command == "read-attachment":
+            return self.read_attachment(request["payload"])
         if command == "reconcile-attachments":
             return self.reconcile_attachments(request["payload"])
         if command == "read-transaction":
@@ -2486,7 +2504,7 @@ def serve():
             response_limit = (
                 MAX_RESPONSE_BYTES
                 if isinstance(request, dict)
-                and request.get("command") in {"read-session", "read-working-deck"}
+                and request.get("command") in {"read-session", "read-working-deck", "read-attachment"}
                 else MAX_AGENT_WORKSPACE_RESPONSE_BYTES
                 if isinstance(request, dict)
                 and request.get("command") == "read-agent-workspace"

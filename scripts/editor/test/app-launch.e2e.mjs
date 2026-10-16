@@ -2024,7 +2024,7 @@ test('浏览器关闭时即使 close beacon 丢失也由持续租约回收全部
   assert.equal(app.state, 'closed');
 });
 
-test('Agent 写入里程碑并创建独立 Deck 后，画布自动出现且终端停靠右侧', async t => {
+test('Agent 当前轮制作发布只执行一次，画布自动出现并交接最终 Editor', async t => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'deck-creation-auto-layout-'));
   const templatePath = join(projectRoot, 'template.html');
   await copyFile(resolve('assets/tech-share-deck.html'), templatePath);
@@ -2040,11 +2040,17 @@ test('Agent 写入里程碑并创建独立 Deck 后，画布自动出现且终�
     }),
     snapshot:() => ({ version:1, templates:[] }),
   };
+  const queuedPrompts = [];
+  let terminal;
   const app = await startAppServer({
     token:'creation-auto-layout-secret',
     pythonExecutable:PYTHON_EXECUTABLE,
     pickAgentProjectDirectory:async () => projectRoot,
-    createAgentTerminal:options => new CreationTerminalFixture(options),
+    createAgentTerminal:options => {
+      terminal = new CreationTerminalFixture(options);
+      terminal.submitPrompt = prompt => queuedPrompts.push(prompt);
+      return terminal;
+    },
     // 该用例只验证创建页布局、实时画布与 Editor 交接；质量契约由 DeckFactory
     // 单元与 Python 契约测试覆盖，避免让真实模板内容绑死界面 E2E fixture。
     createCreationWorkspace:options => DeckCreationWorkspace.create({
@@ -2097,7 +2103,18 @@ test('Agent 写入里程碑并创建独立 Deck 后，画布自动出现且终�
       trialPptx:false, autoOpenEditor:true,
     },
   });
-  await creationCommand(app, { type:'start-generation', expectedRevision:7 });
+  const runCreationCli = async (command, revision) => {
+    const result = await execFileAsync(process.execPath, [
+      resolve('scripts/editor/cli.mjs'), 'creation', command,
+      '--capability-file', terminal.options.environment.AICO_PPT_CREATION_CAPABILITY_FILE,
+      '--expected-revision', String(revision),
+    ]);
+    return JSON.parse(result.stdout);
+  };
+  const started = await runCreationCli('start-generation', 7);
+  assert.equal(started.continuation.mode, 'current-turn');
+  assert.ok(started.continuation.instructions.includes(started.snapshot.managedDeck.workingDeckPath));
+  assert.equal(queuedPrompts.length, 0);
 
   await page.locator('[data-deck-stage]').waitFor({ state:'visible' });
   await page.frameLocator('[data-deck-preview]').frameLocator('#deck-frame')
@@ -2132,14 +2149,28 @@ test('Agent 写入里程碑并创建独立 Deck 后，画布自动出现且终�
   await page.frameLocator('[data-deck-preview]').frameLocator('#deck-frame')
     .locator('#stage').getByText('创建页实时修改已经生效').waitFor();
 
+  // 文本可见不等于全页诊断已返回。Windows 上先等待源码刷新后的权威诊断，
+  // 再模拟 Agent 完成检查并请求发布，避免把渲染中的状态当成已检查完成。
+  const diagnosticDeadline = Date.now() + 15_000;
+  let diagnosticsReady = false;
+  while (Date.now() < diagnosticDeadline) {
+    const state = await fetch(`${beforeMutation.managedDeck.serviceUrl}/api/session`, {
+      headers:{ authorization:`Bearer ${beforeMutation.managedDeck.token}` },
+    }).then(response => response.json());
+    diagnosticsReady = Object.keys(state.diagnosticsBaseline ?? {}).length === 37
+      && state.diagnosticsRevision === state.revision;
+    if (diagnosticsReady) break;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 25));
+  }
+  assert.equal(diagnosticsReady, true, '全页诊断就绪后才能模拟已检查完成');
+
   const current = await fetch(
     `${app.url}/api/creation-draft?token=${encodeURIComponent(app.token)}`,
   ).then(response => response.json());
-  const published = await creationCommand(app, {
-    type:'generation-ready', expectedRevision:current.revision,
-    diagnostics:{ summary:'实时初版完成' },
-  });
+  const published = await runCreationCli('generation-ready', current.revision);
   assert.equal(published.snapshot.phase, 'ready');
+  assert.equal(queuedPrompts.length, 1, 'Dev Shell 只保留一次最终 Editor 地址交接');
+  assert.match(queuedPrompts[0], /^当前 Deck 已从“新建 Deck”进入“修改 Deck”微调阶段/);
   assert.match(
     await (await import('node:fs/promises')).readFile(published.snapshot.generation.publishedDeck, 'utf8'),
     /创建页实时修改已经生效/,

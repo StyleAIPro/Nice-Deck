@@ -21,6 +21,7 @@ edit-bundle.py — 安全编辑「独立版」单文件 deck 的工具函数。
 """
 import argparse, json, base64, gzip, zlib, uuid, re, os, tempfile
 from os import replace as atomic_replace
+from pathlib import Path
 
 # ---------------- 读写 ----------------
 def load(path):
@@ -95,6 +96,14 @@ def dump_template(s):
 
 def set_template(lines, s):
     lines[_tpl_idx(lines)] = dump_template(s)
+    # 更新已知外层错误栏；自定义外壳不按猜测替换。资源与页面正文保持不变。
+    marker = "// Error sink persists across replaceWith since it's on window, not the DOM."
+    start = next((i for i, line in enumerate(lines) if line.strip() == marker), None)
+    if start is not None:
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].strip() == '}, true);'), None)
+        if end is not None:
+            sink = Path(__file__).resolve().parent / 'runtime' / 'bundle-error-sink.js'
+            lines[start:end + 1] = sink.read_text(encoding='utf-8').splitlines()
 
 def get_manifest(lines):
     return json.loads(lines[_man_idx(lines)].strip())

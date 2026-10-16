@@ -1908,7 +1908,8 @@ export async function startAppServer({
           });
         }
         const command = await readJson(request);
-        const receipt = await requestCreationWorkspace.dispatch(command);
+        // 调度方式由服务端鉴权结果决定，不接受命令 payload 自报调用来源。
+        const receipt = await requestCreationWorkspace.dispatch(command, { agentInitiated:agentAuthorized });
         sendJson(response, 200, receipt);
         return;
       }

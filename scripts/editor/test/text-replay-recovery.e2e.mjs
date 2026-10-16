@@ -2,6 +2,55 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { startFixtureServer, openEditor } from './test-helpers.mjs';
 
+test('原生删空富文本后再次编辑、撤销重做和固化均保持一致', async t => {
+  const app = await startFixtureServer({
+    bundle:true,
+    fixtureTransform:html => html.replace('卡片 A', '<span>保留</span><b>删除</b><i>后文</i>'),
+  });
+  t.after(() => app.close());
+  const { browser, page } = await openEditor(app);
+  t.after(() => browser.close());
+  page.setDefaultTimeout(8_000);
+  const card = page.frameLocator('#deck-frame').locator('.card').first();
+  await page.locator('#deck-frame').evaluate(frame => {
+    frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove();
+  });
+  await page.click('[data-mode="edit"]');
+  await card.dblclick();
+  await card.evaluate(element => {
+    const range = document.createRange();
+    range.selectNodeContents(element.querySelector('b'));
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.keyboard.press('Backspace');
+  await card.press('Control+Enter');
+  await page.waitForFunction(() => document.querySelector('[data-revision]')?.textContent === '1');
+  assert.equal(await card.textContent(), '保留后文');
+  for (let repeat = 0; repeat < 2; repeat += 1) {
+    await card.dblclick();
+    await card.press('Escape');
+    await page.waitForTimeout(120);
+    assert.doesNotMatch((await page.locator('[data-history-notice]').allTextContents()).join(' '),
+      /历史重放冲突|TARGET_AMBIGUOUS|TARGET_NOT_FOUND/);
+    assert.equal(await card.textContent(), '保留后文');
+  }
+  for (const [method, revision, text] of [['undo', 2, '保留删除后文'], ['redo', 3, '保留后文']]) {
+    await page.click(`[data-history-${method}]`);
+    await page.waitForFunction(rev => document.querySelector('[data-revision]')?.textContent === String(rev), revision);
+    assert.equal(await card.textContent(), text);
+  }
+  await page.click('[data-solidify]');
+  await page.click('[data-solidify-confirm]');
+  await page.waitForFunction(() => document.querySelector('[data-solidify]')?.dataset.unsolidified === 'false');
+  await page.reload();
+  await card.waitFor();
+  await page.waitForFunction(() => document.querySelector('#deck-frame')?.contentDocument
+    ?.querySelector('.card')?.textContent === '保留后文');
+  assert.equal(app.session.historyArchives.at(-1).entries.length, 1);
+});
+
 async function fixture(t) {
   const app = await startFixtureServer({
     fixtureTransform:html => html.replace('卡片 B', '<b data-editor-id="element-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">表格原文</b><p>页脚原文</p>'),

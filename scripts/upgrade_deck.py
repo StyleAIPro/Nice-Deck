@@ -454,11 +454,16 @@ def resolve_known_shell_conflicts(value):
 
 def merge_legacy_shell(original, latest, template_kind, content):
     score, commit, baseline = find_legacy_baseline(original, template_kind)
+    inputs = [("user", original), ("base", baseline), ("latest", latest)]
+    brand_pattern = r'<button\b[^>]*\bid="brandbtn"[^>]*>.*?</button>'
+    brands = [_profile_element(value, brand_pattern) for _, value in inputs]
+    if all(brands):
+        # 与 compose_latest 一致，保留用户拥有的导航入口；默认文案更新不构成公共壳冲突。
+        inputs = [(name, value.replace(brand, content["brand_button"], 1))
+                  for (name, value), brand in zip(inputs, brands)]
     with tempfile.TemporaryDirectory() as directory:
         paths = []
-        for name, value in (
-            ("user", original), ("base", baseline), ("latest", latest)
-        ):
+        for name, value in inputs:
             path = Path(directory) / name
             path.write_text(_merge_normalize(value), encoding="utf-8")
             paths.append(path)

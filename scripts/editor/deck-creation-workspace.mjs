@@ -56,6 +56,7 @@ export function buildCreationInitializationPrompt({ projectRoot, capabilityPath 
     '用 propose-outline / confirm-outline、propose-page-plan / confirm-page-plan 依次沉淀大纲与页面规划；用户在对话中的明确同意就是确认依据。',
     'pageTypeId 必须来自所选模板目录；封面 cover 排第一、目录 toc 排第二、感谢页 thanks 排最后，三者必须各有且只有一页。',
     '页面不会提供前三步的结构化编辑器或确认按钮。完成页面规划后，由你执行 set-output，再执行 start-generation。',
+    'start-generation / retry-generation 的 CLI 回执包含 continuation.instructions；按回执在当前轮继续制作，不等待或另发一条制作消息。已经开始的初稿先读取 status 并继续已有工作副本，不重复 start-generation。',
     'set-output payload 形如 {"output":{"fileName":"主题.html","templateId":"training|tech-share|work-report|qualification|project-review","includePlan":true,"trialPptx":false,"autoOpenEditor":true}}。独立 Deck 一出现，页面会自动显示 Deck 画布。',
     `当前 Draft capability 文件：${capabilityPath}。每次 creation CLI 命令均须加 --capability-file 参数；文件由服务维护，恢复后仍读取同一路径，不要读取、打印或复制其中凭据。`,
     `不要修改内置模板，也不要直接覆盖最终输出文件。独立 Deck 出现后，系统会给出 Editor 托管工作副本；结构制作只编辑该工作副本，并且必须通过 ${EDIT_BUNDLE}。`,
@@ -114,7 +115,7 @@ function fallbackMilestones(snapshot) {
   };
 }
 
-export function buildGenerationPrompt(snapshot, { template = null, capabilityPath = null } = {}) {
+export function buildGenerationPrompt(snapshot, { template = null, capabilityPath = null, currentTurn = false } = {}) {
   const managed = snapshot.managedDeck ?? null;
   const deckPath = managed?.workingDeckPath
     ?? snapshot.generation.stagingDeckPath ?? snapshot.generation.stagingDeck;
@@ -124,8 +125,12 @@ export function buildGenerationPrompt(snapshot, { template = null, capabilityPat
   const pagePlanContractPath = snapshot.generation.stagingPagePlanContractPath
     ?? snapshot.generation.stagingPagePlanContract;
   const instructions = [
-    '页面规划已经由用户确认，现在开始制作初版 Deck。',
-    ...buildSkillContractInstructions({ skillRoot:PROJECT_DIR }),
+    currentTurn
+      ? '初版工作副本已准备好，请在当前轮继续制作；本回执不会追加下一轮任务。'
+      : '页面规划已经由用户确认，现在开始制作初版 Deck。',
+    ...(currentTurn
+      ? ['沿用当前会话已加载的 AICO-PPT 单一质量契约；以下为本次工作副本与页面规划的执行信息。缺失的规范按需读取，质量要求不变。']
+      : buildSkillContractInstructions({ skillRoot:PROJECT_DIR })),
     ...buildTemplatePlanInstructions({
       template, pagePlan:snapshot.pagePlan, pagePlanContractPath,
     }),
@@ -382,7 +387,7 @@ export class DeckCreationWorkspace {
     await managed?.close?.();
   }
 
-  async #prepare(command) {
+  async #prepare(command, { agentInitiated }) {
     let receipt = await this.store.dispatch(command);
     try {
       await this.#closeManagedDeck();
@@ -391,13 +396,27 @@ export class DeckCreationWorkspace {
       const managed = await this.#ensureManagedDeck();
       const view = this.snapshot();
       const template = this.catalog?.resolve?.(view.output?.templateId);
-      const prompt = buildGenerationPrompt(view, { template, capabilityPath:this.capabilityPath });
+      const prompt = buildGenerationPrompt(view, {
+        template, capabilityPath:this.capabilityPath, currentTurn:agentInitiated,
+      });
       await this.store.updateGeneration({
         agentTask:managed
           ? '通过 Editor Managed Workspace 制作初版 Deck'
           : '在 staging Deck 制作初版 Deck',
       }, 'creation-generation-progress');
       await managed?.waitUntilReady?.({ timeoutMs:20_000 });
+      // capability 调用来自正在执行的 Agent，后续步骤必须随工具回执交还它。
+      // 再投递到会话队列会延迟到当前轮发布结束后，形成过期的第二次制作任务。
+      if (agentInitiated) {
+        return {
+          ...receipt,
+          snapshot:this.snapshot(),
+          continuation:{
+            mode:'current-turn', draftId:view.draftId,
+            runId:view.generation.runId, instructions:prompt,
+          },
+        };
+      }
       if (this.terminal?.snapshot?.().state === 'running') {
         try {
           await this.terminal.waitUntilReady?.({ timeoutMs:10_000 });
@@ -445,7 +464,7 @@ export class DeckCreationWorkspace {
     }
   }
 
-  async dispatch(command) {
+  async dispatch(command, { agentInitiated = false } = {}) {
     if (this.closed) throw Object.assign(new Error('Deck 创建工作区已关闭'), { code:'SERVICE_CLOSED', statusCode:503 });
     const current = this.snapshot();
     const selectedTemplateId = current.brief?.recommendedTemplateId;
@@ -468,7 +487,7 @@ export class DeckCreationWorkspace {
       this.catalog.validatePagePlan(current.output?.templateId, current.pagePlan);
     }
     if (command?.type === 'start-generation' || command?.type === 'retry-generation') {
-      return this.#prepare(command);
+      return this.#prepare(command, { agentInitiated });
     }
     if (command?.type === 'generation-ready') return this.#verifyAndPublish(command);
     if (command?.type === 'cancel-generation') {

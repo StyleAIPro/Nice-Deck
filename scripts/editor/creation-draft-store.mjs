@@ -358,6 +358,10 @@ export class CreationDraftStore {
       draft.output = normalizeOutput(command.output);
       draft.generation = null;
     } else if (command.type === 'start-generation') {
+      if (draft.generation) {
+        throw creationError('GENERATION_ALREADY_STARTED', 409,
+          '初稿已经开始，请读取 status 并继续已有工作副本；需要重新制作时使用 retry-generation');
+      }
       if (draft.pagePlanStatus !== 'confirmed' || draft.pagePlanConfirmedRevision === null || !draft.output) {
         throw creationError('CREATION_GATE_UNMET', 409, '请先确认页面规划和输出设置');
       }

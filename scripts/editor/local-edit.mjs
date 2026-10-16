@@ -2,6 +2,7 @@
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {pythonUtf8SpawnOptions} from './python-utf8.mjs';
+import {LOCAL_IDENTITY_RECOVERY} from './local-edit-guidance.mjs';
 export const LOCAL_EDIT_KINDS=['setShape','replaceFragment','insertFragment','deleteElement','duplicateElement','replaceImage'];
 function runLocalEdit(bytes,payload,{pythonExecutable,signal}={}) {
   return new Promise((resolve,reject)=>{
@@ -18,7 +19,14 @@ function runLocalEdit(bytes,payload,{pythonExecutable,signal}={}) {
     child.once('close',code=>{
       clearTimeout(timer);signal?.removeEventListener('abort',abort);
       if(signal?.aborted)return reject(signal.reason);
-      if(code!==0)return reject(Object.assign(new Error(stderr?`局部修改准备失败：${stderr}`:'局部修改准备失败或超时'),{code:'LOCAL_EDIT_REJECTED',statusCode:409}));
+      if(code!==0){
+        let diagnostic;
+        try{diagnostic=JSON.parse(Buffer.concat(chunks).toString());}catch{}
+        if(diagnostic?.code==='LOCAL_EDIT_IDENTITY_MISMATCH')return reject(Object.assign(new Error(diagnostic.message),{
+          code:diagnostic.code,statusCode:409,identity:diagnostic.identity,recovery:LOCAL_IDENTITY_RECOVERY,
+        }));
+        return reject(Object.assign(new Error(stderr?`局部修改准备失败：${stderr.trim()}`:'局部修改准备失败或超时'),{code:'LOCAL_EDIT_REJECTED',statusCode:409}));
+      }
       try{resolve(JSON.parse(Buffer.concat(chunks).toString()));}catch(error){reject(error);}
     });
     child.stdin.end(JSON.stringify({bytes:bytes.toString('base64'),...payload}));
@@ -26,7 +34,15 @@ function runLocalEdit(bytes,payload,{pythonExecutable,signal}={}) {
 }
 
 export async function prepareLocalEdit(bytes,operations,options) {
-  const result=await runLocalEdit(bytes,{operations,styles:options?.styles??{}},options);
+  let images={};
+  if(operations.some(op=>['insertFragment','replaceFragment','replaceImage'].includes(op.kind))){
+    const {sources}=await runLocalEdit(bytes,{mode:'resources',operations},options);
+    if(sources.length){
+      if(!options?.resolveImages)throw Object.assign(new Error('本地图片需要当前 Deck 的附件读取能力'),{code:'LOCAL_IMAGE_UNAVAILABLE',statusCode:409});
+      images=await options.resolveImages(sources);
+    }
+  }
+  const result=await runLocalEdit(bytes,{operations,styles:options?.styles??{},images},options);
   return Buffer.from(result.bytes,'base64');
 }
 export function inspectLocalSource(bytes,target,options) {

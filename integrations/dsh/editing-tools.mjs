@@ -2,6 +2,7 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {editingRequestAnchor} from './editing-request-context.mjs';
 import {LOCAL_EDIT_KINDS} from '../../scripts/editor/local-edit.mjs';
+import {LOCAL_FRAGMENT_GUIDANCE} from '../../scripts/editor/local-edit-guidance.mjs';
 import {readWorkspaceCapability} from '../../scripts/editor/workspace-capability.mjs';
 
 export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
@@ -10,13 +11,13 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
   endpoint.searchParams.set('token',new URL(appUrl).searchParams.get('token'));
   ctx.tools.register({
     name:'aico_ppt',
-    description:'操作当前会话关联的 PPT。任务列表用 tasks；用户明确要求删除任务时用 delete_task(taskId,expectedRevision,cancelActiveBatch:true)，只删除反馈记录不删除页面；取消批次等待用 cancel_batch。先 inspect 读取 taskId 或 pageKey/query 的目标、父容器和当前截图，再 edit 原样使用目标提交。普通编辑无需读取完整 Skill、源码或协议，不要额外改版式。edit 返回提交结果及同版本截图；已提交但检查未完成时用 view/result，禁止重交。setText payload={text}; setStyle={property,value}; translate={x,y}; resize={width,height} 或 {scale}; hide/show={}; hide 是隐藏、不补位。局部形状、模块、图片优先 structure：operations=[{target,kind,payload}]，kind=setShape(shape:triangle|rectangle|ellipse|diamond,stroke,fill,strokeWidth)、replaceFragment(html,保留原 data-editor-id)、insertFragment(html,不指定新身份)、deleteElement、duplicateElement、replaceImage(src)。structure 自动事务、完整历史验证并返回结果图，不写临时脚本、不额外 verify。批量页目录用 catalog；默认只读目标区域，需更多候选用 limit/offset 或 query。整页增删排序与共享脚本仍走源码事务。',
+    description:'操作当前会话关联的 PPT。任务列表用 tasks；用户明确要求删除任务时用 delete_task(taskId,expectedRevision,cancelActiveBatch:true)，只删除反馈记录不删除页面；取消批次等待用 cancel_batch。先 inspect 读取 taskId 或 pageKey/query 的目标、父容器和当前截图，再 edit 原样使用目标提交。普通编辑无需读取完整 Skill、源码或协议，不要额外改版式。edit 返回提交结果及同版本截图；已提交但检查未完成时用 view/result，禁止重交。setText payload={text}; setStyle={property,value}; translate={x,y}; resize={width,height} 或 {scale}; hide/show={}; hide 是隐藏、不补位。局部形状、模块、图片优先 structure：operations=[{target,kind,payload}]，kind=setShape(shape:triangle|rectangle|ellipse|diamond,stroke,fill,strokeWidth)、replaceFragment(html)、insertFragment(html,不指定新身份)、deleteElement、duplicateElement、replaceImage(attachmentPath 或 src)。structure 自动事务、完整历史验证并返回结果图，不写临时脚本、不额外 verify。批量页目录用 catalog；默认只读目标区域，需更多候选用 limit/offset 或 query。整页增删排序与共享脚本仍走源码事务。'+LOCAL_FRAGMENT_GUIDANCE,
     parameters:{type:'object',additionalProperties:false,properties:{
       operation:{type:'string',enum:['inspect','edit','structure','view','catalog','result','verify','tasks','delete_task','cancel_batch']},
       taskId:{type:'string',description:'区域反馈任务 ID，不是 workId 或会话 ID。左侧对原任务的补充仍传原 taskId；独立新修改不传。'},
       taskRelation:{type:'string',enum:['supplement','new'],description:'由 Agent 根据用户意图判断。supplement 需原 taskId；new 不传 taskId，不完成已有任务。有未完成标注时必须明确选择，歧义先澄清。'},pageKey:{type:'string'},query:{type:'string'},
       workId:{type:'string',description:'写操作必须原样携带 inspect 返回的工作项身份，避免会话切换后修改另一份文档。'},
-      detail:{type:'string',enum:['source'],description:'仅局部 HTML 替换前按需读取指定 target 的原片段，保留身份，不读全文件。'},target:{type:'object'},
+      detail:{type:'string',enum:['source'],description:'仅局部 HTML 替换前按需读取指定 target 的原片段，保留目标及所有子元素编号，不读全文件。'},target:{type:'object'},
       limit:{type:'integer',minimum:1,maximum:32},offset:{type:'integer',minimum:0},
       operations:{type:'array',items:{type:'object',properties:{target:{type:'object'},kind:{type:'string',enum:LOCAL_EDIT_KINDS},payload:{type:'object'}},required:['target','kind','payload']}},
       expectedRevision:{type:'integer',minimum:0},commandId:{type:'string'},cancelActiveBatch:{type:'boolean'},
@@ -34,6 +35,11 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
         body:JSON.stringify({sessionId:exec.agent?.session.id}),signal:exec.signal});
       if(!linked.ok)throw new Error('无法取得当前 PPT 工作区');
       const context=await linked.json();
+      if(context.status==='creating')return {
+        status:'creating',code:'DECK_NOT_CREATED',committed:false,workId:context.workId,
+        message:'创建草稿工作区可用，Deck 尚未生成，当前不能执行页面编辑操作。',
+        recovery:'继续当前会话的需求、大纲和页面规划，通过当前创建上下文的 creation CLI 推进；无需重新打开 Editor。',
+      };
       if(context.status!=='ready')throw new Error('请先打开此会话关联的 PPT Editor');
       if(args.taskId&&args.taskId===context.workId)return {
         status:'invalid-target',code:'WORK_ID_NOT_TASK_ID',
@@ -125,8 +131,11 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
         return {committed:rejected?false:error.committed??null,
           commitStatus:rejected?'rejected':error.committed===true?'committed':'unknown',
           commandId,error:error.code??'TRANSPORT_ERROR',message:error.message,
+          ...(error.stage?{stage:error.stage}:{}),
+          ...(error.code==='LOCAL_EDIT_IDENTITY_MISMATCH'&&error.identity?{identity:error.identity}:{}),
+          ...(error.code==='RESOURCE_LOAD_FAILED'&&error.resources?{resources:error.resources}:{}),
           recovery:rejected
-            ? '本次明确未提交，无需 result 查询。按错误核对目标任务或 Deck 状态，再 inspect 获取有效目标后决定是否编辑；无关框选和任务增删不要求暂停。'
+            ? error.recovery??'本次明确未提交，无需 result 查询。按错误核对目标任务或 Deck 状态，再 inspect 获取有效目标后决定是否编辑；无关框选和任务增删不要求暂停。'
             : '用 result 查询同一 commandId；不要直接重复提交或改用新版本'};
       }
       const affectedPages=[...new Set(inputActions.map(a=>a.target.pageKey))];

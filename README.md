@@ -1,8 +1,8 @@
 # AICO-PPT
 
-AICO-PPT 提供独立 Skill 和原装 DSH Desktop 的可视化演示插件，共用根目录 `SKILL.md`。**beta0.1 已发布**，包内版本 `0.1.26`，Windows x64 一个完整安装包，包含私有 Python 与浏览器。
+AICO-PPT 提供独立 Skill 和原装 DSH Desktop 的可视化演示插件，共用根目录 `SKILL.md`。**beta0.2**，包内版本 `0.1.37`，Windows x64 一个完整安装包，包含私有 Python 与浏览器。
 
-当前源码版本为 `0.1.30`，本地 Windows 完整包增加配合 Harness dev.62 的重启检查与运行版本报告，修复无关标注增删改导致 Agent 编辑误报版本冲突，并保留此前局部编辑、截图复用与跨页撤销／重做修复；安装命令见[安装指南](INSTALL.md#本地优化包0130)。官网 Beta 包仍为此前发布版本。
+当前源码版本为 `0.1.37`，修复编辑模式删空富文本片段后再次编辑误报历史重放冲突的问题；保留真实内容冲突检查，撤销、重做与固化共用原有权威历史。包含 `0.1.36` 的图片附件内嵌和此前修复；安装命令见[安装指南](INSTALL.md)。完整变更与验证范围见[beta0.2 发行说明](docs/release-beta0.2.md)。
 
 当前固定原装社区版 Desktop 2.0.13 + DSH 0.1.5-rc.2，先安装 AICO-Harness，再安装 PPT。安装步骤和完整性核验见[安装指南](INSTALL.md)与[官网安装页](https://openx.huawei.com/project/7665/AICO-Plugin-Web_master/install.html)。公开 Beta 不代表最终包联合验收已经完成，macOS 桌面插件暂缓。
 

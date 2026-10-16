@@ -921,6 +921,18 @@ class WindowsPersistentHelper:
         _assert_directory(directory)
         return {"safe": True}
 
+    def read_attachment(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"taskId", "file"}:
+            raise SidecarIOError("read-attachment payload 格式无效")
+        self.assert_bound({})
+        task_id = _require_uuid(payload["taskId"], "taskId")
+        item = self._validate_attachment_files(task_id, [payload["file"]])[0]
+        directory = _child_directory(self.attachments, task_id)
+        contents = _read_file(directory, item["name"], maximum=item["size"])
+        if len(contents) != item["size"]:
+            raise SidecarIOError("附件大小与登记信息不一致")
+        return {"bytes": base64.b64encode(contents).decode("ascii")}
+
     def publish_attachments(self, payload):
         if not isinstance(payload, dict) or set(payload) != {"uploadId", "taskId", "files"}:
             raise SidecarIOError("publish-attachments payload 无效")
@@ -1160,6 +1172,7 @@ class WindowsPersistentHelper:
             "discard-attachment-upload": self.discard_attachment_upload,
             "delete-task-attachments": self.delete_task_attachments,
             "verify-task-attachments": self.verify_task_attachments,
+            "read-attachment": self.read_attachment,
         }
         command = request.get("command") if isinstance(request, dict) else None
         if command == "close":

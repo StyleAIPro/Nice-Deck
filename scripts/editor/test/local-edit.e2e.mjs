@@ -1,13 +1,63 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {readFile,mkdtemp,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 import {startFixtureServer,openEditor} from './test-helpers.mjs';
+import {installEditingTools} from '../../../integrations/dsh/editing-tools.mjs';
+import {writeWorkspaceCapability} from '../workspace-capability.mjs';
 
 const post=async(app,path,body)=>{
  const response=await fetch(`${app.url}${path}?token=${app.token}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
  return {status:response.status,body:await response.json()};
 };
 const session=app=>fetch(`${app.url}/api/session?token=${app.token}`).then(r=>r.json());
+
+test('工具的子元素编号拒绝明确未提交，修复后能继续提交和撤销重做',async t=>{
+ const app=await startFixtureServer({bundle:true,fixtureTransform:html=>html.replace('卡片 A','<b>卡片 A</b>')});
+ t.after(()=>app.close());const {browser,page}=await openEditor(app);t.after(()=>browser.close());
+ const root=await mkdtemp(join(tmpdir(),'aico-identity-recovery-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const capabilityPath=await writeWorkspaceCapability(root,{url:app.url,token:app.token});
+ let tool;
+ installEditingTools({tools:{register:value=>{tool=value;}},attachments:{saveImage:async()=>({id:'test-image'})}},app.url,{
+  request:async(url,options)=>new URL(url).pathname.includes('editing-context')
+   ? {ok:true,json:async()=>({status:'ready',workId:'work',capabilityPath})} : fetch(url,options),
+ });
+ const exec={agent:{session:{id:'test'}},signal:new AbortController().signal};
+ const target=await page.locator('#deck-frame').evaluate(frame=>frame.contentWindow.HuaweiDeckPatchRuntime.makeLocator(frame.contentDocument.querySelector('.card')));
+ const inspect=()=>tool.execute({operation:'inspect',pageKey:target.pageKey,detail:'source',target},exec);
+ const original=await inspect();
+ assert.equal(original.sourceIdentity.requiredCount,2);
+ assert.equal(original.sourceIdentity.rootEditorId,target.editorId);
+ const before=await readFile(app.workingDeckPath);
+ const replace=html=>tool.execute({operation:'structure',workId:'work',expectedRevision:original.revision,
+  operations:[{target,kind:'replaceFragment',payload:{html}}]},exec);
+ // 模拟真实请求：只留下容器编号，重写时丢掉子元素编号。
+ const broken=original.sourceHtml.replace(/ data-editor-id="([^"]+)"/g,(attr,id)=>id===target.editorId?attr:'');
+ const rejected=await replace(broken);
+ assert.equal(rejected.committed,false,JSON.stringify(rejected));
+ assert.equal(rejected.commitStatus,'rejected');
+ assert.equal(rejected.error,'LOCAL_EDIT_IDENTITY_MISMATCH');
+ assert.equal(rejected.stage,'prepare');
+ assert.equal(rejected.identity.missingCount,1);
+ assert.match(rejected.recovery,/inspect/);assert.match(rejected.recovery,/无需 result/);
+ assert.deepEqual(await readFile(app.workingDeckPath),before);
+ const state=await session(app);assert.equal(state.revision,original.revision);
+ assert.equal(state.groups.length,0);assert.equal(state.sourceEdit,undefined);
+ const fresh=await inspect();
+ const result=await replace(fresh.sourceHtml.replace('卡片 A','修复后的卡片'));
+ assert.equal(result.committed,true,JSON.stringify(result));
+ await page.waitForFunction(()=>document.querySelector('#deck-frame')?.contentDocument?.querySelector('.card')?.textContent==='修复后的卡片');
+ for(const [method,text] of [['undo','卡片 A'],['redo','修复后的卡片']]){
+  const response=await post(app,`/api/groups/${result.groupId}/${method}`,{expectedRevision:(await session(app)).revision});
+  assert.equal(response.status,200,JSON.stringify(response.body));
+  await page.waitForFunction(text=>document.querySelector('#deck-frame')?.contentDocument?.querySelector('.card')?.textContent===text,text);
+ }
+ const next=await tool.execute({operation:'structure',workId:'work',expectedRevision:(await session(app)).revision,
+  operations:[{target,kind:'setShape',payload:{shape:'ellipse'}}]},exec);
+ assert.equal(next.committed,true,JSON.stringify(next));
+ assert.equal((await session(app)).groups.length,2);
+});
 const id='12345678-1234-4123-8123-123456789abc';
 async function setup(t){
  const app=await startFixtureServer({bundle:true});t.after(()=>app.close());
@@ -60,6 +110,7 @@ test('局部片段按目标读取；验证失败恢复工作副本并允许后�
  reject=true;
  const failed=await post(app,'/api/local-edits',{expectedRevision:0,commandId:id,operations});
  assert.equal(failed.status,500);assert.deepEqual(await readFile(app.workingDeckPath),before);
+ assert.notEqual(failed.body.committed,false,'事务建立后的异常不冒充准备阶段的确定拒绝');
  const state=await session(app);assert.equal(state.groups.length,0);assert.equal(state.sourceEdit,undefined);
  reject=false;
  const retry=await post(app,'/api/local-edits',{expectedRevision:state.revision,commandId:id,operations});

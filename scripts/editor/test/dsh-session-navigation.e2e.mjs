@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { renderEditingContext } from '../../../integrations/dsh/editing-context.mjs';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { copyFile, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
@@ -185,6 +188,20 @@ test('DSH 恢复旧空占位后，打开编辑器与项目会话切换可靠往�
   await page.waitForFunction(() => document.querySelector('#workbench')?.contentWindow !== null);
   await creationSelect.locator('option[value^="session-"]').waitFor({ state:'attached' });
   const creationSessionId = await creationSelect.inputValue();
+  const contextFor = async sessionId => {
+    const url = new URL('/api/dsh-work-items/editing-context', app.url);
+    url.searchParams.set('token', app.token);
+    const response = await fetch(url, {method:'POST', headers:{origin:url.origin,'content-type':'application/json'},body:JSON.stringify({sessionId})});
+    assert.equal(response.status,200);
+    return response.json();
+  };
+  const creationContext = await contextFor(creationSessionId);
+  assert.equal(creationContext.status,'creating','真实 Creation Draft 打开后无需先生成 Editor');
+  assert.match(renderEditingContext(creationContext),/创建草稿工作区可用/);
+  assert.doesNotMatch(renderEditingContext(creationContext),/工作区当前不可用/);
+  const status = await promisify(execFile)(process.execPath,[resolve('scripts/editor/cli.mjs'),'creation','status','--capability-file',creationContext.creation.capabilityPath]);
+  assert.match(status.stdout,/brief/,'投影的创建 capability 必须能够通过真实 CLI 读取草稿');
+
   assert.equal(
     await page.evaluate(sessionId => (
       window.sentPrompts().filter(row => row.sessionId === sessionId).length
@@ -222,6 +239,9 @@ test('DSH 恢复旧空占位后，打开编辑器与项目会话切换可靠往�
   );
   const editingSessionId = await editingSelect.inputValue();
   assert.notEqual(editingSessionId, creationSessionId);
+  assert.equal((await contextFor(editingSessionId)).status,'ready');
+  assert.equal((await contextFor(creationSessionId)).status,'creating','前台切到其他 Deck 不得改变创建会话的上下文');
+
   assert.match(
     (await editingSelect.locator('option:checked').textContent()) ?? '',
     /^修改 Deck：会话切换测试\.html/u,

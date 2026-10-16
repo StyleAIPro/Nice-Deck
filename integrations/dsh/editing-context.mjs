@@ -1,11 +1,22 @@
 import {editingRequestAnchor} from './editing-request-context.mjs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import {LOCAL_FRAGMENT_GUIDANCE} from '../../scripts/editor/local-edit-guidance.mjs';
 
 /** 最新连接信息覆盖历史端口与旧的“等待区域任务”提示，不改变用户意图。 */
 export function renderEditingContext(context) {
   if (context.status === 'unlinked') return '';
-  const identity = `当前会话明确关联的 AICO-PPT 工作项：${JSON.stringify(context.workId)}；源文件：${JSON.stringify(context.deckPath)}。`;
+  const identity = `当前会话明确关联的 AICO-PPT 工作项：${JSON.stringify(context.workId)}${context.deckPath ? `；源文件：${JSON.stringify(context.deckPath)}` : ''}。`;
+  if (context.status === 'creating') {
+    const cli = fileURLToPath(new URL('../../scripts/editor/cli.mjs', import.meta.url));
+    return [
+      identity,
+      `创建草稿工作区可用；当前阶段：${JSON.stringify(context.creation.phase)}；revision：${context.creation.revision}。尚未生成 Deck，因此没有 Deck Editor 是正常状态。`,
+      '继续在当前会话中确认 PPT 主题、听众、需求、大纲和页面规划；遵循已有创建流程及用户确认，不要求用户重新打开 Editor。',
+      `当前创建 CLI：node ${JSON.stringify(cli)} creation status --capability-file ${JSON.stringify(context.creation.capabilityPath)}。其他 creation 命令也使用这份 capability 文件，不读取、打印或复制其中凭据。`,
+      '尚未生成 Deck 时不要调用 aico_ppt 编辑工具、不另起工作区、不直改输出文件；Deck 生成后按后续上下文使用托管 Editor。',
+    ].join('\n');
+  }
   if (context.status !== 'ready') return `${identity}\n对应 Editor 工作区当前不可用。不要使用历史 capability，不另起 headless workspace，不直改源文件；请提示用户打开此会话关联的右侧 Editor 后重试。`;
   const cli = fileURLToPath(new URL('../../scripts/editor/cli.mjs', import.meta.url));
   const view=Object.hasOwn(context,'requestView')?context.requestView:context.view;
@@ -17,6 +28,7 @@ export function renderEditingContext(context) {
     `未完成反馈任务：${JSON.stringify(context.feedbackTasks ?? [])}。`,
     `托管工作副本：${JSON.stringify(context.workingDeckPath)}。CLI：${JSON.stringify(cli)} --capability-file ${JSON.stringify(context.capabilityPath)}。`,
     ...(context.includeInstructions===false?[]:[
+      LOCAL_FRAGMENT_GUIDANCE,
       '普通查看 inspect 不传 taskId；workId 不是 taskId。写入携带 inspect 的 workId、expectedRevision 和原 target。补充原任务传 taskRelation:"supplement" 与 taskId；独立修改传 taskRelation:"new"，不结束旧任务，歧义才澄清。',
       '文字样式位置用 edit；形状、图片、模块增删和局部 HTML 用 structure，自动事务、验证、结果图。先读目标区域，跨页任务才读 catalog 和相关页；不读取完整 Skill，不写临时脚本。成功回执无需重复 verify/task；图片待检查用 view，传输不明用 result 查同一 commandId，不重复写入。',
       '只有整页增删排序或共享 CSS/脚本修改才读取 references/editing-guide.md，并走 begin-source-task / begin-source-edit → edit-bundle.py → commit-source-edit；失败 cancel-source-edit。普通问答、讨论和分析只读。不得要求退出 Editor、关闭租约或直改真实 Deck；只有固化发布真实文件。',
