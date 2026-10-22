@@ -5,6 +5,7 @@ import hashlib
 import gzip
 import io
 import json
+import re
 from pathlib import Path
 import tarfile
 import tempfile
@@ -62,6 +63,13 @@ def main():
         package = json.load(source.extractfile(manifest))
         if package.get('name') != 'aico-ppt-skill':
             parser.error('Base package is not aico-ppt-skill')
+        try:
+            version_module = source.extractfile('package/scripts/editor/runtime-version.mjs').read().decode('utf-8')
+        except (KeyError, AttributeError, UnicodeError):
+            parser.error('基础插件包缺少固定运行版本；请先执行 npm run prepack')
+        expected = re.escape(json.dumps(package['version'], ensure_ascii=False))
+        if not re.fullmatch(r'(?:\s*//[^\n]*\n)*\s*export const runtimeVersion = ' + expected + r';\s*', version_module):
+            parser.error('运行版本未同步或仍读取动态清单；请执行 npm run prepack')
         output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=output.parent, suffix='.tgz', delete=False) as temp:
             temporary = Path(temp.name)

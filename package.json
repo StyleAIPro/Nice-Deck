@@ -1,7 +1,7 @@
 {
   "name": "aico-ppt-skill",
-  "version": "0.1.37",
-  "description": "AICO-PPT Agent Skill 与 DeepSeek Harness 可视化 Editor 插件",
+  "version": "0.1.42",
+  "description": "AICO-PPT 可视化编辑插件。桌面使用需先安装并启用兼容的 AICO-Harness；卸载顺序：先 PPT，后 Harness。",
   "private": true,
   "type": "module",
   "main": "integrations/dsh/index.mjs",
@@ -51,7 +51,8 @@
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-workbench"
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "aico-harness"
       ],
       "platform": "web"
     }
@@ -61,7 +62,8 @@
     "test:editor:unit": "node scripts/run-editor-tests.mjs unit",
     "test:editor:e2e": "node scripts/run-editor-tests.mjs e2e",
     "test:editor:python": "node scripts/run-editor-tests.mjs python",
-    "test:editor": "node scripts/run-editor-tests.mjs all"
+    "test:editor": "node scripts/run-editor-tests.mjs all",
+    "prepack": "node scripts/sync-runtime-version.mjs"
   },
   "dependencies": {
     "busboy": "1.6.0",

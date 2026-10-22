@@ -1,5 +1,18 @@
 # AICO-PPT 安装指南
 
+## 本地 0.1.38：页码栏连续切页
+
+点击左侧页码后，用 ↑ / ↓ 或在页码栏滚动滚轮切换上一页／下一页。支持展开和收起模式，首尾停留不循环；点击其他区域后，恢复原来的输入与滚动行为。继承 beta0.2 的全部修复。
+
+仅生成本地包，不自动安装或重启。由用户在 DSH Terminal 执行：
+
+```powershell
+dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\AICO-PPT\dist\aico-ppt-skill-0.1.38-win32-x64.tgz" --ignore-scripts --config.auto-install-peers=false
+```
+
+安装后保存工作、退出托盘并重启 Desktop 生效。官网 beta0.2 包仍为 `0.1.37`。
+
+
 ## 普通用户：beta0.2
 
 更新：2026-10-16。固定原装社区版 DSH Desktop 2.0.13 + DSH 0.1.5-rc.2。当前只发布 Windows x64 桌面插件，macOS 暂缓。

@@ -4,6 +4,7 @@ import {editingRequestAnchor} from './editing-request-context.mjs';
 import {LOCAL_EDIT_KINDS} from '../../scripts/editor/local-edit.mjs';
 import {LOCAL_FRAGMENT_GUIDANCE} from '../../scripts/editor/local-edit-guidance.mjs';
 import {readWorkspaceCapability} from '../../scripts/editor/workspace-capability.mjs';
+import {resolvePptRequest,withPptRequest} from './request-work-context.mjs';
 
 export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
   if(!ctx.tools?.register)return;
@@ -31,10 +32,13 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
     }},
     async execute(args,exec) {
       if(!args||!['inspect','edit','structure','view','catalog','result','verify','tasks','delete_task','cancel_batch'].includes(args.operation))throw new Error('无效的 PPT 操作');
+      const requestContext=await resolvePptRequest(ctx,exec.agent.session,{callId:exec.rootCallId??exec.callId});
       const linked=await request(endpoint,{method:'POST',headers:{'content-type':'application/json',origin:endpoint.origin},
-        body:JSON.stringify({sessionId:exec.agent?.session.id}),signal:exec.signal});
-      if(!linked.ok)throw new Error('无法取得当前 PPT 工作区');
-      const context=await linked.json();
+        body:JSON.stringify({sessionId:requestContext?.sessionId??exec.agent?.session.id,...(requestContext?{expectedWorkId:requestContext.reference.workId}:{})}),signal:exec.signal});
+      const response=await linked.json();
+      if(!linked.ok)throw Object.assign(new Error(response.message??'无法取得当前 PPT 工作区'),{code:response.code,statusCode:linked.status});
+      const context=withPptRequest(response,requestContext);
+      const execute=async()=>{
       if(context.status==='creating')return {
         status:'creating',code:'DECK_NOT_CREATED',committed:false,workId:context.workId,
         message:'创建草稿工作区可用，Deck 尚未生成，当前不能执行页面编辑操作。',
@@ -148,6 +152,10 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
           views:pictures.map(({imageRef,...metadata})=>metadata),remainingViewPages:affectedPages.slice(3),
           currentViewMatchesCommit:pictures.every(view=>view.revision===(committed.commandRevision??committed.revision))};
       }catch(error){return {...committed,commandId,workId:context.workId,affectedPages,visualStatus:'pending',visualError:error.message,recovery:'修改已经提交；使用 view 查看，勿重交修改'};}
+      };
+      const result=await execute();
+      return requestContext?.delegated?{...result,delegatedContext:{executionSessionId:requestContext.executionSessionId,
+        sourceSessionId:requestContext.sessionId,sourceRequestId:requestContext.requestId}}:result;
     },
   });
 }

@@ -173,6 +173,11 @@ function loopbackHttpOrigin(value) {
   }
 }
 
+/** 只认可原装 Desktop 的固定应用 Origin，以及原有本机 HTTP 宿主。 */
+function dshParentOrigin(value) {
+  return value === 'dsh-app://app' ? value : loopbackHttpOrigin(value);
+}
+
 function tokenMatches(actual, expected) {
   const left = Buffer.from(String(actual ?? ''));
   const right = Buffer.from(String(expected));
@@ -298,8 +303,8 @@ export async function startAppServer({
     throw new TypeError('embeddedMode 只支持 null 或 dsh');
   }
   if (embeddedMode === 'dsh' && embeddedParentOrigin !== null) {
-    try { embeddedParentOrigin = new URL(embeddedParentOrigin).origin; }
-    catch { throw new TypeError('embeddedParentOrigin 必须是有效 Origin'); }
+    embeddedParentOrigin = dshParentOrigin(embeddedParentOrigin);
+    if (!embeddedParentOrigin) throw new TypeError('embeddedParentOrigin 必须是原装桌面或本机 HTTP Origin');
   }
   if (!isAgentProviderId(agentProvider)) {
     throw new TypeError(`Agent provider 不受支持：${agentProvider}`);
@@ -941,10 +946,10 @@ export async function startAppServer({
     const dshBridgeOrigin = embeddedMode === 'dsh'
       && (
         (request.method === 'POST'
-          && ['/api/dsh-work-items/resolve-session', '/api/dsh-work-items/restore-session', '/api/dsh-work-items/complete-restore'].includes(requestUrl.pathname))
+          && ['/api/dsh-work-items/resolve-session', '/api/dsh-work-items/request-context', '/api/dsh-work-items/restore-session', '/api/dsh-work-items/complete-restore'].includes(requestUrl.pathname))
         || (request.method === 'GET' && requestUrl.pathname === '/api/work-history')
       )
-      ? loopbackHttpOrigin(request.headers.origin)
+      ? dshParentOrigin(request.headers.origin)
       : null;
     const requestCreationWorkspace = agentAuthorized
       ? capabilityRuntime.workspace : creationWorkspace;
@@ -976,7 +981,7 @@ export async function startAppServer({
           '',
         );
       const frameAncestors = embeddedMode === 'dsh'
-        ? "frame-ancestors http://127.0.0.1:* http://localhost:*"
+        ? "frame-ancestors http://127.0.0.1:* http://localhost:* dsh-app://app"
         : "frame-ancestors 'none'";
       response.writeHead(200, {
         'cache-control':'no-store',
@@ -988,7 +993,8 @@ export async function startAppServer({
           "form-action 'none'", frameAncestors,
         ].join('; '),
         'content-type':'text/html; charset=utf-8',
-        'set-cookie':`${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`,
+        // 原装 dsh-app 页面与本机 HTTP 属于不同站点；分区 Cookie 仅在当前顶层站点内携带能力令牌。
+        'set-cookie':`${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${embeddedMode === 'dsh' ? 'SameSite=None; Secure; Partitioned' : 'SameSite=Strict'}`,
         'x-content-type-options':'nosniff',
       });
       response.end(html);
@@ -1489,13 +1495,14 @@ export async function startAppServer({
         return;
       }
 
-      if (requestUrl.pathname === '/api/dsh-work-items/editing-context') {
+      if (['/api/dsh-work-items/editing-context','/api/dsh-work-items/request-context'].includes(requestUrl.pathname)) {
         if (embeddedMode !== 'dsh') throw Object.assign(new Error('当前不是 DSH 嵌入模式'), {
           code:'DSH_BRIDGE_UNAVAILABLE', statusCode:409,
         });
-        const { sessionId } = await readJson(request);
+        const referenceOnly=requestUrl.pathname.endsWith('/request-context');
+        const { sessionId,expectedWorkId } = await readJson(request);
         const result = await resolveEditingContext({
-          sessionId, workCatalog:activeWorkCatalog, findEditingRuntime,
+          sessionId,expectedWorkId,referenceOnly,workCatalog:activeWorkCatalog, findEditingRuntime,
           findCreationRuntime:workItem => creationRuntimes.get(creationRuntimeKey(workItem)),
         });
         sendJson(response, 200, result);

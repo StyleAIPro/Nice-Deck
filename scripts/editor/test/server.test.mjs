@@ -134,6 +134,7 @@ test('DSH Editor Core 不创建 Agent PTY，也不暴露 xterm 页面资源', as
       + `&editorToken=${encodeURIComponent(app.editorToken)}`,
   );
   assert.equal(editorResponse.status, 200);
+  assert.match(editorResponse.headers.get('set-cookie'), /HttpOnly; SameSite=None; Secure; Partitioned/);
   const html = await editorResponse.text();
   assert.doesNotMatch(html, /xterm\.(?:js|css)/u);
   assert.match(html, /DEV SHELL/u, 'DSH 复用同一页面模板，由运行模式隐藏开发标识');

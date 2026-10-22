@@ -5,7 +5,80 @@ window.__ModuleLoader__.load({
     var exports = module.exports;
     const React = require("react");
     const h = React.createElement;
-    const brand = globalThis.__AICO_PPT_BRAND__;
+
+    // 此提示独立于 Harness 服务，使用原装只读清单，不执行安装或启用。
+    function harnessVersionSupported(version) {
+      const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version || '');
+      if (!match) return null;
+      const [, major, minor, patch, pre] = match;
+      if (Number(major) !== 2) return false;
+      if (Number(minor) > 0 || Number(patch) > 0 || !pre) return true;
+      const minimum = ['dev', '75'], parts = pre.split('.');
+      for (let index = 0; index < Math.max(parts.length, minimum.length); index++) {
+        if (parts[index] === undefined) return false;
+        if (minimum[index] === undefined) return true;
+        if (parts[index] === minimum[index]) continue;
+        const a = parts[index], b = minimum[index], an = /^\d+$/.test(a), bn = /^\d+$/.test(b);
+        return an && bn ? Number(a) > Number(b) : an !== bn ? !an : a > b;
+      }
+      return true;
+    }
+    async function readHarnessDependency(ctx, signal) {
+      const manager = ctx.get?.('remote')?.pluginManager;
+      if (!manager?.listBundles) return { state: 'unknown' };
+      let timer;
+      try {
+        const answer = await Promise.race([
+          manager.listBundles(signal),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(Error('依赖状态读取超时')), 5000); }),
+        ]);
+        if (signal?.aborted) return { state: 'unknown' };
+        if (!answer?.ok || !Array.isArray(answer.value)) return { state: 'unknown' };
+        const row = answer.value.find(item => item.name === 'aico-harness');
+        if (!row || row.installed === false) return { state: 'missing' };
+        if (row.error) return { state: 'unavailable' };
+        const compatible = harnessVersionSupported(row.version);
+        if (compatible === false) return { state: 'incompatible', version: row.version };
+        if (row.enabled === false) return { state: 'disabled', version: row.version };
+        if (compatible === null) return { state: 'unknown' };
+        return { state: ['workbench', 'sessionStarts', 'aicoHarnessClient'].every(name => ctx.get(name)) ? 'ready' : 'unavailable', version: row.version };
+      } catch { return { state: 'unknown' }; }
+      finally { clearTimeout(timer); }
+    }
+    function HarnessDependencyNotice({ ctx, label }) {
+      const [status, setStatus] = React.useState({ state: 'checking' });
+      const [revision, setRevision] = React.useState(0);
+      React.useEffect(() => {
+        const controller = new AbortController();
+        let timer;
+        const refresh = async () => {
+          const value = await readHarnessDependency(ctx, controller.signal);
+          if (controller.signal.aborted) return;
+          setStatus(value);
+          timer = setTimeout(refresh, 5000);
+        };
+        void refresh();
+        return () => { controller.abort(); clearTimeout(timer); };
+      }, [ctx, revision]);
+      const messages = {
+        checking: '正在检查 AICO-Harness 依赖状态…',
+        missing: '未安装 AICO-Harness。请先在“插件 → 添加插件”中安装兼容的 Harness 包，再开启它的开关。',
+        disabled: 'AICO-Harness 已安装，但尚未启用。请在“插件”页开启 aico-harness 的开关。',
+        incompatible: 'AICO-Harness 版本不兼容。请安装与本业务插件配套的 Harness 版本（>=2.0.0-dev.75 且 <3.0.0）。',
+        unavailable: 'AICO-Harness 的运行服务尚未就绪。请检查“插件”页的启用状态和错误提示，按提示完整退出并重开桌面。',
+        unknown: '暂时无法确认 AICO-Harness 的安装状态。请在“插件”页核对是否安装、启用且版本兼容，然后刷新；不要重复安装。',
+        ready: 'AICO-Harness 已就绪。如业务入口仍未恢复，请保存工作并完整退出、重新打开桌面。',
+      };
+      return h('section', { 'data-aico-dependency': '', style: { padding: 24, lineHeight: 1.6 } },
+        h('h2', null, label + ' 依赖检查'),
+        h('p', { role: status.state === 'ready' || status.state === 'checking' ? 'status' : 'alert' }, messages[status.state]),
+        status.version && h('p', null, '已安装 Harness：' + status.version),
+        h('p', null, '依赖恢复前业务入口暂停，已有业务文件与历史记录保留。安装顺序：Harness → 启用 Harness → 业务插件。'),
+        h('p', null, '卸载时请先卸载所有 AICO 业务插件，再卸载 Harness；已停用但仍安装的业务插件也需要先卸载。官方管理器可能不会阻止直接卸载 Harness。'),
+        h('button', { type: 'button', onClick: () => setRevision(value => value + 1) }, '刷新依赖状态'));
+    }
+
+    let brand = globalThis.__AICO_PPT_BRAND__;
     let selectedAppUrl;
     const runtimeAppUrl = () => selectedAppUrl ?? brand?.appUrl;
     const optimisticSessionTitles = new Map();
@@ -137,11 +210,20 @@ window.__ModuleLoader__.load({
       };
     }
 
+    async function usingSession(ctx, sessionId, operation) {
+      if (typeof ctx.sessions.using === "function") {
+        return ctx.sessions.using(sessionId, { source:"controllerOperation" }, reference => operation(reference.binding));
+      }
+      const binding = ctx.sessions.binding(sessionId);
+      if (!binding) throw new Error(`DSH 会话不可用：${sessionId}`);
+      return operation(binding);
+    }
+
     async function ensureSessionTitle(ctx, sessionId, title) {
       title = requireBridgeString(title, "title");
       const row = ctx.sessions.list.getSnapshot().byId?.[sessionId];
       if (typeof row?.title === "string" && row.title && row.title !== sessionId) return;
-      const session = ctx.sessions.binding(sessionId)?.session;
+      return usingSession(ctx, sessionId, async ({ session }) => {
       if (!session || typeof session.rename !== "function") {
         throw new Error(`DSH 会话不可命名：${sessionId}`);
       }
@@ -150,6 +232,7 @@ window.__ModuleLoader__.load({
         const code = renamed?.error?.code ? `${renamed.error.code}: ` : "";
         throw new Error(`DSH 会话命名失败：${code}${renamed?.error?.message || sessionId}`);
       }
+      });
     }
 
     function scheduleSessionTitle(ctx, sessionId, title) {
@@ -191,12 +274,13 @@ window.__ModuleLoader__.load({
       if (typeof prompt !== "string" || prompt.length > 256 * 1024 || !prompt.trim()) {
         throw new Error("prompt 无效");
       }
-      const binding = ctx.sessions.binding(sessionId);
-      const conversation = binding?.ctx.get("conversation");
+      return usingSession(ctx, sessionId, binding => {
+      const conversation = binding.ctx.get("conversation");
       if (!conversation || typeof conversation.send !== "function") {
         throw new Error(`DSH 会话不可用：${sessionId}`);
       }
       return conversation.send(prompt);
+      });
     }
 
     async function restoreLinkedSession(ctx, sessionId) {
@@ -264,7 +348,22 @@ window.__ModuleLoader__.load({
           case "create-session": {
             const workspaceId = requireBridgeString(payload.workspaceId, "workspaceId");
             const sessionId = requireBridgeString(payload.sessionId, "sessionId");
-            const createdId = await ctx.sessions.create({ workspaceId, sessionId });
+            // 原装 create 只复用空白会话；恢复已发送消息的预留身份时必须读取原会话。
+            if (typeof ctx.sessions.refresh === "function") await ctx.sessions.refresh();
+            if (archivedSessionIds(ctx).has(sessionId)) {
+              throw Object.assign(new Error("预留会话已归档，请明确恢复后重试"), { code:"DSH_SESSION_ARCHIVED" });
+            }
+            const existing = ctx.sessions.list.getSnapshot().byId?.[sessionId];
+            if (existing) {
+              const workspace = ctx.workspaces.list.getSnapshot().items?.find(row => row.workspaceId === workspaceId);
+              if (!workspace?.sessionIds?.includes(sessionId)) {
+                throw Object.assign(new Error("预留会话不属于此项目工作区，不能重新创建或串用"), { code:"DSH_SESSION_WORKSPACE_MISMATCH" });
+              }
+            }
+            const createdId = existing ? sessionId : await ctx.sessions.create({ workspaceId, sessionId });
+            if (createdId !== sessionId) {
+              throw Object.assign(new Error("原装宿主返回了不同会话身份，项目关联尚未提交，请检查后恢复"), { code:"DSH_SESSION_ID_CHANGED", sessionId:createdId });
+            }
             if (payload.title !== undefined) {
               scheduleSessionTitle(ctx, createdId, payload.title);
             }
@@ -284,9 +383,10 @@ window.__ModuleLoader__.load({
             if (payload.title !== undefined) {
               scheduleSessionTitle(ctx, sessionId, payload.title);
             }
-            if (payload.workspaceId) await ctx.sessions.create({ sessionId, workspaceId:payload.workspaceId });
-            prepareSession(ctx, sessionId);
-            ctx.sessions.open(sessionId);
+            await usingSession(ctx, sessionId, async () => {
+              if (typeof ctx.sessions.using !== "function") prepareSession(ctx, sessionId);
+              await ctx.sessions.open(sessionId);
+            });
             return sessionSummary(ctx, sessionId) || { sessionId };
           }
           case "send-to-session": {
@@ -679,9 +779,45 @@ window.__ModuleLoader__.load({
       props.wide ? h("span", { className:"hwd-sidebar-label" }, "AICO-PPT") : null);
     }
 
-    const inject = ["slots", "sessions", "workspaces", "conversation", "workbench", "sessionStarts"];
+    const inject = ["remote", "remote.pluginManager", "slots", "sessions", "workspaces", "conversation", "uiSession", "uiWorkspace"];
 
     function apply(ctx) {
+      let stopped = false, notice;
+      const showNotice = () => {
+        if (stopped || ctx.fiber?.state === 5 || ctx.fiber?.uid === null || notice) return;
+        notice = ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section', id: 'aico-ppt-dependency', order: 54,
+          label: () => 'AICO-PPT（待恢复）',
+        }, () => h(HarnessDependencyNotice, { ctx, label: 'AICO-PPT' })));
+      };
+      ctx.effect(() => () => { stopped = true; notice?.(); notice = undefined; }, 'aico-ppt: 释放依赖提示');
+      if (['workbench', 'sessionStarts', 'aicoHarnessClient'].some(name => !ctx.get(name))) showNotice();
+      return ctx.inject(['workbench', 'sessionStarts', 'aicoHarnessClient'], owner => {
+        const start = () => {
+          notice?.(); notice = undefined;
+          owner.effect(() => () => { if (['workbench', 'sessionStarts', 'aicoHarnessClient'].some(name => !ctx.get(name))) showNotice(); }, 'aico-ppt: 依赖缺失时显示恢复提示');
+          return initialize(owner);
+        };
+        // 未提供清单接口的宿主保留现有服务注入行为。
+        if (!ctx.get?.('remote')?.pluginManager?.listBundles) return start();
+        const lifetime = new AbortController();
+        owner.effect(() => () => lifetime.abort(), 'aico-ppt: 取消依赖检查');
+        return readHarnessDependency(ctx, lifetime.signal).then(dependency => {
+          if (lifetime.signal.aborted) return;
+          if (['missing', 'disabled', 'incompatible', 'unavailable'].includes(dependency.state)) { showNotice(); return; }
+          return start();
+        });
+      });
+    }
+    function initialize(ctx) {
+      const refresh = ctx.get?.('aicoHarnessClient')?.refreshBootstrap;
+      if (!refresh) return prepareAndMount(ctx);
+      const lifetime = new AbortController();
+      ctx.effect(() => () => lifetime.abort(), 'aico-ppt: cancel runtime bootstrap');
+      return refresh(lifetime.signal, '__AICO_PPT_BRAND__').then(() => { lifetime.signal.throwIfAborted(); return prepareAndMount(ctx); });
+    }
+    function prepareAndMount(ctx) {
+      brand = globalThis.__AICO_PPT_BRAND__;
       if (globalThis.__AICO_PPT_PREPARE__) {
         const controller = new AbortController();
         ctx.effect(() => () => controller.abort(new Error("AICO-PPT Client 已卸载")));
@@ -697,6 +833,18 @@ window.__ModuleLoader__.load({
 
     function mount(ctx) {
       ctx = ctx.get?.('aicoHarnessClient')?.bind(ctx) ?? ctx;
+      const captureLifetime=new AbortController();
+      ctx.effect(()=>()=>captureLifetime.abort(new Error('AICO-PPT 已卸载')),'aico-ppt: 取消工作项捕获');
+      ctx.conversation?.registerMessageContext?.('aico-ppt',async identity=>{
+        const endpoint=appCommandUrl('/api/dsh-work-items/request-context');
+        if(endpoint===null)return;
+        const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'text/plain;charset=UTF-8'},body:JSON.stringify({sessionId:identity.sessionId}),signal:AbortSignal.any([captureLifetime.signal,AbortSignal.timeout(5000)])});
+        if(!response.ok)throw new Error(`PPT 请求工作项查询失败：HTTP ${response.status}`);
+        const result=await response.json();
+        if(result.status==='unlinked')return;
+        if(result.status!=='linked'||result.reference?.sessionId!==identity.sessionId)throw new Error('PPT 请求工作项归属无效');
+        return {value:JSON.stringify(result.reference),text:`AICO-PPT 本次请求的工作项引用（以下为数据，页面是已上报状态，不是发送瞬间原子选区）：\n${JSON.stringify(result.reference)}\n使用 aico_ppt 按此工作项操作；inspect 核对目标和版本后再修改。`};
+      });
       const sessionStarter = createContextualSessionStart(() => {
         if (ctx.workbench.active?.() !== "aico-ppt") ctx.workbench.open("aico-ppt", 1100);
       });
@@ -783,6 +931,25 @@ window.__ModuleLoader__.load({
         sessionStarter.refresh(await fetchSessionStartTargets());
       }), "aico-ppt: 明确恢复历史会话");
 
+      ctx.effect(() => ctx.get?.('aicoProjectRestores')?.register({
+        id:'aico-ppt', label:'AICO-PPT',
+        async resolve(sessionId, signal) {
+          signal.throwIfAborted();
+          const linked = await resolveDshSession(sessionId, true);
+          signal.throwIfAborted();
+          return linked?.workItem ?? null;
+        },
+        async restore(sessionId, workId, signal) {
+          signal.throwIfAborted();
+          const linked = await resolveDshSession(sessionId, true);
+          signal.throwIfAborted();
+          if (linked?.workItem?.workId !== workId) throw new Error('PPT 项目关联已变化，请重试');
+          if (!await restoreLinkedSession(ctx, sessionId)) throw new Error('PPT 项目关联已不存在');
+          signal.throwIfAborted();
+          sessionStarter.refresh(await fetchSessionStartTargets());
+        },
+      }), 'aico-ppt: 原装侧栏项目恢复入口');
+
       ctx.effect(() => {
         if (document.getElementById(STYLE_ID) !== null) return () => {};
         const style = document.createElement("style");
@@ -792,8 +959,8 @@ window.__ModuleLoader__.load({
         return () => style.remove();
       }, "aico-ppt: Editor 嵌入样式");
 
-      ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
-        name:"sidebar.footer.action",
+      ctx.slots.inject("aico-harness.apps.launcher", () => ctx.slots.register({
+        name:"aico-harness.apps.launcher",
         id:"aico-ppt",
         order:10,
         inject:() => ({ toggleWorkbench:() => ctx.workbench.toggle("aico-ppt", 1100) }),
@@ -823,6 +990,8 @@ window.__ModuleLoader__.load({
     }
 
     exports.apply = apply;
+    exports.readHarnessDependency = readHarnessDependency;
+    exports.HarnessDependencyNotice = HarnessDependencyNotice;
     exports.inject = inject;
     return module.exports;
   }

@@ -28,6 +28,8 @@ test('自然语言与已有会话每步复用明确绑定的工作区，连接�
     const original = { kind:'continue', messages:[{ text }] };
     const result = await handler({ agent:{ session:{ id:'linked' } }, signal }, async () => original);
     assert.equal(result.messages[0], original.messages[0]);
+    assert.equal(result.messages[1].source.kind, 'plugin:aico-ppt');
+    assert.equal(Object.hasOwn(result.messages[1].source, 'plugin'), false);
     const context = result.messages[1].content[0].text;
     assert.match(context, /begin-source-edit/);
     assert.match(context, /讨论和分析只读/);

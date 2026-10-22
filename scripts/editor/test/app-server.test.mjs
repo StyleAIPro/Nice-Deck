@@ -23,6 +23,28 @@ function post(app, path) {
   });
 }
 
+test('原装 Desktop Origin 可嵌入并读取会话绑定，其他自定义来源与缺失令牌仍被拒绝',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'aico-ppt-official-origin-'));
+  const app=await startAppServer({token:'official-test',embeddedMode:'dsh',embeddedParentOrigin:'dsh-app://app',
+    recentDeckStore:createRecentDeckStore({filePath:join(directory,'recent.json')})});
+  t.after(async()=>{await app.close();await rm(directory,{recursive:true,force:true});});
+  const page=await fetch(app.appUrl);
+  assert.match(page.headers.get('content-security-policy'),/frame-ancestors[^;]*dsh-app:\/\/app/);
+  assert.match(page.headers.get('set-cookie'),/HttpOnly; SameSite=None; Secure; Partitioned/);
+  const send=(url,origin)=>fetch(url,{method:'POST',headers:{origin,'content-type':'text/plain;charset=UTF-8'},body:JSON.stringify({sessionId:'missing'})});
+  for(const name of ['resolve-session','request-context']){
+  const endpoint=`${app.url}/api/dsh-work-items/${name}?token=${app.token}`;
+  const allowed=await send(endpoint,'dsh-app://app');
+  assert.equal(allowed.status,200);assert.equal(allowed.headers.get('access-control-allow-origin'),'dsh-app://app');
+  assert.equal((await allowed.json()).status,'unlinked');
+  for(const origin of ['null','dsh-app://shell','dsh-app://app.evil','dsh-app://app/']) {
+    const rejected=await send(endpoint,origin);
+    assert.equal(rejected.status,403,origin);assert.equal(rejected.headers.get('access-control-allow-origin'),null);
+  }
+  assert.equal((await send(endpoint.replace('?token=official-test',''),'dsh-app://app')).status,403);
+  }
+});
+
 function postJson(app, path, body) {
   return fetch(`${app.url}${path}?token=${encodeURIComponent(app.token)}`, {
     method:'POST',

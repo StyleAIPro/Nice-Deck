@@ -32,7 +32,12 @@ const dshWorkItemCoordinatorEnabled = document.documentElement.dataset
   .dshWorkItemCoordinator === 'true';
 const dshParentOrigin = (() => {
   if (!embeddedDsh) return null;
-  try { return new URL(params.get('parentOrigin')).origin; }
+  const value = params.get('parentOrigin');
+  if (value === 'dsh-app://app') return value;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' && url.origin === value && ['localhost','127.0.0.1','[::1]'].includes(url.hostname) ? value : null;
+  }
   catch { return null; }
 })();
 const guidedTourButton = document.querySelector('[data-guided-tour="editing"]');
@@ -2084,7 +2089,83 @@ function confirmPage(button) {
   }
   currentPage.textContent = button.dataset.pageTitle;
   currentKey.textContent = button.dataset.pageKey;
+  revealPageButton(button);
   void publishViewContext();
+}
+
+function revealPageButton(button) {
+  // 只滚动页码栏，避免 scrollIntoView 连带移动整个编辑工作台。
+  const item = button.getBoundingClientRect();
+  const list = pageList.getBoundingClientRect();
+  const top = list.top + pageList.clientTop;
+  const bottom = top + pageList.clientHeight;
+  if (item.top < top) pageList.scrollTop += item.top - top;
+  else if (item.bottom > bottom) pageList.scrollTop += item.bottom - bottom;
+}
+
+function stepPage(direction) {
+  const buttons = [...pageList.querySelectorAll('[data-page-key]')];
+  const focused = buttons.indexOf(document.activeElement);
+  const index = focused >= 0 ? focused
+    : buttons.findIndex(button => button.getAttribute('aria-current') === 'page');
+  const next = buttons[index + direction];
+  if (index < 0 || !next) return;
+  next.focus({ preventScroll:true });
+  revealPageButton(next);
+  requestPage(next);
+}
+
+let pageWheelDelta = 0;
+let pageWheelAt = 0;
+let pageWheelStepAt = -Infinity;
+let pageWheelDirection = 0;
+function resetPageWheel() {
+  pageWheelDelta = 0;
+  pageWheelAt = 0;
+  pageWheelStepAt = -Infinity;
+  pageWheelDirection = 0;
+}
+
+function onPageListClick(event) {
+  resetPageWheel();
+  const clicked = event.target.closest('[data-page-key]');
+  const button = clicked ?? pageList.querySelector('[aria-current="page"]');
+  if (!button || !pageList.contains(button)) return;
+  button.focus({ preventScroll:true });
+  if (clicked) requestPage(button);
+}
+
+function onPageListKeydown(event) {
+  if (!deckReady || event.defaultPrevented || event.isComposing
+    || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  resetPageWheel();
+  stepPage(event.key === 'ArrowDown' ? 1 : -1);
+}
+
+function onPageListWheel(event) {
+  if (!deckReady || !pageList.contains(document.activeElement) || event.defaultPrevented
+    || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+    || !Number.isFinite(event.deltaY) || event.deltaY === 0
+    || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+  event.preventDefault();
+  const now = performance.now();
+  const direction = Math.sign(event.deltaY);
+  if (now - pageWheelAt > 240 || direction !== pageWheelDirection) resetPageWheel();
+  pageWheelAt = now;
+  pageWheelDirection = direction;
+  // 归一化鼠标与触控板滚动；一次大滚动也只走一页，连续事件限速。
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? pageList.clientHeight : 1;
+  pageWheelDelta += event.deltaY * unit;
+  if (Math.abs(pageWheelDelta) < 40 || now - pageWheelStepAt < 160) return;
+  pageWheelDelta = 0;
+  pageWheelStepAt = now;
+  stepPage(direction);
+}
+
+function onPageListFocusout(event) {
+  if (!pageList.contains(event.relatedTarget)) resetPageWheel();
 }
 
 function requestPage(button) {
@@ -2142,7 +2223,6 @@ function renderPages(nextPages, preferredPageKey, preferredPageIndex) {
       const label = document.createElement('span');
       label.className = 'page-item-label';
       button.append(label);
-      button.addEventListener('click', () => requestPage(button));
     }
     unused.delete(button);
     button.dataset.pageKey = page.pageKey;
@@ -2690,6 +2770,10 @@ document.addEventListener('keydown', onHistoryKeydown);
 document.addEventListener('keydown', onSelectionDeleteKeydown);
 document.addEventListener('keydown', onTemporaryRegionKeydown, true);
 document.addEventListener('keyup', onTemporaryRegionKeyup, true);
+pageList.addEventListener('click', onPageListClick);
+pageList.addEventListener('keydown', onPageListKeydown);
+pageList.addEventListener('wheel', onPageListWheel, { passive:false });
+pageList.addEventListener('focusout', onPageListFocusout);
 
 const eventsUrl = new URL('/events', location.href);
 eventsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2847,6 +2931,10 @@ function teardown() {
   document.removeEventListener('keydown', onSelectionDeleteKeydown);
   document.removeEventListener('keydown', onTemporaryRegionKeydown, true);
   document.removeEventListener('keyup', onTemporaryRegionKeyup, true);
+  pageList.removeEventListener('click', onPageListClick);
+  pageList.removeEventListener('keydown', onPageListKeydown);
+  pageList.removeEventListener('wheel', onPageListWheel);
+  pageList.removeEventListener('focusout', onPageListFocusout);
   window.removeEventListener('message', onFrameMessage);
   window.removeEventListener('message', onDshParentMessage);
   window.removeEventListener('pagehide', teardown);

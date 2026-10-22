@@ -1,6 +1,7 @@
 /** 同轮使用首次执行时的目标快照；浏览导航不改变已发起的请求。 */
 const anchors=new WeakMap();
 export function editingRequestAnchor(agent,context) {
+  if(Object.hasOwn(context,'requestView'))return structuredClone(context.requestView);
   const turn=agent?.session.snapshotEvents?.().findLast(event=>event.type==='turn/start')?.seq;
   if(!agent||turn===undefined)return context.view??null;
   const key=JSON.stringify([context.workId,turn]);

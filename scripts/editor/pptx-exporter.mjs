@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +28,7 @@ function runConverter(inputPath, outputPath, {
 }) {
   return new Promise((resolvePromise, reject) => {
     let settled = false;
+    let stopping = false;
     let stdout = '';
     let stderr = '';
     const child = spawnProcess(
@@ -43,16 +44,30 @@ function runConverter(inputPath, outputPath, {
       if (error) reject(error);
       else resolvePromise(value);
     };
-    const abort = () => {
-      child.kill('SIGTERM');
-      finish(exportError('PPTX_EXPORT_CANCELLED', 503, 'PPTX 导出已取消'));
+    // Windows 的 kill 只结束父进程；必须在父进程仍存活时终止整棵转换树。
+    // 等待系统终止命令完成后才返回，避免清理临时目录时浏览器仍在读写。
+    const stop = error => {
+      if (settled || stopping) return;
+      stopping = true;
+      clearTimeout(timer);
+      if (process.platform === 'win32' && child.pid) {
+        const executable = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+        execFile(executable, ['/PID', String(child.pid), '/T', '/F'],
+          { windowsHide:true, timeout:15_000 }, failure => {
+            if (failure) {
+              finish(exportError('PPTX_EXPORT_CLEANUP_FAILED', 503,
+                'PPTX 转换进程清理失败', failure.message));
+            } else finish(error);
+          });
+      } else {
+        child.once('close', () => finish(error));
+        child.kill('SIGKILL');
+      }
     };
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(exportError(
-        'PPTX_EXPORT_TIMEOUT', 504, 'PPTX 导出超时，请缩小 Deck 后重试', stderr,
-      ));
-    }, timeoutMs);
+    const abort = () => stop(exportError('PPTX_EXPORT_CANCELLED', 503, 'PPTX 导出已取消'));
+    const timer = setTimeout(() => stop(exportError(
+      'PPTX_EXPORT_TIMEOUT', 504, 'PPTX 导出超时，请缩小 Deck 后重试', stderr,
+    )), timeoutMs);
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
     child.stdout?.on('data', chunk => {
@@ -73,6 +88,7 @@ function runConverter(inputPath, outputPath, {
       ));
     });
     child.once('close', code => {
+      if (stopping) return;
       if (code !== 0) {
         const patchFailure = stderr.match(/^PPTX_PATCH_REPLAY_FAILED: (.+)$/mu)?.[1];
         finish(exportError(

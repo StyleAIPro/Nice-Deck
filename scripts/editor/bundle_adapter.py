@@ -7,10 +7,13 @@ import stat
 import tempfile
 import uuid
 
-try:
-    from product_paths import resolve_project_state_root
-except ModuleNotFoundError:
-    from scripts.editor.product_paths import resolve_project_state_root
+# Host 在用户工作区启动 Python；仅从随包相邻文件加载，不依赖工作目录或搜索路径。
+_paths_spec = importlib.util.spec_from_file_location(
+    "aico_ppt_product_paths", Path(__file__).with_name("product_paths.py")
+)
+_paths_module = importlib.util.module_from_spec(_paths_spec)
+_paths_spec.loader.exec_module(_paths_module)
+resolve_project_state_root = _paths_module.resolve_project_state_root
 
 
 ROOT = Path(__file__).resolve().parents[2]

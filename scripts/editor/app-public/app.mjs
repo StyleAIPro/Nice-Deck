@@ -31,7 +31,12 @@ const token = launchParams.get('token');
 const embeddedDsh = launchParams.get('embedded') === 'dsh';
 const dshParentOrigin = (() => {
   if (!embeddedDsh) return null;
-  try { return new URL(launchParams.get('parentOrigin')).origin; }
+  const value = launchParams.get('parentOrigin');
+  if (value === 'dsh-app://app') return value;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' && url.origin === value && ['localhost','127.0.0.1','[::1]'].includes(url.hostname) ? value : null;
+  }
   catch { return null; }
 })();
 if (embeddedDsh) document.documentElement.dataset.embedded = 'dsh';
@@ -881,7 +886,7 @@ async function rebindWorkTask(entry, button) {
 
 async function dismissWorkTask(kind, entry, button) {
   if (state !== 'idle') return;
-  if (entry.lifecycle !== 'removing' && !window.confirm(`移除项目“${entry.displayName}”？\n将归档关联的 ${entry.dshBinding?.sessions?.length ?? 0} 段会话，并移除项目入口。内容文件和历史记录保留。原装宿主按会话逐项归档，失败可重试；恢复项目后需新建会话。`)) return;
+  if (entry.lifecycle !== 'removing' && !window.confirm(`移除项目“${entry.displayName}”？\n将归档关联的 ${entry.dshBinding?.sessions?.length ?? 0} 段会话，并移除项目入口。内容文件和历史记录保留，中断后可重试。可以从项目历史重新打开；宿主支持时，也可从会话菜单的 AICO 恢复入口找回原会话。`)) return;
   button.disabled = true;
   historyStatus(kind, '正在移除项目并归档会话…', 'working');
   let pending;

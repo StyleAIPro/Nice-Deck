@@ -8,7 +8,7 @@
 import {runtimeVersion} from '../../scripts/editor/runtime-version.mjs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import {installEditingTools} from './editing-tools.mjs'
 import { installEditingContext } from './editing-context.mjs'
 import { startRuntimeWorker } from './runtime-host.mjs'
@@ -122,7 +122,8 @@ export async function apply(ctx, config = {}) {
   if (config.stateRoot !== undefined && (typeof config.stateRoot !== 'string' || !isAbsolute(config.stateRoot))) throw new TypeError('AICO-PPT stateRoot 必须是绝对路径')
   logo = `data:image/png;base64,${(await readFile(BRAND_LOGO_URL)).toString('base64')}`
   const explicitRuntime = config.aicoRuntime !== undefined
-  desktop = explicitRuntime ? config.aicoRuntime : await resolveBundledRuntime(PACKAGE_ROOT)
+  desktop = explicitRuntime ? config.aicoRuntime : await resolveBundledRuntime(PACKAGE_ROOT, process.env,
+    {resourceDirectory:config.stateRoot ? join(config.stateRoot, 'runtime') : undefined})
   editor = explicitRuntime || desktop
     ? await startRuntimeWorker(explicitRuntime ? desktop : {root:desktop.root,paths:desktop.paths}, { stateRoot:config.stateRoot })
     : await (await import('../../scripts/editor/app-server.mjs')).startAppServer({

@@ -31,6 +31,8 @@ b=r/'resources/browser'; b.mkdir(); (b/'chrome.exe').write_bytes(b'browser')
 with tarfile.open(r/'base.tgz','w:gz') as out:
  data=json.dumps({'name':'aico-ppt-skill','version':'0.0.0'}).encode()
  entry=tarfile.TarInfo('package/package.json'); entry.size=len(data); out.addfile(entry,io.BytesIO(data))
+ data=b'export const runtimeVersion = \"0.0.0\";\\n'
+ entry=tarfile.TarInfo('package/scripts/editor/runtime-version.mjs'); entry.size=len(data); out.addfile(entry,io.BytesIO(data))
 `,root]);
  await run(python,[pack,'--plugin-tgz',join(root,'base.tgz'),'--runtime-root',join(root,'resources'),'--output',join(root,'full.tgz')]);
  await mkdir(join(root,'unpacked'));

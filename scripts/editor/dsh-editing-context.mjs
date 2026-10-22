@@ -1,17 +1,22 @@
 import { writeWorkspaceCapability } from './workspace-capability.mjs';
 
 /** 按持久会话关联解析现有写入方，绝不按当前 UI 或项目路径猜测。 */
-export async function resolveEditingContext({ sessionId, workCatalog, findEditingRuntime, findCreationRuntime }) {
+export async function resolveEditingContext({ sessionId, expectedWorkId, referenceOnly=false, workCatalog, findEditingRuntime, findCreationRuntime }) {
   if (typeof sessionId !== 'string' || !sessionId.trim()) {
     throw Object.assign(new Error('缺少有效会话标识'), { statusCode:400 });
   }
   const workItem = await workCatalog.resolveByDshSession(sessionId);
+  if(expectedWorkId!==undefined&&(typeof expectedWorkId!=='string'||!expectedWorkId||workItem?.workId!==expectedWorkId)){
+    throw Object.assign(new Error('PPT 请求的工作项关联已变化，未访问其他文档'),{statusCode:409,code:'PPT_REQUEST_WORK_CHANGED'});
+  }
   if (!workItem || !['editing','creation'].includes(workItem.kind)) return { status:'unlinked' };
   const workspace = workItem.kind === 'creation' ? findCreationRuntime?.(workItem)?.workspace : null;
   const app = workItem.kind === 'creation'
     ? (workspace?.closed ? null : workspace?.managedDeck?.editor)
     : findEditingRuntime({ deckId:workItem.deckId, deckPath:workItem.deckPath })?.app;
   const identity = { workId:workItem.workId, deckPath:app?.deckPath ?? workItem.deckPath, kind:workItem.kind };
+  if(referenceOnly)return {status:'linked',reference:{schema:1,sessionId,workId:workItem.workId,kind:workItem.kind,
+    view:structuredClone(app?.viewContext??null)}};
   if (!app?.sessionDir || !app.workingDeckPath) {
     // 创建前期没有 Deck 和 Editor 是正常状态，不能据此阻断需求与规划。
     // 已有产物却丢失 Editor 时仍拒绝编辑，不能降级绕过托管工作副本。

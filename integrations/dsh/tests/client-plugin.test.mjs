@@ -48,7 +48,7 @@ async function loadClientBundle({ fetchImpl, brand, prepare } = {}) {
     },
   }
   vm.runInNewContext(source, {
-    window, document, console, URL, AbortController,
+    window, document, console, URL, AbortController, AbortSignal,
     __AICO_PPT_PREPARE__:prepare,
     fetch:fetchImpl ?? (async () => ({ ok:true, json:async () => ({ status:'unlinked' }) })),
     setTimeout, clearTimeout,
@@ -71,6 +71,17 @@ async function loadClientBundle({ fetchImpl, brand, prepare } = {}) {
     useRef() { return { current: null } },
     useState(value) { return [value, () => {}] },
   }
+  const plugin = handoff.factory((specifier) => {
+    if (specifier === 'react') return React
+    throw new Error(`测试未声明的 Client 外部模块：${specifier}`)
+  })
+  // 这些业务测试预置依赖就绪；缺失和动态恢复由原装 Cordis 生命周期回归覆盖。
+  const apply = plugin.apply
+  plugin.apply = ctx => {
+    const owner = { ...ctx, get: name => ctx.get?.(name) ?? (name === 'aicoHarnessClient' ? { bind: value => value } : ['workbench', 'sessionStarts'].includes(name) ? {} : undefined) }
+    owner.inject = (_dependencies, mount) => mount(owner)
+    return apply(owner)
+  }
   return {
     source,
     styles,
@@ -78,10 +89,7 @@ async function loadClientBundle({ fetchImpl, brand, prepare } = {}) {
     intervalCallbacks,
     windowListeners,
     handoff,
-    plugin: handoff.factory((specifier) => {
-      if (specifier === 'react') return React
-      throw new Error(`测试未声明的 Client 外部模块：${specifier}`)
-    }),
+    plugin,
   }
 }
 
@@ -89,11 +97,35 @@ function fileURL(url) {
   return url.pathname
 }
 
+test('PPT 请求捕获按提交会话取得无凭据的引用，错误和卸载不得静默提交',async()=>{
+  let capture,mode='linked';const requests=[],dispose=[];
+  const reference={schema:1,sessionId:'background',workId:'work-a',kind:'editing',view:{pageKey:'page-a'}};
+  const loaded=await loadClientBundle({fetchImpl:async(url,options)=>{
+    if(!new URL(url).pathname.endsWith('/request-context'))return{ok:true,json:async()=>({status:'unlinked'})};
+    options.signal.throwIfAborted();requests.push({url:new URL(url),body:JSON.parse(options.body),signal:options.signal});
+    return {ok:mode!=='failed',status:503,json:async()=>mode==='unlinked'?{status:'unlinked'}:{status:'linked',reference:{...reference,sessionId:mode==='wrong'?'other':reference.sessionId}}};
+  }});
+  loaded.plugin.apply({
+    effect:fn=>{const stop=fn();if(typeof stop==='function')dispose.push(stop);return stop;},on:()=>()=>{},
+    conversation:{registerMessageContext:(id,fn)=>{assert.equal(id,'aico-ppt');capture=fn;}},
+    slots:{inject:(_name,mount)=>mount(),register:()=>()=>{}},
+    sessions:{list:{getSnapshot:()=>({current:'different-foreground',byId:{}}),subscribe:()=>()=>{}}},
+    workspaces:{list:{getSnapshot:()=>({phase:'ready',items:[]}),subscribe:()=>()=>{}}},
+    workbench:{},sessionStarts:{register:()=>()=>{}},
+  });
+  const first=await capture({sessionId:'background'});assert.deepEqual(JSON.parse(first.value),reference);assert.match(first.text,/非发送瞬间|不是发送瞬间/);assert.doesNotMatch(first.text,/token=test/);
+  assert.deepEqual(requests[0].body,{sessionId:'background'});assert.equal(requests[0].url.searchParams.get('token'),'test');
+  mode='wrong';await assert.rejects(capture({sessionId:'background'}),/归属无效/);
+  mode='failed';await assert.rejects(capture({sessionId:'background'}),/503/);
+  mode='unlinked';assert.equal(await capture({sessionId:'background'}),undefined);
+  for(const stop of dispose.reverse())stop();await assert.rejects(capture({sessionId:'background'}),/已卸载/);
+});
+
 test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', async () => {
   const loaded = await loadClientBundle()
   assert.equal(loaded.handoff.id, 'aico-ppt-skill')
   assert.deepEqual(Array.from(loaded.plugin.inject), [
-    'slots', 'sessions', 'workspaces', 'conversation', 'workbench', 'sessionStarts',
+    'remote', 'remote.pluginManager', 'slots', 'sessions', 'workspaces', 'conversation', 'uiSession', 'uiWorkspace',
   ])
   assert.doesNotMatch(loaded.source, /node-pty|agent-terminal-panel|\/agent-terminal/u)
   assert.match(loaded.source, /clipboard-read \*; clipboard-write \*; fullscreen \*/u)
@@ -103,6 +135,7 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
   const sent = []
   const toggled = []
   const sessionOperations = []
+  const createdSessions = []
   let sessionStartContribution
   let blockSessionOpen = false
   let blockSessionRename = false
@@ -116,7 +149,7 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
     on() { return () => {} },
     slots: {
       inject(name, mount) {
-        assert.ok(['sidebar.footer.action', 'workbench.persistent-view'].includes(name))
+        assert.ok(['aico-harness.apps.launcher', 'workbench.persistent-view'].includes(name))
         return mount()
       },
       register(options, component) {
@@ -130,6 +163,7 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
         subscribe() { return () => {} },
       },
       async create({ workspaceId, sessionId }) {
+        createdSessions.push(sessionId)
         assert.equal(workspaceId, 'workspace-project')
         sessionRows[sessionId] ??= { displayTitle:sessionId, running:false }
         return sessionId
@@ -170,7 +204,9 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
     },
     workspaces: {
       list: {
-        getSnapshot() { return { phase:'ready', archivedSessionIds:[] } },
+        getSnapshot() { return { phase:'ready', archivedSessionIds:[], items:[{
+          workspaceId:'workspace-project', sessionIds:Object.keys(sessionRows),
+        }] } },
         subscribe() { return () => {} },
       },
       async create({ path }) {
@@ -191,7 +227,7 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
 
   loaded.plugin.apply(ctx)
   assert.equal(loaded.styles.has('aico-ppt-dsh-style'), true)
-  const launcher = registrations.find(row => row.options.name === 'sidebar.footer.action')
+  const launcher = registrations.find(row => row.options.name === 'aico-harness.apps.launcher')
   const workbench = registrations.find(row => row.options.name === 'workbench.persistent-view')
   assert.ok(launcher)
   assert.ok(workbench)
@@ -267,6 +303,10 @@ test('Client bundle 注册左侧入口与跨会话常驻 workbench 视图', asyn
   await face.executeDshCommand('create-session', {
     workspaceId:'workspace-project', sessionId:'session-new', title:'修改 Deck：重复恢复不应改名',
   })
+  assert.deepEqual(createdSessions, ['session-new'], '已存在的预留会话不能再次交给只复用空白会话的 create')
+  await assert.rejects(face.executeDshCommand('create-session', {
+    workspaceId:'another-workspace', sessionId:'session-new',
+  }), error => error.code === 'DSH_SESSION_WORKSPACE_MISMATCH')
   assert.equal((await face.executeDshCommand('fork-session', {
     sourceSessionId:'session-1',
   })).sessionId, 'session-fork')
@@ -924,7 +964,9 @@ test('package manifest 同时声明 Host bundle 与 Client 依赖', async () => 
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-api-workspace-controller'))
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-conversation'))
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-sidebar'))
-  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-workbench'))
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-workspace'))
+  assert.ok(manifest.dsh.client.inject.includes('aico-harness'))
+  assert.ok(!manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-workbench'))
   assert.match(patch, /id: aico-ppt/u)
   assert.match(patch, /name: aico-ppt-skill/u)
 })

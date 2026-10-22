@@ -2,6 +2,7 @@ import {editingRequestAnchor} from './editing-request-context.mjs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {LOCAL_FRAGMENT_GUIDANCE} from '../../scripts/editor/local-edit-guidance.mjs';
+import {resolvePptRequest,withPptRequest} from './request-work-context.mjs';
 
 /** 最新连接信息覆盖历史端口与旧的“等待区域任务”提示，不改变用户意图。 */
 export function renderEditingContext(context) {
@@ -23,7 +24,7 @@ export function renderEditingContext(context) {
   const compactView=view?{pageKey:view.pageKey,pageIndex:view.pageIndex,selection:view.selection,revision:view.revision}:null;
   return [
     identity,
-    `本轮目标参考（首次执行快照，非发送瞬间）：${JSON.stringify(compactView)}。翻页不改变本轮目标；inspect 重新校验对象。`,
+    `${context.requestViewTiming==='reported-request'?'本次请求登记的页面参考（已上报状态，非发送瞬间原子选区）':'本轮目标参考（首次执行快照，非发送瞬间）'}：${JSON.stringify(compactView)}。翻页不改变本轮目标；inspect 重新校验对象。`,
     `项目资料索引：${JSON.stringify(context.project ?? {})}。只在内容创作或跨页一致性需要时展开。`,
     `未完成反馈任务：${JSON.stringify(context.feedbackTasks ?? [])}。`,
     `托管工作副本：${JSON.stringify(context.workingDeckPath)}。CLI：${JSON.stringify(cli)} --capability-file ${JSON.stringify(context.capabilityPath)}。`,
@@ -47,13 +48,14 @@ export function installEditingContext(ctx, appUrl, { fetchContext = fetch } = {}
     if (decision.kind === 'reject' || signal.aborted) return decision;
     let text,context;
     try {
+      const request=await resolvePptRequest(ctx,agent.session,{claimedUsers:decision.messages.filter(message=>message.source?.kind==='user')});
       const response = await fetchContext(endpoint, {
         method:'POST', headers:{ 'content-type':'application/json', origin:endpoint.origin },
-        body:JSON.stringify({ sessionId:agent.session.id }),
+        body:JSON.stringify({ sessionId:request?.sessionId??agent.session.id,...(request?{expectedWorkId:request.reference.workId}:{}) }),
         signal:AbortSignal.any([signal, AbortSignal.timeout(5000)]),
       });
       if (!response.ok) throw new Error(`AICO-PPT 会话工作区解析失败（${response.status}）`);
-      context=await response.json();
+      context=withPptRequest(await response.json(),request);
       context.requestView=editingRequestAnchor(agent,context);
       text = renderEditingContext(context);
     } catch (error) {
@@ -81,7 +83,7 @@ export function installEditingContext(ctx, appUrl, { fetchContext = fetch } = {}
     const message = Object.freeze({
       id:randomUUID(), role:'user',
       content:Object.freeze([Object.freeze({ type:'text', text })]),
-      source:Object.freeze({ kind:'plugin', plugin:'aico-ppt', form:'snapshot',
+      source:Object.freeze({ kind:'plugin:aico-ppt', form:'snapshot',
         sections:Object.freeze([Object.freeze({ name:'aico-ppt-workspace', text })]) }),
     });
     return { ...decision, messages:[...decision.messages, message] };

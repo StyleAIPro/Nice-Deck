@@ -629,13 +629,14 @@ function send(response, statusCode, body, contentType, headers = {}) {
   response.end(body);
 }
 
-function sendEditorIndex(request, response, url, token, editorToken, serviceOrigin, contents) {
+function sendEditorIndex(request, response, url, token, editorToken, serviceOrigin, contents, embeddedDsh = false) {
   authorize(request, url, token, serviceOrigin);
   if (url.searchParams.get('editorToken') !== editorToken) {
     throw httpError('FORBIDDEN', 403, '缺少编辑器能力令牌');
   }
   send(response, 200, contents, 'text/html; charset=utf-8', {
-    'set-cookie': `${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`,
+    // 仅 DSH 嵌入页面启用站点分区；API 仍校验原点和当前运行实例的能力令牌。
+    'set-cookie': `${authCookieName(token)}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${embeddedDsh ? 'SameSite=None; Secure; Partitioned' : 'SameSite=Strict'}`,
   });
 }
 
@@ -2249,7 +2250,7 @@ export async function startServer({
 
       if (request.method === 'GET' && pathname === '/') {
         sendEditorIndex(
-          request, response, url, token, editorToken, serviceOrigin, pinnedEditorIndex,
+          request, response, url, token, editorToken, serviceOrigin, pinnedEditorIndex, dshAgentBridge,
         );
         return;
       }
@@ -3063,7 +3064,7 @@ export async function startServer({
       }
       if (request.method === 'GET' && (pathname === '/editor' || pathname === '/editor/')) {
         sendEditorIndex(
-          request, response, url, token, editorToken, serviceOrigin, pinnedEditorIndex,
+          request, response, url, token, editorToken, serviceOrigin, pinnedEditorIndex, dshAgentBridge,
         );
         return;
       }
