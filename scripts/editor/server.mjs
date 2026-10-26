@@ -36,6 +36,7 @@ import {
 } from './agent-workspace/project-root.mjs';
 import { AttachmentStore } from './attachment-store.mjs';
 import { resolveLocalImages } from './local-image-resources.mjs';
+import {validateChatImageResources,MAX_LOCAL_EDIT_BODY_BYTES} from './chat-image-resources.mjs';
 import { BridgeService } from './bridge-service.mjs';
 import {
   buildCreationHandoffPrompt,
@@ -562,13 +563,13 @@ function isProtected(pathname) {
     || pathname === '/events';
 }
 
-async function readJson(request) {
+async function readJson(request,maximumBytes=MAX_BODY_BYTES) {
   const chunks = [];
   let bodyBytes = 0;
   for await (const chunk of request) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bodyBytes += bytes.length;
-    if (bodyBytes > MAX_BODY_BYTES) {
+    if (bodyBytes > maximumBytes) {
       throw httpError('BODY_TOO_LARGE', 413, '请求体过大');
     }
     chunks.push(bytes);
@@ -2227,6 +2228,7 @@ export async function startServer({
       const result = await sidecarBoundary.io.pruneWorkingVersions();
       connectionRecord('working-version-gc', {
         removed:result.removed, removedBytes:result.removedBytes,
+        removedBackups:result.removedBackups ?? 0, removedBackupBytes:result.removedBackupBytes ?? 0,
         kept:result.kept, skipped:result.skipped ?? null,
       });
     } catch (error) {
@@ -2715,7 +2717,7 @@ export async function startServer({
       }
       if(request.method==='POST' && pathname==='/api/local-edits') {
         if(solidifying)throw httpError('EDITOR_SOLIDIFYING',409,'正在固化，请稍后重试');
-        const {expectedRevision,taskId=null,commandId,operations}=await readJson(request);
+        const {expectedRevision,taskId=null,commandId,operations,imageResources}=await readJson(request,MAX_LOCAL_EDIT_BODY_BYTES);
         requireRevision(expectedRevision);requireTaskId(taskId);
         if(typeof commandId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(commandId)
           || !Array.isArray(operations)||!operations.length||operations.length>32
@@ -2724,6 +2726,7 @@ export async function startServer({
         const digest=createHash('sha256').update(JSON.stringify({taskId,operations})).digest('hex');
         const duplicate=bridge.replayLocalEdit(commandId,digest);
         if(duplicate){json(response,200,duplicate);return;}
+        const chatImages=validateChatImageResources(imageResources);
         if(localEdits.has(commandId))throw httpError('COMMAND_IN_PROGRESS',409,'同一修改正在执行，请查询回执');
         if(localEdits.size>=2)throw httpError('LOCAL_EDIT_BUSY',409,'其他局部修改正在准备，请稍后重试');
         const abort=new AbortController();
@@ -2739,7 +2742,14 @@ export async function startServer({
           try {
             candidate=await prepareLocalEdit(await workingDeckStore.read(),operations,{
               pythonExecutable,signal:abort.signal,styles:reserved.styles,
-              resolveImages:sources=>resolveLocalImages(sources,{tasks:sessionStore.state.tasks,sessionDir:sessionStore.sessionDir,realSessionDir:sidecarBoundary.session.realPath,io:sidecarBoundary.io}),
+              resolveImages:async sources=>{
+                const local=await resolveLocalImages(sources.filter(source=>!Object.hasOwn(chatImages,source)),{tasks:sessionStore.state.tasks,sessionDir:sessionStore.sessionDir,realSessionDir:sidecarBoundary.session.realPath,baseDir:dirname(absoluteDeckPath)});
+                const used=Object.fromEntries(sources.filter(source=>Object.hasOwn(chatImages,source)).map(source=>[source,chatImages[source]]));
+                const images={...local,...used};
+                if(Object.values(images).reduce((sum,image)=>sum+Buffer.from(image.data,'base64').length,0)>25*1024*1024)
+                  throw httpError('CHAT_IMAGE_UNAVAILABLE',413,'本次内嵌图片合计超过 25 MiB，请分批插入');
+                return images;
+              },
             });
           } catch(error) {
             // 此阶段仅生成内存候选，尚未建立事务或写入工作副本，能确定本次未提交。
@@ -3045,6 +3055,8 @@ export async function startServer({
             expectedFingerprint:`sha256:${result.fingerprint}`,
           });
           await bindingPersistenceQueue;
+          // 正式发布、检查点和文件绑定均已持久化，且固化标记仍阻止并发编辑。
+          await collectUnusedWorkingVersions();
           broadcast('deck-solidified', result.revision, {
             solidified:true,
             clearedGroupCount:result.clearedGroupCount,

@@ -5123,6 +5123,11 @@ test('固化结构历史才会原子发布托管工作副本并清空撤销队�
   assert.deepEqual(app.session.groups, []);
   assert.deepEqual(app.session.redo, []);
   assert.match(await readFile(app.deckPath, 'utf8'), /已固化结构文案/);
+  const versions=await readdir(join(app.sessionDir,'working','versions'));
+  assert.deepEqual(versions,[`${app.session.workingDeckFingerprint}.html`],
+    '固化响应前应释放已经归档的完整结构版本');
+  assert.equal((await readdir(join(app.sessionDir,'backups'))).filter(name=>name.endsWith('.html')).length,1);
+  assert.equal(app.session.historyArchives.at(-1).format,'audit-v1');
 });
 
 test('固化成功但目录见证未持久化时重启按会话检查点自动恢复绑定', async t => {

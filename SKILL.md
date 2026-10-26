@@ -72,7 +72,7 @@ node scripts/editor/cli.mjs status
 
 已有元素的文字、格式、移动、缩放和显隐在 Harness 内优先使用原生 `aico_ppt` 的 `inspect → edit`，其他环境可用 `locate-text` / `replace-text` / `apply`。局部形状、图片、模块增删和 HTML 片段替换用 `inspect → structure`，服务自动完成源码事务、完整历史重放验证和结果图；片段替换前用 `inspect(detail:"source",target)` 读取原片段，保留目标及所有子元素的 `data-editor-id`，编号继续对应原有内容；新增节点不填编号，确需删除用 `deleteElement`。元素编号拒绝时按 recovery 修复后再提交，仍无法修复则继续无依赖的剩余任务。写入携带 inspect 的 workId、expectedRevision 和原 target。普通修改只读目标页的相关区域；跨页语义用 catalog 后读取相关页，邻页不是固定必读项。成功回执与同版本结果图足够时结束，不重复 task、verify 或读取完整 Skill；明确 `commitStatus:"rejected"` 时按错误重新 inspect 目标，无需查回执；传输不明时用 result 查询同一 commandId。页面增删排序、模板升级和共享 CSS / 脚本重构先建立源码事务，再用 `scripts/edit-bundle.py` 修改 capability 中的 `workingDeckPath` 并显式提交。手工结构修改与正式发布前执行 `node scripts/editor/cli.mjs verify` 检查完整历史候选；此命令只检查、不推进历史。用户要求完成 / 保存 / 正式写入时执行 `node scripts/editor/cli.mjs solidify`；用户明确要求仅预览或暂不固化时保留 workspace 与历史并报告 capability 路径。`solidify` 成功后才替换真实 Deck 并清空撤销 / 重做队列。
 
-图片写入走 [编辑指南的本地附件内嵌规则](references/editing-guide.md#dsh-普通修改的短路径)：`replaceImage` 传已上传附件的 `attachmentPath`，片段 `img.src` 可填同一附件路径。工具自动内嵌并验证图片可加载，资源验证失败时按返回的页码与图片修复后再提交。
+文件和图片统一直接插入，不按来源划分信任区，也不要求先登记或重复上传。`replaceImage` 的 `src` / `attachmentPath` 和片段 `img.src` 接受本地路径、file URL、区域附件路径或 `inspect` 返回的 `chatImages` / `chatFiles` 中的 `src`；普通文件用 `<a download="文件名" href="文件路径或附件src">文件名</a>` 内嵌。工具读取文件并写入 Deck，图片会验证能否加载；失败按实际读取或显示错误修复。详见[附件内嵌规则](references/editing-guide.md#dsh-普通修改的短路径)。
 
 新建 Deck 允许在尚无目标文件时直接复制所选模板；**合法 bundle 第一次落盘后，后续第一版制作立即按上述规则进入 Managed Workspace**。不要把整份第一版制作留在无历史的经典直改路径中。
 
@@ -92,6 +92,8 @@ node scripts/editor/cli.mjs status
    新建 Deck，或本次修改涉及目录 / 章节结构时，还必须按上一节运行 `toc_contract.py`；目录页不能只通过通用溢出检查。
 
 5. **用户明确要求 PPTX 时才导出**：macOS / Linux 用 `python3 scripts/html2pptx/convert.py my-deck.html --mode editable`，Windows 用 `py -3 scripts\html2pptx\convert.py my-deck.html --mode editable`。可编辑模式生成可修改的文字、常见图形和表格；原生文字统一微软雅黑，字号按 HTML 画布比例和局部缩放换算并对齐真实文字基线；复杂视觉保留图片，不保证全部元素或动画可编辑；`--mode image` 生成注重外观还原的高清图片页，CLI 不传模式仍默认 `image`。Editor 导出图标提供这两种选择，默认推荐可编辑，取消不启动导出。两种模式均使用当前工作副本快照（含尚未固化的预览修改，不触发固化），等待全部补丁应用并校验数量后才导出；失败或超时则中止并提示补丁错误，不生成回滚后的旧内容。layer 多标签页自动逐标签展开；后续只改 HTML 时不自动重导，除非用户再次要求。
+
+固化也会结束旧中间 HTML 的保留：成功后保留当前文件、工作副本和最近一份固化前备份，操作审计记录继续保留。未固化修改仍可撤销，不手工删除 sidecar。异常保护与保留规则见 `references/editing-guide.md` 的“固化后的历史空间”。
 
 ## 旧 Deck 升级
 

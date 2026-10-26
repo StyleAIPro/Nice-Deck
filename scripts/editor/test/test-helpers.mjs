@@ -1,10 +1,13 @@
 import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { loadChromium } from '../../verify/load-playwright.mjs';
-import { startServer } from '../server.mjs';
+import {pathToFileURL} from 'node:url';
+import { loadChromium,chromiumLaunchOptions } from '../../verify/load-playwright.mjs';
+const {startServer}=await import(process.env.AICO_PPT_TEST_PACKAGE_ROOT?
+  pathToFileURL(join(process.env.AICO_PPT_TEST_PACKAGE_ROOT,'scripts/editor/server.mjs')).href:'../server.mjs');
 
 export async function startFixtureServer(options = {}) {
+  const dshAgentBridge=options.dshAgentBridge??Boolean(process.env.AICO_PPT_TEST_PACKAGE_ROOT);
   const root = await mkdtemp(join(tmpdir(), 'deck-editor-fixture-'));
   const deckPath = join(root, 'minimal-deck.html');
   if (options.bundle) {
@@ -41,6 +44,9 @@ export async function startFixtureServer(options = {}) {
       spawnWriter: options.spawnWriter,
       onActiveWritersChange: options.onActiveWritersChange,
       spawnAgentTerminal: options.spawnAgentTerminal,
+      // 成品包有意排除独立 Dev Shell PTY；本夹具只测手工编辑，不启动该入口。
+      createAgentTerminal:options.createAgentTerminal??(process.env.AICO_PPT_TEST_PACKAGE_ROOT
+        ? async()=>{throw Error('成品包手工编辑夹具不启动独立 Agent PTY');}:null),
       createAgentTerminalConversation: options.createAgentTerminalConversation,
       discoverAgentTerminalConversation: options.discoverAgentTerminalConversation,
       resumeAgentTerminalConversation: options.resumeAgentTerminalConversation,
@@ -52,8 +58,8 @@ export async function startFixtureServer(options = {}) {
       pickDeckFile:options.pickDeckFile,
       agentRunTimeoutMs: options.agentRunTimeoutMs,
       agentRunAdapter: options.agentRunAdapter,
-      dshAgentBridge: options.dshAgentBridge,
-      ...(options.dshAgentBridge ? {
+      dshAgentBridge,
+      ...(dshAgentBridge ? {
         workId:options.workId ?? '11111111-1111-4111-8111-111111111111',
         dshWorkItemProvider:options.dshWorkItemProvider ?? (async () => ({
           workId:options.workId ?? '11111111-1111-4111-8111-111111111111',
@@ -107,8 +113,9 @@ async function settleWithin(promise, timeoutMs) {
 }
 
 export async function openEditor(app, options = {}) {
+  if(process.env.AICO_PPT_TEST_PACKAGE_ROOT)options={embeddedMode:'dsh',...options};
   const chromium = await loadChromium();
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch(chromiumLaunchOptions());
   const browserProblems = [];
   const resourceProblems = [];
   const resourceCancellations = [];

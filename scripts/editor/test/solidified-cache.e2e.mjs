@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile,readdir} from 'node:fs/promises';
+import {join} from 'node:path';
+import {startFixtureServer,openEditor} from './test-helpers.mjs';
+
+test('真实画布固化后回收中间 HTML，刷新仍显示已发布内容并保留备份', {timeout:30000},async t=>{
+  const app=await startFixtureServer({bundle:true,autoStartAgentTerminal:false,preserveRoot:true});
+  t.after(async()=>{await app.close();await app.cleanup();});
+  const original=await readFile(app.deckPath);
+  const {browser,page}=await openEditor(app,{allowPilotDocumentBlobAbort:true});
+  page.setDefaultTimeout(8000);
+  t.after(()=>browser.close());
+  await page.locator('#deck-frame').evaluate(frame=>frame.contentDocument.querySelector('#__deck_loading_overlay')?.remove());
+  await page.locator('[data-mode="edit"]').click();
+  const heading=page.frameLocator('#deck-frame').locator('h2').first();
+  await heading.dblclick();await heading.fill('固化后保持的内容');await page.locator('[data-current-page]').click();
+  await page.waitForFunction(()=>document.querySelector('[data-revision]')?.textContent==='1',null,{timeout:8000});
+  assert.ok((await readFile(app.deckPath)).equals(original),'固化前源文件保持原状');
+  await page.locator('[data-solidify]').click();await page.locator('[data-solidify-confirm]').click();
+  await page.waitForFunction(()=>document.querySelector('[data-solidify]')?.dataset.unsolidified==='false',null,{timeout:8000});
+  assert.equal(app.session.historyArchives.at(-1).format,'audit-v1');
+  const backups=await readdir(join(app.sessionDir,'backups'));
+  assert.equal(backups.filter(name=>name.endsWith('.html')).length,1);
+  assert.ok((await readFile(join(app.sessionDir,'backups',backups.find(name=>name.endsWith('.html'))))).equals(original));
+  await page.reload();
+  await page.waitForFunction(()=>document.querySelector('#deck-frame')?.contentDocument?.querySelector('h2')?.textContent==='固化后保持的内容',null,{timeout:8000});
+  assert.deepEqual(app.session.groups,[]);
+  assert.ok((await readdir(join(app.sessionDir,'working','versions'))).length<=2);
+  await browser.close();
+});

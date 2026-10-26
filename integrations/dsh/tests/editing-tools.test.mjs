@@ -3,8 +3,43 @@ import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {createHash} from 'node:crypto';
 import {installEditingTools} from '../editing-tools.mjs';
 import {writeWorkspaceCapability} from '../../../scripts/editor/workspace-capability.mjs';
+
+test('聊天中上传的图片可直接作为 Deck 图片素材，无需在区域任务重复上传',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'aico-chat-image-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const capabilityPath=await writeWorkspaceCapability(root,{url:'http://localhost:1235',token:'private'});
+ const data=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
+ const attachment={attachmentId:`sha256:${createHash('sha256').update(data).digest('hex')}`,mediaType:'image/png',bytes:data.length,width:1,height:1,name:'聊天图片.png'};
+ const events=[{type:'user/message',seq:1,data:{id:'message-a',source:{kind:'user'},content:[{type:'image',attachment}]}},
+  {type:'turn/start',seq:2}];
+ let tool;const writes=[],reads=[];
+ installEditingTools({tools:{register:value=>{tool=value;}},attachments:{readImage:async(ref,signal)=>{reads.push(ref);signal.throwIfAborted();return {ref,data};}}},'http://localhost:1234/?token=x',{
+  request:async(url,options)=>{
+   const path=new URL(url).pathname;
+   if(path.includes('editing-context'))return {ok:true,json:async()=>({status:'ready',workId:'w',capabilityPath,feedbackTasks:[]})};
+   if(path==='/api/local-edits')writes.push(JSON.parse(options.body));
+   return {ok:true,json:async()=>({revision:1,page:{pageKey:'p'}})};
+  }});
+ const exec={agent:{session:{id:'s',snapshotEvents:()=>events}},signal:new AbortController().signal};
+ const inspected=await tool.execute({operation:'inspect'},exec);
+ assert.equal(inspected.chatImages?.[0]?.attachmentId,attachment.attachmentId,'inspect 应提供可直接插图的聊天图片标识');
+ const src=`attachment:${attachment.attachmentId}`;
+ const result=await tool.execute({operation:'structure',workId:'w',expectedRevision:1,operations:[
+  {target:{pageKey:'p',editorId:'e'},kind:'insertFragment',payload:{html:`<img src="${src}" alt="训练曲线">`}}
+ ]},exec);
+ assert.equal(result.committed,true);
+ assert.equal(reads.length,1);
+ assert.equal(writes[0].operations[0].payload.html,`<img src="${src}" alt="训练曲线">`);
+ assert.deepEqual(writes[0].imageResources[src],{mime:'image/png',data:data.toString('base64')});
+ assert.ok(!JSON.stringify(inspected).includes(data.toString('base64')),'上下文不暴露图片字节');
+ const unavailable=await tool.execute({operation:'structure',workId:'w',expectedRevision:1,operations:[
+  {target:{pageKey:'p',editorId:'e'},kind:'replaceImage',payload:{src:`attachment:sha256:${'b'.repeat(64)}`}}
+ ]},exec);
+ assert.equal(unavailable.committed,false);assert.equal(unavailable.error,'CHAT_IMAGE_UNAVAILABLE');
+ assert.equal(writes.length,1,'不可见的聊天图片不能触发 Deck 写入');
+});
 
 test('明确拒绝不要求查回执；断线和执行中的命令仍保留未知提交保护',async t=>{
  const root=await mkdtemp(join(tmpdir(),'aico-tool-rejection-'));t.after(()=>rm(root,{recursive:true,force:true}));

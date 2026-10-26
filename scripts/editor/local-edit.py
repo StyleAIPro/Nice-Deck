@@ -86,7 +86,7 @@ def fragment(value):
 
 
 def image_sources(operations, manifest):
-    """只收集待插入资源，不根据模型路径直接读取文件。"""
+    """收集图片和下载附件来源，由资源层统一读取并内嵌。"""
     sources = []
     for op in operations:
         payload = op.get('payload', {})
@@ -99,19 +99,22 @@ def image_sources(operations, manifest):
                     raise ValueError('局部图片请使用单一 img.src，不支持 srcset')
                 if node['tag'] == 'img':
                     sources.append(node['attrs'].get('src', ''))
+                elif node['tag'] == 'a' and 'download' in node['attrs']:
+                    sources.append(node['attrs'].get('href', ''))
         elif op.get('kind') == 'replaceImage':
             if 'attachmentPath' in payload and 'src' in payload:
                 raise ValueError('图片替换只提供 attachmentPath 或 src 其中一个')
             sources.append(payload.get('attachmentPath', payload.get('src', '')))
     return list(dict.fromkeys(value for value in sources if not (
-        isinstance(value, str) and (value in manifest or re.match(r'^(https?://|data:image/(?:png|jpeg|webp|gif);base64,)', value, re.I))
+        isinstance(value, str) and (value in manifest or re.match(r'^(https?://|data:|#|mailto:|tel:|javascript:|vbscript:)', value, re.I))
     )))
 
 
 def replace_image_sources(value, image_ids):
     for node in reversed(Tree(value).nodes):
-        if node['tag'] == 'img' and node['attrs'].get('src') in image_ids:
-            value = value[:node['start']] + opening(node, {'src': image_ids[node['attrs']['src']]}) + value[node['openEnd']:]
+        attr = 'src' if node['tag'] == 'img' else 'href' if node['tag'] == 'a' and 'download' in node['attrs'] else None
+        if attr and node['attrs'].get(attr) in image_ids:
+            value = value[:node['start']] + opening(node, {attr: image_ids[node['attrs'][attr]]}) + value[node['openEnd']:]
     return value
 
 
@@ -191,7 +194,7 @@ def apply(source, operations, computed=None, image_ids=None, manifest=None):
             src = payload.get('attachmentPath', payload.get('src'))
             src = image_ids.get(src, src)
             if node['tag'] != 'img' or not isinstance(src, str) or not (src in (manifest or {}) or re.match(r'^(https?://|data:image/(?:png|jpeg|webp|gif);base64,)', src, re.I)):
-                raise ValueError('图片替换需要 img 目标和已登记附件、内嵌资源、HTTP(S) 或受支持的图片 data URL')
+                raise ValueError('图片替换需要 img 目标和可读取的图片、内嵌资源、HTTP(S) 或受支持的图片 data URL')
             new = opening(node, {'src': src})
         else:
             raise ValueError('不支持的局部操作')

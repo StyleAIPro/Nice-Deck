@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {LOCAL_FRAGMENT_GUIDANCE} from '../../scripts/editor/local-edit-guidance.mjs';
 import {resolvePptRequest,withPptRequest} from './request-work-context.mjs';
+import {chatImageReferences,chatImageCatalog,chatFileCatalog} from './chat-images.mjs';
 
 /** 最新连接信息覆盖历史端口与旧的“等待区域任务”提示，不改变用户意图。 */
 export function renderEditingContext(context) {
@@ -27,6 +28,8 @@ export function renderEditingContext(context) {
     `${context.requestViewTiming==='reported-request'?'本次请求登记的页面参考（已上报状态，非发送瞬间原子选区）':'本轮目标参考（首次执行快照，非发送瞬间）'}：${JSON.stringify(compactView)}。翻页不改变本轮目标；inspect 重新校验对象。`,
     `项目资料索引：${JSON.stringify(context.project ?? {})}。只在内容创作或跨页一致性需要时展开。`,
     `未完成反馈任务：${JSON.stringify(context.feedbackTasks ?? [])}。`,
+    ...(context.chatImages?.length?[`可直接插入 Deck 的聊天图片：${JSON.stringify(context.chatImages)}。replaceImage 的 src 或局部片段 img.src 使用对应 src，工具自动内嵌；无需用户在 Editor 重复上传。`]:[]),
+    ...(context.chatFiles?.length?[`可直接使用的聊天文件：${JSON.stringify(context.chatFiles)}。图片文件可用于 img.src，普通文件作为附件用 <a download="文件名" href="对应src">文件名</a> 内嵌。`]:[]),
     `托管工作副本：${JSON.stringify(context.workingDeckPath)}。CLI：${JSON.stringify(cli)} --capability-file ${JSON.stringify(context.capabilityPath)}。`,
     ...(context.includeInstructions===false?[]:[
       LOCAL_FRAGMENT_GUIDANCE,
@@ -56,6 +59,8 @@ export function installEditingContext(ctx, appUrl, { fetchContext = fetch } = {}
       });
       if (!response.ok) throw new Error(`AICO-PPT 会话工作区解析失败（${response.status}）`);
       context=withPptRequest(await response.json(),request);
+      const refs=chatImageReferences(agent.session,{claimedUsers:decision.messages});
+      context.chatImages=chatImageCatalog(refs);context.chatFiles=chatFileCatalog(refs);
       context.requestView=editingRequestAnchor(agent,context);
       text = renderEditingContext(context);
     } catch (error) {

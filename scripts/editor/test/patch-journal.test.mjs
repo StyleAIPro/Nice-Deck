@@ -190,6 +190,22 @@ test('固化会把当前最终动作折叠进基线并清空撤销重做，后�
   assert.deepEqual(journal.state.redo, []);
 });
 
+test('固化后归档只保留审计说明，不继续依赖结构修改的完整 HTML', () => {
+  const journal = new PatchJournal({groups:[],redo:[],solidifiedActions:[]});
+  const before='a'.repeat(64),after='b'.repeat(64),published='c'.repeat(64);
+  const group=journal.appendSourceGroup({beforeFingerprint:before,afterFingerprint:after,summary:'调整页面结构'},'task-one');
+  const result=journal.solidify({fingerprint:published,previousFingerprint:before});
+  const archive=journal.state.historyArchives.at(-1);
+  assert.equal(archive.format,'audit-v1');
+  assert.equal(archive.entries[0].entryId,group.id);
+  assert.equal(archive.entries[0].summary,'调整页面结构');
+  assert.equal(JSON.stringify(archive.entries).includes(before),false);
+  assert.equal(JSON.stringify(archive.entries).includes(after),false);
+  assert.deepEqual(result.archivedEntryIds,[group.id]);
+  assert.equal(journal.state.historyRetention.checkpointId,result.checkpointId);
+  assert.equal(journal.state.historyRetention.backupFingerprint,before);
+});
+
 test('结构修改只进入统一历史，不会被编译成元素动作', () => {
   const journal = new PatchJournal({ groups:[], redo:[], solidifiedActions:[] });
   const source = journal.appendSourceGroup({

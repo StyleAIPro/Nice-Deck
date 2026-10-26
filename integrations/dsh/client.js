@@ -1,6 +1,7 @@
 window.__ModuleLoader__.load({
   id: "aico-ppt-skill",
   factory: (require) => {
+    const CLIENT_RUNTIME_VERSION = "0.1.44";
     var module = { exports: {} };
     var exports = module.exports;
     const React = require("react");
@@ -814,7 +815,7 @@ window.__ModuleLoader__.load({
       if (!refresh) return prepareAndMount(ctx);
       const lifetime = new AbortController();
       ctx.effect(() => () => lifetime.abort(), 'aico-ppt: cancel runtime bootstrap');
-      return refresh(lifetime.signal, '__AICO_PPT_BRAND__').then(() => { lifetime.signal.throwIfAborted(); return prepareAndMount(ctx); });
+      return refresh(lifetime.signal, '__AICO_PPT_BRAND__',undefined,{version:CLIENT_RUNTIME_VERSION}).then(() => { lifetime.signal.throwIfAborted(); return prepareAndMount(ctx); });
     }
     function prepareAndMount(ctx) {
       brand = globalThis.__AICO_PPT_BRAND__;

@@ -459,6 +459,8 @@ Agent 结构修改必须先执行 `begin-source-edit`（区域任务使用 `begi
 
 #### 写回顺序与失败原子性
 
+固化归档采用 `audit-v1` 轻量记录；识别到的旧时间线归档在下一次固化候选中转换，任务结果不变。`historyRetention` 绑定最近检查点、发布指纹和固化前备份指纹。GC 仅在发布文件、检查点、备份内容和可信 helper 锁均验证通过且无事务时启用固化后的即时回收，活动时间线和恢复引用仍受保护。回收由成功固化、启动恢复完成及正常关闭触发；失败保留文件并诊断，不回滚成功发布。
+
 真实 Deck 发布只接受明确固化意图：可见 Editor 由浏览器用户二次确认，无窗口 Skill 仅按用户明确的完成、保存或正式写入要求调用；`POST /api/write-deck` 只建立检查点，不发布文件。正式发布必须先调用 `POST /api/solidify-preflight`，再把一次性预检令牌交给 `POST /api/solidify-deck`，并使用以下固定顺序：
 
 1. mutation queue 先强制登记已经写盘的工作副本变化，再检查 revision、editor online、页面目标和诊断 ready；旧 revision 在任何固化副作用前返回 `REVISION_CONFLICT`；

@@ -1,6 +1,6 @@
 {
   "name": "aico-ppt-skill",
-  "version": "0.1.42",
+  "version": "0.1.44",
   "description": "AICO-PPT 可视化编辑插件。桌面使用需先安装并启用兼容的 AICO-Harness；卸载顺序：先 PPT，后 Harness。",
   "private": true,
   "type": "module",
@@ -19,7 +19,7 @@
     "aico.release.json",
     "references/",
     "assets/",
-    "docs/user-guide/",
+    "docs/",
     "integrations/dsh/",
     "scripts/",
     "!integrations/dsh/tests/**",
@@ -35,9 +35,7 @@
     "!scripts/editor/agent-terminal-session.mjs",
     "!scripts/run-editor-tests.mjs",
     "!scripts/test_*.py",
-    "!scripts/verify/*.test.mjs",
-    "docs/release-beta0.2.md",
-    "docs/release-history-20261016.md"
+    "!scripts/verify/*.test.mjs"
   ],
   "dsh": {
     "bundle": {

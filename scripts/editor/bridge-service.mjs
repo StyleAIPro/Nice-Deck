@@ -1463,6 +1463,7 @@ export class BridgeService {
           revision:state.revision + 1,
           fingerprint:result.fingerprint,
           workingFingerprint:result.fingerprint,
+          previousFingerprint:state.deckFingerprint,
         });
         // session 的固化基线必须与 writer 已写进 bundle 的动作 schema 完全相同。
         // 不能把 expectedRevision 等请求期字段留在内存里，否则重开后 JSON

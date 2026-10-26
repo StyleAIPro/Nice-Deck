@@ -28,6 +28,20 @@ function digest(value) {
   return createHash('sha256').update(stableJson(value)).digest('hex');
 }
 
+// 固化后的时间线只用于审计；保留任务与说明，不再持有源码版本和完整动作副本。
+function auditArchive(archive) {
+  if (archive.format === 'audit-v1') return archive;
+  if (!Array.isArray(archive.entries) || !archive.entries.every(entry =>
+    typeof entry?.entryId === 'string' && ['actions','source'].includes(entry.mutation?.kind))) return archive;
+  return {...archive,format:'audit-v1',entries:archive.entries.map((entry,index) => ({
+    entryId:entry.entryId,committedAt:entry.committedAt ?? null,
+    origin:structuredClone(entry.origin ?? null),kind:entry.mutation.kind,
+    applied:index < archive.cursor,
+    actionCount:entry.mutation.actions?.length ?? 0,
+    summary:entry.mutation.source?.summary ?? null,
+  }))};
+}
+
 function entryMutation(entry) {
   if (entry?.mutation?.kind === 'actions') {
     return { kind:'actions', actions:structuredClone(entry.mutation.actions ?? []) };
@@ -434,6 +448,7 @@ export class EditTimeline {
     };
     this.state.historyArchives ??= [];
     this.state.historyArchives.push(archive);
+    this.state.historyArchives = this.state.historyArchives.map(auditArchive);
     this.state.checkpoints ??= [];
     this.state.checkpoints.push({
       checkpointId:archive.checkpointId,
@@ -443,6 +458,11 @@ export class EditTimeline {
       entryCount:archive.entries.length,
     });
     this.state.timeline = { cursor:0, entries:[] };
+    if (/^[0-9a-f]{64}$/.test(checkpoint.fingerprint ?? '')
+      && /^[0-9a-f]{64}$/.test(checkpoint.previousFingerprint ?? '')) {
+      this.state.historyRetention = {version:1,checkpointId:archive.checkpointId,
+        fingerprint:checkpoint.fingerprint,backupFingerprint:checkpoint.previousFingerprint};
+    }
     rebuildDigests(this.state);
     this.syncCompatibilityViews();
     return archive;

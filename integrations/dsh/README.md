@@ -106,6 +106,8 @@ Creation CLI 每次通过 `--capability-file` 读取 Draft 的本机服务 URL �
 
 ### Harness 会话直接编辑
 
+文件和图片不按来源划分插入权限。`chat-images.mjs` 从原装 `session.snapshotEvents()` 和首步接纳消息枚举文件、图片引用，工具生成的图片也可使用；上下文与 `inspect` 返回精简目录。`structure` 中的附件 `src` 经公开 `attachments.readImage(ref, signal)` 或 `readFileStream(ref, signal)` 读取，Host 把字节放进现有 capability 的 `/api/local-edits` 请求。Editor 校验字节、摘要及总量，再走原局部事务内嵌及完整历史验证。本地路径、file URL、区域任务附件也直接读取，无需先登记为 Deck 附件；相对路径以源 Deck 所在目录为基准。图片用 `img.src` 或 `replaceImage`，普通下载文件用 `<a download href="来源">文件名</a>` 内嵌。字节不写入模型提示、工具结果或临时文件，不额外创建反馈任务。源码依据为原装 DSH `packages/attachment/attachment/src/index.ts` 的上述公开接口，无需修改原装宿主或模型网关。
+
 已明确关联 Deck 的 Harness 会话会在每次模型调用前获得当前 Editor 工作区连接，包含受限 action capability 文件与托管工作副本路径；恢复旧会话或重启后重新解析，不依赖固定措辞。用户可直接在左侧讨论或要求修改，讨论只读，明确修改复用右侧同一工作区，无需先提交区域任务或退出 Editor。结构修改按 begin-source-edit / commit-source-edit 事务提交，每批成功后更新预览；事务期间人工写入保持串行保护。未关联会话不注入 Deck 能力，已关联但 Editor 不可用时提示重新打开对应工作区，不另起 headless 编辑器抢占租约。
 
 ## 简洁编辑与视觉确认

@@ -162,7 +162,7 @@ export async function apply(ctx, config = {}) {
       table.push({
         kind:'global',
         name:'__AICO_PPT_BRAND__',
-        value:runtimeFailure ? {logo,...unavailable(runtimeFailure)} : { logo, appUrl:editor.appUrl },
+        value:runtimeFailure ? {logo,...unavailable(runtimeFailure)} : { logo, appUrl:editor.appUrl,version:runtimeVersion },
       })
     })
   } catch (error) {

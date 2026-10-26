@@ -23,7 +23,8 @@ def collect_working_versions(payload, *, session_id, deck_name, directories,
         reject("版本回收参数无效")
     guard()
     result = {"dryRun": payload["dryRun"], "removed": 0, "removedBytes": 0,
-              "candidates": [], "candidateBytes": 0, "kept": 0}
+              "candidates": [], "candidateBytes": 0, "kept": 0,
+              "removedBackups": 0, "removedBackupBytes": 0, "backupCandidates": []}
     listings = {}
     witnesses = {}
     references = set()
@@ -67,14 +68,40 @@ def collect_working_versions(payload, *, session_id, deck_name, directories,
             except (ValueError, UnicodeError):
                 reject("版本引用元数据损坏，跳过回收")
             metadata[(area, name)] = value
-            # 同时保护嵌套历史、归档、结果回执和路径中的指纹；宁可多保留。
-            references.update(x.lower() for x in FINGERPRINT.findall(raw.decode("utf-8")))
     state = metadata.get(("session", "session.json"))
     if not isinstance(state, dict) or state.get("version") != 2 \
             or state.get("sessionId") != session_id:
         reject("版本回收缺少可信的当前会话元数据")
     if state.get("sourceEdit") or state.get("conflict"):
         return {**result, "skipped": "session-not-settled"}
+    retention = state.get("historyRetention")
+    checkpoint = (state.get("checkpoints") or [{}])[-1]
+    solidified = isinstance(retention, dict) and retention.get("version") == 1 \
+        and retention.get("checkpointId") == checkpoint.get("checkpointId") \
+        and retention.get("fingerprint") == checkpoint.get("fingerprint") \
+        and retention.get("fingerprint") == state.get("deckFingerprint") \
+        and re.fullmatch(r"[0-9a-f]{64}", str(retention.get("backupFingerprint", "")))
+    backup_names = names("backups")
+    keep_backup = None
+    if solidified:
+        published = read("project", deck_name, 48 * 1024 * 1024)
+        if hashlib.sha256(published).hexdigest() != retention["fingerprint"]:
+            return {**result, "skipped": "published-deck-changed"}
+        keep_backup = f'{deck_name.rsplit(".", 1)[0]}-{retention["backupFingerprint"]}.html'
+        try:
+            backup = read("backups", keep_backup, 48 * 1024 * 1024)
+        except FileNotFoundError:
+            return {**result, "skipped": "solidified-backup-unavailable"}
+        if hashlib.sha256(backup).hexdigest() != retention["backupFingerprint"]:
+            return {**result, "skipped": "solidified-backup-unavailable"}
+    for (area, name), value in metadata.items():
+        if solidified and (area, name) == ("session", "session.json"):
+            value = dict(value)
+            value.pop("historyRetention", None)
+            value["checkpoints"] = [checkpoint]
+            value["historyArchives"] = [entry for entry in value.get("historyArchives", [])
+                                        if entry.get("format") != "audit-v1"]
+        references.update(x.lower() for x in FINGERPRINT.findall(json.dumps(value, ensure_ascii=False)))
     working = read("working", "deck.html", 48 * 1024 * 1024)
     working_hash = hashlib.sha256(working).hexdigest()
     if state.get("workingDeckFingerprint") != working_hash:
@@ -85,8 +112,9 @@ def collect_working_versions(payload, *, session_id, deck_name, directories,
             references.add(hashlib.sha256(read(area, name, 48 * 1024 * 1024)).hexdigest())
         except FileNotFoundError:
             pass
-    for name in names("backups"):
-        references.update(x.lower() for x in FINGERPRINT.findall(name))
+    for name in backup_names:
+        if not solidified:
+            references.update(x.lower() for x in FINGERPRINT.findall(name))
     versions = []
     for name in names("versions"):
         if VERSION.fullmatch(name):
@@ -96,7 +124,20 @@ def collect_working_versions(payload, *, session_id, deck_name, directories,
     latest = {name for name, _ in versions[:KEEP_LATEST]}
     cutoff = time.time_ns() - KEEP_SECONDS * 1_000_000_000
     candidates = [(name, info) for name, info in versions
-                  if name[:-5] not in references and name not in latest and info[3] < cutoff]
+                  if name[:-5] not in references and (solidified or (name not in latest and info[3] < cutoff))]
+    backup_candidates = []
+    if solidified:
+        backup_pattern = re.compile(re.escape(deck_name.rsplit(".", 1)[0]) + r"-([0-9a-f]{64})\.html")
+        for name in backup_names:
+            match = backup_pattern.fullmatch(name)
+            if not match or name == keep_backup or match[1] in references:
+                continue
+            info = witness("backups", name)
+            content = read("backups", name, 48 * 1024 * 1024)
+            if hashlib.sha256(content).hexdigest() != match[1]:
+                continue
+            backup_candidates.append((name, info))
+        result["backupCandidates"] = [name for name, _ in backup_candidates]
     result.update(candidates=[name for name, _ in candidates],
                   candidateBytes=sum(info[2] for _, info in candidates),
                   kept=len(versions) - len(candidates))
@@ -119,4 +160,13 @@ def collect_working_versions(payload, *, session_id, deck_name, directories,
             if unlink(directories["versions"], name)["removed"]:
                 result["removed"] += 1
                 result["removedBytes"] += info[2]
+        for name, info in backup_candidates:
+            unchanged()
+            if witness("backups", name) != info:
+                reject("待回收备份发生变化，已停止")
+            if unlink(directories["backups"], name)["removed"]:
+                witnesses.pop(("backups", name), None)
+                listings["backups"].remove(name)
+                result["removedBackups"] += 1
+                result["removedBackupBytes"] += info[2]
     return result

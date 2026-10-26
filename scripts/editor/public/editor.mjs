@@ -1457,7 +1457,7 @@ function renderSolidifyDialogContent(reason = 'toolbar') {
     ? hasPendingChanges
       ? `这些修改仍安全保存在工作副本中，但还没有写入原 Deck。${activeAgent ? '退出还会中断当前 Agent 执行。' : ''}`
       : '退出会中断当前 Agent 执行；已经保存的工作副本不会丢失。'
-    : '这会把当前修改永久写入这个 Deck，并清空全部撤销和重做记录。固化完成后无法恢复到之前的状态。';
+    : '这会把当前修改永久写入这个 Deck，结束本轮撤销和重做，并自动清理中间版本。默认保留最近一份固化前备份。';
   solidifyCount.textContent = redoCount > 0
     ? `将固化当前生效的 ${activeGroupCount} 组修改，并清空 ${redoCount} 组重做记录`
     : `将固化 ${activeGroupCount} 组修改`;

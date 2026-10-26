@@ -1,41 +1,19 @@
 # AICO-PPT 安装指南
 
-## 本地 0.1.38：页码栏连续切页
+## Windows 桌面插件
 
-点击左侧页码后，用 ↑ / ↓ 或在页码栏滚动滚轮切换上一页／下一页。支持展开和收起模式，首尾停留不循环；点击其他区域后，恢复原来的输入与滚动行为。继承 beta0.2 的全部修复。
+当前适配官方 DeepSeek Desktop／DSH `0.2.1-rc.2`，Windows x64；macOS 桌面包暂缓。公开附件与本地完整包分开，见[版本与发布](docs/releases.md)。
 
-仅生成本地包，不自动安装或重启。由用户在 DSH Terminal 执行：
+1. 从[官方安装页](https://openx.huawei.com/project/7665/AICO-Plugin-Web_master/install-official.html)下载 Harness 与 PPT 完整包，核对大小和 SHA-256。
+2. 在原装“插件 → 添加插件”中填写 Harness `.tgz` 的本地完整路径，等待成功并确认启用。
+3. 再添加 PPT 完整包，等待原装结果；需要重启时按提示处理。更新前保存工作和未发送草稿。
+4. 在原装模型页配置模型，从 Harness 侧栏打开 PPT，按[快速开始](docs/user-guide/quick-start.md)创建或打开 Deck。
 
-```powershell
-dsh plugin add "C:\Users\z00633277\workspace\AICO-2.0\AICO-PPT\dist\aico-ppt-skill-0.1.38-win32-x64.tgz" --ignore-scripts --config.auto-install-peers=false
-```
+PPT 完整 Windows 包包含私有 Python、浏览器和运行依赖，无需额外资源包、Agent CLI 或旧宿主专用渲染服务。WSL 只改变模型连接，业务、文件与工具留在 Windows。CLI 仅作排障备用，先通过官方 Desktop 注册配套 `dsh` 命令并确认目标 Profile，不使用另装的 npm dsh 或旧社区命令替代。
 
-安装后保存工作、退出托盘并重启 Desktop 生效。官网 beta0.2 包仍为 `0.1.37`。
+卸载通过原装插件页移除 PPT，先业务插件、后 Harness。Deck、会话和业务数据保留；不能整目录删除 `.aico-ppt-editor` 或旧 `.huawei-deck-editor`，其中包含工作副本和恢复历史。安装不自动改写已有 Deck；旧错误图片路径需重新选择附件内嵌后保存，自定义导航继续保留。
 
-
-## 普通用户：beta0.2
-
-更新：2026-10-16。固定原装社区版 DSH Desktop 2.0.13 + DSH 0.1.5-rc.2。当前只发布 Windows x64 桌面插件，macOS 暂缓。
-
-1. 从[官网安装页](https://openx.huawei.com/project/7665/AICO-Plugin-Web_master/install.html)下载 Harness 与 PPT，核对大小和 SHA-256。
-2. 在原装 Desktop 托盘打开 DSH Terminal，使用实际下载目录依次执行：
-
-```powershell
-dsh plugin add "C:\Downloads\aico-harness-beta0.2-win32-x64.tgz" --ignore-scripts
-dsh plugin add "C:\Downloads\aico-ppt-skill-beta0.2-win32-x64.tgz" --ignore-scripts
-```
-
-3. 保存工作并重启，在原装模型页配置模型，从侧边栏打开 AICO-PPT。
-
-PPT 包内版本为 `0.1.37`，配套 Harness 为 `2.0.0-dev.73`。完整包包含私有 Windows Python、浏览器及运行依赖，不需要另装资源包，不要求 Agent CLI、PTY 或旧宿主的专用渲染接口。手动 Beta 已公开发布；签名自动安装渠道及最终包两种模型连接联合验收仍未完成。
-
-业务、文件和工具始终留在 Windows；WSL 只提供可选模型通信。升级、卸载均使用原装插件机制，先保存工作；`dsh plugin remove aico-ppt-skill` 移除插件后重启，保留 Deck 与业务数据。不能整目录删除 `.aico-ppt-editor` 或旧 `.huawei-deck-editor`，其中包含工作副本与恢复历史。
-
-插件诊断日志位于运行用户的 `~/.aico/diagnostics/ppt-editor-*.jsonl`，按大小轮转，只记白名单连接状态。反馈故障时保留时间和对应日志；浏览器断线时可能无法上报，不能仅凭没有日志认定没有重连。
-
-当前运行时与工具接口见[DSH 接入](integrations/dsh/README.md)，初次使用见[快速开始](docs/user-guide/quick-start.md)。
-
-本次性能、并发编辑、撤销重做、图片与富文本修复见 [beta0.2 发行说明](docs/release-beta0.2.md)。安装不会自动修改已有 Deck；历史图片错误路径须重新选择对应附件，重新内嵌后保存。新建 Deck 使用新版模板，已有自定义导航在模板升级时保留。[发布前开发记录](docs/release-history-20261016.md)仅作追溯。
+插件诊断日志位于运行用户的 `~/.aico/diagnostics/ppt-editor-*.jsonl`，按大小轮转，只记白名单连接状态。保留故障时间和相应日志；没有上报不等于未发生断线。当前接口见[DSH 接入](integrations/dsh/README.md)。生产签名渠道和最终四包双连接联合验收仍按实际范围保留。
 
 ## 独立 Skill 安装（按需）
 

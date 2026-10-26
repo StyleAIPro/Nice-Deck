@@ -5,6 +5,7 @@ import {LOCAL_EDIT_KINDS} from '../../scripts/editor/local-edit.mjs';
 import {LOCAL_FRAGMENT_GUIDANCE} from '../../scripts/editor/local-edit-guidance.mjs';
 import {readWorkspaceCapability} from '../../scripts/editor/workspace-capability.mjs';
 import {resolvePptRequest,withPptRequest} from './request-work-context.mjs';
+import {chatImageReferences,chatImageCatalog,chatFileCatalog,readChatImageResources} from './chat-images.mjs';
 
 export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
   if(!ctx.tools?.register)return;
@@ -38,6 +39,7 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
       const response=await linked.json();
       if(!linked.ok)throw Object.assign(new Error(response.message??'无法取得当前 PPT 工作区'),{code:response.code,statusCode:linked.status});
       const context=withPptRequest(response,requestContext);
+      const chatRefs=chatImageReferences(exec.agent.session,{callId:exec.rootCallId??exec.callId});
       const execute=async()=>{
       if(context.status==='creating')return {
         status:'creating',code:'DECK_NOT_CREATED',committed:false,workId:context.workId,
@@ -89,7 +91,7 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
       };
       if(['inspect','view','catalog'].includes(args.operation)){
         const pageKey=args.pageKey??(args.taskId?undefined:anchor?.pageKey);
-        try{return {...await picture({taskId:args.taskId,pageKey,query:args.query,limit:args.limit,offset:args.offset,detail:args.detail,target:args.target,catalogOnly:args.operation==='catalog'},args.operation==='view'?'view':'inspect'),workId:context.workId};}
+        try{return {...await picture({taskId:args.taskId,pageKey,query:args.query,limit:args.limit,offset:args.offset,detail:args.detail,target:args.target,catalogOnly:args.operation==='catalog'},args.operation==='view'?'view':'inspect'),workId:context.workId,chatImages:chatImageCatalog(chatRefs),chatFiles:chatFileCatalog(chatRefs)};}
         catch(error){
           if(error.code!=='EDITOR_SOLIDIFYING')throw error;
           return {status:'busy',code:error.code,message:'此 Deck 正在固化，尚未读取或修改中间副本。',recovery:'可以继续普通问答；固化完成后再 inspect 获取新版本，不要重复提交固化。'};
@@ -126,12 +128,21 @@ export function installEditingTools(ctx,appUrl,{request=fetch}={}) {
         return {...action,id,taskId};
       });
       let committed;
-      try {committed={...await call(isStructure?'/api/local-edits':'/api/actions',{
-        expectedRevision:args.expectedRevision,taskId,commandId,...(isStructure?{operations:inputActions}:{actions})}),committed:true};}
+      try {
+        let imageResources={};
+        try {
+          if(isStructure&&!hasReceipt)imageResources=await readChatImageResources(inputActions,chatRefs,ctx.get?.('attachments')??ctx.attachments,exec.signal);
+        } catch(error){
+          error.committed=false;error.stage='prepare';
+          error.recovery='本次尚未提交。先 inspect 获取附件 src，或直接使用本地文件路径；核对文件可读后重试，无需在 Editor 重复上传。';
+          throw error;
+        }
+        committed={...await call(isStructure?'/api/local-edits':'/api/actions',{
+        expectedRevision:args.expectedRevision,taskId,commandId,...(isStructure?{operations:inputActions,...(Object.keys(imageResources).length?{imageResources}:{})}:{actions})}),committed:true};}
       catch(error) {
         const rejected=error.committed===false || (error.committed!==true &&
           ['REVISION_CONFLICT','TASK_CHANGED','TASK_NOT_FOUND','TASK_ALREADY_COMPLETED',
-            'INVALID_INPUT','EDITOR_INTERACTION_ACTIVE','SOURCE_EDIT_ACTIVE','EDITOR_SOLIDIFYING'].includes(error.code));
+            'INVALID_INPUT','CHAT_IMAGE_UNAVAILABLE','EDITOR_INTERACTION_ACTIVE','SOURCE_EDIT_ACTIVE','EDITOR_SOLIDIFYING'].includes(error.code));
         return {committed:rejected?false:error.committed??null,
           commitStatus:rejected?'rejected':error.committed===true?'committed':'unknown',
           commandId,error:error.code??'TRANSPORT_ERROR',message:error.message,
